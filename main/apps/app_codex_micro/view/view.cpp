@@ -68,6 +68,9 @@ constexpr float DialRatchetToneVolume                  = 0.30f;
 constexpr uint16_t DialRatchetVibrationDurationMs      = 10;
 constexpr uint8_t DialRatchetVibrationStrength         = 44;
 constexpr uint32_t AnimatedLightingRefreshPeriodMs     = 100;
+constexpr uint32_t DisplayDimDelayMs                   = 30000;
+constexpr uint32_t DisplayOffDelayMs                   = 120000;
+constexpr uint32_t PixelShiftPeriodMs                  = 60000;
 constexpr float AmbientBrightnessScale                 = 0.42f;
 constexpr float AmbientSaturationScale                 = 0.72f;
 constexpr int AmbientOuterSize                         = 464;
@@ -88,6 +91,10 @@ constexpr std::array<lv_opa_t, 14> AmbientLayerOpacity = {
     static_cast<lv_opa_t>(36),
     static_cast<lv_opa_t>(20),
     static_cast<lv_opa_t>(8),
+};
+constexpr std::array<std::array<int8_t, 2>, 5> PixelShiftOffsets = {
+    std::array<int8_t, 2>{0, 0},  std::array<int8_t, 2>{1, 0},  std::array<int8_t, 2>{0, 1},
+    std::array<int8_t, 2>{-1, 0}, std::array<int8_t, 2>{0, -1},
 };
 
 constexpr int DisplayCenter                   = 233;
@@ -360,8 +367,12 @@ namespace view {
 
 CodexMicroView::~CodexMicroView()
 {
-    GetHAL().setMicrophoneMeterEnabled(false);
+    GetHAL().setBackLightBrightness(_display_base_brightness, false);
     releaseActiveInputs();
+    if (_wake_overlay != nullptr) {
+        lv_obj_delete(_wake_overlay);
+        _wake_overlay = nullptr;
+    }
     if (_root != nullptr) {
         lv_obj_delete(_root);
     }
@@ -382,6 +393,10 @@ void CodexMicroView::stylePanel(lv_obj_t* object, uint32_t background, uint32_t 
 
 void CodexMicroView::init(lv_obj_t* parent)
 {
+    _display_base_brightness = std::max(10, GetHAL().getBackLightBrightness());
+    _last_activity_tick      = lv_tick_get();
+    _display_power           = DisplayPowerState::Active;
+
     lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(parent, lv_color_hex(Background), LV_PART_MAIN);
 
@@ -463,7 +478,7 @@ void CodexMicroView::init(lv_obj_t* parent)
     }
 
     lv_obj_t* mic_source = lv_label_create(_mic_screen);
-    lv_label_set_text(mic_source, "HOST PTT / LOCAL LEVEL");
+    lv_label_set_text(mic_source, "PTT / COMPUTER MIC");
     lv_obj_set_style_text_font(mic_source, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(mic_source, lv_color_hex(KeyMuted), LV_PART_MAIN);
     lv_obj_align(mic_source, LV_ALIGN_CENTER, 0, 116);
@@ -506,7 +521,37 @@ void CodexMicroView::init(lv_obj_t* parent)
         lv_obj_set_pos(_pairing_dots[index], 216 + static_cast<int>(index) * 14, 286);
         stylePanel(_pairing_dots[index], PairingCore, PairingCore, LV_RADIUS_CIRCLE, 0);
     }
+
+    _pairing_reset_control = lv_button_create(_pairing_screen);
+    lv_obj_set_size(_pairing_reset_control, 210, 54);
+    lv_obj_align(_pairing_reset_control, LV_ALIGN_CENTER, 0, 132);
+    stylePanel(_pairing_reset_control, Touch, TouchBorder, 27, 1);
+    lv_obj_set_style_bg_color(_pairing_reset_control, lv_color_hex(0x2A2F2C), PressedStyle);
+    lv_obj_set_style_border_color(_pairing_reset_control, lv_color_hex(Green), PressedStyle);
+    lv_obj_add_event_cb(_pairing_reset_control, touchEvent, LV_EVENT_PRESSED, this);
+    lv_obj_add_event_cb(_pairing_reset_control, touchEvent, LV_EVENT_RELEASED, this);
+    lv_obj_add_event_cb(_pairing_reset_control, touchEvent, LV_EVENT_PRESS_LOST, this);
+
+    lv_obj_t* pairing_reset_label = lv_label_create(_pairing_reset_control);
+    lv_label_set_text(pairing_reset_label, "HOLD 3s TO RESET");
+    lv_obj_set_style_text_font(pairing_reset_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(pairing_reset_label, lv_color_hex(Text), LV_PART_MAIN);
+    lv_obj_center(pairing_reset_label);
+
     lv_obj_move_foreground(_pairing_screen);
+
+    _wake_overlay = lv_obj_create(parent);
+    lv_obj_set_pos(_wake_overlay, 0, 0);
+    lv_obj_set_size(_wake_overlay, 466, 466);
+    lv_obj_add_flag(_wake_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(_wake_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(_wake_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(_wake_overlay, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(_wake_overlay, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(_wake_overlay, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(_wake_overlay, wakeOverlayEvent, LV_EVENT_PRESSED, this);
+    lv_obj_add_event_cb(_wake_overlay, wakeOverlayEvent, LV_EVENT_RELEASED, this);
+    lv_obj_add_event_cb(_wake_overlay, wakeOverlayEvent, LV_EVENT_PRESS_LOST, this);
 
     renderPage();
     ESP_LOGI(Tag, "Stopwatch Micro UI ready: 4 touch command + A mic + B send + 6 agent keys");
@@ -702,6 +747,9 @@ void CodexMicroView::renderPage()
     if (_pairing_screen != nullptr && !lv_obj_has_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN)) {
         lv_obj_move_foreground(_pairing_screen);
     }
+    if (_wake_overlay != nullptr && (_wake_overlay_armed || _display_power == DisplayPowerState::Off)) {
+        lv_obj_move_foreground(_wake_overlay);
+    }
     ESP_LOGI(Tag, "page=%s", _page == Page::Command ? "command" : "agent");
 }
 
@@ -766,6 +814,64 @@ void CodexMicroView::setInputSuppressed(bool suppressed)
     _input_suppressed = suppressed;
 }
 
+void CodexMicroView::setDisplayPower(DisplayPowerState state)
+{
+    if (_display_power == state) {
+        return;
+    }
+
+    _display_power = state;
+    int brightness = _display_base_brightness;
+    if (state == DisplayPowerState::Dimmed) {
+        brightness = std::max(10, _display_base_brightness / 4);
+    } else if (state == DisplayPowerState::Off) {
+        brightness = 0;
+    }
+    GetHAL().setBackLightBrightness(brightness, false);
+    if (_wake_overlay != nullptr) {
+        if (state == DisplayPowerState::Off) {
+            lv_obj_remove_flag(_wake_overlay, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(_wake_overlay);
+        } else if (!_wake_overlay_armed) {
+            lv_obj_add_flag(_wake_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    ESP_LOGI(Tag, "display power=%s brightness=%d",
+             state == DisplayPowerState::Active   ? "active"
+             : state == DisplayPowerState::Dimmed ? "dimmed"
+                                                  : "off",
+             brightness);
+}
+
+void CodexMicroView::wakeDisplay()
+{
+    _last_activity_tick = lv_tick_get();
+    setDisplayPower(DisplayPowerState::Active);
+}
+
+void CodexMicroView::updateDisplayPower(uint32_t tick, bool hostStateChanged)
+{
+    if (hostStateChanged || interactionActive()) {
+        wakeDisplay();
+    } else {
+        const uint32_t idle = tick - _last_activity_tick;
+        if (idle >= DisplayOffDelayMs) {
+            setDisplayPower(DisplayPowerState::Off);
+        } else if (idle >= DisplayDimDelayMs) {
+            setDisplayPower(DisplayPowerState::Dimmed);
+        }
+    }
+
+    if (_display_power == DisplayPowerState::Off || _root == nullptr) {
+        return;
+    }
+    const uint8_t shift = static_cast<uint8_t>((tick / PixelShiftPeriodMs) % PixelShiftOffsets.size());
+    if (shift != _pixel_shift_index) {
+        _pixel_shift_index = shift;
+        lv_obj_align(_root, LV_ALIGN_CENTER, PixelShiftOffsets[shift][0], PixelShiftOffsets[shift][1]);
+    }
+}
+
 void CodexMicroView::setMicActive(bool active)
 {
     active = active && _functional_enabled;
@@ -774,9 +880,7 @@ void CodexMicroView::setMicActive(bool active)
     }
 
     _mic_active = active;
-    GetHAL().setMicrophoneMeterEnabled(_mic_active);
     if (_mic_active) {
-        _mic_smoothed_level   = 0.0f;
         _mic_last_update_tick = 0;
         lv_obj_remove_flag(_mic_screen, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(_mic_screen);
@@ -797,14 +901,15 @@ void CodexMicroView::setMicActive(bool active)
 
 void CodexMicroView::updateConnection(const CodexMicroState& state)
 {
-    if (state.connected != _functional_enabled) {
-        if (state.connected) {
+    const bool functional = state.connected && state.protocolReady;
+    if (functional != _functional_enabled) {
+        if (functional) {
             _functional_enabled = true;
             if (_pairing_screen != nullptr) {
                 lv_obj_add_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN);
             }
             setPage(Page::Command);
-            ESP_LOGI(Tag, "pairing complete; functional pages enabled");
+            ESP_LOGI(Tag, "Codex handshake complete; functional pages enabled");
         } else {
             releaseActiveInputs();
             _functional_enabled = false;
@@ -813,11 +918,12 @@ void CodexMicroView::updateConnection(const CodexMicroState& state)
                 lv_obj_remove_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_move_foreground(_pairing_screen);
             }
-            ESP_LOGW(Tag, "connection lost; pairing screen active");
+            ESP_LOGW(Tag, "%s; pairing screen active",
+                     state.connected ? "waiting for Codex handshake" : "connection lost");
         }
     }
 
-    if (!state.connected) {
+    if (!functional) {
         const std::size_t active_dot = static_cast<std::size_t>((lv_tick_get() / 350U) % _pairing_dots.size());
         for (std::size_t index = 0; index < _pairing_dots.size(); ++index) {
             if (_pairing_dots[index] != nullptr) {
@@ -915,7 +1021,7 @@ void CodexMicroView::updateAgentLights(const CodexMicroState& state)
 bool CodexMicroView::interactionActive() const
 {
     const auto key_active = [](const KeyContext& context) { return context.active; };
-    return _joystick_active || _dial_pressed || _touch_pressed || _mic_active ||
+    return _joystick_active || _dial_pressed || _touch_pressed || _mic_active || _wake_overlay_armed ||
            std::any_of(_command_contexts.begin(), _command_contexts.end(), key_active) ||
            std::any_of(_agent_contexts.begin(), _agent_contexts.end(), key_active);
 }
@@ -943,19 +1049,17 @@ void CodexMicroView::updateMicMeter()
     }
     _mic_last_update_tick = tick;
 
-    const float raw_level = GetHAL().getMicrophoneLevel();
-    const float smoothing = raw_level > _mic_smoothed_level ? 0.58f : 0.18f;
-    _mic_smoothed_level += (raw_level - _mic_smoothed_level) * smoothing;
-
     constexpr float Center        = 4.0f;
     constexpr int MicMeterCenterY = 307;
+    const float phase             = static_cast<float>(tick % 1440U) / 180.0f;
     for (std::size_t index = 0; index < _mic_bars.size(); ++index) {
         lv_obj_t* bar = _mic_bars[index];
         if (bar == nullptr) {
             continue;
         }
         const float falloff = std::fabs(static_cast<float>(index) - Center) / Center;
-        const float amount  = std::clamp(_mic_smoothed_level * (1.0f - falloff * 0.34f), 0.0f, 1.0f);
+        const float pulse   = 0.5f + 0.5f * std::sin(phase - static_cast<float>(index) * 0.68f);
+        const float amount  = std::clamp((0.28f + pulse * 0.72f) * (1.0f - falloff * 0.28f), 0.0f, 1.0f);
         const int height    = std::max(6, static_cast<int>(std::lround(54.0f * amount)));
         lv_obj_set_y(bar, MicMeterCenterY - height / 2);
         lv_obj_set_height(bar, height);
@@ -968,8 +1072,11 @@ void CodexMicroView::update(const CodexMicroState& state)
     const uint32_t tick = lv_tick_get();
     updateDialReturn();
     updateMicMeter();
-    const bool state_changed      = state.revision != _last_state_revision;
-    const int8_t connection_phase = !state.connected ? static_cast<int8_t>((tick / 350U) % 3U) : 3;
+    const bool state_changed     = state.revision != _last_state_revision;
+    const bool attention_changed = state.attentionRevision != _last_attention_revision;
+    updateDisplayPower(tick, attention_changed);
+    const bool host_ready         = state.connected && state.protocolReady;
+    const int8_t connection_phase = !host_ready ? static_cast<int8_t>((tick / 350U) % 3U) : 3;
     if (state_changed || connection_phase != _last_connection_phase) {
         updateConnection(state);
         _last_connection_phase = connection_phase;
@@ -987,9 +1094,9 @@ void CodexMicroView::update(const CodexMicroState& state)
     }
 
     if (_page == Page::Command) {
-        const bool keys_animated    = state.keys.effect == CodexMicroLightEffect::Breath ||
-                                      state.keys.effect == CodexMicroLightEffect::ShallowBreath ||
-                                      state.keys.effect == CodexMicroLightEffect::Snake;
+        const bool keys_animated = state.keys.effect == CodexMicroLightEffect::Breath ||
+                                   state.keys.effect == CodexMicroLightEffect::ShallowBreath ||
+                                   state.keys.effect == CodexMicroLightEffect::Snake;
         const bool keys_refresh_due = tick - _command_last_update_tick >= AnimatedLightingRefreshPeriodMs;
         if (state_changed || _page_dirty || (keys_animated && keys_refresh_due && !input_active)) {
             updateCommandLighting(state);
@@ -1005,8 +1112,9 @@ void CodexMicroView::update(const CodexMicroState& state)
             updateAgentLights(state);
         }
     }
-    _page_dirty          = false;
-    _last_state_revision = state.revision;
+    _page_dirty              = false;
+    _last_state_revision     = state.revision;
+    _last_attention_revision = state.attentionRevision;
 }
 
 void CodexMicroView::releaseActiveInputs()
@@ -1031,6 +1139,7 @@ void CodexMicroView::releaseActiveInputs()
         GetCodexMicroBle().sendKey(CodexMicroControl::EncoderPress, CodexMicroKeyAction::Release);
         _dial_host_press_active = false;
     }
+    _touch_pressed = false;
     resetDial();
 }
 
@@ -1045,6 +1154,9 @@ void CodexMicroView::keyEvent(lv_event_t* event)
     }
 
     const lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED) {
+        context->owner->wakeDisplay();
+    }
     if (code == LV_EVENT_PRESSED && !context->owner->_functional_enabled) {
         return;
     }
@@ -1094,7 +1206,7 @@ void CodexMicroView::commandDeckEvent(lv_event_t* event)
         const lv_area_t segment_area = commandSegmentArea(center_x, center_y, index);
         const lv_area_t& clip_area   = layer->buf_area;
         const bool intersects        = segment_area.x1 <= clip_area.x2 && segment_area.x2 >= clip_area.x1 &&
-                                       segment_area.y1 <= clip_area.y2 && segment_area.y2 >= clip_area.y1;
+                                segment_area.y1 <= clip_area.y2 && segment_area.y2 >= clip_area.y1;
         if (!intersects) {
             continue;
         }
@@ -1277,7 +1389,7 @@ void CodexMicroView::updateJoystickFromPoint(const lv_point_t& point)
     const float wrapped_delta = std::min(angle_delta, 1.0f - angle_delta);
     const bool report_changed = std::fabs(host_distance - _joystick_distance) >= JoystickDistanceSendThreshold ||
                                 (host_distance > 0.0f && wrapped_delta >= JoystickAngleSendThreshold);
-    const uint32_t tick       = lv_tick_get();
+    const uint32_t tick   = lv_tick_get();
     const bool report_due = _joystick_last_send_tick == 0 || tick - _joystick_last_send_tick >= JoystickReportPeriodMs;
     if (report_changed && report_due) {
         _joystick_angle          = angle;
@@ -1310,6 +1422,9 @@ void CodexMicroView::joystickEvent(lv_event_t* event)
         return;
     }
     const lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED) {
+        owner->wakeDisplay();
+    }
     if (!owner->_functional_enabled) {
         if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
             owner->releaseJoystick();
@@ -1379,28 +1494,33 @@ void CodexMicroView::updateDialFromPoint(const lv_point_t& point)
     }
     const float clamped_degrees =
         std::clamp(unwrapped, static_cast<float>(DialStartDegrees), static_cast<float>(DialEndDegrees));
-    const int next_step =
+    const int desired_step =
         static_cast<int>(std::lround((clamped_degrees - static_cast<float>(DialStartDegrees)) /
                                      static_cast<float>(DialEndDegrees - DialStartDegrees) * DialStepCount));
-    if (next_step == _dial_step) {
+    if (desired_step == _dial_step) {
         return;
     }
 
     _dial_rotating          = true;
-    const int direction     = next_step > _dial_step ? 1 : -1;
-    const int emitted_steps = std::abs(next_step - _dial_step);
-    _dial_step              = next_step;
+    const int step_delta    = std::clamp(desired_step - _dial_step, -static_cast<int>(CodexMicroMaxEncoderBatchSteps),
+                                         static_cast<int>(CodexMicroMaxEncoderBatchSteps));
+    const int direction     = step_delta > 0 ? 1 : -1;
+    const int emitted_steps = std::abs(step_delta);
     if (emitted_steps > 0) {
         // Queue the batch so a fast drag never performs a burst of HID writes
         // inside LVGL's touch callback. The worker still emits every official
         // encoder detent in order.
-        GetCodexMicroBle().sendEncoderSteps(direction, static_cast<uint16_t>(emitted_steps));
+        const bool queued = GetCodexMicroBle().sendEncoderSteps(direction, static_cast<uint16_t>(emitted_steps));
+        if (!queued) {
+            return;
+        }
+        _dial_step += step_delta;
         const uint32_t tick = lv_tick_get();
         if (_dial_last_feedback_tick == 0 || tick - _dial_last_feedback_tick >= DialFeedbackPeriodMs) {
             playDialRatchetFeedback(direction);
             _dial_last_feedback_tick = tick;
         }
-        ESP_LOGD(Tag, "arc-slider rotate direction=%d steps=%d", direction, emitted_steps);
+        ESP_LOGD(Tag, "arc-slider rotate direction=%d steps=%d desired=%d", direction, emitted_steps, desired_step);
     }
     setDialVisualStep(static_cast<float>(_dial_step));
 }
@@ -1457,10 +1577,12 @@ void CodexMicroView::releaseDialGesture()
     if (!_dial_rotating) {
         if (_dial_host_press_active) {
             GetCodexMicroBle().sendKey(CodexMicroControl::EncoderPress, CodexMicroKeyAction::Release);
+            _dial_host_press_active = false;
         }
-        GetCodexMicroBle().sendKey(CodexMicroControl::EncoderPress, CodexMicroKeyAction::Press);
-        _dial_host_press_active = true;
-        _dial_release_tick      = lv_tick_get() + (held >= 500U ? 520U : 45U);
+        if (GetCodexMicroBle().sendKey(CodexMicroControl::EncoderPress, CodexMicroKeyAction::Press)) {
+            _dial_host_press_active = true;
+            _dial_release_tick      = lv_tick_get() + (held >= 500U ? 520U : 45U);
+        }
         ESP_LOGI(Tag, "arc-slider %s gesture=%ums", held >= 500U ? "settings-hold" : "press",
                  static_cast<unsigned>(held));
     }
@@ -1479,6 +1601,9 @@ void CodexMicroView::dialEvent(lv_event_t* event)
         return;
     }
     const lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED) {
+        owner->wakeDisplay();
+    }
     if (!owner->_functional_enabled) {
         return;
     }
@@ -1515,7 +1640,11 @@ void CodexMicroView::touchEvent(lv_event_t* event)
         return;
     }
     const lv_event_code_t code = lv_event_get_code(event);
-    if (!owner->_functional_enabled) {
+    if (code == LV_EVENT_PRESSED) {
+        owner->wakeDisplay();
+    }
+    const bool pairing_reset_event = lv_event_get_target_obj(event) == owner->_pairing_reset_control;
+    if (!owner->_functional_enabled && !pairing_reset_event) {
         return;
     }
     if (code == LV_EVENT_PRESSED) {
@@ -1531,6 +1660,28 @@ void CodexMicroView::touchEvent(lv_event_t* event)
                      requested ? 1 : 0);
         } else {
             ESP_LOGI(Tag, "touch sensor tap duration=%ums (single BLE channel)", static_cast<unsigned>(held));
+        }
+    }
+}
+
+void CodexMicroView::wakeOverlayEvent(lv_event_t* event)
+{
+    auto* owner = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
+    if (owner == nullptr) {
+        return;
+    }
+
+    const lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED) {
+        owner->_wake_overlay_armed = true;
+        owner->_last_activity_tick = lv_tick_get();
+        owner->_display_power      = DisplayPowerState::Active;
+        GetHAL().setBackLightBrightness(owner->_display_base_brightness, false);
+        ESP_LOGI(Tag, "display woken by touch; gesture consumed");
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        owner->_wake_overlay_armed = false;
+        if (owner->_wake_overlay != nullptr) {
+            lv_obj_add_flag(owner->_wake_overlay, LV_OBJ_FLAG_HIDDEN);
         }
     }
 }

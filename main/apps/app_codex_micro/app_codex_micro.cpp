@@ -102,6 +102,9 @@ void AppCodexMicro::onRunning()
     if (_view == nullptr) {
         return;
     }
+    if (event != input::KeyEvent::None) {
+        _view->wakeDisplay();
+    }
     _view->update(state);
     if (mic_view_changed) {
         _view->setMicActive(_mic_host_active);

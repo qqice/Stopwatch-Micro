@@ -43,8 +43,56 @@ def apply_patch(repo: Path, patch: Path) -> None:
     raise RuntimeError(f"Patch does not match {repo}: {patch}")
 
 
+def worktree_status(repo: Path) -> str:
+    """Return all tracked and untracked dependency changes."""
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return result.stdout.strip()
+
+
+def verify_repo_state(repo: Path, patch: Path | None) -> None:
+    """Reject dependency drift beyond the one declared project patch."""
+    if patch is None:
+        if changes := worktree_status(repo):
+            raise RuntimeError(f"Unexpected changes in {repo}:\n{changes}")
+        return
+
+    untracked = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard"],
+        check=True,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+    ).stdout.strip()
+    actual = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--binary", "--no-ext-diff", "HEAD", "--"],
+        check=True,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+    ).stdout.replace("\r\n", "\n")
+    expected = patch.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if untracked or actual != expected:
+        changes = worktree_status(repo)
+        raise RuntimeError(f"Unexpected changes in {repo} beyond {patch}:\n{changes}")
+
+
 def clone_or_update_repo(config: dict[str, Any]) -> None:
-    repo = ROOT / config["path"]
+    components_root = (ROOT / "components").resolve()
+    repo = (ROOT / config["path"]).resolve()
+    if not repo.is_relative_to(components_root) or repo == components_root:
+        raise ValueError(f"Dependency path must stay under components/: {config['path']}")
     commit = config.get("commit", "")
     if COMMIT_PATTERN.fullmatch(commit) is None:
         raise ValueError(f"{config['path']} must declare an immutable 40-character commit SHA")
@@ -70,8 +118,14 @@ def clone_or_update_repo(config: dict[str, Any]) -> None:
     if config.get("with_submodules", False):
         run_git(repo, "submodule", "update", "--init", "--recursive")
 
-    if patch_path := config.get("patch"):
-        apply_patch(repo, ROOT / patch_path)
+    patch = (ROOT / config["patch"]).resolve() if config.get("patch") else None
+    if patch is not None:
+        patches_root = (ROOT / "patches").resolve()
+        if not patch.is_relative_to(patches_root) or not patch.is_file():
+            raise ValueError(f"Patch path must stay under patches/: {config['patch']}")
+    if patch is not None:
+        apply_patch(repo, patch)
+    verify_repo_state(repo, patch)
 
 
 def fetch_dependencies() -> None:

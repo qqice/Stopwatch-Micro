@@ -72,7 +72,7 @@ const Hal::ButtonConfig& Hal::getButtonConfig(bool loadFromSettings)
 {
     if (loadFromSettings) {
         Settings settings(std::string(Hal::SettingsNs), false);
-        _btn_config.sfxEnabled     = settings.GetBool("btn_sfx", true);
+        _btn_config.sfxEnabled     = settings.GetBool("btn_sfx", false);
         _btn_config.vibrateEnabled = settings.GetBool("btn_vibrate", true);
         mclog::tagInfo(_tag, "config loaded from settings: sfx={}, vibrate={}", _btn_config.sfxEnabled,
                        _btn_config.vibrateEnabled);

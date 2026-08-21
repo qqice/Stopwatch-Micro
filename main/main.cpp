@@ -57,6 +57,7 @@ extern "C" void app_main(void)
     while (true) {
         GetHAL().feedTheDog();
         GetMooncake().update();
+        GetCodexMicroBle().poll();
         const uint32_t now = GetHAL().millis();
         if (now - last_codex_battery_update >= 30000) {
             last_codex_battery_update = now;

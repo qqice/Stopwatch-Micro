@@ -39,6 +39,7 @@ build/
 cmake-build-*/
 /components/
 managed_components/
+.artifacts/
 
 # PlatformIO
 .pio/

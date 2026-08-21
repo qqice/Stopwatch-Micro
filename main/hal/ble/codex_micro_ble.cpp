@@ -27,6 +27,10 @@
 #include <system_config.h>
 
 extern "C" void codex_micro_hid_gatt_compat_link_anchor();
+extern "C" void codex_micro_hid_gatt_compat_snapshot_bonds();
+extern "C" void codex_micro_hid_gatt_compat_gatts_event(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                                                        esp_ble_gatts_cb_param_t* param);
+extern "C" void codex_micro_hid_gatt_compat_authenticated(const uint8_t* address);
 
 namespace {
 
@@ -111,6 +115,12 @@ const cJSON* objectItem(const cJSON* object, const char* name)
     return object == nullptr ? nullptr : cJSON_GetObjectItemCaseSensitive(object, name);
 }
 
+bool sameLight(const CodexMicroLight& lhs, const CodexMicroLight& rhs)
+{
+    return lhs.color == rhs.color && lhs.brightness == rhs.brightness && lhs.effect == rhs.effect &&
+           lhs.speed == rhs.speed && lhs.magic == rhs.magic;
+}
+
 CodexMicroLightEffect parseLightEffect(const cJSON* value, CodexMicroLightEffect fallback)
 {
     if (cJSON_IsNumber(value)) {
@@ -149,6 +159,72 @@ CodexMicroLightEffect parseLightEffect(const cJSON* value, CodexMicroLightEffect
 bool jsonFlag(const cJSON* value)
 {
     return cJSON_IsTrue(value) || (cJSON_IsNumber(value) && value->valueint != 0);
+}
+
+enum class RpcObjectState : uint8_t {
+    Incomplete,
+    Complete,
+    Invalid,
+};
+
+RpcObjectState rpcObjectState(const std::string& json)
+{
+    constexpr std::size_t MaxNestingDepth     = 32;
+    std::array<char, MaxNestingDepth> closers = {};
+    bool started                              = false;
+    bool in_string                            = false;
+    bool escaped                              = false;
+    std::size_t depth                         = 0;
+    for (std::size_t index = 0; index < json.size(); ++index) {
+        const char character = json[index];
+        if (!started) {
+            if (character == ' ' || character == '\t' || character == '\r' || character == '\n') {
+                continue;
+            }
+            if (character != '{') {
+                return RpcObjectState::Invalid;
+            }
+            started    = true;
+            closers[0] = '}';
+            depth      = 1;
+            continue;
+        }
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (character == '\\') {
+                escaped = true;
+            } else if (character == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (character == '"') {
+            in_string = true;
+        } else if (character == '{' || character == '[') {
+            if (depth == closers.size()) {
+                return RpcObjectState::Invalid;
+            }
+            closers[depth] = character == '{' ? '}' : ']';
+            ++depth;
+        } else if (character == '}' || character == ']') {
+            if (depth == 0 || closers[depth - 1] != character) {
+                return RpcObjectState::Invalid;
+            }
+            --depth;
+            if (depth == 0) {
+                for (++index; index < json.size(); ++index) {
+                    const char trailing = json[index];
+                    if (trailing != ' ' && trailing != '\t' && trailing != '\r' && trailing != '\n' &&
+                        trailing != '\0') {
+                        return RpcObjectState::Invalid;
+                    }
+                }
+                return RpcObjectState::Complete;
+            }
+        }
+    }
+    return RpcObjectState::Incomplete;
 }
 
 void addResponseId(cJSON* response, const cJSON* id)
@@ -194,12 +270,15 @@ bool CodexMicroBle::begin()
         return false;
     }
 
-    if (!initializeController() || !configureAdvertising()) {
+    if (!initializeController()) {
+        return false;
+    }
+    codex_micro_hid_gatt_compat_snapshot_bonds();
+    if (!configureAdvertising()) {
         return false;
     }
 
-    if (logStepError("esp_ble_gatts_register_callback",
-                     esp_ble_gatts_register_callback(esp_hidd_gatts_event_handler))) {
+    if (logStepError("esp_ble_gatts_register_callback", esp_ble_gatts_register_callback(gattsEventCallback))) {
         return false;
     }
 
@@ -208,19 +287,63 @@ bool CodexMicroBle::begin()
         return false;
     }
 
-    _input_queue = xQueueCreate(InputQueueDepth, sizeof(InputEvent));
-    if (_input_queue == nullptr || xTaskCreatePinnedToCore(inputTaskEntry, "codex_input_tx", 4096, this,
-                                                           InputTaskPriority, &_input_task, InputTaskCore) != pdPASS) {
-        ESP_LOGW(Tag, "unable to start asynchronous input sender; using synchronous fallback");
+    _input_queue          = xQueueCreate(NormalInputQueueDepth, sizeof(InputEvent));
+    _critical_input_queue = xQueueCreate(CriticalInputQueueDepth, sizeof(InputEvent));
+    _joystick_queue       = xQueueCreate(1, sizeof(InputEvent));
+    _rpc_queue            = xQueueCreate(RpcQueueDepth, sizeof(RpcRequest*));
+    if (_input_queue == nullptr || _critical_input_queue == nullptr || _joystick_queue == nullptr ||
+        _rpc_queue == nullptr ||
+        xTaskCreatePinnedToCore(inputTaskEntry, "codex_input_tx", 6144, this, InputTaskPriority, &_input_task,
+                                InputTaskCore) != pdPASS) {
+        ESP_LOGE(Tag, "unable to allocate required BLE transport queues or worker");
         if (_input_queue != nullptr) {
             vQueueDelete(_input_queue);
             _input_queue = nullptr;
         }
+        if (_critical_input_queue != nullptr) {
+            vQueueDelete(_critical_input_queue);
+            _critical_input_queue = nullptr;
+        }
+        if (_joystick_queue != nullptr) {
+            vQueueDelete(_joystick_queue);
+            _joystick_queue = nullptr;
+        }
+        if (_rpc_queue != nullptr) {
+            vQueueDelete(_rpc_queue);
+            _rpc_queue = nullptr;
+        }
         _input_task = nullptr;
+        return false;
     }
 
     ESP_LOGI(Tag, "initializing vendor HID VID=%04X PID=%04X usage=FF00 report=%u", VendorId, ProductId, ReportId);
     return true;
+}
+
+void CodexMicroBle::poll()
+{
+    if (!connected()) {
+        return;
+    }
+
+    const uint32_t now                 = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    const ProtocolLinkState link_state = _link_state.load(std::memory_order_acquire);
+    if (link_state == ProtocolLinkState::Ready || link_state == ProtocolLinkState::Disconnected) {
+        return;
+    }
+    if (link_state == ProtocolLinkState::Recovering) {
+        const uint32_t deadline = _half_open_recovery_deadline_ms.load(std::memory_order_relaxed);
+        if (deadline != 0 && static_cast<int32_t>(now - deadline) >= 0) {
+            ESP_LOGE(Tag, "BLE disconnect watchdog expired; restarting transport");
+            esp_restart();
+        }
+        return;
+    }
+
+    const uint32_t connected_since = _connected_since_ms.load(std::memory_order_relaxed);
+    if (connected_since != 0 && now - connected_since >= ProtocolHandshakeTimeoutMs) {
+        recoverHalfOpenConnection();
+    }
 }
 
 bool CodexMicroBle::initializeController()
@@ -341,6 +464,7 @@ void CodexMicroBle::gapEventCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_c
             break;
         case ESP_GAP_BLE_AUTH_CMPL_EVT:
             if (param->ble_security.auth_cmpl.success) {
+                codex_micro_hid_gatt_compat_authenticated(param->ble_security.auth_cmpl.bd_addr);
                 ESP_LOGI(Tag, "pairing complete");
             } else {
                 ESP_LOGE(Tag, "pairing failed: 0x%02x", param->ble_security.auth_cmpl.fail_reason);
@@ -364,6 +488,25 @@ void CodexMicroBle::gapEventCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_c
         default:
             break;
     }
+}
+
+void CodexMicroBle::gattsEventCallback(esp_gatts_cb_event_t event, esp_gatt_if_t gattsIf,
+                                       esp_ble_gatts_cb_param_t* param)
+{
+    auto& owner = GetCodexMicroBle();
+    if (owner._state_mutex != nullptr &&
+        ((param != nullptr && event == ESP_GATTS_CONNECT_EVT) || event == ESP_GATTS_DISCONNECT_EVT)) {
+        xSemaphoreTake(owner._state_mutex, portMAX_DELAY);
+        if (param != nullptr && event == ESP_GATTS_CONNECT_EVT) {
+            std::memcpy(owner._peer_address.data(), param->connect.remote_bda, ESP_BD_ADDR_LEN);
+            owner._peer_address_valid.store(true, std::memory_order_release);
+        } else {
+            owner._peer_address_valid.store(false, std::memory_order_release);
+        }
+        xSemaphoreGive(owner._state_mutex);
+    }
+    codex_micro_hid_gatt_compat_gatts_event(event, gattsIf, param);
+    esp_hidd_gatts_event_handler(event, gattsIf, param);
 }
 
 void CodexMicroBle::hidEventCallback(void*, esp_event_base_t, int32_t id, void* eventData)
@@ -432,12 +575,20 @@ void CodexMicroBle::onConnected(bool connectedValue)
         return;
     }
     if (!connectedValue) {
-        // Stop accepting UI input before clearing transport state. The hot
-        // input path reads this atomic and never waits on the RPC state mutex.
+        // Close the input admission gate before publishing a new generation.
+        // Otherwise another core could briefly pair the new generation with
+        // the old Ready link and send into a connection that is closing.
         _connected.store(false, std::memory_order_release);
     }
+    _connection_generation.fetch_add(1, std::memory_order_acq_rel);
+    _link_state.store(connectedValue ? ProtocolLinkState::Awaiting : ProtocolLinkState::Disconnected,
+                      std::memory_order_release);
+    _half_open_recovery_deadline_ms.store(0, std::memory_order_relaxed);
+    _connected_since_ms.store(connectedValue ? static_cast<uint32_t>(esp_timer_get_time() / 1000) : 0,
+                              std::memory_order_relaxed);
     xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _state.connected = connectedValue;
+    _state.connected     = connectedValue;
+    _state.protocolReady = false;
     if (!connectedValue) {
         _state.threads       = {};
         _state.ambient       = {};
@@ -448,14 +599,83 @@ void CodexMicroBle::onConnected(bool connectedValue)
         _keys_sync_thread    = -1;
     }
     ++_state.revision;
+    ++_state.attentionRevision;
     xSemaphoreGive(_state_mutex);
     if (connectedValue) {
         _connected.store(true, std::memory_order_release);
     }
-    if (!connectedValue && _input_queue != nullptr) {
+    if (_input_queue != nullptr) {
         xQueueReset(_input_queue);
+        xQueueReset(_critical_input_queue);
+        xQueueReset(_joystick_queue);
+        RpcRequest* pending_request = nullptr;
+        while (xQueueReceive(_rpc_queue, &pending_request, 0) == pdTRUE) {
+            delete pending_request;
+            pending_request = nullptr;
+        }
     }
     _rpc_buffer.clear();
+}
+
+bool CodexMicroBle::markProtocolReady(uint32_t generation)
+{
+    xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    if (!connected() || generation != _connection_generation.load(std::memory_order_acquire)) {
+        xSemaphoreGive(_state_mutex);
+        return false;
+    }
+    ProtocolLinkState expected = ProtocolLinkState::Awaiting;
+    if (!_link_state.compare_exchange_strong(expected, ProtocolLinkState::Ready, std::memory_order_acq_rel)) {
+        const bool already_ready = expected == ProtocolLinkState::Ready && connected() &&
+                                   generation == _connection_generation.load(std::memory_order_acquire);
+        xSemaphoreGive(_state_mutex);
+        return already_ready;
+    }
+    if (!connected() || generation != _connection_generation.load(std::memory_order_acquire) ||
+        _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
+        xSemaphoreGive(_state_mutex);
+        return false;
+    }
+    _half_open_recovery_deadline_ms.store(0, std::memory_order_relaxed);
+    _state.protocolReady = true;
+    ++_state.revision;
+    ++_state.attentionRevision;
+    xSemaphoreGive(_state_mutex);
+    ESP_LOGI(Tag, "Codex RPC handshake complete");
+    return true;
+}
+
+void CodexMicroBle::recoverHalfOpenConnection()
+{
+    if (!connected()) {
+        return;
+    }
+    ProtocolLinkState expected = ProtocolLinkState::Awaiting;
+    if (!_link_state.compare_exchange_strong(expected, ProtocolLinkState::Recovering, std::memory_order_acq_rel)) {
+        return;
+    }
+    ++_half_open_recoveries;
+    ESP_LOGW(Tag, "Codex RPC handshake timed out after %ums; reconnecting", ProtocolHandshakeTimeoutMs);
+
+    esp_bd_addr_t peer = {};
+    xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    const bool peer_valid = _peer_address_valid.load(std::memory_order_acquire);
+    if (peer_valid) {
+        std::memcpy(peer, _peer_address.data(), ESP_BD_ADDR_LEN);
+    }
+    xSemaphoreGive(_state_mutex);
+    if (peer_valid) {
+        const esp_err_t error = esp_ble_gap_disconnect(peer);
+        if (error == ESP_OK) {
+            const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+            _half_open_recovery_deadline_ms.store(now + 2000U, std::memory_order_relaxed);
+            return;
+        }
+        ESP_LOGE(Tag, "BLE disconnect request failed: %s", esp_err_to_name(error));
+    }
+
+    ESP_LOGE(Tag, "current BLE peer unavailable; restarting transport");
+    esp_restart();
 }
 
 bool CodexMicroBle::connected()
@@ -478,24 +698,29 @@ CodexMicroState CodexMicroBle::snapshot()
 CodexMicroBleDiagnostics CodexMicroBle::diagnostics() const
 {
     return {
-        .initialized    = _initialized.load(),
-        .hidReady       = _hid_ready.load(),
-        .connected      = _connected.load(std::memory_order_acquire),
-        .advertising    = _advertising.load(),
-        .inputQueued    = _input_queued.load(),
-        .inputDropped   = _input_dropped.load(),
-        .inputProcessed = _input_processed.load(),
-        .txMessages     = _tx_messages.load(),
-        .txReports      = _tx_reports.load(),
-        .txFailures     = _tx_failures.load(),
-        .rxReports      = _rx_reports.load(),
-        .rpcMessages    = _rpc_messages.load(),
-        .rpcErrors      = _rpc_errors.load(),
-        .queuePending   = _input_queue == nullptr ? 0U : static_cast<uint32_t>(uxQueueMessagesWaiting(_input_queue)),
-        .queueHighWater = _queue_high_water.load(std::memory_order_relaxed),
-        .txMaxUs        = _tx_max_us.load(std::memory_order_relaxed),
-        .txTotalUs      = _tx_total_us.load(std::memory_order_relaxed),
-        .inputTaskCore  = _input_task_core.load(std::memory_order_relaxed),
+        .initialized        = _initialized.load(),
+        .hidReady           = _hid_ready.load(),
+        .connected          = _connected.load(std::memory_order_acquire),
+        .protocolReady      = _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Ready,
+        .advertising        = _advertising.load(),
+        .inputQueued        = _input_queued.load(),
+        .inputDropped       = _input_dropped.load(),
+        .inputProcessed     = _input_processed.load(),
+        .txMessages         = _tx_messages.load(),
+        .txReports          = _tx_reports.load(),
+        .txFailures         = _tx_failures.load(),
+        .rxReports          = _rx_reports.load(),
+        .rpcMessages        = _rpc_messages.load(),
+        .rpcErrors          = _rpc_errors.load(),
+        .queuePending       = _input_queue == nullptr ? 0U
+                                                      : static_cast<uint32_t>(uxQueueMessagesWaiting(_input_queue) +
+                                                                              uxQueueMessagesWaiting(_critical_input_queue) +
+                                                                              uxQueueMessagesWaiting(_joystick_queue)),
+        .queueHighWater     = _queue_high_water.load(std::memory_order_relaxed),
+        .txMaxUs            = _tx_max_us.load(std::memory_order_relaxed),
+        .txTotalUs          = _tx_total_us.load(std::memory_order_relaxed),
+        .halfOpenRecoveries = _half_open_recoveries.load(std::memory_order_relaxed),
+        .inputTaskCore      = _input_task_core.load(std::memory_order_relaxed),
     };
 }
 
@@ -524,10 +749,10 @@ bool CodexMicroBle::protocolSelfTest() const
     }
 
     std::array<char, 112> key_message = {};
-    const int key_length = std::snprintf(key_message.data(), key_message.size(),
-                                         "{\"method\":\"v.oai.hid\",\"params\":{\"k\":\"%s\",\"act\":%u,\"ag\":%d}}",
-                                         codexMicroControlCode(CodexMicroControl::Agent1),
-                                         static_cast<unsigned>(CodexMicroKeyAction::Press), 0);
+    const int key_length              = std::snprintf(key_message.data(), key_message.size(),
+                                                      "{\"method\":\"v.oai.hid\",\"params\":{\"k\":\"%s\",\"act\":%u,\"ag\":%d}}",
+                                                      codexMicroControlCode(CodexMicroControl::Agent1),
+                                                      static_cast<unsigned>(CodexMicroKeyAction::Press), 0);
     if (key_length <= 0 || static_cast<std::size_t>(key_length) >= key_message.size() ||
         std::strcmp(key_message.data(), "{\"method\":\"v.oai.hid\",\"params\":{\"k\":\"AG00\",\"act\":1,\"ag\":0}}") !=
             0) {
@@ -649,6 +874,12 @@ bool CodexMicroBle::sendEncoderSteps(int direction, uint16_t steps)
     if (steps == 0) {
         return true;
     }
+    if (steps > CodexMicroMaxEncoderBatchSteps) {
+        ++_input_dropped;
+        ESP_LOGE(Tag, "encoder batch exceeds limit requested=%u limit=%u", static_cast<unsigned>(steps),
+                 static_cast<unsigned>(CodexMicroMaxEncoderBatchSteps));
+        return false;
+    }
     const InputEvent event = {
         .kind    = InputEventKind::Key,
         .control = direction > 0 ? CodexMicroControl::EncoderClockwise : CodexMicroControl::EncoderCounterClockwise,
@@ -667,62 +898,216 @@ void CodexMicroBle::runInputTask()
 {
     _input_task_core.store(static_cast<int8_t>(xPortGetCoreID()), std::memory_order_relaxed);
     InputEvent event;
+    InputEvent encoder_batch;
+    RpcRequest* queued_rpc_request = nullptr;
+    bool encoder_pending           = false;
+    const auto event_is_current    = [this](const InputEvent& candidate) {
+        return candidate.generation == _connection_generation.load(std::memory_order_acquire) &&
+               _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Ready;
+    };
     while (true) {
-        if (xQueueReceive(_input_queue, &event, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-        if (event.kind == InputEventKind::Joystick) {
-            // Analog motion is absolute. If the UI sampled several positions
-            // while BLE was busy, only the newest consecutive sample matters;
-            // sending old positions makes the host feel behind the finger.
-            InputEvent next;
-            while (xQueuePeek(_input_queue, &next, 0) == pdTRUE && next.kind == InputEventKind::Joystick) {
-                xQueueReceive(_input_queue, &event, 0);
-            }
-            sendJoystickNow(event.angle, event.distance);
-            ++_input_processed;
-            vTaskDelay(pdMS_TO_TICKS(4));
-            continue;
-        }
-        for (uint16_t index = 0; index < event.repeat; ++index) {
-            if (!sendKeyNow(event.control, event.action, event.agent)) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        while (connected()) {
+            if (xQueueReceive(_critical_input_queue, &event, 0) == pdTRUE) {
+                if (!event_is_current(event)) {
+                    continue;
+                }
+                bool sent = false;
+                for (unsigned attempt = 0; attempt < 3 && connected() && event_is_current(event); ++attempt) {
+                    sent = event.kind == InputEventKind::Joystick
+                               ? sendJoystickNow(event.angle, event.distance, event.generation)
+                               : sendKeyNow(event.control, event.action, event.agent, event.generation);
+                    if (sent) {
+                        break;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(8));
+                }
+                if (sent) {
+                    ++_input_processed;
+                } else if (connected() && event_is_current(event)) {
+                    ++_input_dropped;
+                    ESP_LOGE(Tag, "critical input delivery failed; restarting to release host controls");
+                    esp_restart();
+                }
+            } else if (xQueueReceive(_rpc_queue, &queued_rpc_request, 0) == pdTRUE) {
+                std::unique_ptr<RpcRequest> rpc_request(queued_rpc_request);
+                queued_rpc_request = nullptr;
+                if (rpc_request == nullptr ||
+                    rpc_request->generation != _connection_generation.load(std::memory_order_acquire)) {
+                    continue;
+                }
+                if (_link_state.load(std::memory_order_acquire) == ProtocolLinkState::Awaiting) {
+                    const uint32_t now             = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+                    const uint32_t connected_since = _connected_since_ms.load(std::memory_order_relaxed);
+                    const uint32_t elapsed         = now - connected_since;
+                    if (connected_since != 0 && elapsed < RpcTransportWarmupMs) {
+                        vTaskDelay(pdMS_TO_TICKS(RpcTransportWarmupMs - elapsed));
+                    }
+                }
+                if (!connected() || rpc_request->generation != _connection_generation.load(std::memory_order_acquire)) {
+                    continue;
+                }
+                const ProtocolLinkState current_link_state = _link_state.load(std::memory_order_acquire);
+                if (current_link_state != ProtocolLinkState::Awaiting &&
+                    current_link_state != ProtocolLinkState::Ready) {
+                    continue;
+                }
+                cJSON* request = cJSON_ParseWithLength(rpc_request->json.data(), rpc_request->length);
+                if (request == nullptr) {
+                    ++_rpc_errors;
+                    continue;
+                }
+                ++_rpc_messages;
+                handleRpc(request, rpc_request->generation);
+                cJSON_Delete(request);
+            } else if (_link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
                 break;
+            } else if (xQueueReceive(_joystick_queue, &event, 0) == pdTRUE) {
+                if (!event_is_current(event)) {
+                    continue;
+                }
+                if (sendJoystickNow(event.angle, event.distance, event.generation)) {
+                    ++_input_processed;
+                } else if (connected() && event_is_current(event)) {
+                    ++_input_dropped;
+                }
+            } else {
+                if (!encoder_pending && xQueueReceive(_input_queue, &encoder_batch, 0) == pdTRUE) {
+                    encoder_pending = true;
+                }
+                if (encoder_pending && !event_is_current(encoder_batch)) {
+                    encoder_pending = false;
+                    continue;
+                }
+                if (!encoder_pending) {
+                    break;
+                }
+                const bool ordered_control = encoder_batch.action != CodexMicroKeyAction::Rotate;
+                const unsigned attempts    = ordered_control ? 3U : 1U;
+                bool sent                  = false;
+                for (unsigned attempt = 0; attempt < attempts && connected() && event_is_current(encoder_batch);
+                     ++attempt) {
+                    sent = sendKeyNow(encoder_batch.control, encoder_batch.action, encoder_batch.agent,
+                                      encoder_batch.generation);
+                    if (sent) {
+                        break;
+                    }
+                    if (ordered_control) {
+                        vTaskDelay(pdMS_TO_TICKS(8));
+                    }
+                }
+                if (sent) {
+                    ++_input_processed;
+                } else if (connected() && event_is_current(encoder_batch)) {
+                    ++_input_dropped;
+                    if (ordered_control) {
+                        ESP_LOGE(Tag, "encoder control delivery failed; restarting to release host control");
+                        esp_restart();
+                    }
+                }
+                if (encoder_batch.repeat > 0) {
+                    --encoder_batch.repeat;
+                }
+                encoder_pending = encoder_batch.repeat > 0;
             }
-            ++_input_processed;
-            // Encoder detents are relative and must all be preserved. Pace
-            // them on this background task so a long batch cannot starve UI.
+
+            // Process at most one encoder detent before checking control and
+            // latest-joystick queues again. This bounds PTT/key release latency.
             vTaskDelay(pdMS_TO_TICKS(4));
+        }
+        if (!connected()) {
+            encoder_pending = false;
         }
     }
 }
 
 bool CodexMicroBle::queueInput(const InputEvent& event)
 {
-    if (!connected()) {
+    const uint32_t generation = _connection_generation.load(std::memory_order_acquire);
+    if (!connected() || _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
         return false;
     }
-    if (_input_queue == nullptr) {
-        if (event.kind == InputEventKind::Joystick) {
-            return sendJoystickNow(event.angle, event.distance);
+    InputEvent queued_event = event;
+    queued_event.generation = generation;
+    if (_input_queue == nullptr || _critical_input_queue == nullptr || _joystick_queue == nullptr ||
+        _input_task == nullptr) {
+        if (queued_event.generation != _connection_generation.load(std::memory_order_acquire) ||
+            _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
+            return false;
+        }
+        if (queued_event.kind == InputEventKind::Joystick) {
+            return sendJoystickNow(queued_event.angle, queued_event.distance, queued_event.generation);
         }
         bool sent = true;
-        for (uint16_t index = 0; index < event.repeat; ++index) {
-            sent = sendKeyNow(event.control, event.action, event.agent) && sent;
+        for (uint16_t index = 0; index < queued_event.repeat; ++index) {
+            if (queued_event.generation != _connection_generation.load(std::memory_order_acquire) ||
+                _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
+                return false;
+            }
+            sent = sendKeyNow(queued_event.control, queued_event.action, queued_event.agent, queued_event.generation) &&
+                   sent;
         }
         return sent;
     }
-    if (xQueueSend(_input_queue, &event, 0) != pdTRUE) {
+
+    if (generation != _connection_generation.load(std::memory_order_acquire) ||
+        _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
+        return false;
+    }
+    BaseType_t queued           = pdFALSE;
+    const bool joystick_neutral = queued_event.kind == InputEventKind::Joystick && queued_event.distance <= 0.001f;
+    const bool encoder_ordered =
+        queued_event.kind == InputEventKind::Key &&
+        (queued_event.action == CodexMicroKeyAction::Rotate || queued_event.control == CodexMicroControl::EncoderPress);
+    const bool critical      = joystick_neutral || (queued_event.kind == InputEventKind::Key && !encoder_ordered);
+    const bool must_preserve = critical || (encoder_ordered && queued_event.action != CodexMicroKeyAction::Rotate);
+    if (joystick_neutral) {
+        // Discard the last unsent non-zero position, then place neutral in the
+        // ordered control FIFO. A quick new press cannot overtake this barrier.
+        xQueueReset(_joystick_queue);
+        queued = xQueueSendToBack(_critical_input_queue, &queued_event, pdMS_TO_TICKS(20));
+    } else if (queued_event.kind == InputEventKind::Joystick) {
+        // Non-zero analog motion is absolute and only its latest value matters.
+        queued = xQueueOverwrite(_joystick_queue, &queued_event);
+    } else if (critical) {
+        // All key press/release events share one FIFO, preserving per-key
+        // ordering while receiving priority over relative encoder motion.
+        queued = xQueueSendToBack(_critical_input_queue, &queued_event, pdMS_TO_TICKS(20));
+    } else {
+        const bool rotation = queued_event.action == CodexMicroKeyAction::Rotate;
+        if (!rotation || uxQueueSpacesAvailable(_input_queue) > EncoderControlReserve) {
+            queued = xQueueSendToBack(_input_queue, &queued_event, must_preserve ? pdMS_TO_TICKS(20) : 0);
+        }
+    }
+
+    if (queued != pdTRUE) {
         ++_input_dropped;
-        ESP_LOGW(Tag, "input queue full kind=%u repeat=%u", static_cast<unsigned>(event.kind),
-                 static_cast<unsigned>(event.repeat));
+        ESP_LOGE(Tag, "input queue full kind=%u action=%u repeat=%u", static_cast<unsigned>(queued_event.kind),
+                 static_cast<unsigned>(queued_event.action), static_cast<unsigned>(queued_event.repeat));
+        if (must_preserve && connected() &&
+            queued_event.generation == _connection_generation.load(std::memory_order_acquire) &&
+            _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Ready) {
+            ESP_LOGE(Tag, "critical input was not queued; restarting to release host controls");
+            esp_restart();
+        }
+        return false;
+    }
+    if (queued_event.generation != _connection_generation.load(std::memory_order_acquire) ||
+        _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
+        ++_input_dropped;
+        xTaskNotifyGive(_input_task);
         return false;
     }
     ++_input_queued;
-    updateAtomicMax(_queue_high_water, static_cast<uint32_t>(uxQueueMessagesWaiting(_input_queue)));
+    const uint32_t pending =
+        static_cast<uint32_t>(uxQueueMessagesWaiting(_input_queue) + uxQueueMessagesWaiting(_critical_input_queue) +
+                              uxQueueMessagesWaiting(_joystick_queue));
+    updateAtomicMax(_queue_high_water, pending);
+    xTaskNotifyGive(_input_task);
     return true;
 }
 
-bool CodexMicroBle::sendKeyNow(CodexMicroControl control, CodexMicroKeyAction action, int8_t agent)
+bool CodexMicroBle::sendKeyNow(CodexMicroControl control, CodexMicroKeyAction action, int8_t agent, uint32_t generation)
 {
     const char* key = codexMicroControlCode(control);
     if (key == nullptr) {
@@ -740,7 +1125,7 @@ bool CodexMicroBle::sendKeyNow(CodexMicroControl control, CodexMicroKeyAction ac
                                static_cast<unsigned>(action));
     }
     const bool encoded = length > 0 && static_cast<std::size_t>(length) < message.size();
-    const bool sent    = encoded && sendJson(message.data());
+    const bool sent    = encoded && sendJson(message.data(), generation);
     if (action == CodexMicroKeyAction::Rotate) {
         ESP_LOGD(Tag, "TX key=%s act=%u agent=%d sent=%d", key == nullptr ? "" : key, static_cast<unsigned>(action),
                  static_cast<int>(agent), sent ? 1 : 0);
@@ -751,20 +1136,20 @@ bool CodexMicroBle::sendKeyNow(CodexMicroControl control, CodexMicroKeyAction ac
     return sent;
 }
 
-bool CodexMicroBle::sendJoystickNow(float angle, float distance)
+bool CodexMicroBle::sendJoystickNow(float angle, float distance, uint32_t generation)
 {
     std::array<char, 112> message = {};
     const int length =
         std::snprintf(message.data(), message.size(), "{\"method\":\"v.oai.rad\",\"params\":{\"a\":%.6f,\"d\":%.6f}}",
                       static_cast<double>(angle), static_cast<double>(distance));
     const bool encoded = length > 0 && static_cast<std::size_t>(length) < message.size();
-    const bool sent    = encoded && sendJson(message.data());
+    const bool sent    = encoded && sendJson(message.data(), generation);
     ESP_LOGD(Tag, "TX stick angle=%.3f distance=%.3f sent=%d", static_cast<double>(angle),
              static_cast<double>(distance), sent ? 1 : 0);
     return sent;
 }
 
-bool CodexMicroBle::sendJsonObject(cJSON* object)
+bool CodexMicroBle::sendJsonObject(cJSON* object, uint32_t expectedGeneration)
 {
     if (object == nullptr) {
         return false;
@@ -774,12 +1159,26 @@ bool CodexMicroBle::sendJsonObject(cJSON* object)
     if (encoded == nullptr) {
         return false;
     }
-    bool sent = sendJson(encoded);
+    bool sent = false;
+    const bool handshake_warmup =
+        expectedGeneration != UINT32_MAX && _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Awaiting;
+    const unsigned attempts = handshake_warmup ? 5U : 1U;
+    for (unsigned attempt = 0; attempt < attempts; ++attempt) {
+        sent                                       = sendJson(encoded, expectedGeneration, true);
+        const ProtocolLinkState current_link_state = _link_state.load(std::memory_order_acquire);
+        if (sent || !connected() ||
+            (expectedGeneration != UINT32_MAX &&
+             expectedGeneration != _connection_generation.load(std::memory_order_acquire)) ||
+            (current_link_state != ProtocolLinkState::Awaiting && current_link_state != ProtocolLinkState::Ready)) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
     std::free(encoded);
     return sent;
 }
 
-bool CodexMicroBle::sendJson(const char* json)
+bool CodexMicroBle::sendJson(const char* json, uint32_t expectedGeneration, bool allowAwaiting)
 {
     if (json == nullptr || _hid_device == nullptr || _tx_mutex == nullptr || !connected()) {
         return false;
@@ -787,7 +1186,12 @@ bool CodexMicroBle::sendJson(const char* json)
 
     const int64_t started_us = esp_timer_get_time();
     xSemaphoreTake(_tx_mutex, portMAX_DELAY);
-    if (!connected()) {
+    const ProtocolLinkState link_state = _link_state.load(std::memory_order_acquire);
+    const bool link_allows_send =
+        link_state == ProtocolLinkState::Ready || (allowAwaiting && link_state == ProtocolLinkState::Awaiting);
+    if (!connected() ||
+        (expectedGeneration != UINT32_MAX &&
+         (expectedGeneration != _connection_generation.load(std::memory_order_acquire) || !link_allows_send))) {
         xSemaphoreGive(_tx_mutex);
         return false;
     }
@@ -811,8 +1215,12 @@ bool CodexMicroBle::sendJson(const char* json)
         }
         esp_err_t error = esp_hidd_dev_input_set(_hid_device, 0, ReportId, report, sizeof(report));
         if (error != ESP_OK) {
-            ++_tx_failures;
-            ESP_LOGW(Tag, "input report failed: %s", esp_err_to_name(error));
+            const bool warming_up = allowAwaiting && expectedGeneration != UINT32_MAX &&
+                                    _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Awaiting;
+            if (!warming_up) {
+                ++_tx_failures;
+            }
+            ESP_LOGW(Tag, "input report failed warmup=%d: %s", warming_up ? 1 : 0, esp_err_to_name(error));
             success = false;
             break;
         }
@@ -862,7 +1270,7 @@ void CodexMicroBle::onOutput(const uint8_t* data, std::size_t length)
     const char* payload             = reinterpret_cast<const char*>(data + offset + 2);
     constexpr char TopLevelPrefix[] = "{\"method\"";
     bool startsTopLevel             = payloadLength >= sizeof(TopLevelPrefix) - 1 &&
-                                      std::memcmp(payload, TopLevelPrefix, sizeof(TopLevelPrefix) - 1) == 0;
+                          std::memcmp(payload, TopLevelPrefix, sizeof(TopLevelPrefix) - 1) == 0;
     if (startsTopLevel && !_rpc_buffer.empty()) {
         _rpc_buffer.clear();
     }
@@ -887,24 +1295,61 @@ void CodexMicroBle::onOutput(const uint8_t* data, std::size_t length)
         _rpc_buffer.append(payload, payloadLength);
     }
 
-    cJSON* request = cJSON_ParseWithLength(_rpc_buffer.data(), _rpc_buffer.size());
-    if (request == nullptr) {
-        if (!_rpc_buffer.empty() && _rpc_buffer.back() == '\n') {
-            ESP_LOGW(Tag, "invalid complete RPC payload");
-            ++_rpc_errors;
-            _rpc_buffer.clear();
-        }
+    // Work Louder HID writes are length-framed but are not guaranteed to end
+    // with a newline. Detect a balanced top-level JSON object here and leave
+    // all parsing/allocation to the larger worker task stack.
+    const RpcObjectState object_state = rpcObjectState(_rpc_buffer);
+    if (object_state == RpcObjectState::Invalid) {
+        ESP_LOGW(Tag, "invalid RPC framing");
+        ++_rpc_errors;
+        _rpc_buffer.clear();
         return;
     }
-
-    ++_rpc_messages;
-    handleRpc(request);
-    cJSON_Delete(request);
+    if (object_state != RpcObjectState::Complete) {
+        return;
+    }
+    if (!queueRpcRequest(_rpc_buffer.data(), _rpc_buffer.size())) {
+        ++_rpc_errors;
+    }
     _rpc_buffer.clear();
 }
 
-void CodexMicroBle::handleRpc(const cJSON* request)
+bool CodexMicroBle::queueRpcRequest(const char* json, std::size_t length)
 {
+    const uint32_t generation          = _connection_generation.load(std::memory_order_acquire);
+    const ProtocolLinkState link_state = _link_state.load(std::memory_order_acquire);
+    if (json == nullptr || length == 0 || length > MaxRpcBufferSize || _rpc_queue == nullptr ||
+        _input_task == nullptr || !connected() ||
+        (link_state != ProtocolLinkState::Awaiting && link_state != ProtocolLinkState::Ready)) {
+        return false;
+    }
+    std::unique_ptr<RpcRequest> request(new (std::nothrow) RpcRequest());
+    if (request == nullptr) {
+        return false;
+    }
+    request->generation = generation;
+    request->length     = static_cast<uint16_t>(length);
+    std::memcpy(request->json.data(), json, length);
+    const ProtocolLinkState current_link_state = _link_state.load(std::memory_order_acquire);
+    if (generation != _connection_generation.load(std::memory_order_acquire) || !connected() ||
+        (current_link_state != ProtocolLinkState::Awaiting && current_link_state != ProtocolLinkState::Ready)) {
+        return false;
+    }
+    RpcRequest* queued_request = request.get();
+    if (xQueueSendToBack(_rpc_queue, &queued_request, 0) != pdTRUE) {
+        ESP_LOGE(Tag, "RPC dispatch queue full length=%u", static_cast<unsigned>(length));
+        return false;
+    }
+    request.release();
+    xTaskNotifyGive(_input_task);
+    return true;
+}
+
+void CodexMicroBle::handleRpc(const cJSON* request, uint32_t generation)
+{
+    if (!connected() || generation != _connection_generation.load(std::memory_order_acquire)) {
+        return;
+    }
     const cJSON* methodValue = objectItem(request, "method");
     const char* method       = cJSON_IsString(methodValue) ? methodValue->valuestring : "";
     const cJSON* id          = objectItem(request, "id");
@@ -913,31 +1358,55 @@ void CodexMicroBle::handleRpc(const cJSON* request)
 
     if (std::strcmp(method, "sys.version") == 0) {
         cJSON* result = cJSON_CreateObject();
+        if (result == nullptr) {
+            ++_rpc_errors;
+            return;
+        }
         cJSON_AddStringToObject(result, "version", FirmwareVersion);
-        sendResult(id, result);
+        if (sendResult(id, result, generation)) {
+            markProtocolReady(generation);
+        }
         return;
     }
 
     if (std::strcmp(method, "device.status") == 0) {
         CodexMicroState state = snapshot();
         cJSON* result         = cJSON_CreateObject();
+        if (result == nullptr) {
+            ++_rpc_errors;
+            return;
+        }
         cJSON_AddStringToObject(result, "version", FirmwareVersion);
         cJSON_AddNumberToObject(result, "profile_index", 0);
         cJSON_AddNumberToObject(result, "layer_index", 1);
         cJSON_AddNumberToObject(result, "battery", state.battery);
         cJSON_AddBoolToObject(result, "is_charging", state.charging);
-        sendResult(id, result);
+        if (sendResult(id, result, generation)) {
+            markProtocolReady(generation);
+        }
         return;
     }
 
     if (std::strcmp(method, "v.oai.thstatus") == 0 && cJSON_IsArray(params)) {
-        updateThreadLighting(params);
-        sendSuccess(id);
+        if (!updateThreadLighting(params, generation)) {
+            return;
+        }
+        if (sendSuccess(id, generation)) {
+            markProtocolReady(generation);
+        }
         return;
     }
 
     if (std::strcmp(method, "v.oai.rgbcfg") == 0 && cJSON_IsObject(params)) {
         xSemaphoreTake(_state_mutex, portMAX_DELAY);
+        const ProtocolLinkState link_state = _link_state.load(std::memory_order_acquire);
+        if (!connected() || generation != _connection_generation.load(std::memory_order_acquire) ||
+            (link_state != ProtocolLinkState::Awaiting && link_state != ProtocolLinkState::Ready)) {
+            xSemaphoreGive(_state_mutex);
+            return;
+        }
+        const CodexMicroLight previous_ambient = _state.ambient;
+        const CodexMicroLight previous_keys    = _state.keys;
         updateLightingSide(_configured_ambient, objectItem(params, "ambient"));
         updateLightingSide(_configured_keys, objectItem(params, "keys"));
         if (_ambient_sync_thread < 0) {
@@ -946,14 +1415,21 @@ void CodexMicroBle::handleRpc(const cJSON* request)
         if (_keys_sync_thread < 0) {
             _state.keys = _configured_keys;
         }
-        ++_state.revision;
+        if (!sameLight(previous_ambient, _state.ambient) || !sameLight(previous_keys, _state.keys)) {
+            ++_state.revision;
+            ++_state.attentionRevision;
+        }
         xSemaphoreGive(_state_mutex);
-        sendSuccess(id);
+        if (sendSuccess(id, generation)) {
+            markProtocolReady(generation);
+        }
         return;
     }
 
     if (std::strcmp(method, "lights.preview") == 0 || std::strcmp(method, "host.focused_app") == 0) {
-        sendSuccess(id);
+        if (sendSuccess(id, generation)) {
+            markProtocolReady(generation);
+        }
         return;
     }
 
@@ -962,36 +1438,45 @@ void CodexMicroBle::handleRpc(const cJSON* request)
     cJSON* error = cJSON_AddObjectToObject(response, "error");
     cJSON_AddNumberToObject(error, "code", -32601);
     cJSON_AddStringToObject(error, "message", "Method not found");
-    sendJsonObject(response);
+    sendJsonObject(response, generation);
 }
 
-void CodexMicroBle::sendResult(const cJSON* id, cJSON* result)
+bool CodexMicroBle::sendResult(const cJSON* id, cJSON* result, uint32_t generation)
 {
     cJSON* response = cJSON_CreateObject();
     if (response == nullptr || result == nullptr) {
         cJSON_Delete(response);
         cJSON_Delete(result);
-        return;
+        return false;
     }
     addResponseId(response, id);
     cJSON_AddItemToObject(response, "result", result);
-    sendJsonObject(response);
+    return sendJsonObject(response, generation);
 }
 
-void CodexMicroBle::sendSuccess(const cJSON* id)
+bool CodexMicroBle::sendSuccess(const cJSON* id, uint32_t generation)
 {
     cJSON* result = cJSON_CreateObject();
     if (result == nullptr) {
-        return;
+        return false;
     }
     cJSON_AddBoolToObject(result, "ok", true);
-    sendResult(id, result);
+    return sendResult(id, result, generation);
 }
 
-void CodexMicroBle::updateThreadLighting(const cJSON* values)
+bool CodexMicroBle::updateThreadLighting(const cJSON* values, uint32_t generation)
 {
     xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    const cJSON* value = nullptr;
+    const ProtocolLinkState link_state = _link_state.load(std::memory_order_acquire);
+    if (!connected() || generation != _connection_generation.load(std::memory_order_acquire) ||
+        (link_state != ProtocolLinkState::Awaiting && link_state != ProtocolLinkState::Ready)) {
+        xSemaphoreGive(_state_mutex);
+        return false;
+    }
+    const auto previous_threads            = _state.threads;
+    const CodexMicroLight previous_ambient = _state.ambient;
+    const CodexMicroLight previous_keys    = _state.keys;
+    const cJSON* value                     = nullptr;
     cJSON_ArrayForEach(value, values)
     {
         const cJSON* idValue = objectItem(value, "id");
@@ -1031,8 +1516,16 @@ void CodexMicroBle::updateThreadLighting(const cJSON* values)
     } else {
         _state.ambient = _configured_ambient;
     }
-    ++_state.revision;
+    bool changed = !sameLight(previous_ambient, _state.ambient) || !sameLight(previous_keys, _state.keys);
+    for (std::size_t index = 0; index < _state.threads.size() && !changed; ++index) {
+        changed = !sameLight(previous_threads[index], _state.threads[index]);
+    }
+    if (changed) {
+        ++_state.revision;
+        ++_state.attentionRevision;
+    }
     xSemaphoreGive(_state_mutex);
+    return true;
 }
 
 void CodexMicroBle::updateLightingSide(CodexMicroLight& side, const cJSON* value)

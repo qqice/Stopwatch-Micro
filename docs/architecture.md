@@ -10,11 +10,13 @@ have one owner each.
 2. `app_codex_micro` creates the only Mooncake application and polls physical inputs.
 3. `CodexMicroView` owns the two LVGL pages, Pairing overlay, Mic overlay, touch controls, and their
    local animation state.
-4. `CodexMicroBle` owns advertising, bonding, HID/GATT services, JSON-RPC input messages, and host
-   state updates.
+4. `CodexMicroBle` owns advertising, bonding, HID/GATT services, JSON-RPC input messages, protocol
+   readiness, and host state updates.
 
 The BLE service outlives UI page changes. Connection state flows from `CodexMicroBle` to the view;
-the view cannot dismiss Pairing without a live connection.
+the view cannot dismiss Pairing until both the HID link and a recognized Codex RPC are live. A HID
+link that receives no recognized RPC for 25 seconds is treated as a Windows half-open connection and
+is disconnected or restarted so advertising can resume.
 
 ## Input path
 
@@ -35,7 +37,7 @@ events fit in one 63-byte report.
 ## Runtime scheduling
 
 The ESP-IDF configuration pins the Bluetooth controller, Bluedroid host, and `main_task` to CPU0.
-Stopwatch Micro therefore pins its HID TX, audio, microphone, vibration, and battery workers to
+Stopwatch Micro therefore pins its HID TX, audio, vibration, and battery workers to
 CPU0 as well, while LVGL rendering and 8 ms touch sampling run alone on CPU1 at priority 2. The main
 loop yields for one RTOS tick on each iteration. This prevents Codex traffic and feedback work from
 stealing touch/render time while keeping all host communication off the UI core.
@@ -47,15 +49,39 @@ rendering state local so protocol delivery is not coupled to an LVGL redraw.
 
 Incoming JSON-RPC requests update a thread-state snapshot in the BLE service. The Agent page reads
 that snapshot during its periodic refresh and maps the six host states to button labels and lights.
-The parser validates request shape before publishing a new snapshot and responds to supported RPC
-methods over the same GATT transport.
+The GATT callback validates the length-framed, possibly non-newline-terminated stream with a bounded
+JSON structure scanner, then moves complete requests as heap pointers to a four-entry transport
+queue. Parsing and dispatch happen only on the larger CPU0 worker stack. The worker waits up to
+200 ms after a reconnect before replying and validates the connection generation again before any
+host-state mutation or response.
+
+Windows treats a bonded HID Input Report subscription as persistent across a peripheral reboot,
+while the ESP-IDF 5.5.4 HID helper starts with its in-memory CCC flag cleared. At boot the
+compatibility layer snapshots existing bonds and locates the exact Report ID 6 Input CCC handle.
+After an identity from that boot snapshot authenticates, it restores the helper's notification flag.
+New pairings still require the client's real encrypted CCC write. This prevents the half-open
+connect/retry loop after a hard reset without weakening first-pair subscription semantics.
 
 ## Microphone boundary
 
 Codex Micro's `ACT10` event controls push-to-talk in ChatGPT Desktop. ChatGPT captures the computer's
-selected system microphone; the vendor HID/JSON-RPC protocol has no PCM audio message. Stopwatch
-Micro may sample its MEMS microphone for the on-device level meter, but that sample is not host audio
-and must not be used as evidence that ChatGPT received speech.
+selected system microphone; the vendor HID/JSON-RPC protocol has no PCM audio message. The firmware
+configures ES8311 and I2S for output only and never starts an RX channel. The on-device Mic animation
+is deliberately synthetic and communicates PTT state without sampling the built-in microphone.
+
+## Display power and input safety
+
+The view owns AMOLED power state. It dims after 30 seconds, turns off after two minutes, and wakes for
+host state or physical input. A touch that wakes a fully dark display is consumed through release,
+preventing an invisible Command or Agent action. Five one-pixel offsets rotate once per minute while
+the display is visible to reduce static AMOLED wear.
+
+Input delivery uses three paths: an ordered control FIFO for every key transition and joystick
+neutral barrier, a one-slot latest-state queue for non-zero joystick motion, and a FIFO of relative
+encoder batches. The worker checks controls and joystick state between every encoder detent. A
+critical delivery is retried; persistent failure restarts BLE so the host releases PTT and held
+controls instead of remaining stuck. Rotation batches are capped at 20 detents and at most two may
+wait ahead of an encoder click, bounding worst-case click backlog to roughly 240 ms at 4 ms pacing.
 
 ## Dependency boundary
 

@@ -49,6 +49,7 @@ inline constexpr std::array<const char*, 15> CodexMicroControlCodes = {
     "AG00",  "AG01",  "AG02",  "AG03",  "AG04", "AG05",   "ACT06",  "ACT07",
     "ACT08", "ACT09", "ACT10", "ACT12", "ENC",  "ENC_CW", "ENC_CC",
 };
+inline constexpr uint16_t CodexMicroMaxEncoderBatchSteps = 20;
 
 static_assert(CodexMicroControlCodes.size() ==
               static_cast<std::size_t>(CodexMicroControl::EncoderCounterClockwise) + 1);

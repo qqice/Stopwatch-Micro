@@ -135,7 +135,7 @@ public:
     m5::Button_Class btnPwr;
 
     struct ButtonConfig {
-        bool sfxEnabled     = true;
+        bool sfxEnabled     = false;
         bool vibrateEnabled = true;
     };
 

@@ -31,8 +31,15 @@ public:
     Page currentPage() const;
     bool setPageForDebug(Page page);
     void setInputSuppressed(bool suppressed);
+    void wakeDisplay();
 
 private:
+    enum class DisplayPowerState : uint8_t {
+        Active,
+        Dimmed,
+        Off,
+    };
+
     enum class Icon : uint8_t {
         Fast,
         Approve,
@@ -63,6 +70,7 @@ private:
     static void dialHitTestEvent(lv_event_t* event);
     static void dialEvent(lv_event_t* event);
     static void touchEvent(lv_event_t* event);
+    static void wakeOverlayEvent(lv_event_t* event);
 
     void setPage(Page page);
     void renderPage();
@@ -83,6 +91,8 @@ private:
     void updateCommandLighting(const CodexMicroState& state);
     void updateAgentLights(const CodexMicroState& state);
     void updateMicMeter();
+    void updateDisplayPower(uint32_t tick, bool hostStateChanged);
+    void setDisplayPower(DisplayPowerState state);
     bool interactionActive() const;
     void invalidateCommandSegment(std::size_t slot);
     void updateJoystickFromPoint(const lv_point_t& point);
@@ -102,6 +112,8 @@ private:
     lv_obj_t* _pairing_screen                 = nullptr;
     lv_obj_t* _pairing_pulse                  = nullptr;
     lv_obj_t* _pairing_core                   = nullptr;
+    lv_obj_t* _pairing_reset_control          = nullptr;
+    lv_obj_t* _wake_overlay                   = nullptr;
     std::array<lv_obj_t*, 9> _mic_bars        = {};
     std::array<lv_obj_t*, 3> _pairing_dots    = {};
     std::array<lv_obj_t*, 2> _page_roots      = {};
@@ -138,7 +150,6 @@ private:
 
     bool _touch_pressed                = false;
     bool _mic_active                   = false;
-    float _mic_smoothed_level          = 0.0f;
     uint32_t _mic_last_update_tick     = 0;
     uint32_t _command_last_update_tick = 0;
     uint32_t _agent_last_update_tick   = 0;
@@ -148,9 +159,15 @@ private:
     bool _ambient_visible              = false;
     uint32_t _touch_press_tick         = 0;
     uint32_t _last_state_revision      = UINT32_MAX;
+    uint32_t _last_attention_revision  = UINT32_MAX;
     int8_t _last_connection_phase      = -1;
     bool _functional_enabled           = false;
     bool _input_suppressed             = false;
+    bool _wake_overlay_armed           = false;
+    DisplayPowerState _display_power   = DisplayPowerState::Active;
+    uint32_t _last_activity_tick       = 0;
+    uint8_t _pixel_shift_index         = UINT8_MAX;
+    int _display_base_brightness       = 80;
     bool _page_dirty                   = true;
     Page _page                         = Page::Command;
 };

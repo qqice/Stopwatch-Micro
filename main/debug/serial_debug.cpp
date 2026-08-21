@@ -188,7 +188,7 @@ void SerialDebug::handleLine(char* line)
         const CodexMicroBleDiagnostics diagnostics = GetCodexMicroBle().diagnostics();
         const bool healthy = GetCodexMicroBle().protocolSelfTest() && diagnostics.inputDropped == 0 &&
                              diagnostics.txFailures == 0 && diagnostics.rpcErrors == 0;
-        char details[144]  = {};
+        char details[144] = {};
         std::snprintf(details, sizeof(details),
                       "controls=12 encoder=3 report_id=6 report_bytes=63 payload_bytes=61 dropped=%lu tx_failures=%lu "
                       "rpc_errors=%lu",
@@ -322,15 +322,16 @@ void SerialDebug::printStatus()
         onOff(hal.i2c), onOff(hal.pmic), onOff(hal.ioExpander), onOff(hal.display), onOff(hal.touch), onOff(hal.audio),
         onOff(hal.vibrator), onOff(hal.buttons));
     std::printf(
-        "DBG STATUS ble_ready=%s ble_connected=%s advertising=%s revision=%lu queued=%lu dropped=%lu processed=%lu "
-        "tx_messages=%lu tx_reports=%lu tx_failures=%lu rx_reports=%lu rpc=%lu rpc_errors=%lu pending=%lu\r\n",
-        onOff(state.ready && ble.hidReady), onOff(state.connected), onOff(ble.advertising),
-        static_cast<unsigned long>(state.revision), static_cast<unsigned long>(ble.inputQueued),
+        "DBG STATUS ble_ready=%s ble_connected=%s ble_protocol=%s advertising=%s revision=%lu queued=%lu dropped=%lu "
+        "processed=%lu tx_messages=%lu tx_reports=%lu tx_failures=%lu rx_reports=%lu rpc=%lu rpc_errors=%lu "
+        "pending=%lu half_open_recoveries=%lu\r\n",
+        onOff(state.ready && ble.hidReady), onOff(state.connected), onOff(state.protocolReady && ble.protocolReady),
+        onOff(ble.advertising), static_cast<unsigned long>(state.revision), static_cast<unsigned long>(ble.inputQueued),
         static_cast<unsigned long>(ble.inputDropped), static_cast<unsigned long>(ble.inputProcessed),
         static_cast<unsigned long>(ble.txMessages), static_cast<unsigned long>(ble.txReports),
         static_cast<unsigned long>(ble.txFailures), static_cast<unsigned long>(ble.rxReports),
         static_cast<unsigned long>(ble.rpcMessages), static_cast<unsigned long>(ble.rpcErrors),
-        static_cast<unsigned long>(ble.queuePending));
+        static_cast<unsigned long>(ble.queuePending), static_cast<unsigned long>(ble.halfOpenRecoveries));
     const Hal::PerformanceDiagnostics performance = GetHAL().performanceDiagnostics();
     std::printf(
         "DBG STATUS perf_lvgl_core=%d perf_tx_core=%d lvgl_calls=%lu lvgl_max_us=%lu touch_reads=%lu "
@@ -441,16 +442,9 @@ void SerialDebug::printControls()
 void SerialDebug::startMicrophoneTest(uint32_t durationMs)
 {
     cancelAsyncTest("replaced", false);
-    _async_test         = AsyncTest::Microphone;
-    _test_started_ms    = GetHAL().millis();
-    _test_deadline_ms   = _test_started_ms + durationMs;
-    _meter_was_enabled  = GetHAL().isMicrophoneMeterEnabled();
-    _microphone_peak    = 0.0f;
-    _microphone_samples = 0;
-    GetHAL().setMicrophoneMeterEnabled(true);
-    char details[48] = {};
-    std::snprintf(details, sizeof(details), "duration_ms=%lu", static_cast<unsigned long>(durationMs));
-    result("mic", "RUNNING", details);
+    (void)durationMs;
+    const bool disabled = !GetHAL().isMicrophoneMeterEnabled() && GetHAL().getMicrophoneLevel() == 0.0f;
+    result("mic", disabled ? "PASS" : "FAIL", "policy=computer_microphone local_capture=disabled pcm_transport=none");
 }
 
 void SerialDebug::updateMicrophoneTest(uint32_t now)
@@ -585,8 +579,8 @@ void SerialDebug::updateUiCycle(uint32_t now)
 void SerialDebug::startTransportTest()
 {
     cancelAsyncTest("replaced", false);
-    if (!GetCodexMicroBle().connected()) {
-        result("transport", "SKIP", "reason=requires_ble_connection");
+    if (!GetCodexMicroBle().diagnostics().protocolReady) {
+        result("transport", "SKIP", "reason=requires_codex_rpc_handshake");
         return;
     }
     const CodexMicroBleDiagnostics before = GetCodexMicroBle().diagnostics();
@@ -609,8 +603,8 @@ void SerialDebug::updateTransportTest(uint32_t now)
         return;
     }
     const CodexMicroBleDiagnostics after = GetCodexMicroBle().diagnostics();
-    const bool sent   = after.txMessages > _transport_tx_messages && after.txReports > _transport_tx_reports &&
-                        after.txFailures == _transport_tx_failures;
+    const bool sent = after.txMessages > _transport_tx_messages && after.txReports > _transport_tx_reports &&
+                      after.txFailures == _transport_tx_failures;
     char details[112] = {};
     std::snprintf(details, sizeof(details), "messages_delta=%lu reports_delta=%lu failures_delta=%lu",
                   static_cast<unsigned long>(after.txMessages - _transport_tx_messages),
@@ -623,8 +617,8 @@ void SerialDebug::updateTransportTest(uint32_t now)
 void SerialDebug::startPerformanceTest(uint32_t durationMs, bool generateTraffic)
 {
     cancelAsyncTest("replaced", false);
-    if (!GetCodexMicroBle().connected()) {
-        result("perf", "SKIP", "reason=requires_ble_connection");
+    if (!GetCodexMicroBle().diagnostics().protocolReady) {
+        result("perf", "SKIP", "reason=requires_codex_rpc_handshake");
         return;
     }
     GetHAL().resetPerformanceDiagnostics();
@@ -690,14 +684,14 @@ void SerialDebug::updatePerformanceTest(uint32_t now)
     const uint32_t messages                   = after.txMessages - _performance_tx_messages;
     const uint32_t reports                    = after.txReports - _performance_tx_reports;
     const uint32_t failures                   = after.txFailures - _performance_tx_failures;
-    const bool activity_ok = _performance_generate_traffic
-                                 ? _performance_generated >= 40 && _performance_accepted == _performance_generated &&
+    const bool activity_ok                    = _performance_generate_traffic
+                                                    ? _performance_generated >= 40 && _performance_accepted == _performance_generated &&
                                        queued == _performance_accepted
-                                 : queued > 0 && processed > 0;
-    const bool responsive  = activity_ok && dropped == 0 && processed > 0 && messages > 0 && reports > 0 &&
-                             failures == 0 && display.touchReads > 0 && display.touchMaxGapUs <= 50000 &&
-                             _performance_loop_max_gap_us <= 50000;
-    char details[320]      = {};
+                                                    : queued > 0 && processed > 0;
+    const bool responsive = activity_ok && dropped == 0 && processed > 0 && messages > 0 && reports > 0 &&
+                            failures == 0 && display.touchReads > 0 && display.touchMaxGapUs <= 50000 &&
+                            _performance_loop_max_gap_us <= 50000;
+    char details[320] = {};
     std::snprintf(details, sizeof(details),
                   "generated=%lu accepted=%lu queued=%lu processed=%lu dropped=%lu messages=%lu reports=%lu "
                   "failures=%lu queue_high=%lu tx_max_us=%lu loop_gap_max_us=%lu lvgl_core=%d tx_core=%d "

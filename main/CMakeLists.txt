@@ -33,9 +33,15 @@ idf_component_register(
         ${MY_INCS}
 )
 
-# ESP-IDF sizes BLE HID Output Report characteristics from the report body.
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    "STOPWATCH_MICRO_VERSION=\"${PROJECT_VER}\""
+)
+
+# ESP-IDF 5.5.4 sizes BLE HID Output Report characteristics from the report body.
 # Codex's node-hid bridge includes Report ID 6 in its 64-byte SetReport buffer,
-# so widen that characteristic by one byte before the GATT table is created.
+# so the compatibility source widens that characteristic before table creation.
+# It also records the matching Input CCC handle so a pre-existing authenticated
+# Windows bond can restore the helper's notification state after a cold reboot.
 target_link_libraries(${COMPONENT_LIB} INTERFACE
     "-Wl,--wrap=esp_ble_gatts_create_attr_tab"
 )

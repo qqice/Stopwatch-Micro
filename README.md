@@ -60,9 +60,21 @@ returns immediately to Pairing.
 | Planar joystick | `v.oai.rad` | Dead-zone-compensated Plan, Forward, Sidebar, Back |
 | Bottom touch sensor | local system | Hold for 3 seconds to erase BLE bonds and restart pairing |
 
-The Mic screen meter is driven by the StopWatch's built-in MEMS microphone. It visualizes the local
-sound level only: `ACT10` starts push-to-talk with the computer's selected microphone, and the BLE
-vendor HID transport does not stream StopWatch PCM audio to the host.
+After a bond reset, remove the old `Codex Micro` entry from Windows Bluetooth settings if Windows
+still retains it, then pair again.
+
+An existing Windows bond reconnects automatically after a normal reset or power cycle. The Pairing
+screen may appear briefly while BLE reconnects, then it should settle on Command without flashing
+back and forth or requiring another pairing.
+
+`ACT10` starts push-to-talk with the computer's selected microphone. This build configures the
+StopWatch audio path for speaker output only: it does not enable the I2S receive channel, sample the
+built-in MEMS microphone, or transport PCM audio. The Mic screen animation is a PTT activity
+indicator, not an audio level meter.
+
+The AMOLED dims after 30 seconds, turns off after two minutes, and wakes on an input or host status
+change. A small periodic pixel shift reduces static-image wear. The first touch after the display
+has turned fully off only wakes the screen, so an unseen Approve or Decline control cannot fire.
 
 ## Web review prototype
 
@@ -104,6 +116,29 @@ linked into the firmware accidentally.
 
 The validated toolchain is ESP-IDF v5.5.4.
 
+On Windows, use the checked-in PowerShell entry point. It validates the toolchain, discovers the
+ESP32-S3 USB Serial/JTAG port, refuses to flash until a full backup exists, and provides a guarded
+factory restore path:
+
+```powershell
+.\tools\stopwatch.ps1 doctor -Port COM5
+.\tools\stopwatch.ps1 deps -DirectGit
+.\tools\stopwatch.ps1 build -SkipDeps
+.\tools\stopwatch.ps1 backup -Port COM5
+.\tools\stopwatch.ps1 flash -Port COM5 -Erase
+```
+
+The first backup is a complete 16 MiB image. Restore it only when intentionally returning to the
+factory firmware:
+
+```powershell
+.\tools\stopwatch.ps1 restore -Port COM5 `
+  -BackupPath .\.artifacts\backups\<timestamp>\stopwatch_factory_16MiB.bin `
+  -ConfirmRestore
+```
+
+On Linux or macOS, the equivalent low-level sequence remains:
+
 ```bash
 python3 fetch_repos.py
 source "$HOME/esp/esp-idf/export.sh"
@@ -114,15 +149,15 @@ idf.py -p /dev/cu.usbmodem21301 flash monitor
 `repos.json` pins every source dependency to a full immutable commit SHA. ESP-IDF managed
 dependencies are locked separately in `dependencies.lock`.
 
-Discover the connected `/dev/cu.usb*` device first when the example port is not present. Generated
-dependency and build directories are ignored by Git.
+Discover the connected serial device first when the example port is not present. Generated
+dependencies, builds, backups, and release artifacts are ignored by Git.
 
 ## Release artifacts
 
-Each GitHub Release contains the application firmware, bootloader, partition table, initial OTA
-data, flash arguments, a machine-readable manifest, SHA-256 checksums, and a self-contained ZIP.
-Download them from [Releases](https://github.com/xuruiray/Stopwatch-Micro/releases). The ZIP includes
-the exact `esptool` command required to flash the device.
+The upstream repository does not currently publish a GitHub Release. Build from source, then run
+`.\tools\stopwatch.ps1 package` to create a self-contained ZIP locally. The bundle contains the
+individual images, a merged image, `flash.ps1`, the machine-readable flash plan, the tested Codex
+version, and SHA-256 checksums.
 
 ## Serial diagnostics
 
@@ -147,7 +182,16 @@ debug vibrate 500 80
 debug backlight 80
 ```
 
-Run the safe automated suite from the host with:
+Before Codex is paired, run the bring-up suite with `-AllowOffline`. Once the Codex RPC handshake is
+working, omit that switch: strict mode requires every functional test to pass and permits only the
+non-confirmed pairing-reset command to return `SKIP`.
+
+```powershell
+.\tools\stopwatch.ps1 verify -Port COM5 -AllowOffline
+.\tools\stopwatch.ps1 verify -Port COM5
+```
+
+The portable Python form is:
 
 ```bash
 source "$HOME/esp/esp-idf/export.sh"
@@ -159,6 +203,7 @@ the ESP32-S3 USB Serial/JTAG port may reset the board; the runner waits for a fr
 `ping` handshake before testing. `debug pairing-reset CONFIRM` is deliberately excluded because it
 erases BLE bonds and restarts the device.
 
+`debug mic` verifies the privacy boundary (`local_capture=disabled`); it does not record audio.
 `debug perf` generates a safe 50 Hz neutral-joystick load and reports BLE queue depth, HID latency,
 LVGL handler time, and touch-sampling gaps. For a real interaction trace, operate the physical
 controls while running `python3 -u tools/serial_debug_test.py --trace-seconds 30`.

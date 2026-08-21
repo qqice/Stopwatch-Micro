@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import glob
 import re
 import sys
 import time
@@ -12,6 +11,7 @@ from dataclasses import dataclass
 
 try:
     import serial
+    from serial.tools import list_ports
 except ImportError as exc:  # pragma: no cover - depends on the ESP-IDF environment
     raise SystemExit("pyserial is required; source the ESP-IDF export script first") from exc
 
@@ -29,13 +29,27 @@ class Result:
 def discover_port(explicit: str | None) -> str:
     if explicit:
         return explicit
-    candidates = sorted(glob.glob("/dev/cu.usbmodem*"))
-    if len(candidates) != 1:
-        raise SystemExit(
-            "expected one /dev/cu.usbmodem* device; pass --port explicitly. "
-            f"Found: {candidates or 'none'}"
-        )
-    return candidates[0]
+
+    ports = sorted(list_ports.comports(), key=lambda port: port.device.casefold())
+    candidates = [
+        port
+        for port in ports
+        if (port.vid, port.pid) == (0x303A, 0x1001)
+        or "usb jtag/serial debug" in (port.description or "").casefold()
+    ]
+    if len(candidates) == 1:
+        return candidates[0].device
+
+    found = "; ".join(
+        f"{port.device} ({port.description or 'unknown'}, "
+        f"VID:PID={port.vid or 0:04X}:{port.pid or 0:04X})"
+        for port in ports
+    )
+    raise SystemExit(
+        "expected one ESP32-S3 USB Serial/JTAG port; pass --port explicitly. "
+        f"Matching devices: {[port.device for port in candidates] or 'none'}. "
+        f"All serial ports: {found or 'none'}"
+    )
 
 
 class DebugClient:
@@ -90,37 +104,48 @@ class DebugClient:
         raise TimeoutError(f"timed out waiting for {expected!r} after {text!r}")
 
 
-def run_automated(client: DebugClient) -> tuple[list[Result], list[str]]:
+def run_automated(client: DebugClient, allow_offline: bool) -> tuple[list[Result], list[str]]:
     cases = [
-        ("debug help", "help", 3.0),
-        ("debug status", "status", 3.0),
-        ("debug selftest", "selftest", 8.0),
-        ("debug controls", "controls", 5.0),
-        ("debug protocol", "protocol", 3.0),
-        ("debug ui cycle", "ui-cycle", 5.0),
-        ("debug transport", "transport", 5.0),
-        ("debug perf 3000", "perf", 6.0),
-        ("debug mic 2500", "mic", 5.0),
-        ("debug status", "status", 3.0),
-        ("debug pairing-reset", "pairing-reset", 3.0),
+        ("debug help", "help", 3.0, {"PASS"}),
+        ("debug status", "status", 3.0, {"PASS"}),
+        ("debug selftest", "selftest", 8.0, {"PASS"}),
+        ("debug controls", "controls", 5.0, {"PASS"}),
+        ("debug protocol", "protocol", 3.0, {"PASS"}),
+        ("debug ui cycle", "ui-cycle", 5.0, {"PASS"}),
+        ("debug transport", "transport", 5.0, {"PASS"}),
+        ("debug perf 3000", "perf", 6.0, {"PASS"}),
+        ("debug mic 500", "mic", 3.0, {"PASS"}),
+        ("debug status", "status", 3.0, {"PASS"}),
+        ("debug pairing-reset", "pairing-reset", 3.0, {"SKIP"}),
     ]
     results: list[Result] = []
     failures: list[str] = []
-    for command, expected, timeout in cases:
+    offline_optional = {"ui-cycle", "transport", "perf"}
+    for command, expected, timeout, accepted in cases:
         result = client.command(command, expected, timeout)
         results.append(result)
-        if result.status == "FAIL":
-            failures.append(f"{expected}: {result.details}")
+        allowed = accepted | ({"SKIP"} if allow_offline and expected in offline_optional else set())
+        if result.status not in allowed:
+            allowed_text = "/".join(sorted(allowed))
+            failures.append(
+                f"{expected}: expected {allowed_text}, got {result.status} {result.details}"
+            )
     return results, failures
 
 
 def run_interactive(client: DebugClient, failures: list[str]) -> None:
     print("\nInteractive checks: watch the screen and feel/listen to the device.")
     tone = client.command("debug tone 880 350", "tone")
+    if tone.status not in {"PASS", "OBSERVE"}:
+        failures.append(f"tone: unexpected status {tone.status} ({tone.details})")
     if input("Did you hear one tone? [y/N] ").strip().lower() != "y":
         failures.append(f"tone: not confirmed ({tone.details})")
 
     vibration = client.command("debug vibrate 500 80", "vibrate")
+    if vibration.status not in {"PASS", "OBSERVE"}:
+        failures.append(
+            f"vibrate: unexpected status {vibration.status} ({vibration.details})"
+        )
     if input("Did you feel one vibration? [y/N] ").strip().lower() != "y":
         failures.append(f"vibrate: not confirmed ({vibration.details})")
 
@@ -136,6 +161,11 @@ def run_interactive(client: DebugClient, failures: list[str]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", help="USB Serial/JTAG port; auto-detected when unique")
+    parser.add_argument(
+        "--allow-offline",
+        action="store_true",
+        help="permit SKIP/OBSERVE results during hardware bring-up before Codex is connected",
+    )
     parser.add_argument("--interactive", action="store_true", help="also run physical observation checks")
     parser.add_argument(
         "--trace-seconds",
@@ -146,8 +176,9 @@ def main() -> int:
     port = discover_port(args.port)
     print(f"HOST port={port}")
 
-    client = DebugClient(port)
+    client: DebugClient | None = None
     try:
+        client = DebugClient(port)
         client.handshake()
         if args.trace_seconds is not None:
             duration = max(1, min(args.trace_seconds, 60))
@@ -157,14 +188,15 @@ def main() -> int:
             results = [trace]
             failures = [] if trace.status == "PASS" else [f"trace: {trace.status} {trace.details}"]
         else:
-            results, failures = run_automated(client)
+            results, failures = run_automated(client, args.allow_offline)
             if args.interactive:
                 run_interactive(client, failures)
     except (TimeoutError, serial.SerialException) as exc:
         print(f"HOST ERROR {exc}")
         return 2
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
     counts: dict[str, int] = {}
     for result in results:
