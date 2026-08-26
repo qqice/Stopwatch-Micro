@@ -23,6 +23,7 @@ enum class CodexMicroControl : uint8_t {
     Decline,
     NewChat,
     Mic,
+    NewTask,
     Send,
     EncoderPress,
     EncoderClockwise,
@@ -45,9 +46,9 @@ enum class CodexMicroLightEffect : uint8_t {
     ShallowBreath = 6,
 };
 
-inline constexpr std::array<const char*, 15> CodexMicroControlCodes = {
-    "AG00",  "AG01",  "AG02",  "AG03",  "AG04", "AG05",   "ACT06",  "ACT07",
-    "ACT08", "ACT09", "ACT10", "ACT12", "ENC",  "ENC_CW", "ENC_CC",
+inline constexpr std::array<const char*, 16> CodexMicroControlCodes = {
+    "AG00",  "AG01",  "AG02",  "AG03",  "AG04",  "AG05", "ACT06",  "ACT07",
+    "ACT08", "ACT09", "ACT10", "ACT11", "ACT12", "ENC",  "ENC_CW", "ENC_CC",
 };
 inline constexpr uint16_t CodexMicroMaxEncoderBatchSteps = 20;
 
@@ -61,5 +62,6 @@ constexpr const char* codexMicroControlCode(CodexMicroControl control)
 
 static_assert(std::string_view(codexMicroControlCode(CodexMicroControl::Agent1)) == "AG00");
 static_assert(std::string_view(codexMicroControlCode(CodexMicroControl::Mic)) == "ACT10");
+static_assert(std::string_view(codexMicroControlCode(CodexMicroControl::NewTask)) == "ACT11");
 static_assert(std::string_view(codexMicroControlCode(CodexMicroControl::Send)) == "ACT12");
 static_assert(std::string_view(codexMicroControlCode(CodexMicroControl::EncoderPress)) == "ENC");

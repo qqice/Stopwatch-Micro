@@ -83,6 +83,7 @@ public:
 
     bool sendKey(CodexMicroControl control, CodexMicroKeyAction action, int8_t agent = -1);
     bool sendJoystick(float angle, float distance);
+    bool sendJoystickButton(float angle, bool pressed);
     bool sendEncoderSteps(int direction, uint16_t steps);
 
 private:
@@ -117,6 +118,7 @@ private:
         uint16_t repeat            = 1;
         float angle                = 0.0f;
         float distance             = 0.0f;
+        bool ordered               = false;
         uint32_t generation        = 0;
     };
 

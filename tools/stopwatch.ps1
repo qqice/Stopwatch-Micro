@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('doctor', 'deps', 'build', 'backup', 'flash', 'monitor', 'verify', 'package', 'restore')]
+    [ValidateSet('doctor', 'deps', 'build', 'backup', 'flash', 'monitor', 'verify', 'bridge', 'package', 'restore')]
     [string]$Action = 'doctor',
 
     [string]$Port,
@@ -9,11 +9,13 @@ param(
     [string]$BackupPath,
     [string]$Version,
     [string]$CodexVersion,
+    [string]$CodexPath,
     [switch]$DirectGit,
     [switch]$SkipDeps,
     [switch]$Erase,
     [switch]$Interactive,
     [switch]$AllowOffline,
+    [switch]$Once,
     [switch]$ConfirmRestore
 )
 
@@ -302,6 +304,20 @@ switch ($Action) {
         }
         & python @arguments
         Assert-LastExitCode 'serial verification'
+    }
+
+    'bridge' {
+        Enter-EspIdf
+        $resolvedPort = Resolve-StopwatchPort
+        $arguments = @('-u', (Join-Path $projectRoot 'tools\stopwatch_bridge.py'), '--port', $resolvedPort)
+        if ($Once) {
+            $arguments += '--once'
+        }
+        if ($CodexPath) {
+            $arguments += @('--codex-path', [System.IO.Path]::GetFullPath($CodexPath))
+        }
+        & python @arguments
+        Assert-LastExitCode 'Stopwatch usage bridge'
     }
 
     'package' {

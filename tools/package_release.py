@@ -24,8 +24,10 @@ RESERVED_BUNDLE_NAMES = {
         "Stopwatch-Micro-merged.bin",
         "flash.ps1",
         "FLASHING.md",
+        "BRIDGE.md",
         "manifest.json",
         "SHA256SUMS",
+        "stopwatch_bridge.py",
     )
 }
 
@@ -311,6 +313,15 @@ def main() -> None:
     for _, name, source in flash_files:
         shutil.copy2(source, bundle_dir / name)
 
+    support_files = {
+        "stopwatch_bridge.py": PROJECT_ROOT / "tools" / "stopwatch_bridge.py",
+        "BRIDGE.md": PROJECT_ROOT / "docs" / "bridge.md",
+    }
+    for name, source in support_files.items():
+        if not source.is_file():
+            raise SystemExit(f"Missing release support file: {source}")
+        shutil.copy2(source, bundle_dir / name)
+
     flash_args = [" ".join(write_args)]
     flash_args.extend(f"{offset} {name}" for offset, name, _ in flash_files)
     (bundle_dir / "flash_args").write_text(
@@ -362,6 +373,9 @@ python -m esptool --chip {chip} --port COM5 --baud 460800 write_flash 0x0 Stopwa
 ```
 
 Verify the files against `SHA256SUMS` before flashing.
+
+After flashing, see `BRIDGE.md` to enable live Codex quota and reset-time updates over USB
+Serial/JTAG.
 """
     (bundle_dir / "FLASHING.md").write_text(flashing, encoding="utf-8")
 
@@ -376,6 +390,11 @@ Verify the files against `SHA256SUMS` before flashing.
             {"offset": offset, "name": name} for offset, name, _ in flash_files
         ],
         "merged_image": {"offset": "0x0", "name": merged_image.name},
+        "usage_bridge": {
+            "script": "stopwatch_bridge.py",
+            "documentation": "BRIDGE.md",
+            "source_method": "account/rateLimits/read",
+        },
     }
     (bundle_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"

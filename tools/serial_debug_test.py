@@ -149,7 +149,7 @@ def run_interactive(client: DebugClient, failures: list[str]) -> None:
     if input("Did you feel one vibration? [y/N] ").strip().lower() != "y":
         failures.append(f"vibrate: not confirmed ({vibration.details})")
 
-    print("Within 20 seconds press yellow A, press blue B, then touch/drag the display.")
+    print("Within 20 seconds press yellow A, press blue B, then tap Command keys and drag the reasoning arc.")
     inputs = client.command("debug inputs 20000", "inputs", timeout=23.0)
     if inputs.status != "PASS":
         failures.append(f"inputs: {inputs.status} {inputs.details}")
@@ -170,7 +170,7 @@ def main() -> int:
     parser.add_argument(
         "--trace-seconds",
         type=int,
-        help="capture real A/B/touch/joystick/slider transport performance instead of the automated suite",
+        help="capture real A/B/Command/reasoning-arc transport performance instead of the automated suite",
     )
     args = parser.parse_args()
     port = discover_port(args.port)

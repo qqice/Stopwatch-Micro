@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import json
+import os
+import queue
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 
@@ -15,6 +18,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 import package_release  # noqa: E402
 import serial_debug_test  # noqa: E402
+import stopwatch_bridge  # noqa: E402
 
 
 class FakeDebugClient:
@@ -24,6 +28,55 @@ class FakeDebugClient:
     def command(self, _text: str, expected: str, _timeout: float) -> serial_debug_test.Result:
         default = "SKIP" if expected == "pairing-reset" else "PASS"
         return serial_debug_test.Result(expected, self.statuses.get(expected, default), "fixture=1")
+
+
+class FakeSerialPort:
+    def __init__(self, *, ping: bool = True, usage: str = "pass", current: int = 0) -> None:
+        self.dtr = True
+        self.rts = True
+        self.port: str | None = None
+        self.closed = False
+        self._ping = ping
+        self._usage = usage
+        self._current = current
+        self._incoming: queue.Queue[bytes] = queue.Queue()
+
+    def open(self) -> None:
+        self.closed = False
+
+    def write(self, payload: bytes) -> int:
+        if self.closed:
+            raise OSError("closed")
+        if b"debug ping\n" in payload and self._ping:
+            self._incoming.put(b"DBG RESULT command=ping status=PASS reply=pong\r\n")
+        if payload.startswith(b"debug host-usage "):
+            sequence = int(payload.split()[2])
+            if self._usage == "pass":
+                self._incoming.put(
+                    f"DBG RESULT command=host-usage status=PASS seq={sequence}\r\n".encode()
+                )
+            elif self._usage == "stale":
+                self._incoming.put(
+                    (
+                        "DBG RESULT command=host-usage status=FAIL "
+                        f"seq={sequence} reason=stale_sequence current={self._current}\r\n"
+                    ).encode()
+                )
+        return len(payload)
+
+    def flush(self) -> None:
+        return
+
+    def readline(self) -> bytes:
+        if self.closed:
+            raise OSError("closed")
+        try:
+            return self._incoming.get(timeout=0.005)
+        except queue.Empty:
+            return b""
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class SerialPolicyTests(unittest.TestCase):
@@ -77,6 +130,7 @@ class FlashPlanTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 package_release.load_flash_plan(root)
 
+
     def test_duplicate_basename_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -113,6 +167,145 @@ class FlashPlanTests(unittest.TestCase):
             self.write_plan(root, {"0x0": "first.bin", "0x10": "second.bin"})
             with self.assertRaises(SystemExit):
                 package_release.load_flash_plan(root)
+
+
+class StopwatchBridgeTests(unittest.TestCase):
+    def test_normalizes_canonical_codex_bucket(self) -> None:
+        result = {
+            "rateLimits": {
+                "limitId": "legacy",
+                "primary": {"usedPercent": 99, "windowDurationMins": 5, "resetsAt": 1},
+            },
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitId": "codex",
+                    "primary": {
+                        "usedPercent": 17.25,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1788295390,
+                    },
+                },
+                "codex_model": {
+                    "limitId": "codex_model",
+                    "primary": {"usedPercent": 95, "windowDurationMins": 300, "resetsAt": 2},
+                },
+            },
+            "rateLimitResetCredits": {"availableCount": 2},
+        }
+        snapshot = stopwatch_bridge.normalize_rate_limits(result, captured_epoch=1234)
+        self.assertEqual(snapshot.remaining_basis_points, 8275)
+        self.assertEqual(snapshot.reset_epoch, 1788295390)
+        self.assertEqual(snapshot.captured_epoch, 1234)
+        self.assertEqual(snapshot.reset_credits, 2)
+
+    def test_selects_more_consumed_window_and_clamps_remaining(self) -> None:
+        result = {
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitId": "codex",
+                    "primary": {
+                        "usedPercent": 80,
+                        "windowDurationMins": 300,
+                        "resetsAt": 100,
+                    },
+                    "secondary": {
+                        "usedPercent": 101.5,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 200,
+                    },
+                }
+            }
+        }
+        snapshot = stopwatch_bridge.normalize_rate_limits(result, captured_epoch=300)
+        self.assertEqual(snapshot.remaining_basis_points, 0)
+        self.assertEqual(snapshot.reset_epoch, 200)
+        self.assertEqual(snapshot.reset_credits, 0)
+
+    def test_falls_back_to_legacy_codex_bucket(self) -> None:
+        result = {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 25,
+                    "windowDurationMins": 60,
+                    "resetsAt": None,
+                },
+            }
+        }
+        snapshot = stopwatch_bridge.normalize_rate_limits(result, captured_epoch=400)
+        self.assertEqual(snapshot.remaining_basis_points, 7500)
+        self.assertEqual(snapshot.reset_epoch, 0)
+
+    def test_rejects_missing_canonical_bucket(self) -> None:
+        with self.assertRaises(stopwatch_bridge.BridgeError):
+            stopwatch_bridge.normalize_rate_limits(
+                {
+                    "rateLimitsByLimitId": {
+                        "other": {
+                            "limitId": "other",
+                            "primary": {"usedPercent": 10},
+                        }
+                    }
+                }
+            )
+
+    def test_formats_single_line_host_usage_command(self) -> None:
+        snapshot = stopwatch_bridge.UsageSnapshot(8275, 1788295390, 1787740000, 1)
+        self.assertEqual(
+            stopwatch_bridge.format_host_usage_line(7, snapshot),
+            "debug host-usage 7 8275 1788295390 1787740000 1\n",
+        )
+
+    def test_rejects_out_of_range_wire_values(self) -> None:
+        with self.assertRaises(stopwatch_bridge.BridgeError):
+            stopwatch_bridge.format_host_usage_line(
+                1,
+                stopwatch_bridge.UsageSnapshot(10001, 1788295390, 1787740000, 1),
+            )
+
+    def test_locates_newest_desktop_managed_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = root / "OpenAI" / "Codex" / "bin" / "old" / "codex.exe"
+            new = root / "OpenAI" / "Codex" / "bin" / "new" / "codex.exe"
+            old.parent.mkdir(parents=True)
+            new.parent.mkdir(parents=True)
+            old.write_bytes(b"old")
+            new.write_bytes(b"new")
+            os.utime(old, (1, 1))
+            os.utime(new, (2, 2))
+            with unittest.mock.patch.dict(os.environ, {"LOCALAPPDATA": str(root)}):
+                self.assertTrue(os.path.samefile(stopwatch_bridge.locate_codex(), new))
+
+    def test_serial_ping_timeout_closes_port(self) -> None:
+        fake = FakeSerialPort(ping=False)
+        with unittest.mock.patch.object(stopwatch_bridge.serial, "Serial", return_value=fake):
+            with self.assertRaises(stopwatch_bridge.BridgeError):
+                stopwatch_bridge.SerialUsageTransport("COM5", handshake_timeout=0.02)
+        self.assertTrue(fake.closed)
+
+    def test_serial_accepts_ack_that_arrives_before_wait(self) -> None:
+        fake = FakeSerialPort()
+        snapshot = stopwatch_bridge.UsageSnapshot(8000, 2000, 1000, 1)
+        with unittest.mock.patch.object(stopwatch_bridge.serial, "Serial", return_value=fake):
+            transport = stopwatch_bridge.SerialUsageTransport("COM5", handshake_timeout=0.2)
+            try:
+                transport.send(10, snapshot)
+            finally:
+                transport.close()
+
+    def test_serial_reports_stale_current_for_sequence_sync(self) -> None:
+        fake = FakeSerialPort(usage="stale", current=123)
+        snapshot = stopwatch_bridge.UsageSnapshot(8000, 2000, 1000, 1)
+        with unittest.mock.patch.object(stopwatch_bridge.serial, "Serial", return_value=fake):
+            transport = stopwatch_bridge.SerialUsageTransport("COM5", handshake_timeout=0.2)
+            try:
+                with self.assertRaises(stopwatch_bridge.StaleSequenceError) as caught:
+                    transport.send(10, snapshot)
+                self.assertEqual(caught.exception.current_sequence, 123)
+                self.assertEqual(stopwatch_bridge.next_sequence(123), 124)
+            finally:
+                transport.close()
 
 
 if __name__ == "__main__":

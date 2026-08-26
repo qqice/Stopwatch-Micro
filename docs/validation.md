@@ -19,9 +19,13 @@ Open `web/index.html` in a browser and check:
 
 - Pairing is the only interactive screen before connection.
 - Pairing success opens Command; disconnect returns to Pairing.
-- Fast, Approve, Decline, and Fork have large independent hit targets.
-- The joystick respects its invisible circular limit and returns to center.
-- The arc slider sends discrete feedback and returns to its midpoint.
+- Plan, New Task, Fast, Approve, Decline, and Fork have large independent hit targets.
+- The six Command buttons fit inside the circular safe area without overlapping the center status card.
+- Plan emits an ordered radial press/neutral pair and New Task emits `ACT11`.
+- The reasoning arc emits `ENC_CW` on the left and `ENC_CC` on the right, gives discrete feedback,
+  and returns to its midpoint.
+- The center dial shows real quota/reset data after a bridge update, explicit stale/unavailable
+  states, and the StopWatch battery.
 - Holding A opens Mic, its visualization animates, and release returns to the previous page.
 - B simulates Send and A+B toggles Command/Agent.
 
@@ -47,7 +51,7 @@ python3 -u tools/serial_debug_test.py --port /dev/cu.usbmodem21301
 
 The automated runner verifies the USB receive/transmit handshake, eight HAL readiness signals,
 heap integrity and PSRAM, display geometry, battery telemetry, output-only audio configuration, BLE
-service, all 12 physical Codex control codes, the three encoder codes, report framing, an actual
+service, all 13 physical Codex control codes, the three encoder codes, report framing, an actual
 neutral HID transmission, Command/Agent/Mic UI construction, and the local-microphone privacy
 boundary. Strict mode requires `PASS` for every functional check; only an unconfirmed pairing reset
 may return `SKIP`. A complete strict run reports `pass=10 skip=1 failures=0`. Use `--allow-offline`
@@ -77,11 +81,10 @@ verify the following against ChatGPT Settings:
 
 1. The device is discovered as `Codex Micro`, connects, reconnects, and returns to Pairing after a
    disconnect.
-2. `AG00`–`AG05`, `ACT06`–`ACT10`, and `ACT12` each trigger their mapped host action.
+2. `AG00`–`AG05` and `ACT06`–`ACT12` each trigger their mapped host action.
 3. Agent labels and lights follow host thread updates.
-4. The enlarged arc-slider target produces `ENC_CC`, `ENC`, and `ENC_CW` without stalling during a
-   fast drag; the planar joystick crosses the host action threshold before reaching the visual edge
-   and produces `v.oai.rad` direction updates.
+4. The top reasoning arc produces `ENC_CC`, `ENC`, and `ENC_CW` without stalling during a fast drag;
+   Plan produces one ordered `v.oai.rad` Plan pulse and neutral, while New Task produces `ACT11`.
 5. Holding physical A starts host push-to-talk using the computer microphone, releasing A stops it,
    physical B sends, and A+B only toggles pages. `debug mic` must report local capture disabled.
 6. Every accepted input produces haptic feedback without making touch or page changes sluggish;
@@ -93,12 +96,35 @@ verify the following against ChatGPT Settings:
 9. Hard-reset the ESP32-S3 without erasing bonds, wait for the existing Windows bond to reconnect,
    and rerun the strict suite. It must reach `ble_protocol=1` without manual pairing, with
    `rpc_errors=0`, `tx_failures=0`, and `half_open_recoveries=0`.
+10. Run `tools/stopwatch.ps1 bridge -Once`; require a `host-usage` PASS acknowledgement and verify
+    the center dial matches the normalized `account/rateLimits/read` percentage and reset window.
 
 The compatibility protocol only triggers host push-to-talk. ChatGPT uses the computer's selected
 microphone, the StopWatch I2S RX path remains disabled, and the BLE vendor HID channel never streams
 PCM audio.
 
-## Validated Windows hardware run
+## Validated Windows hardware runs
+
+### 0.3.0 circular Command UI
+
+The 2026-08-26 final run used the same M5Stack StopWatch Dev Kit (ESP32-S3 revision 0.2, 16 MiB
+flash, 8 MiB PSRAM), ESP-IDF 5.5.4, and Codex Desktop 26.820.7780.0 on Windows. The verified 16 MiB
+factory recovery image was checked again before flashing. The final `Stopwatch-Micro.bin` was
+`0x1a4cc0` bytes; all four flashed regions passed esptool's post-write hash verification.
+
+Browser QA confirmed the six 78-pixel circular command buttons, 174-pixel center status dial, and
+reasoning arc had no overlap or console errors. Plan produced an ordered radial press/neutral event,
+New Task produced `ACT11`, and a right reasoning step produced `ENC_CC` before returning to center.
+
+Strict hardware verification after the final flash reported:
+
+- `HOST SUMMARY pass=10 skip=1 failures=0` (the unconfirmed destructive pairing reset is the skip)
+- HAL self-test `17/17`, physical controls `13/13`, BLE ready/connected/protocol `1/1/1`
+- RPC errors `0`, TX failures `0`, half-open recoveries `0`
+- 50 Hz transport `151/151`, dropped `0`, failures `0`, queue high-water mark `1`
+- live bridge `PASS`: `remaining_bp=6900`, reset timestamp present, reset credits `1`, stale `0`
+
+### 0.2.0 baseline (historical)
 
 The 2026-08-21 acceptance run used an M5Stack StopWatch Dev Kit (ESP32-S3 revision 0.2, 16 MiB flash,
 8 MiB PSRAM), ESP-IDF 5.5.4, and Codex Desktop 26.818.3698.0 on Windows. A complete 16 MiB factory

@@ -7,6 +7,7 @@
 #include <apps/common/audio/audio.h>
 #include <hal/ble/codex_micro_ble.h>
 #include <hal/hal.h>
+#include <host/host_bridge.h>
 #include <system_config.h>
 
 #include <algorithm>
@@ -46,6 +47,26 @@ bool elapsed(uint32_t now, uint32_t deadline)
 const char* onOff(bool value)
 {
     return value ? "1" : "0";
+}
+
+bool parseUnsignedStrict(const char* value, uint32_t minimum, uint32_t maximum, uint32_t& parsed)
+{
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return false;
+        }
+    }
+    errno                      = 0;
+    char* end                  = nullptr;
+    const unsigned long number = std::strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || number < minimum || number > maximum) {
+        return false;
+    }
+    parsed = static_cast<uint32_t>(number);
+    return true;
 }
 
 }  // namespace
@@ -190,12 +211,51 @@ void SerialDebug::handleLine(char* line)
                              diagnostics.txFailures == 0 && diagnostics.rpcErrors == 0;
         char details[144] = {};
         std::snprintf(details, sizeof(details),
-                      "controls=12 encoder=3 report_id=6 report_bytes=63 payload_bytes=61 dropped=%lu tx_failures=%lu "
+                      "controls=13 encoder=3 report_id=6 report_bytes=63 payload_bytes=61 dropped=%lu tx_failures=%lu "
                       "rpc_errors=%lu",
                       static_cast<unsigned long>(diagnostics.inputDropped),
                       static_cast<unsigned long>(diagnostics.txFailures),
                       static_cast<unsigned long>(diagnostics.rpcErrors));
         result("protocol", healthy ? "PASS" : "FAIL", details);
+        return;
+    }
+    if (std::strcmp(command, "host-usage") == 0) {
+        uint32_t sequence       = 0;
+        uint32_t remaining      = 0;
+        uint32_t reset_epoch    = 0;
+        uint32_t captured_epoch = 0;
+        uint32_t reset_credits  = 0;
+        char* sequence_value    = ::strtok_r(nullptr, " \t", &save);
+        char* remaining_value   = ::strtok_r(nullptr, " \t", &save);
+        char* reset_value       = ::strtok_r(nullptr, " \t", &save);
+        char* captured_value    = ::strtok_r(nullptr, " \t", &save);
+        char* credits_value     = ::strtok_r(nullptr, " \t", &save);
+        char* extra             = ::strtok_r(nullptr, " \t", &save);
+        const bool valid        = extra == nullptr && parseUnsignedStrict(sequence_value, 1, UINT32_MAX, sequence) &&
+                           parseUnsignedStrict(remaining_value, 0, 10000, remaining) &&
+                           parseUnsignedStrict(reset_value, 0, UINT32_MAX, reset_epoch) &&
+                           parseUnsignedStrict(captured_value, 1, UINT32_MAX, captured_epoch) &&
+                           parseUnsignedStrict(credits_value, 0, 99, reset_credits);
+        if (!valid) {
+            result("host-usage", "FAIL", "reason=invalid_fields");
+            return;
+        }
+        const bool applied =
+            GetHostBridge().applyUsage(sequence, static_cast<uint16_t>(remaining), reset_epoch, captured_epoch,
+                                       static_cast<uint8_t>(reset_credits), GetHAL().millis());
+        char details[112] = {};
+        std::snprintf(details, sizeof(details), "seq=%lu remaining_bp=%lu reset_epoch=%lu credits=%lu",
+                      static_cast<unsigned long>(sequence), static_cast<unsigned long>(remaining),
+                      static_cast<unsigned long>(reset_epoch), static_cast<unsigned long>(reset_credits));
+        if (applied) {
+            result("host-usage", "PASS", details);
+        } else {
+            char rejected[96] = {};
+            std::snprintf(rejected, sizeof(rejected), "seq=%lu reason=stale_sequence current=%lu",
+                          static_cast<unsigned long>(sequence),
+                          static_cast<unsigned long>(GetHostBridge().lastUsageSequence()));
+            result("host-usage", "FAIL", rejected);
+        }
         return;
     }
     if (std::strcmp(command, "mic") == 0) {
@@ -301,6 +361,7 @@ void SerialDebug::printHelp()
     std::printf(
         "DBG HELP commands=ui_[command|agent|mic|cycle],transport,perf_[ms],trace_[ms],mic_[ms],inputs_[ms]\r\n");
     std::printf("DBG HELP commands=tone_[hz]_[ms],vibrate_[ms]_[strength],backlight_[10-100],cancel\r\n");
+    std::printf("DBG HELP bridge=host-usage_[seq]_[remaining_bp]_[reset_epoch]_[captured_epoch]_[credits]\r\n");
     std::printf("DBG HELP destructive=pairing-reset_CONFIRM\r\n");
     std::fflush(stdout);
     result("help", "PASS");
@@ -341,6 +402,13 @@ void SerialDebug::printStatus()
         static_cast<unsigned long>(performance.lvglHandlerMaxUs), static_cast<unsigned long>(performance.touchReads),
         static_cast<unsigned long>(performance.touchMaxGapUs), static_cast<unsigned long>(ble.queueHighWater),
         static_cast<unsigned long>(ble.txMaxUs), static_cast<unsigned long>(ble.txTotalUs));
+    const HostBridgeSnapshot host = GetHostBridge().snapshot(GetHAL().millis());
+    std::printf(
+        "DBG STATUS host_bridge=%s usage_available=%s usage_stale=%s remaining_bp=%u reset_seconds=%lu "
+        "reset_credits=%u usage_seq=%lu\r\n",
+        onOff(host.online), onOff(host.usageAvailable), onOff(host.usageStale),
+        static_cast<unsigned>(host.remainingBasisPoints), static_cast<unsigned long>(host.resetSeconds),
+        static_cast<unsigned>(host.resetCredits), static_cast<unsigned long>(GetHostBridge().lastUsageSequence()));
     std::fflush(stdout);
     result("status", "PASS");
 }
@@ -410,7 +478,7 @@ void SerialDebug::runSelfTest()
     check("ble.service", ble.initialized && ble.hidReady && state.ready, ble_details);
     char protocol_details[112] = {};
     std::snprintf(protocol_details, sizeof(protocol_details),
-                  "controls=12 encoder=3 rpc_buffer=4096 dropped=%lu tx_failures=%lu rpc_errors=%lu",
+                  "controls=13 encoder=3 rpc_buffer=4096 dropped=%lu tx_failures=%lu rpc_errors=%lu",
                   static_cast<unsigned long>(ble.inputDropped), static_cast<unsigned long>(ble.txFailures),
                   static_cast<unsigned long>(ble.rpcErrors));
     check("ble.protocol",
@@ -418,6 +486,12 @@ void SerialDebug::runSelfTest()
           protocol_details);
     check("ui.objects", _app.debugUiReady(), _app.debugScreenName());
     check("serial.transport", true, "primary=usb-serial-jtag nonblocking=1");
+    const HostBridgeSnapshot host = GetHostBridge().snapshot(GetHAL().millis());
+    char host_details[96]         = {};
+    std::snprintf(host_details, sizeof(host_details), "online=%s available=%s stale=%s remaining_bp=%u",
+                  onOff(host.online), onOff(host.usageAvailable), onOff(host.usageStale),
+                  static_cast<unsigned>(host.remainingBasisPoints));
+    check("host.bridge", host.remainingBasisPoints <= 10000, host_details);
 
     char summary[64] = {};
     std::snprintf(summary, sizeof(summary), "passed=%u failed=%u", passed, failed);
@@ -426,7 +500,7 @@ void SerialDebug::runSelfTest()
 
 void SerialDebug::printControls()
 {
-    constexpr std::size_t PhysicalControlCount = 12;
+    constexpr std::size_t PhysicalControlCount = 13;
     bool all_valid                             = CodexMicroControlCodes.size() >= PhysicalControlCount;
     for (std::size_t index = 0; index < PhysicalControlCount; ++index) {
         const char* code = CodexMicroControlCodes[index];
@@ -436,7 +510,7 @@ void SerialDebug::printControls()
                     valid ? code : "invalid", valid ? "PASS" : "FAIL");
     }
     std::fflush(stdout);
-    result("controls", all_valid ? "PASS" : "FAIL", "physical=12");
+    result("controls", all_valid ? "PASS" : "FAIL", "physical=13");
 }
 
 void SerialDebug::startMicrophoneTest(uint32_t durationMs)

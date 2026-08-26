@@ -24,11 +24,11 @@ Touch controls are handled by LVGL event callbacks. Physical A/B transitions are
 `KeyManager` and consumed by `CodexMicroApp`. Host-facing inputs are encoded with the constants in
 `main/hal/ble/codex_micro_protocol.h`; A+B is deliberately local and only toggles the active page.
 
-The arc slider uses a finger-sized hit target, converts its displacement from center into discrete
-counter-clockwise or clockwise events, and sends an encoder press when selected. A fast drag keeps
-all host encoder steps but collapses local audio/haptic work into one feedback pulse per touch sample.
-The planar joystick applies a small local dead zone and reaches full host distance before the edge,
-then sends normalized direction data through `v.oai.rad` and returns to its center after release.
+The top reasoning arc uses a finger-sized hit target and converts left/right displacement into the
+official encoder events used by Codex Desktop's Reasoning-only dial mode. A fast drag keeps all host
+encoder steps but collapses local audio/haptic work into one feedback pulse per touch sample. The
+Plan button sends an ordered radial Plan press followed by a neutral barrier, so even a fast tap
+cannot lose or reorder the toggle. New Task uses the otherwise-empty official `ACT11` slot.
 
 The serializer retains the reference 4 ms pacing between fragmented reports, and the background HID
 worker applies the same inter-message pacing without blocking LVGL. Normal key, joystick, and encoder
@@ -61,6 +61,15 @@ compatibility layer snapshots existing bonds and locates the exact Report ID 6 I
 After an identity from that boot snapshot authenticates, it restores the helper's notification flag.
 New pairings still require the client's real encrypted CCC write. This prevents the half-open
 connect/retry loop after a hard reset without weakening first-pair subscription semantics.
+
+## Usage bridge
+
+The vendor Micro RPC does not contain account usage. A separate, optional Windows companion starts
+the desktop-managed `codex app-server`, reads the stable `account/rateLimits/read` method once per
+minute, normalizes the canonical `codex` bucket, and sends only remaining basis points, reset epoch,
+capture epoch, and reset-credit count over USB Serial/JTAG. The firmware validates an atomic
+single-line update and derives the countdown from monotonic time. Stale and unavailable states are
+explicit, and periodic quota refreshes do not wake the display.
 
 ## Microphone boundary
 

@@ -733,9 +733,9 @@ void CodexMicroBle::resetPerformanceDiagnostics()
 
 bool CodexMicroBle::protocolSelfTest() const
 {
-    constexpr std::array<std::string_view, 15> ExpectedCodes = {
-        "AG00",  "AG01",  "AG02",  "AG03",  "AG04", "AG05",   "ACT06",  "ACT07",
-        "ACT08", "ACT09", "ACT10", "ACT12", "ENC",  "ENC_CW", "ENC_CC",
+    constexpr std::array<std::string_view, 16> ExpectedCodes = {
+        "AG00",  "AG01",  "AG02",  "AG03",  "AG04",  "AG05", "ACT06",  "ACT07",
+        "ACT08", "ACT09", "ACT10", "ACT11", "ACT12", "ENC",  "ENC_CW", "ENC_CC",
     };
     for (std::size_t index = 0; index < ExpectedCodes.size(); ++index) {
         if (ExpectedCodes[index] != CodexMicroControlCodes[index]) {
@@ -865,6 +865,17 @@ bool CodexMicroBle::sendJoystick(float angle, float distance)
         .kind     = InputEventKind::Joystick,
         .angle    = angle,
         .distance = distance,
+    };
+    return queueInput(event);
+}
+
+bool CodexMicroBle::sendJoystickButton(float angle, bool pressed)
+{
+    const InputEvent event = {
+        .kind     = InputEventKind::Joystick,
+        .angle    = angle,
+        .distance = pressed ? 1.0f : 0.0f,
+        .ordered  = true,
     };
     return queueInput(event);
 }
@@ -1059,14 +1070,15 @@ bool CodexMicroBle::queueInput(const InputEvent& event)
     const bool encoder_ordered =
         queued_event.kind == InputEventKind::Key &&
         (queued_event.action == CodexMicroKeyAction::Rotate || queued_event.control == CodexMicroControl::EncoderPress);
-    const bool critical      = joystick_neutral || (queued_event.kind == InputEventKind::Key && !encoder_ordered);
+    const bool critical =
+        queued_event.ordered || joystick_neutral || (queued_event.kind == InputEventKind::Key && !encoder_ordered);
     const bool must_preserve = critical || (encoder_ordered && queued_event.action != CodexMicroKeyAction::Rotate);
     if (joystick_neutral) {
         // Discard the last unsent non-zero position, then place neutral in the
         // ordered control FIFO. A quick new press cannot overtake this barrier.
         xQueueReset(_joystick_queue);
         queued = xQueueSendToBack(_critical_input_queue, &queued_event, pdMS_TO_TICKS(20));
-    } else if (queued_event.kind == InputEventKind::Joystick) {
+    } else if (queued_event.kind == InputEventKind::Joystick && !critical) {
         // Non-zero analog motion is absolute and only its latest value matters.
         queued = xQueueOverwrite(_joystick_queue, &queued_event);
     } else if (critical) {

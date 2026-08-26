@@ -48,16 +48,17 @@ returns immediately to Pairing.
 
 | Input | Host control | Behavior |
 | --- | --- | --- |
-| Command top | `ACT06` | Fast |
-| Command left | `ACT07` | Approve |
-| Command right | `ACT08` | Decline |
-| Command bottom | `ACT09` | Fork |
+| Command left-top | `v.oai.rad` Plan direction | Toggle Plan mode |
+| Command left-middle | `ACT06` | Fast |
+| Command left-bottom | `ACT07` | Approve |
+| Command right-top | `ACT11` | New Task |
+| Command right-middle | `ACT09` | Fork |
+| Command right-bottom | `ACT08` | Decline |
 | Yellow physical A | `ACT10` | Hold for host push-to-talk; release to stop |
 | Blue physical B | `ACT12` | Send |
 | Physical A + B | local UI | Toggle Command and Agent |
 | Agent 1–6 | `AG00`–`AG05` | Select the corresponding agent/thread |
-| Arc slider | `ENC_CC`, `ENC`, `ENC_CW` | Enlarged touch target; previous, press/select, next; returns to center |
-| Planar joystick | `v.oai.rad` | Dead-zone-compensated Plan, Forward, Sidebar, Back |
+| Top reasoning arc | `ENC_CC`, `ENC`, `ENC_CW` | Decrease/increase reasoning effort; press/select; returns to center |
 | Bottom touch sensor | local system | Hold for 3 seconds to erase BLE bonds and restart pairing |
 
 After a bond reset, remove the old `Codex Micro` entry from Windows Bluetooth settings if Windows
@@ -76,18 +77,25 @@ The AMOLED dims after 30 seconds, turns off after two minutes, and wakes on an i
 change. A small periodic pixel shift reduces static-image wear. The first touch after the display
 has turned fully off only wakes the screen, so an unseen Approve or Decline control cannot fire.
 
+The center circular status dial shows canonical Codex quota remaining, its reset countdown, and
+StopWatch battery.
+Quota data comes from the official Codex App Server through the USB usage bridge; it is marked stale
+after two minutes and unavailable after ten minutes rather than displaying a fabricated value. See
+[`docs/bridge.md`](docs/bridge.md) for setup and the required one-time Codex Micro mappings.
+
 ## Web review prototype
 
 The reviewable HTML version of the interface lives in [`web/index.html`](web/index.html). It models
-connection, page, touch, joystick, slider, and physical-key interactions without requiring the
-device. The live GitHub Pages build is available below:
+connection, page, touch, reasoning-arc, and physical-key interactions without requiring the device.
+The live GitHub Pages build is available below:
 
 ![Stopwatch Micro Command UI preview](docs/assets/stopwatch-micro-ui.png)
 
 <https://xuruiray.github.io/Stopwatch-Micro/>
 
 Command is the default preview. Use `?paired=0` to show Pairing and `?mic=1` to preview the Mic
-state. The separate A, B, and A+B review controls mirror hold-to-talk, send, and page switching.
+state. The page mirrors the six command keys, reasoning arc, quota card, and battery status. The
+separate A, B, and A+B review controls mirror hold-to-talk, send, and page switching.
 
 Changes under `web/` deploy automatically from `main`; **Deploy web prototype** can also be run
 manually from the Actions tab.
@@ -126,7 +134,11 @@ factory restore path:
 .\tools\stopwatch.ps1 build -SkipDeps
 .\tools\stopwatch.ps1 backup -Port COM5
 .\tools\stopwatch.ps1 flash -Port COM5 -Erase
+.\tools\stopwatch.ps1 bridge -Port COM5
 ```
+
+Keep `bridge` running for live quota/reset updates. It owns the serial port, so stop it with
+`Ctrl+C` before flashing, monitoring, or running diagnostics. Use `bridge -Once` for one snapshot.
 
 The first backup is a complete 16 MiB image. Restore it only when intentionally returning to the
 factory firmware:
@@ -157,13 +169,13 @@ dependencies, builds, backups, and release artifacts are ignored by Git.
 The upstream repository does not currently publish a GitHub Release. Build from source, then run
 `.\tools\stopwatch.ps1 package` to create a self-contained ZIP locally. The bundle contains the
 individual images, a merged image, `flash.ps1`, the machine-readable flash plan, the tested Codex
-version, and SHA-256 checksums.
+version, the Windows usage bridge and setup guide, and SHA-256 checksums.
 
 ## Serial diagnostics
 
 The firmware exposes a non-blocking, line-oriented debug CLI over the primary USB Serial/JTAG
 port. Commands always start with `debug` (or `dbg`) and finish with a machine-readable result such
-as `DBG RESULT command=selftest status=PASS passed=16 failed=0`.
+as `DBG RESULT command=selftest status=PASS passed=17 failed=0`.
 
 ```text
 debug help
