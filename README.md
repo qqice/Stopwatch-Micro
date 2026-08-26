@@ -73,12 +73,12 @@ StopWatch audio path for speaker output only: it does not enable the I2S receive
 built-in MEMS microphone, or transport PCM audio. The Mic screen animation is a PTT activity
 indicator, not an audio level meter.
 
-The AMOLED dims after 30 seconds, turns off after two minutes, and wakes on an input or host status
-change. A small periodic pixel shift reduces static-image wear. The first touch after the display
-has turned fully off only wakes the screen, so an unseen Approve or Decline control cannot fire.
+The AMOLED stays on at the configured brightness while the firmware is running. A small periodic
+pixel shift remains enabled to reduce static-image wear. Always-on operation increases battery use
+and AMOLED aging; the pixel shift reduces but cannot eliminate burn-in risk.
 
-The center circular status dial shows canonical Codex quota remaining, its reset countdown, and
-StopWatch battery.
+The center circular status dial shows canonical Codex quota remaining, its reset countdown, and a
+level-aware StopWatch battery icon with percentage and a charging indicator.
 Quota data comes from the official Codex App Server through the USB usage bridge; it is marked stale
 after two minutes and unavailable after ten minutes rather than displaying a fabricated value. See
 [`docs/bridge.md`](docs/bridge.md) for setup and the required one-time Codex Micro mappings.
@@ -94,8 +94,9 @@ The live GitHub Pages build is available below:
 <https://xuruiray.github.io/Stopwatch-Micro/>
 
 Command is the default preview. Use `?paired=0` to show Pairing and `?mic=1` to preview the Mic
-state. The page mirrors the six command keys, reasoning arc, quota card, and battery status. The
-separate A, B, and A+B review controls mirror hold-to-talk, send, and page switching.
+state. The page mirrors the six layered command keys, reasoning arc, quota card, battery icon, and
+always-on policy. The separate A, B, and A+B review controls mirror hold-to-talk, send, and page
+switching.
 
 Changes under `web/` deploy automatically from `main`; **Deploy web prototype** can also be run
 manually from the Actions tab.

@@ -6,6 +6,7 @@
 #include <apps/common/audio/audio.h>
 #include <hal/hal.h>
 #include <host/host_bridge.h>
+#include <system_config.h>
 
 #include <algorithm>
 #include <array>
@@ -29,6 +30,11 @@ constexpr uint32_t KeyPressed              = 0xE8ECE8;
 constexpr uint32_t KeyBorder               = 0xFFFFFA;
 constexpr uint32_t KeyInk                  = 0x171A18;
 constexpr uint32_t KeyMuted                = 0x69716D;
+constexpr uint32_t CommandFaceTop          = 0xFAFAF6;
+constexpr uint32_t CommandFaceBottom       = 0xD7DED9;
+constexpr uint32_t CommandPressedTop       = 0xD9DFDB;
+constexpr uint32_t CommandPressedBottom    = 0xEBEFEC;
+constexpr uint32_t CommandBezel            = 0x343B37;
 constexpr uint32_t CodexBlue               = 0x566BF7;
 constexpr uint32_t ArcTrack                = 0x686D6A;
 constexpr uint32_t ArcThumb                = 0x626763;
@@ -46,12 +52,16 @@ constexpr uint32_t AgentOff                = 0xAEB4B0;
 constexpr uint32_t StatusCard              = 0x121714;
 constexpr uint32_t StatusBorder            = 0x3B4540;
 constexpr uint32_t StatusStale             = 0xE4AF57;
+constexpr uint32_t BatteryLow              = 0xFF666A;
 constexpr lv_style_selector_t PressedStyle =
     static_cast<lv_style_selector_t>(LV_PART_MAIN) | static_cast<lv_style_selector_t>(LV_STATE_PRESSED);
 
 constexpr std::array<CodexMicroControl, 6> AgentControls = {
     CodexMicroControl::Agent1, CodexMicroControl::Agent2, CodexMicroControl::Agent3,
     CodexMicroControl::Agent4, CodexMicroControl::Agent5, CodexMicroControl::Agent6,
+};
+constexpr std::array<uint32_t, 6> CommandAccentColors = {
+    0x8B9DFF, 0xB999FF, 0xF4B84B, 0x6F9FFF, Green, BatteryLow,
 };
 constexpr float FeedbackToneDurationSeconds            = 0.016f;
 constexpr float FeedbackToneVolume                     = 0.38f;
@@ -104,6 +114,24 @@ constexpr int DialThumbHeight           = 30;
 constexpr uint32_t DialReturnDurationMs = 240;
 constexpr uint32_t DialFeedbackPeriodMs = 40;
 static_assert(AgentControls.size() == 6, "Codex Micro requires six Agent Keys");
+static_assert(CommandAccentColors.size() == 6, "Command accents must match the six Command buttons");
+
+const char* batterySymbol(uint8_t level)
+{
+    if (level >= 90) {
+        return LV_SYMBOL_BATTERY_FULL;
+    }
+    if (level >= 65) {
+        return LV_SYMBOL_BATTERY_3;
+    }
+    if (level >= 40) {
+        return LV_SYMBOL_BATTERY_2;
+    }
+    if (level >= 15) {
+        return LV_SYMBOL_BATTERY_1;
+    }
+    return LV_SYMBOL_BATTERY_EMPTY;
+}
 
 int feedbackMidi(CodexMicroControl control, int8_t agent)
 {
@@ -303,6 +331,7 @@ void CodexMicroView::init(lv_obj_t* parent)
     _display_base_brightness = std::max(10, GetHAL().getBackLightBrightness());
     _last_activity_tick      = lv_tick_get();
     _display_power           = DisplayPowerState::Active;
+    GetHAL().setBackLightBrightness(_display_base_brightness, false);
 
     lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(parent, lv_color_hex(Background), LV_PART_MAIN);
@@ -507,20 +536,49 @@ void CodexMicroView::createCommandButton(lv_obj_t* parent, std::size_t slot, int
     lv_obj_t* button = lv_button_create(parent);
     lv_obj_set_pos(button, x, y);
     lv_obj_set_size(button, 78, 78);
-    stylePanel(button, Key, KeyBorder, LV_RADIUS_CIRCLE, 1);
-    lv_obj_set_style_bg_color(button, lv_color_hex(KeyPressed), PressedStyle);
-    lv_obj_set_style_border_color(button, lv_color_hex(CodexBlue), PressedStyle);
-    lv_obj_set_style_transform_width(button, -3, PressedStyle);
-    lv_obj_set_style_transform_height(button, -3, PressedStyle);
-    lv_obj_set_style_shadow_width(button, 7, LV_PART_MAIN);
-    lv_obj_set_style_shadow_opa(button, LV_OPA_20, LV_PART_MAIN);
+    stylePanel(button, CommandFaceTop, KeyBorder, LV_RADIUS_CIRCLE, 1);
+    lv_obj_set_style_bg_grad_color(button, lv_color_hex(CommandFaceBottom), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(button, LV_GRAD_DIR_VER, LV_PART_MAIN);
+    lv_obj_set_style_outline_width(button, 2, LV_PART_MAIN);
+    lv_obj_set_style_outline_pad(button, 1, LV_PART_MAIN);
+    lv_obj_set_style_outline_color(button, lv_color_hex(CommandBezel), LV_PART_MAIN);
+    lv_obj_set_style_outline_opa(button, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(button, 8, LV_PART_MAIN);
+    lv_obj_set_style_shadow_offset_y(button, 3, LV_PART_MAIN);
+    lv_obj_set_style_shadow_spread(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(button, LV_OPA_30, LV_PART_MAIN);
     lv_obj_set_style_shadow_color(button, lv_color_hex(0x000000), LV_PART_MAIN);
+
+    lv_obj_set_style_bg_color(button, lv_color_hex(CommandPressedTop), PressedStyle);
+    lv_obj_set_style_bg_grad_color(button, lv_color_hex(CommandPressedBottom), PressedStyle);
+    lv_obj_set_style_bg_grad_dir(button, LV_GRAD_DIR_VER, PressedStyle);
+    lv_obj_set_style_outline_color(button, lv_color_hex(CommandAccentColors[slot]), PressedStyle);
+    lv_obj_set_style_outline_width(button, 3, PressedStyle);
+    lv_obj_set_style_shadow_width(button, 3, PressedStyle);
+    lv_obj_set_style_shadow_offset_y(button, 1, PressedStyle);
+    lv_obj_set_style_shadow_opa(button, LV_OPA_20, PressedStyle);
+    lv_obj_set_style_transform_width(button, -4, PressedStyle);
+    lv_obj_set_style_transform_height(button, -4, PressedStyle);
+    lv_obj_set_style_translate_y(button, 2, PressedStyle);
 
     _command_buttons[slot]  = button;
     _command_contexts[slot] = {.owner = this, .action = action, .control = control, .slot = slot, .active = false};
     lv_obj_add_event_cb(button, commandEvent, LV_EVENT_PRESSED, &_command_contexts[slot]);
     lv_obj_add_event_cb(button, commandEvent, LV_EVENT_RELEASED, &_command_contexts[slot]);
     lv_obj_add_event_cb(button, commandEvent, LV_EVENT_PRESS_LOST, &_command_contexts[slot]);
+
+    lv_obj_t* highlight = lv_arc_create(button);
+    lv_obj_set_size(highlight, 62, 62);
+    lv_obj_center(highlight);
+    lv_obj_remove_flag(highlight, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(highlight, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_arc_width(highlight, 0, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(highlight, 2, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(highlight, lv_color_hex(0xFFFFFF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(highlight, LV_OPA_50, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(highlight, true, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(highlight, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_arc_set_angles(highlight, 210, 330);
 
     lv_obj_t* title = lv_label_create(button);
     lv_label_set_text(title, label);
@@ -621,10 +679,10 @@ void CodexMicroView::renderCenterStatus(lv_obj_t* parent)
     stylePanel(divider, StatusBorder, StatusBorder, 0, 0);
 
     _battery_label = lv_label_create(_usage_card);
-    lv_label_set_text(_battery_label, "WATCH --");
-    lv_obj_set_style_text_font(_battery_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_label_set_text(_battery_label, LV_SYMBOL_BATTERY_EMPTY " --%");
+    lv_obj_set_style_text_font(_battery_label, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(_battery_label, lv_color_hex(Text), LV_PART_MAIN);
-    lv_obj_align(_battery_label, LV_ALIGN_TOP_MID, 0, 134);
+    lv_obj_align(_battery_label, LV_ALIGN_TOP_MID, 0, 132);
 }
 
 void CodexMicroView::renderAgent(lv_obj_t* parent)
@@ -838,14 +896,20 @@ void CodexMicroView::wakeDisplay()
 
 void CodexMicroView::updateDisplayPower(uint32_t tick, bool hostStateChanged)
 {
-    if (hostStateChanged || interactionActive()) {
-        wakeDisplay();
+    if constexpr (system_config::DisplayAlwaysOn) {
+        if (_display_power != DisplayPowerState::Active) {
+            setDisplayPower(DisplayPowerState::Active);
+        }
     } else {
-        const uint32_t idle = tick - _last_activity_tick;
-        if (idle >= DisplayOffDelayMs) {
-            setDisplayPower(DisplayPowerState::Off);
-        } else if (idle >= DisplayDimDelayMs) {
-            setDisplayPower(DisplayPowerState::Dimmed);
+        if (hostStateChanged || interactionActive()) {
+            wakeDisplay();
+        } else {
+            const uint32_t idle = tick - _last_activity_tick;
+            if (idle >= DisplayOffDelayMs) {
+                setDisplayPower(DisplayPowerState::Off);
+            } else if (idle >= DisplayDimDelayMs) {
+                setDisplayPower(DisplayPowerState::Dimmed);
+            }
         }
     }
 
@@ -960,7 +1024,7 @@ void CodexMicroView::updateCommandLighting(const CodexMicroState& state)
     const bool enabled     = light.effect != CodexMicroLightEffect::Off && light.color != 0 && light.brightness > 0.01f;
     const float seconds    = static_cast<float>(lv_tick_get()) / 1000.0f;
     const float brightness = animatedBrightness(light, seconds);
-    const uint32_t color   = enabled ? scaledColor(light.color, brightness) : 0xFFFFFA;
+    const uint32_t color   = enabled ? scaledColor(light.color, brightness) : CommandBezel;
     int snake_slot         = -1;
     if (enabled && light.effect == CodexMicroLightEffect::Snake) {
         const float speed = light.speed > 0.05f ? light.speed : 0.5f;
@@ -975,10 +1039,10 @@ void CodexMicroView::updateCommandLighting(const CodexMicroState& state)
         _command_lit[i]          = lit;
         _command_light_colors[i] = color;
         if (_command_buttons[i] != nullptr) {
-            lv_obj_set_style_border_color(_command_buttons[i], lv_color_hex(lit ? color : KeyBorder), LV_PART_MAIN);
-            lv_obj_set_style_border_width(_command_buttons[i], lit ? 2 : 1, LV_PART_MAIN);
+            lv_obj_set_style_outline_color(_command_buttons[i], lv_color_hex(lit ? color : CommandBezel), LV_PART_MAIN);
+            lv_obj_set_style_outline_width(_command_buttons[i], lit ? 3 : 2, LV_PART_MAIN);
             lv_obj_set_style_shadow_color(_command_buttons[i], lv_color_hex(lit ? color : 0x000000), LV_PART_MAIN);
-            lv_obj_set_style_shadow_opa(_command_buttons[i], lit ? LV_OPA_30 : LV_OPA_20, LV_PART_MAIN);
+            lv_obj_set_style_shadow_opa(_command_buttons[i], lit ? LV_OPA_40 : LV_OPA_30, LV_PART_MAIN);
         }
     }
     _command_last_update_tick = lv_tick_get();
@@ -1028,9 +1092,18 @@ void CodexMicroView::updateCenterStatus(const CodexMicroState& state)
         }
     }
 
-    std::snprintf(text, sizeof(text), "WATCH %u%%%s", static_cast<unsigned>(state.battery),
-                  state.charging ? " CHG" : "");
+    if (state.charging) {
+        std::snprintf(text, sizeof(text), "%s %u%% %s", batterySymbol(state.battery),
+                      static_cast<unsigned>(state.battery), LV_SYMBOL_CHARGE);
+    } else {
+        std::snprintf(text, sizeof(text), "%s %u%%", batterySymbol(state.battery),
+                      static_cast<unsigned>(state.battery));
+    }
     setLabelText(_battery_label, text);
+    if (_battery_label != nullptr) {
+        const uint32_t battery_color = state.charging ? Green : (state.battery < 15 ? BatteryLow : Text);
+        lv_obj_set_style_text_color(_battery_label, lv_color_hex(battery_color), LV_PART_MAIN);
+    }
 }
 
 void CodexMicroView::updateAgentLights(const CodexMicroState& state)

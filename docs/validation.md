@@ -25,7 +25,9 @@ Open `web/index.html` in a browser and check:
 - The reasoning arc emits `ENC_CW` on the left and `ENC_CC` on the right, gives discrete feedback,
   and returns to its midpoint.
 - The center dial shows real quota/reset data after a bridge update, explicit stale/unavailable
-  states, and the StopWatch battery.
+  states, and a level-aware StopWatch battery icon with percentage and charging indicator.
+- The six Command buttons retain 78-pixel hit targets while their face gradient, mechanical outline,
+  highlight, shadow, and pressed depth remain visually distinct.
 - Holding A opens Mic, its visualization animates, and release returns to the previous page.
 - B simulates Send and A+B toggles Command/Agent.
 
@@ -91,8 +93,8 @@ verify the following against ChatGPT Settings:
    sound effects are off by default.
 7. Holding the reset control for 3 seconds on either the connected page or Pairing screen erases
    stored bonds, restarts, and advertises for a fresh pairing.
-8. After 30 seconds the display dims; after two minutes it turns off. The first dark-screen touch
-   wakes without sending a host action, while new host state wakes immediately.
+8. Leave the device untouched for more than two minutes. The display must remain at its configured
+   brightness, while the one-pixel five-position drift continues on its one-minute cadence.
 9. Hard-reset the ESP32-S3 without erasing bonds, wait for the existing Windows bond to reconnect,
    and rerun the strict suite. It must reach `ble_protocol=1` without manual pairing, with
    `rpc_errors=0`, `tx_failures=0`, and `half_open_recoveries=0`.
@@ -104,6 +106,22 @@ microphone, the StopWatch I2S RX path remains disabled, and the BLE vendor HID c
 PCM audio.
 
 ## Validated Windows hardware runs
+
+### 0.3.1 always-on and material controls
+
+The 2026-08-26 v0.3.1 run used the same ESP32-S3 revision 0.2 StopWatch and Codex Desktop
+26.820.7780.0. Browser QA confirmed six non-overlapping 78-pixel circular controls, layered button
+material, an SVG battery/percentage row, the always-on marker, Plan/New Task events, and reasoning
+return-to-center with no console errors. The final firmware image was `0x1a5040` bytes and all flashed
+regions passed esptool hash verification.
+
+Strict hardware verification reported:
+
+- `display.geometry ... always_on=1 pixel_shift=1`
+- HAL self-test `17/17`, physical controls `13/13`, BLE ready/connected/protocol `1/1/1`
+- 50 Hz transport `151/151`, dropped `0`, failures `0`, queue high-water mark `1`
+- `HOST SUMMARY pass=10 skip=1 failures=0`
+- live usage bridge `remaining_bp=6700`, reset timestamp present, reset credits `1`
 
 ### 0.3.0 circular Command UI
 

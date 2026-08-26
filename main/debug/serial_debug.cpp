@@ -451,9 +451,9 @@ void SerialDebug::runSelfTest()
     lv_display_t* display    = lv_display_get_default();
     const int32_t width      = display == nullptr ? 0 : lv_display_get_horizontal_resolution(display);
     const int32_t height     = display == nullptr ? 0 : lv_display_get_vertical_resolution(display);
-    char display_details[64] = {};
-    std::snprintf(display_details, sizeof(display_details), "width=%ld height=%ld", static_cast<long>(width),
-                  static_cast<long>(height));
+    char display_details[96] = {};
+    std::snprintf(display_details, sizeof(display_details), "width=%ld height=%ld always_on=%s pixel_shift=1",
+                  static_cast<long>(width), static_cast<long>(height), onOff(system_config::DisplayAlwaysOn));
     check("display.geometry", display != nullptr && width > 0 && height > 0, display_details);
 
     const uint8_t battery    = GetHAL().getBatteryLevel();

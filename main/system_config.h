@@ -11,5 +11,6 @@ namespace system_config {
 
 inline constexpr char ProductName[]     = "Codex Micro";
 inline constexpr char FirmwareVersion[] = STOPWATCH_MICRO_VERSION;
+inline constexpr bool DisplayAlwaysOn   = true;
 
 }  // namespace system_config

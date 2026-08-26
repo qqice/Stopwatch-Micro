@@ -80,10 +80,11 @@ is deliberately synthetic and communicates PTT state without sampling the built-
 
 ## Display power and input safety
 
-The view owns AMOLED power state. It dims after 30 seconds, turns off after two minutes, and wakes for
-host state or physical input. A touch that wakes a fully dark display is consumed through release,
-preventing an invisible Command or Agent action. Five one-pixel offsets rotate once per minute while
-the display is visible to reduce static AMOLED wear.
+The view owns AMOLED power state and keeps it active at the configured brightness. Five one-pixel
+offsets rotate once per minute to reduce static AMOLED wear. The existing dim/off and wake-overlay
+paths remain isolated behind the compile-time display policy so they can be restored without
+changing input delivery. Always-on operation trades battery life and panel longevity for an
+immediately readable controller; pixel shifting mitigates but does not eliminate burn-in.
 
 Input delivery uses three paths: an ordered control FIFO for every key transition and joystick
 neutral barrier, a one-slot latest-state queue for non-zero joystick motion, and a FIFO of relative

@@ -214,35 +214,87 @@
       pointer-events: none;
     }
     .command {
+      --command-accent: 111, 159, 255;
       position: absolute;
       z-index: 3;
       width: 78px;
       height: 78px;
       min-height: 78px;
+      isolation: isolate;
       padding: 0 5px;
-      border: 1px solid rgba(255,255,250,.92);
+      overflow: hidden;
+      border: 1px solid rgba(255,255,250,.96);
       border-radius: 50%;
       color: #151817;
-      background: linear-gradient(145deg, var(--key-hi), var(--key-low) 88%);
-      filter: drop-shadow(0 4px 6px rgba(0,0,0,.28));
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.84), inset 0 -3px 6px rgba(0,0,0,.045);
+      background:
+        radial-gradient(circle at 31% 22%, rgba(255,255,255,.96) 0 7%, rgba(255,255,255,0) 31%),
+        linear-gradient(145deg, #fffefa 0%, #f1f3ef 42%, #d9ded9 100%);
+      filter: drop-shadow(0 7px 9px rgba(0,0,0,.25));
+      box-shadow:
+        inset 0 2px 1px rgba(255,255,255,.98),
+        inset 0 -5px 8px rgba(33,42,37,.12),
+        0 2px 0 rgba(83,92,87,.72),
+        0 0 0 1px rgba(var(--command-accent),.08);
       font-size: 14px;
-      font-weight: 700;
+      font-weight: 750;
       letter-spacing: .04em;
       line-height: 1.05;
+      text-shadow: 0 1px 0 rgba(255,255,255,.92);
+      transition: transform .08s ease, border-color .12s ease, background .12s ease,
+        box-shadow .12s ease, filter .12s ease, color .12s ease;
     }
-    .command-plan { left: 119px; top: 64px; }
-    .command-new-task { left: 269px; top: 64px; }
-    .command-fast { left: 44px; top: 194px; }
-    .command-fork { left: 344px; top: 194px; }
-    .command-approve { left: 119px; top: 324px; }
-    .command-decline { left: 269px; top: 324px; }
+    .command::before {
+      content: "";
+      position: absolute;
+      inset: 4px;
+      z-index: -1;
+      border: 1px solid rgba(89,99,93,.2);
+      border-radius: inherit;
+      background: linear-gradient(145deg, rgba(255,255,255,.18), rgba(255,255,255,0) 48%);
+      box-shadow: inset 0 1px 1px rgba(255,255,255,.72), inset 0 -1px 1px rgba(32,40,36,.08);
+      pointer-events: none;
+    }
+    .command::after {
+      content: "";
+      position: absolute;
+      top: 8px;
+      left: 18px;
+      right: 18px;
+      z-index: -1;
+      height: 10px;
+      border-top: 1px solid rgba(255,255,255,.92);
+      border-radius: 50%;
+      background: linear-gradient(180deg, rgba(255,255,255,.18), transparent);
+      pointer-events: none;
+    }
+    .command:hover {
+      border-color: rgba(255,255,255,1);
+      filter: brightness(1.025) drop-shadow(0 8px 10px rgba(0,0,0,.27));
+      box-shadow:
+        inset 0 2px 1px rgba(255,255,255,1),
+        inset 0 -5px 8px rgba(33,42,37,.11),
+        0 2px 0 rgba(83,92,87,.72),
+        0 0 0 2px rgba(var(--command-accent),.15);
+    }
+    .command-plan { --command-accent: 139, 157, 255; left: 119px; top: 64px; }
+    .command-new-task { --command-accent: 185, 153, 255; left: 269px; top: 64px; }
+    .command-fast { --command-accent: 244, 184, 75; left: 44px; top: 194px; }
+    .command-fork { --command-accent: 111, 159, 255; left: 344px; top: 194px; }
+    .command-approve { --command-accent: 89, 227, 165; left: 119px; top: 324px; }
+    .command-decline { --command-accent: 255, 102, 106; left: 269px; top: 324px; }
     .command.is-pressed {
       color: #101312;
-      background: linear-gradient(145deg, #fff, #eef4f0);
-      filter: drop-shadow(0 3px 6px rgba(0,0,0,.3));
-      box-shadow: inset 0 2px 0 #fff, inset 0 -4px 8px rgba(0,0,0,.07);
-      border-color: var(--blue);
+      transform: translateY(2px) scale(.945);
+      border-color: rgba(var(--command-accent),.75);
+      background:
+        radial-gradient(circle at 36% 28%, rgba(255,255,255,.72), transparent 34%),
+        linear-gradient(145deg, #e2e7e2, #f6f8f5 70%);
+      filter: drop-shadow(0 2px 3px rgba(0,0,0,.28));
+      box-shadow:
+        inset 0 4px 8px rgba(35,45,39,.15),
+        inset 0 -1px 1px rgba(255,255,255,.9),
+        0 1px 0 rgba(74,83,78,.6),
+        0 0 0 3px rgba(var(--command-accent),.2);
     }
 
     .usage-card {
@@ -255,8 +307,9 @@
       padding: 12px 25px;
       border: 1px solid #3b4540;
       border-radius: 50%;
-      background: #121714;
-      color: var(--white);
+      background: radial-gradient(circle at 50% 32%, #18201c 0, #111613 72%);
+      color: var(--ink);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 8px 18px rgba(0,0,0,.2);
       text-align: center;
       pointer-events: none;
     }
@@ -266,7 +319,38 @@
     .usage-fill { width: 82%; height: 100%; border-radius: inherit; background: var(--green); }
     .usage-reset { margin-top: 11px; font-size: 14px; }
     .usage-divider { width: 116px; height: 1px; margin: 12px auto 0; background: #3b4540; }
-    .watch-status { margin-top: 11px; font-size: 14px; }
+    .watch-status {
+      min-height: 18px;
+      margin-top: 9px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      color: #e9efeb;
+      font-size: 14px;
+      line-height: 1;
+    }
+    .watch-battery {
+      width: 29px;
+      height: 17px;
+      overflow: visible;
+      filter: drop-shadow(0 0 4px rgba(89,227,165,.16));
+    }
+    .watch-battery-outline {
+      fill: none;
+      stroke: #aeb8b2;
+      stroke-width: 1.35;
+    }
+    .watch-battery-cap { fill: #aeb8b2; }
+    .watch-battery-level { fill: var(--green); }
+    .watch-battery-bolt { fill: #122019; }
+    .watch-percent {
+      min-width: 34px;
+      font-size: 14px;
+      font-weight: 750;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: .01em;
+    }
 
     .command-navigation {
       position: absolute;
@@ -672,7 +756,7 @@
   <main class="review-layout">
     <div class="device-preview">
       <section class="device-stage" aria-label="466 by 466 circular display preview">
-        <div class="device" id="device">
+        <div class="device" id="device" data-display-mode="always-on">
         <div class="ambient-ring" aria-hidden="true"></div>
         <section class="page active" data-page="0" aria-label="Command controls">
           <div class="command-deck">
@@ -689,7 +773,15 @@
               <div class="usage-track"><div class="usage-fill"></div></div>
               <div class="usage-reset">RESET 6d 18h</div>
               <div class="usage-divider"></div>
-              <div class="watch-status">WATCH 98% CHG</div>
+              <div class="watch-status" aria-label="Watch battery 98 percent, charging">
+                <svg class="watch-battery" viewBox="0 0 31 18" aria-hidden="true">
+                  <rect class="watch-battery-outline" x=".75" y="1.75" width="26" height="14.5" rx="3" />
+                  <path class="watch-battery-cap" d="M28.5 6h1.25c.69 0 1.25.56 1.25 1.25v3.5c0 .69-.56 1.25-1.25 1.25H28.5z" />
+                  <rect class="watch-battery-level" x="3.5" y="4.5" width="21.5" height="9" rx="1.8" />
+                  <path class="watch-battery-bolt" d="M15.8 5.2 11.6 10h3l-.5 3.1 4.4-5.2h-3.1z" />
+                </svg>
+                <span class="watch-percent">98%</span>
+              </div>
             </div>
           </div>
           <div class="command-navigation">
