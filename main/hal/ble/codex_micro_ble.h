@@ -47,26 +47,28 @@ struct CodexMicroState {
 };
 
 struct CodexMicroBleDiagnostics {
-    bool initialized            = false;
-    bool hidReady               = false;
-    bool connected              = false;
-    bool protocolReady          = false;
-    bool advertising            = false;
-    uint32_t inputQueued        = 0;
-    uint32_t inputDropped       = 0;
-    uint32_t inputProcessed     = 0;
-    uint32_t txMessages         = 0;
-    uint32_t txReports          = 0;
-    uint32_t txFailures         = 0;
-    uint32_t rxReports          = 0;
-    uint32_t rpcMessages        = 0;
-    uint32_t rpcErrors          = 0;
-    uint32_t queuePending       = 0;
-    uint32_t queueHighWater     = 0;
-    uint32_t txMaxUs            = 0;
-    uint32_t txTotalUs          = 0;
-    uint32_t halfOpenRecoveries = 0;
-    int8_t inputTaskCore        = -1;
+    bool initialized               = false;
+    bool hidReady                  = false;
+    bool connected                 = false;
+    bool protocolReady             = false;
+    bool advertising               = false;
+    uint32_t inputQueued           = 0;
+    uint32_t inputDropped          = 0;
+    uint32_t inputProcessed        = 0;
+    uint32_t txMessages            = 0;
+    uint32_t txReports             = 0;
+    uint32_t txFailures            = 0;
+    uint32_t rxReports             = 0;
+    uint32_t rpcMessages           = 0;
+    uint32_t rpcErrors             = 0;
+    uint32_t wirelessUsageAccepted = 0;
+    uint32_t wirelessUsageRejected = 0;
+    uint32_t queuePending          = 0;
+    uint32_t queueHighWater        = 0;
+    uint32_t txMaxUs               = 0;
+    uint32_t txTotalUs             = 0;
+    uint32_t halfOpenRecoveries    = 0;
+    int8_t inputTaskCore           = -1;
 };
 
 class CodexMicroBle {
@@ -190,6 +192,8 @@ private:
     std::atomic_uint32_t _rx_reports                     = 0;
     std::atomic_uint32_t _rpc_messages                   = 0;
     std::atomic_uint32_t _rpc_errors                     = 0;
+    std::atomic_uint32_t _wireless_usage_accepted        = 0;
+    std::atomic_uint32_t _wireless_usage_rejected        = 0;
     std::atomic_uint32_t _queue_high_water               = 0;
     std::atomic_uint32_t _tx_max_us                      = 0;
     std::atomic_uint32_t _tx_total_us                    = 0;

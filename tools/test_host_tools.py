@@ -79,6 +79,37 @@ class FakeSerialPort:
         self.closed = True
 
 
+class FakeHidDevice:
+    def __init__(self) -> None:
+        self.opened_path: bytes | str | None = None
+        self.writes: list[bytes] = []
+        self.closed = False
+
+    def open_path(self, path: bytes | str) -> None:
+        self.opened_path = path
+
+    def write(self, payload: bytes) -> int:
+        self.writes.append(bytes(payload))
+        return len(payload)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeHidModule:
+    def __init__(self, entries: list[dict[str, object]]) -> None:
+        self.entries = entries
+        self.instance = FakeHidDevice()
+        self.enumerated: tuple[int, int] | None = None
+
+    def enumerate(self, vendor_id: int, product_id: int) -> list[dict[str, object]]:
+        self.enumerated = (vendor_id, product_id)
+        return self.entries
+
+    def device(self) -> FakeHidDevice:
+        return self.instance
+
+
 class SerialPolicyTests(unittest.TestCase):
     def test_strict_policy(self) -> None:
         _, failures = serial_debug_test.run_automated(FakeDebugClient(), allow_offline=False)
@@ -255,6 +286,87 @@ class StopwatchBridgeTests(unittest.TestCase):
             stopwatch_bridge.format_host_usage_line(7, snapshot),
             "debug host-usage 7 8275 1788295390 1787740000 1\n",
         )
+
+    def test_formats_fixed_size_hid_usage_report(self) -> None:
+        snapshot = stopwatch_bridge.UsageSnapshot(8275, 1788295390, 1787740000, 2)
+        report = stopwatch_bridge.format_hid_usage_report(0x01020304, snapshot)
+        self.assertEqual(len(report), 64)
+        self.assertEqual(
+            report,
+            bytes.fromhex(
+                "06a501040302015320de38976a60bf8e6a0210afe39a"
+                "000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+            ),
+        )
+
+    def test_selects_only_codex_micro_vendor_hid_collection(self) -> None:
+        entries = [
+            {
+                "vendor_id": 0x303A,
+                "product_id": 0x8360,
+                "usage_page": 0x0001,
+                "usage": 0x0002,
+                "path": b"system-mouse",
+            },
+            {
+                "vendor_id": 0x303A,
+                "product_id": 0x8360,
+                "usage_page": 0xFF00,
+                "usage": 0x0001,
+                "path": b"codex-micro",
+            },
+            {
+                "vendor_id": 0x303A,
+                "product_id": 0x1001,
+                "usage_page": 0xFF00,
+                "usage": 0x0001,
+                "path": b"usb-jtag",
+            },
+        ]
+        self.assertEqual(stopwatch_bridge.select_hid_path(entries), b"codex-micro")
+
+    def test_hid_transport_opens_and_writes_selected_collection(self) -> None:
+        fake_hid = FakeHidModule(
+            [
+                {
+                    "vendor_id": 0x303A,
+                    "product_id": 0x8360,
+                    "usage_page": 0xFF00,
+                    "usage": 0x0001,
+                    "path": b"codex-micro",
+                }
+            ]
+        )
+        snapshot = stopwatch_bridge.UsageSnapshot(8000, 2000, 1000, 1)
+        with unittest.mock.patch.object(stopwatch_bridge, "hid", fake_hid):
+            transport = stopwatch_bridge.HidUsageTransport()
+            try:
+                transport.send(10, snapshot)
+            finally:
+                transport.close()
+        self.assertEqual(fake_hid.enumerated, (0x303A, 0x8360))
+        self.assertEqual(fake_hid.instance.opened_path, b"codex-micro")
+        self.assertEqual(
+            fake_hid.instance.writes,
+            [stopwatch_bridge.format_hid_usage_report(10, snapshot)],
+        )
+        self.assertTrue(fake_hid.instance.closed)
+
+    def test_auto_transport_falls_back_only_when_hid_is_unavailable(self) -> None:
+        sentinel = object()
+        with (
+            unittest.mock.patch.object(
+                stopwatch_bridge,
+                "HidUsageTransport",
+                side_effect=stopwatch_bridge.HidUnavailableError("not present"),
+            ),
+            unittest.mock.patch.object(stopwatch_bridge, "discover_port", return_value="COM5"),
+            unittest.mock.patch.object(
+                stopwatch_bridge, "SerialUsageTransport", return_value=sentinel
+            ) as serial_transport,
+        ):
+            self.assertIs(stopwatch_bridge.create_usage_transport("auto", None), sentinel)
+        serial_transport.assert_called_once_with("COM5")
 
     def test_rejects_out_of_range_wire_values(self) -> None:
         with self.assertRaises(stopwatch_bridge.BridgeError):

@@ -21,8 +21,12 @@ HostBridge& GetHostBridge()
 bool HostBridge::applyUsage(uint32_t sequence, uint16_t remainingBasisPoints, uint32_t resetEpoch,
                             uint32_t capturedEpoch, uint8_t resetCredits, uint32_t receivedAtMs)
 {
-    if (sequence == 0 || remainingBasisPoints > 10000 || resetCredits > 99 ||
-        !sequenceNewer(sequence, _last_usage_sequence)) {
+    if (sequence == 0 || remainingBasisPoints > 10000 || capturedEpoch == 0 || resetCredits > 99) {
+        return false;
+    }
+    portENTER_CRITICAL(&_mux);
+    if (!sequenceNewer(sequence, _last_usage_sequence)) {
+        portEXIT_CRITICAL(&_mux);
         return false;
     }
     _last_usage_sequence    = sequence;
@@ -33,23 +37,41 @@ bool HostBridge::applyUsage(uint32_t sequence, uint16_t remainingBasisPoints, ui
     _usage_received_at_ms   = receivedAtMs;
     _has_usage              = true;
     ++_revision;
+    portEXIT_CRITICAL(&_mux);
     return true;
 }
 
 HostBridgeSnapshot HostBridge::snapshot(uint32_t nowMs) const
 {
-    HostBridgeSnapshot copy;
-    const uint32_t usageAge   = _has_usage ? nowMs - _usage_received_at_ms : UINT32_MAX;
-    copy.online               = _has_usage && usageAge <= BridgeStaleMs;
-    copy.usageAvailable       = _has_usage && usageAge <= UsageUnavailableMs;
-    copy.usageStale           = copy.usageAvailable && usageAge > BridgeStaleMs;
-    copy.remainingBasisPoints = _remaining_basis_points;
-    copy.resetCredits         = _reset_credits;
-    copy.revision             = _revision;
+    uint32_t usage_received_at_ms   = 0;
+    uint32_t reset_epoch            = 0;
+    uint32_t captured_epoch         = 0;
+    uint32_t revision               = 0;
+    uint16_t remaining_basis_points = 0;
+    uint8_t reset_credits           = 0;
+    bool has_usage                  = false;
+    portENTER_CRITICAL(&_mux);
+    usage_received_at_ms   = _usage_received_at_ms;
+    reset_epoch            = _reset_epoch;
+    captured_epoch         = _captured_epoch;
+    revision               = _revision;
+    remaining_basis_points = _remaining_basis_points;
+    reset_credits          = _reset_credits;
+    has_usage              = _has_usage;
+    portEXIT_CRITICAL(&_mux);
 
-    if (copy.usageAvailable && _reset_epoch > _captured_epoch) {
+    HostBridgeSnapshot copy;
+    const uint32_t usageAge   = has_usage ? nowMs - usage_received_at_ms : UINT32_MAX;
+    copy.online               = has_usage && usageAge <= BridgeStaleMs;
+    copy.usageAvailable       = has_usage && usageAge <= UsageUnavailableMs;
+    copy.usageStale           = copy.usageAvailable && usageAge > BridgeStaleMs;
+    copy.remainingBasisPoints = remaining_basis_points;
+    copy.resetCredits         = reset_credits;
+    copy.revision             = revision;
+
+    if (copy.usageAvailable && reset_epoch > captured_epoch) {
         copy.resetAvailable           = true;
-        const uint32_t initialSeconds = _reset_epoch - _captured_epoch;
+        const uint32_t initialSeconds = reset_epoch - captured_epoch;
         const uint32_t elapsedSeconds = usageAge / 1000U;
         copy.resetSeconds             = elapsedSeconds < initialSeconds ? initialSeconds - elapsedSeconds : 0;
         if (copy.resetSeconds == 0 && usageAge > BridgeStaleMs) {
@@ -61,5 +83,8 @@ HostBridgeSnapshot HostBridge::snapshot(uint32_t nowMs) const
 
 uint32_t HostBridge::lastUsageSequence() const
 {
-    return _last_usage_sequence;
+    portENTER_CRITICAL(&_mux);
+    const uint32_t sequence = _last_usage_sequence;
+    portEXIT_CRITICAL(&_mux);
+    return sequence;
 }

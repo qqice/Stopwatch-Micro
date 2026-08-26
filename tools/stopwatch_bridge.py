@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bridge Codex account usage to Stopwatch Micro over USB Serial/JTAG."""
+"""Bridge Codex account usage to Stopwatch Micro over Bluetooth HID or USB serial."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import struct
 import subprocess
 import sys
 import threading
@@ -23,8 +24,20 @@ except ImportError:  # pragma: no cover - exercised only outside the IDF environ
     serial = None
     list_ports = None
 
+try:
+    import hid
+except ImportError:  # pragma: no cover - optional wireless transport dependency
+    hid = None
+
 
 USB_SERIAL_JTAG_VID_PID = (0x303A, 0x1001)
+CODEX_MICRO_HID_VID_PID = (0x303A, 0x8360)
+CODEX_MICRO_USAGE_PAGE = 0xFF00
+CODEX_MICRO_USAGE = 0x0001
+CODEX_MICRO_REPORT_ID = 6
+CODEX_MICRO_REPORT_BODY_SIZE = 63
+HOST_USAGE_MAGIC = 0xA5
+HOST_USAGE_VERSION = 0x01
 POLL_SECONDS = 60.0
 REQUEST_TIMEOUT_SECONDS = 15.0
 RECONNECT_DELAYS_SECONDS = (1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
@@ -36,6 +49,10 @@ MAX_RESET_CREDITS = 99
 
 class BridgeError(RuntimeError):
     """Expected companion failure with a safe, non-sensitive message."""
+
+
+class HidUnavailableError(BridgeError):
+    """The wireless HID collection is not currently available."""
 
 
 class StaleSequenceError(BridgeError):
@@ -153,6 +170,39 @@ def format_host_usage_line(sequence: int, snapshot: UsageSnapshot) -> str:
         f"debug host-usage {sequence} {snapshot.remaining_basis_points} "
         f"{snapshot.reset_epoch} {snapshot.captured_epoch} {snapshot.reset_credits}\n"
     )
+
+
+def fnv1a32(payload: bytes | bytearray | memoryview) -> int:
+    value = 0x811C9DC5
+    for byte in payload:
+        value ^= byte
+        value = (value * 0x01000193) & 0xFFFFFFFF
+    return value
+
+
+def format_hid_usage_report(sequence: int, snapshot: UsageSnapshot) -> bytes:
+    """Encode one host-usage update as the vendor HID Output Report."""
+    if sequence < 1 or sequence > MAX_SEQUENCE:
+        raise BridgeError("usage sequence is out of range")
+    if not 0 <= snapshot.remaining_basis_points <= 10000:
+        raise BridgeError("remaining basis points are out of range")
+    if not 0 <= snapshot.reset_epoch <= MAX_EPOCH:
+        raise BridgeError("reset epoch is out of range")
+    if not 1 <= snapshot.captured_epoch <= MAX_EPOCH:
+        raise BridgeError("captured epoch is out of range")
+    if not 0 <= snapshot.reset_credits <= MAX_RESET_CREDITS:
+        raise BridgeError("reset credits are out of range")
+
+    body = bytearray(CODEX_MICRO_REPORT_BODY_SIZE)
+    body[0] = HOST_USAGE_MAGIC
+    body[1] = HOST_USAGE_VERSION
+    struct.pack_into("<I", body, 2, sequence)
+    struct.pack_into("<H", body, 6, snapshot.remaining_basis_points)
+    struct.pack_into("<I", body, 8, snapshot.reset_epoch)
+    struct.pack_into("<I", body, 12, snapshot.captured_epoch)
+    body[16] = snapshot.reset_credits
+    struct.pack_into("<I", body, 17, fnv1a32(body[:17]))
+    return bytes((CODEX_MICRO_REPORT_ID,)) + bytes(body)
 
 
 def next_sequence(sequence: int) -> int:
@@ -332,7 +382,97 @@ def discover_port(explicit: str | None) -> str:
     return matches[0]
 
 
+def _hid_int(entry: dict[str, Any], key: str) -> int | None:
+    value = entry.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def select_hid_path(entries: list[dict[str, Any]]) -> bytes | str:
+    """Select the Codex Micro vendor-defined top-level HID collection."""
+    paths: list[bytes | str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if _hid_int(entry, "vendor_id") != CODEX_MICRO_HID_VID_PID[0]:
+            continue
+        if _hid_int(entry, "product_id") != CODEX_MICRO_HID_VID_PID[1]:
+            continue
+        if _hid_int(entry, "usage_page") != CODEX_MICRO_USAGE_PAGE:
+            continue
+        if _hid_int(entry, "usage") != CODEX_MICRO_USAGE:
+            continue
+        path = entry.get("path")
+        if isinstance(path, (bytes, str)) and path:
+            paths.append(path)
+
+    unique_paths: list[bytes | str] = []
+    for path in paths:
+        if path not in unique_paths:
+            unique_paths.append(path)
+    if not unique_paths:
+        raise HidUnavailableError(
+            "Codex Micro Bluetooth HID collection was not found "
+            "(VID:PID=303A:8360 usage_page=FF00 usage=0001)"
+        )
+    if len(unique_paths) != 1:
+        raise BridgeError(
+            f"Expected one Codex Micro Bluetooth HID collection; found {len(unique_paths)}"
+        )
+    return unique_paths[0]
+
+
+class HidUsageTransport:
+    transport_name = "bluetooth"
+
+    def __init__(self) -> None:
+        if hid is None:
+            raise HidUnavailableError("hidapi is required for the Bluetooth transport")
+        try:
+            entries = hid.enumerate(*CODEX_MICRO_HID_VID_PID)
+        except Exception as exc:
+            raise BridgeError("Unable to enumerate Bluetooth HID devices") from exc
+        path = select_hid_path(entries)
+        try:
+            self._device = hid.device()
+            self._device.open_path(path)
+        except Exception as exc:
+            device = getattr(self, "_device", None)
+            if device is not None:
+                try:
+                    device.close()
+                except Exception:
+                    pass
+            raise BridgeError("Unable to open the Codex Micro Bluetooth HID collection") from exc
+
+    def send(self, sequence: int, snapshot: UsageSnapshot) -> None:
+        report = format_hid_usage_report(sequence, snapshot)
+        try:
+            written = self._device.write(report)
+        except Exception as exc:
+            raise BridgeError("Codex Micro Bluetooth HID write failed") from exc
+        if written != len(report):
+            raise BridgeError(
+                f"Codex Micro Bluetooth HID write was incomplete ({written}/{len(report)})"
+            )
+
+    def close(self) -> None:
+        device = getattr(self, "_device", None)
+        if device is None:
+            return
+        try:
+            device.close()
+        except Exception:
+            pass
+        self._device = None
+
+
 class SerialUsageTransport:
+    transport_name = "usb"
+
     def __init__(
         self,
         port: str,
@@ -456,10 +596,28 @@ class SerialUsageTransport:
             self._reader.join(timeout=1)
 
 
+def create_usage_transport(mode: str, port: str | None) -> HidUsageTransport | SerialUsageTransport:
+    if mode not in {"auto", "bluetooth", "usb"}:
+        raise BridgeError(f"unsupported transport: {mode}")
+    if mode in {"auto", "bluetooth"}:
+        try:
+            return HidUsageTransport()
+        except HidUnavailableError:
+            if mode == "bluetooth":
+                raise
+    return SerialUsageTransport(discover_port(port))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex-path", type=Path, help="explicit desktop-managed codex.exe")
     parser.add_argument("--port", help="StopWatch USB Serial/JTAG port, for example COM5")
+    parser.add_argument(
+        "--transport",
+        choices=("auto", "bluetooth", "usb"),
+        default="auto",
+        help="usage transport; auto prefers Bluetooth HID and falls back only when the HID collection is absent",
+    )
     parser.add_argument("--once", action="store_true", help="read and send one usage snapshot")
     return parser.parse_args()
 
@@ -468,7 +626,13 @@ def run(args: argparse.Namespace) -> int:
     sequence = max(1, min(int(time.time()), MAX_SEQUENCE))
     failure_index = 0
     client: AppServerClient | None = None
-    transport: SerialUsageTransport | None = None
+    transport: HidUsageTransport | SerialUsageTransport | None = None
+    requested_transport = args.transport
+    if args.port and requested_transport == "auto":
+        requested_transport = "usb"
+    if args.port and requested_transport == "bluetooth":
+        print("BRIDGE ERROR --port cannot be used with the Bluetooth transport", file=sys.stderr)
+        return 2
     try:
         while True:
             try:
@@ -477,7 +641,7 @@ def run(args: argparse.Namespace) -> int:
                     client = AppServerClient(codex_path)
                     client.start()
                 if transport is None:
-                    transport = SerialUsageTransport(discover_port(args.port))
+                    transport = create_usage_transport(requested_transport, args.port)
                 snapshot = client.read_usage()
                 try:
                     transport.send(sequence, snapshot)
@@ -486,6 +650,7 @@ def run(args: argparse.Namespace) -> int:
                     transport.send(sequence, snapshot)
                 print(
                     "USAGE "
+                    f"transport={transport.transport_name} "
                     f"remaining_bp={snapshot.remaining_basis_points} "
                     f"reset_epoch={snapshot.reset_epoch} credits={snapshot.reset_credits}"
                 )

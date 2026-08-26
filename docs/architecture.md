@@ -66,10 +66,13 @@ connect/retry loop after a hard reset without weakening first-pair subscription 
 
 The vendor Micro RPC does not contain account usage. A separate, optional Windows companion starts
 the desktop-managed `codex app-server`, reads the stable `account/rateLimits/read` method once per
-minute, normalizes the canonical `codex` bucket, and sends only remaining basis points, reset epoch,
-capture epoch, and reset-credit count over USB Serial/JTAG. The firmware validates an atomic
-single-line update and derives the countdown from monotonic time. Stale and unavailable states are
-explicit, and periodic quota refreshes do not wake the display.
+minute, and normalizes the canonical `codex` bucket. By default it sends remaining basis points,
+reset epoch, capture epoch, and reset-credit count as one checksummed 64-byte Bluetooth HID Output
+Report through the already-paired Micro collection. The single-report `0xA5` frame cannot interleave
+with fragmented vendor JSON, produces no response for Codex Desktop to consume, and leaves USB
+Serial/JTAG free. The original acknowledged serial command remains an explicit fallback. HostBridge
+uses a short cross-core critical section, derives the countdown from monotonic time, and exposes
+explicit stale/unavailable states without waking the display.
 
 ## Microphone boundary
 

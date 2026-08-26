@@ -209,13 +209,15 @@ void SerialDebug::handleLine(char* line)
         const CodexMicroBleDiagnostics diagnostics = GetCodexMicroBle().diagnostics();
         const bool healthy = GetCodexMicroBle().protocolSelfTest() && diagnostics.inputDropped == 0 &&
                              diagnostics.txFailures == 0 && diagnostics.rpcErrors == 0;
-        char details[144] = {};
+        char details[208] = {};
         std::snprintf(details, sizeof(details),
                       "controls=13 encoder=3 report_id=6 report_bytes=63 payload_bytes=61 dropped=%lu tx_failures=%lu "
-                      "rpc_errors=%lu",
+                      "rpc_errors=%lu wireless_usage_accepted=%lu wireless_usage_rejected=%lu",
                       static_cast<unsigned long>(diagnostics.inputDropped),
                       static_cast<unsigned long>(diagnostics.txFailures),
-                      static_cast<unsigned long>(diagnostics.rpcErrors));
+                      static_cast<unsigned long>(diagnostics.rpcErrors),
+                      static_cast<unsigned long>(diagnostics.wirelessUsageAccepted),
+                      static_cast<unsigned long>(diagnostics.wirelessUsageRejected));
         result("protocol", healthy ? "PASS" : "FAIL", details);
         return;
     }
@@ -385,13 +387,14 @@ void SerialDebug::printStatus()
     std::printf(
         "DBG STATUS ble_ready=%s ble_connected=%s ble_protocol=%s advertising=%s revision=%lu queued=%lu dropped=%lu "
         "processed=%lu tx_messages=%lu tx_reports=%lu tx_failures=%lu rx_reports=%lu rpc=%lu rpc_errors=%lu "
-        "pending=%lu half_open_recoveries=%lu\r\n",
+        "wireless_usage_accepted=%lu wireless_usage_rejected=%lu pending=%lu half_open_recoveries=%lu\r\n",
         onOff(state.ready && ble.hidReady), onOff(state.connected), onOff(state.protocolReady && ble.protocolReady),
         onOff(ble.advertising), static_cast<unsigned long>(state.revision), static_cast<unsigned long>(ble.inputQueued),
         static_cast<unsigned long>(ble.inputDropped), static_cast<unsigned long>(ble.inputProcessed),
         static_cast<unsigned long>(ble.txMessages), static_cast<unsigned long>(ble.txReports),
         static_cast<unsigned long>(ble.txFailures), static_cast<unsigned long>(ble.rxReports),
         static_cast<unsigned long>(ble.rpcMessages), static_cast<unsigned long>(ble.rpcErrors),
+        static_cast<unsigned long>(ble.wirelessUsageAccepted), static_cast<unsigned long>(ble.wirelessUsageRejected),
         static_cast<unsigned long>(ble.queuePending), static_cast<unsigned long>(ble.halfOpenRecoveries));
     const Hal::PerformanceDiagnostics performance = GetHAL().performanceDiagnostics();
     std::printf(
@@ -476,11 +479,13 @@ void SerialDebug::runSelfTest()
     std::snprintf(ble_details, sizeof(ble_details), "ready=%s connected=%s advertising=%s", onOff(state.ready),
                   onOff(state.connected), onOff(ble.advertising));
     check("ble.service", ble.initialized && ble.hidReady && state.ready, ble_details);
-    char protocol_details[112] = {};
+    char protocol_details[176] = {};
     std::snprintf(protocol_details, sizeof(protocol_details),
-                  "controls=13 encoder=3 rpc_buffer=4096 dropped=%lu tx_failures=%lu rpc_errors=%lu",
+                  "controls=13 encoder=3 rpc_buffer=4096 dropped=%lu tx_failures=%lu rpc_errors=%lu "
+                  "wireless_usage_accepted=%lu wireless_usage_rejected=%lu",
                   static_cast<unsigned long>(ble.inputDropped), static_cast<unsigned long>(ble.txFailures),
-                  static_cast<unsigned long>(ble.rpcErrors));
+                  static_cast<unsigned long>(ble.rpcErrors), static_cast<unsigned long>(ble.wirelessUsageAccepted),
+                  static_cast<unsigned long>(ble.wirelessUsageRejected));
     check("ble.protocol",
           GetCodexMicroBle().protocolSelfTest() && ble.inputDropped == 0 && ble.txFailures == 0 && ble.rpcErrors == 0,
           protocol_details);

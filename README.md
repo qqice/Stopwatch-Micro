@@ -61,6 +61,10 @@ returns immediately to Pairing.
 | Top reasoning arc | `ENC_CC`, `ENC`, `ENC_CW` | Decrease/increase reasoning effort; press/select; returns to center |
 | Bottom touch sensor | local system | Hold for 3 seconds to erase BLE bonds and restart pairing |
 
+In **Settings → Codex Micro**, set **Dial → Reasoning only**. Turn on **Use separate microphone
+keys** before assigning ACT11 to **New Task**; with the stock combined microphone-key setting,
+Codex Desktop intentionally ignores standalone ACT11 events.
+
 After a bond reset, remove the old `Codex Micro` entry from Windows Bluetooth settings if Windows
 still retains it, then pair again.
 
@@ -79,8 +83,8 @@ and AMOLED aging; the pixel shift reduces but cannot eliminate burn-in risk.
 
 The center circular status dial shows canonical Codex quota remaining, its reset countdown, and a
 level-aware StopWatch battery icon with percentage and a charging indicator.
-Quota data comes from the official Codex App Server through the USB usage bridge; it is marked stale
-after two minutes and unavailable after ten minutes rather than displaying a fabricated value. See
+Quota data comes from the official Codex App Server through the wireless Bluetooth HID bridge; it is
+marked stale after two minutes and unavailable after ten minutes rather than displaying a fabricated value. See
 [`docs/bridge.md`](docs/bridge.md) for setup and the required one-time Codex Micro mappings.
 
 ## Web review prototype
@@ -135,11 +139,12 @@ factory restore path:
 .\tools\stopwatch.ps1 build -SkipDeps
 .\tools\stopwatch.ps1 backup -Port COM5
 .\tools\stopwatch.ps1 flash -Port COM5 -Erase
-.\tools\stopwatch.ps1 bridge -Port COM5
+.\tools\stopwatch.ps1 bridge -Transport bluetooth
 ```
 
-Keep `bridge` running for live quota/reset updates. It owns the serial port, so stop it with
-`Ctrl+C` before flashing, monitoring, or running diagnostics. Use `bridge -Once` for one snapshot.
+Keep `bridge` running for live quota/reset updates. Bluetooth mode shares the paired HID collection
+with Codex Desktop and does not open COM5, so the USB cable can be disconnected. Use `bridge -Once`
+for one snapshot; pass `-Transport usb -Port COM5` only when explicitly using the serial fallback.
 
 The first backup is a complete 16 MiB image. Restore it only when intentionally returning to the
 factory firmware:

@@ -10,6 +10,8 @@ param(
     [string]$Version,
     [string]$CodexVersion,
     [string]$CodexPath,
+    [ValidateSet('auto', 'bluetooth', 'usb')]
+    [string]$Transport = 'auto',
     [switch]$DirectGit,
     [switch]$SkipDeps,
     [switch]$Erase,
@@ -307,9 +309,24 @@ switch ($Action) {
     }
 
     'bridge' {
-        Enter-EspIdf
-        $resolvedPort = Resolve-StopwatchPort
-        $arguments = @('-u', (Join-Path $projectRoot 'tools\stopwatch_bridge.py'), '--port', $resolvedPort)
+        if ($Port -and $Transport -eq 'bluetooth') {
+            throw '-Port cannot be used with -Transport bluetooth'
+        }
+        $effectiveTransport = $Transport
+        if ($Port -and $effectiveTransport -eq 'auto') {
+            $effectiveTransport = 'usb'
+        }
+        $arguments = @(
+            '-u',
+            (Join-Path $projectRoot 'tools\stopwatch_bridge.py'),
+            '--transport',
+            $effectiveTransport
+        )
+        if ($effectiveTransport -eq 'usb') {
+            Enter-EspIdf
+            $resolvedPort = Resolve-StopwatchPort
+            $arguments += @('--port', $resolvedPort)
+        }
         if ($Once) {
             $arguments += '--once'
         }

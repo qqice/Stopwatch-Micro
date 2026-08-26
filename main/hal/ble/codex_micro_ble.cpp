@@ -6,6 +6,8 @@
  */
 #include "codex_micro_ble.h"
 
+#include <host/host_bridge.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -34,15 +36,42 @@ extern "C" void codex_micro_hid_gatt_compat_authenticated(const uint8_t* address
 
 namespace {
 
-constexpr const char* Tag               = "CodexMicro-BLE";
-constexpr const char* DeviceName        = system_config::ProductName;
-constexpr const char* Manufacturer      = "Work Louder";
-constexpr const char* FirmwareVersion   = system_config::FirmwareVersion;
-constexpr uint16_t VendorId             = 0x303A;
-constexpr uint16_t ProductId            = 0x8360;
-constexpr uint16_t ProductVersion       = 0x0101;
-constexpr BaseType_t InputTaskCore      = 0;
-constexpr UBaseType_t InputTaskPriority = 1;
+constexpr const char* Tag                    = "CodexMicro-BLE";
+constexpr const char* DeviceName             = system_config::ProductName;
+constexpr const char* Manufacturer           = "Work Louder";
+constexpr const char* FirmwareVersion        = system_config::FirmwareVersion;
+constexpr uint16_t VendorId                  = 0x303A;
+constexpr uint16_t ProductId                 = 0x8360;
+constexpr uint16_t ProductVersion            = 0x0101;
+constexpr BaseType_t InputTaskCore           = 0;
+constexpr UBaseType_t InputTaskPriority      = 1;
+constexpr uint8_t WirelessUsageMarker        = 0xA5;
+constexpr uint8_t WirelessUsageVersion       = 1;
+constexpr std::size_t WirelessUsageDataSize  = 17;
+constexpr std::size_t WirelessUsageFrameSize = 21;
+
+static_assert(WirelessUsageDataSize + sizeof(uint32_t) == WirelessUsageFrameSize);
+
+uint16_t readUint16Le(const uint8_t* bytes)
+{
+    return static_cast<uint16_t>(bytes[0]) | (static_cast<uint16_t>(bytes[1]) << 8U);
+}
+
+uint32_t readUint32Le(const uint8_t* bytes)
+{
+    return static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8U) |
+           (static_cast<uint32_t>(bytes[2]) << 16U) | (static_cast<uint32_t>(bytes[3]) << 24U);
+}
+
+uint32_t fnv1a32(const uint8_t* bytes, std::size_t length)
+{
+    uint32_t hash = 2166136261U;
+    for (std::size_t index = 0; index < length; ++index) {
+        hash ^= bytes[index];
+        hash *= 16777619U;
+    }
+    return hash;
+}
 
 void updateAtomicMax(std::atomic_uint32_t& destination, uint32_t value)
 {
@@ -698,29 +727,31 @@ CodexMicroState CodexMicroBle::snapshot()
 CodexMicroBleDiagnostics CodexMicroBle::diagnostics() const
 {
     return {
-        .initialized        = _initialized.load(),
-        .hidReady           = _hid_ready.load(),
-        .connected          = _connected.load(std::memory_order_acquire),
-        .protocolReady      = _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Ready,
-        .advertising        = _advertising.load(),
-        .inputQueued        = _input_queued.load(),
-        .inputDropped       = _input_dropped.load(),
-        .inputProcessed     = _input_processed.load(),
-        .txMessages         = _tx_messages.load(),
-        .txReports          = _tx_reports.load(),
-        .txFailures         = _tx_failures.load(),
-        .rxReports          = _rx_reports.load(),
-        .rpcMessages        = _rpc_messages.load(),
-        .rpcErrors          = _rpc_errors.load(),
-        .queuePending       = _input_queue == nullptr ? 0U
-                                                      : static_cast<uint32_t>(uxQueueMessagesWaiting(_input_queue) +
-                                                                              uxQueueMessagesWaiting(_critical_input_queue) +
-                                                                              uxQueueMessagesWaiting(_joystick_queue)),
-        .queueHighWater     = _queue_high_water.load(std::memory_order_relaxed),
-        .txMaxUs            = _tx_max_us.load(std::memory_order_relaxed),
-        .txTotalUs          = _tx_total_us.load(std::memory_order_relaxed),
-        .halfOpenRecoveries = _half_open_recoveries.load(std::memory_order_relaxed),
-        .inputTaskCore      = _input_task_core.load(std::memory_order_relaxed),
+        .initialized           = _initialized.load(),
+        .hidReady              = _hid_ready.load(),
+        .connected             = _connected.load(std::memory_order_acquire),
+        .protocolReady         = _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Ready,
+        .advertising           = _advertising.load(),
+        .inputQueued           = _input_queued.load(),
+        .inputDropped          = _input_dropped.load(),
+        .inputProcessed        = _input_processed.load(),
+        .txMessages            = _tx_messages.load(),
+        .txReports             = _tx_reports.load(),
+        .txFailures            = _tx_failures.load(),
+        .rxReports             = _rx_reports.load(),
+        .rpcMessages           = _rpc_messages.load(),
+        .rpcErrors             = _rpc_errors.load(),
+        .wirelessUsageAccepted = _wireless_usage_accepted.load(),
+        .wirelessUsageRejected = _wireless_usage_rejected.load(),
+        .queuePending          = _input_queue == nullptr ? 0U
+                                                         : static_cast<uint32_t>(uxQueueMessagesWaiting(_input_queue) +
+                                                                                 uxQueueMessagesWaiting(_critical_input_queue) +
+                                                                                 uxQueueMessagesWaiting(_joystick_queue)),
+        .queueHighWater        = _queue_high_water.load(std::memory_order_relaxed),
+        .txMaxUs               = _tx_max_us.load(std::memory_order_relaxed),
+        .txTotalUs             = _tx_total_us.load(std::memory_order_relaxed),
+        .halfOpenRecoveries    = _half_open_recoveries.load(std::memory_order_relaxed),
+        .inputTaskCore         = _input_task_core.load(std::memory_order_relaxed),
     };
 }
 
@@ -744,7 +775,7 @@ bool CodexMicroBle::protocolSelfTest() const
     }
 
     if (sizeof(ReportMap) < 2 || ReportMap[8] != ReportId || ReportSize != 63 || PayloadSize != 61 ||
-        MaxRpcBufferSize < ReportSize) {
+        WirelessUsageFrameSize > ReportSize || MaxRpcBufferSize < ReportSize) {
         return false;
     }
 
@@ -1254,6 +1285,57 @@ bool CodexMicroBle::sendJson(const char* json, uint32_t expectedGeneration, bool
 void CodexMicroBle::onOutput(const uint8_t* data, std::size_t length)
 {
     ++_rx_reports;
+    std::size_t wireless_offset = 0;
+    if (data != nullptr && length >= 2 && data[0] == ReportId && data[1] == WirelessUsageMarker) {
+        wireless_offset = 1;
+    }
+    const bool wireless_usage =
+        data != nullptr && length > wireless_offset && data[wireless_offset] == WirelessUsageMarker;
+    if (wireless_usage) {
+        const auto reject = [this](const char* reason) {
+            ++_wireless_usage_rejected;
+            ESP_LOGW(Tag, "wireless usage frame rejected reason=%s", reason);
+        };
+        if (length < wireless_offset + WirelessUsageFrameSize) {
+            reject("truncated");
+            return;
+        }
+        const uint8_t* frame = data + wireless_offset;
+        for (std::size_t index = wireless_offset + WirelessUsageFrameSize; index < length; ++index) {
+            if (data[index] != 0) {
+                reject("trailing_data");
+                return;
+            }
+        }
+        if (frame[1] != WirelessUsageVersion) {
+            reject("version");
+            return;
+        }
+        const uint32_t expected_hash = readUint32Le(frame + WirelessUsageDataSize);
+        if (fnv1a32(frame, WirelessUsageDataSize) != expected_hash) {
+            reject("checksum");
+            return;
+        }
+        const uint32_t sequence       = readUint32Le(frame + 2);
+        const uint16_t remaining      = readUint16Le(frame + 6);
+        const uint32_t reset_epoch    = readUint32Le(frame + 8);
+        const uint32_t captured_epoch = readUint32Le(frame + 12);
+        const uint8_t reset_credits   = frame[16];
+        if (sequence == 0 || remaining > 10000 || captured_epoch == 0 || reset_credits > 99) {
+            reject("fields");
+            return;
+        }
+        const uint32_t received_at_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        if (!GetHostBridge().applyUsage(sequence, remaining, reset_epoch, captured_epoch, reset_credits,
+                                        received_at_ms)) {
+            reject("stale_sequence");
+            return;
+        }
+        ++_wireless_usage_accepted;
+        ESP_LOGI(Tag, "wireless usage frame accepted seq=%lu remaining_bp=%u", static_cast<unsigned long>(sequence),
+                 static_cast<unsigned>(remaining));
+        return;
+    }
     if (data == nullptr || length < 2) {
         ++_rpc_errors;
         return;

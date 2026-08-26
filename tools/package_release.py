@@ -374,8 +374,8 @@ python -m esptool --chip {chip} --port COM5 --baud 460800 write_flash 0x0 Stopwa
 
 Verify the files against `SHA256SUMS` before flashing.
 
-After flashing, see `BRIDGE.md` to enable live Codex quota and reset-time updates over USB
-Serial/JTAG.
+After flashing, see `BRIDGE.md` to enable live Codex quota and reset-time updates over Bluetooth HID,
+with USB Serial/JTAG available as a fallback.
 """
     (bundle_dir / "FLASHING.md").write_text(flashing, encoding="utf-8")
 
@@ -394,6 +394,7 @@ Serial/JTAG.
             "script": "stopwatch_bridge.py",
             "documentation": "BRIDGE.md",
             "source_method": "account/rateLimits/read",
+            "default_transport": "bluetooth_hid",
         },
     }
     (bundle_dir / "manifest.json").write_text(

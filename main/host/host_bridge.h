@@ -5,6 +5,8 @@
 
 #include <cstdint>
 
+#include <freertos/FreeRTOS.h>
+
 struct HostBridgeSnapshot {
     bool online                   = false;
     bool usageAvailable           = false;
@@ -36,6 +38,7 @@ private:
     uint16_t _remaining_basis_points = 0;
     uint8_t _reset_credits           = 0;
     bool _has_usage                  = false;
+    mutable portMUX_TYPE _mux        = portMUX_INITIALIZER_UNLOCKED;
 };
 
 HostBridge& GetHostBridge();
