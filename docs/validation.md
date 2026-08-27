@@ -119,10 +119,10 @@ The 2026-08-26 v0.4.0 run used the same ESP32-S3 revision 0.2 StopWatch and Code
 VID:PID `303A:8360`, usage page `FF00`, usage `0001`, while Codex Desktop remained connected. The
 final firmware image was `0x1a54c0` bytes and all flashed regions passed esptool hash verification.
 
-The bridge reported `transport=bluetooth remaining_bp=6200`. A separate USB diagnostic read then
-proved the frame was handled wirelessly: `wireless_usage_accepted=1`,
+The bridge reported `transport=bluetooth` with a valid non-zero remaining value. A separate USB
+diagnostic read then proved the frame was handled wirelessly: `wireless_usage_accepted=1`,
 `wireless_usage_rejected=0`, `host_bridge=1`, `usage_available=1`, `usage_stale=0`, and the same
-`remaining_bp=6200` with a valid reset countdown. Strict verification also retained:
+remaining value with a valid reset countdown. Strict verification also retained:
 
 - HAL self-test `17/17`, physical controls `13/13`, BLE ready/connected/protocol `1/1/1`
 - 50 Hz transport `151/151`, dropped `0`, failures `0`, queue high-water mark `1`
@@ -143,7 +143,7 @@ Strict hardware verification reported:
 - HAL self-test `17/17`, physical controls `13/13`, BLE ready/connected/protocol `1/1/1`
 - 50 Hz transport `151/151`, dropped `0`, failures `0`, queue high-water mark `1`
 - `HOST SUMMARY pass=10 skip=1 failures=0`
-- live usage bridge `remaining_bp=6700`, reset timestamp present, reset credits `1`
+- live usage bridge accepted a non-zero value with reset timestamp and reset-credit metadata present
 
 ### 0.3.0 circular Command UI
 
@@ -162,7 +162,7 @@ Strict hardware verification after the final flash reported:
 - HAL self-test `17/17`, physical controls `13/13`, BLE ready/connected/protocol `1/1/1`
 - RPC errors `0`, TX failures `0`, half-open recoveries `0`
 - 50 Hz transport `151/151`, dropped `0`, failures `0`, queue high-water mark `1`
-- live bridge `PASS`: `remaining_bp=6900`, reset timestamp present, reset credits `1`, stale `0`
+- live bridge `PASS`: non-zero remaining value, reset timestamp present, stale `0`
 
 ### 0.2.0 baseline (historical)
 

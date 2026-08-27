@@ -5,7 +5,7 @@ param(
     [string]$Action = 'doctor',
 
     [string]$Port,
-    [string]$IdfPath = 'D:\software\v5.5.4\esp-idf',
+    [string]$IdfPath,
     [string]$BackupPath,
     [string]$Version,
     [string]$CodexVersion,
@@ -49,7 +49,15 @@ function Enable-DirectGit {
 }
 
 function Enter-EspIdf {
-    $exportScript = Join-Path $IdfPath 'export.ps1'
+    $effectiveIdfPath = $IdfPath
+    if (-not $effectiveIdfPath) {
+        $effectiveIdfPath = $env:IDF_PATH
+    }
+    if (-not $effectiveIdfPath) {
+        throw 'ESP-IDF path is required. Set IDF_PATH or pass -IdfPath.'
+    }
+    $effectiveIdfPath = [System.IO.Path]::GetFullPath($effectiveIdfPath)
+    $exportScript = Join-Path $effectiveIdfPath 'export.ps1'
     if (-not (Test-Path -LiteralPath $exportScript -PathType Leaf)) {
         throw "ESP-IDF export script was not found: $exportScript"
     }

@@ -1,7 +1,9 @@
 # Stopwatch Micro
 
-[![Firmware build](https://github.com/xuruiray/Stopwatch-Micro/actions/workflows/firmware-build.yml/badge.svg?branch=main)](https://github.com/xuruiray/Stopwatch-Micro/actions/workflows/firmware-build.yml)
-[![clang-format](https://github.com/xuruiray/Stopwatch-Micro/actions/workflows/clang-format-check.yml/badge.svg?branch=main)](https://github.com/xuruiray/Stopwatch-Micro/actions/workflows/clang-format-check.yml)
+**English** | [简体中文](README.zh-CN.md)
+
+[![Firmware build](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/firmware-build.yml/badge.svg?branch=main)](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/firmware-build.yml)
+[![clang-format](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/clang-format-check.yml/badge.svg?branch=main)](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/clang-format-check.yml)
 
 Stopwatch Micro is dedicated firmware that turns the M5Stack StopWatch into an unofficial
 Codex Micro-compatible controller. It boots directly into a two-page LVGL interface and keeps
@@ -61,9 +63,21 @@ returns immediately to Pairing.
 | Top reasoning arc | `ENC_CC`, `ENC`, `ENC_CW` | Decrease/increase reasoning effort; press/select; returns to center |
 | Bottom touch sensor | local system | Hold for 3 seconds to erase BLE bonds and restart pairing |
 
-In **Settings → Codex Micro**, set **Dial → Reasoning only**. Turn on **Use separate microphone
-keys** before assigning ACT11 to **New Task**; with the stock combined microphone-key setting,
-Codex Desktop intentionally ignores standalone ACT11 events.
+### One-time Codex Micro setup
+
+After the device is detected for the first time, open **Settings → Codex Micro** and make these
+host-side assignments:
+
+1. Set **Dial → Reasoning only** so the top arc changes reasoning effort rather than navigating the
+   composer.
+2. Turn on **Use separate microphone keys**.
+3. Select the independent `ACT11` switch and assign **New Task**. With the combined microphone-key
+   setting, Codex Desktop intentionally ignores standalone `ACT11` events.
+4. Confirm **Analog Up → Toggle plan mode**. This is the documented default, and the Plan button
+   emits that direction.
+
+These are ChatGPT Desktop settings, not firmware settings, so they may need to be applied again
+after resetting the Codex Micro layout.
 
 After a bond reset, remove the old `Codex Micro` entry from Windows Bluetooth settings if Windows
 still retains it, then pair again.
@@ -84,8 +98,8 @@ and AMOLED aging; the pixel shift reduces but cannot eliminate burn-in risk.
 The center circular status dial shows canonical Codex quota remaining, its reset countdown, and a
 level-aware StopWatch battery icon with percentage and a charging indicator.
 Quota data comes from the official Codex App Server through the wireless Bluetooth HID bridge; it is
-marked stale after two minutes and unavailable after ten minutes rather than displaying a fabricated value. See
-[`docs/bridge.md`](docs/bridge.md) for setup and the required one-time Codex Micro mappings.
+marked stale after two minutes and unavailable after ten minutes rather than displaying a fabricated
+value. See [`docs/bridge.md`](docs/bridge.md) for setup and the required one-time Codex Micro mappings.
 
 ## Web review prototype
 
@@ -95,7 +109,7 @@ The live GitHub Pages build is available below:
 
 ![Stopwatch Micro Command UI preview](docs/assets/stopwatch-micro-ui.png)
 
-<https://xuruiray.github.io/Stopwatch-Micro/>
+<https://dissipative-atlas.github.io/Stopwatch-Micro/>
 
 Command is the default preview. Use `?paired=0` to show Pairing and `?mic=1` to preview the Mic
 state. The page mirrors the six layered command keys, reasoning arc, quota card, battery icon, and
@@ -131,9 +145,11 @@ The validated toolchain is ESP-IDF v5.5.4.
 
 On Windows, use the checked-in PowerShell entry point. It validates the toolchain, discovers the
 ESP32-S3 USB Serial/JTAG port, refuses to flash until a full backup exists, and provides a guarded
-factory restore path:
+factory restore path. Set `IDF_PATH` to your ESP-IDF v5.5.4 checkout, or pass `-IdfPath` to commands
+that use the toolchain:
 
 ```powershell
+$env:IDF_PATH = 'C:\path\to\esp-idf-v5.5.4'
 .\tools\stopwatch.ps1 doctor -Port COM5
 .\tools\stopwatch.ps1 deps -DirectGit
 .\tools\stopwatch.ps1 build -SkipDeps
@@ -145,6 +161,15 @@ factory restore path:
 Keep `bridge` running for live quota/reset updates. Bluetooth mode shares the paired HID collection
 with Codex Desktop and does not open COM5, so the USB cable can be disconnected. Use `bridge -Once`
 for one snapshot; pass `-Transport usb -Port COM5` only when explicitly using the serial fallback.
+
+To install the hidden, single-instance bridge as a current-user Windows logon task:
+
+```powershell
+.\tools\bridge_autostart.ps1 install
+.\tools\bridge_autostart.ps1 status
+```
+
+Use `stop`, `start`, or `remove` with the same script to manage it.
 
 The first backup is a complete 16 MiB image. Restore it only when intentionally returning to the
 factory firmware:
@@ -172,10 +197,11 @@ dependencies, builds, backups, and release artifacts are ignored by Git.
 
 ## Release artifacts
 
-The upstream repository does not currently publish a GitHub Release. Build from source, then run
-`.\tools\stopwatch.ps1 package` to create a self-contained ZIP locally. The bundle contains the
-individual images, a merged image, `flash.ps1`, the machine-readable flash plan, the tested Codex
-version, the Windows usage bridge and setup guide, and SHA-256 checksums.
+Download the release checksum and self-contained flashing ZIP from
+[GitHub Releases](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/releases). The bundle contains the
+individual images, merged image, flashing script and plan, tested Codex version, wireless bridge,
+logon-task helper, setup guide, licenses, and SHA-256 checksums. To reproduce it locally, run
+`.\tools\stopwatch.ps1 package` from a clean commit.
 
 ## Serial diagnostics
 
@@ -231,6 +257,15 @@ controls while running `python3 -u tools/serial_debug_test.py --trace-seconds 30
 The project has separate source-level, browser, build, and on-device checks. See
 [`docs/validation.md`](docs/validation.md) for the current checklist and the distinction between
 automated verification and host/device behavior that must be observed manually.
+
+## Contributors
+
+- **Dissipative-ATLAS** — project owner and hardware integration.
+- **OpenAI Codex** — AI engineering contributor for firmware, the Windows bridge, UI iteration,
+  testing, and documentation.
+
+The Codex credit records AI-assisted engineering work on this community project. It does not imply
+OpenAI sponsorship, endorsement, or official support.
 
 ## Attribution and license
 

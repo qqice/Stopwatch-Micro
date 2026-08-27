@@ -25,6 +25,9 @@ RESERVED_BUNDLE_NAMES = {
         "flash.ps1",
         "FLASHING.md",
         "BRIDGE.md",
+        "bridge_autostart.ps1",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
         "manifest.json",
         "SHA256SUMS",
         "stopwatch_bridge.py",
@@ -315,7 +318,10 @@ def main() -> None:
 
     support_files = {
         "stopwatch_bridge.py": PROJECT_ROOT / "tools" / "stopwatch_bridge.py",
+        "bridge_autostart.ps1": PROJECT_ROOT / "tools" / "bridge_autostart.ps1",
         "BRIDGE.md": PROJECT_ROOT / "docs" / "bridge.md",
+        "LICENSE": PROJECT_ROOT / "LICENSE",
+        "THIRD_PARTY_NOTICES.md": PROJECT_ROOT / "THIRD_PARTY_NOTICES.md",
     }
     for name, source in support_files.items():
         if not source.is_file():
@@ -393,9 +399,11 @@ with USB Serial/JTAG available as a fallback.
         "usage_bridge": {
             "script": "stopwatch_bridge.py",
             "documentation": "BRIDGE.md",
+            "autostart": "bridge_autostart.ps1",
             "source_method": "account/rateLimits/read",
             "default_transport": "bluetooth_hid",
         },
+        "licenses": ["LICENSE", "THIRD_PARTY_NOTICES.md"],
     }
     (bundle_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"

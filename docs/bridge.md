@@ -62,6 +62,20 @@ so stop a USB bridge with `Ctrl+C` before using `verify`, `monitor`, `flash`, or
 program. If the bridge has not refreshed for more than two minutes, the watch marks the value stale;
 after ten minutes it displays the quota as unavailable instead of treating an error as zero usage.
 
+## Start automatically after Windows sign-in
+
+Install a hidden, current-user Scheduled Task that runs one Bluetooth bridge instance after sign-in,
+continues on battery power, and restarts after an unexpected exit:
+
+```powershell
+.\tools\bridge_autostart.ps1 install
+.\tools\bridge_autostart.ps1 status
+```
+
+From an extracted release ZIP, omit the `tools` directory prefix. Manage the task with `start`,
+`stop`, or `remove`. Sign-in rather than machine startup is intentional: the bridge needs the user's
+Codex login state and Bluetooth session.
+
 ## One-time Codex Micro settings
 
 Open **Settings → Codex Micro** in the Codex desktop app and set:
