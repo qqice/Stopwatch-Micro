@@ -9,11 +9,6 @@ Stopwatch Micro 是一套面向 M5Stack StopWatch Dev Kit（ESP32-S3）的专用
 非官方的 Codex Micro 兼容控制器。设备开机后直接进入双页面 LVGL 界面，并把低功耗蓝牙作为
 系统服务持续运行；原厂 Mooncake 启动器和演示应用不包含在本固件中。
 
-![运行 Command 界面的 Stopwatch Micro](docs/assets/stopwatch-micro-hero.png)
-
-_概念产品图根据本项目界面以及 [M5Stack StopWatch 官方产品页](https://shop.m5stack.com/products/m5stack-stopwatch-dev-kit-esp32-s3)
-展示的外形生成。_
-
 > 本项目通过非稳定公开 API 的协议实现非官方兼容层。ChatGPT Desktop 后续更新可能导致行为
 > 变化，并需要同步更新固件或桥接程序。
 
@@ -31,12 +26,6 @@ _概念产品图根据本项目界面以及 [M5Stack StopWatch 官方产品页](
 </table>
 
 _产品概念示意图由项目所有者提供。_
-
-## 视频演示
-
-[![在 YouTube 上观看 Stopwatch Micro 演示](https://img.youtube.com/vi/PCNvLT41fwM/maxresdefault.jpg)](https://www.youtube.com/shorts/PCNvLT41fwM)
-
-点击预览图可观看 Stopwatch Micro 控制 Codex 的 YouTube Short。
 
 ## 主要功能与界面
 
@@ -184,8 +173,6 @@ python -m pip install hidapi pyserial
 ## Web 界面预览
 
 无需连接设备即可在 [`web/index.html`](web/index.html) 中检查交互。在线 GitHub Pages 版本：
-
-![Stopwatch Micro Command UI 预览](docs/assets/stopwatch-micro-ui.png)
 
 <https://dissipative-atlas.github.io/Stopwatch-Micro/>
 

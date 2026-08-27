@@ -10,11 +10,6 @@ Codex Micro-compatible controller. It boots directly into a two-page LVGL interf
 Bluetooth Low Energy active as a system service; the original Mooncake launcher and demo apps are
 not included.
 
-![Stopwatch Micro running the Command interface](docs/assets/stopwatch-micro-hero.png)
-
-_Concept product image generated from the project UI and the physical form shown on the
-[official M5Stack StopWatch product page](https://shop.m5stack.com/products/m5stack-stopwatch-dev-kit-esp32-s3)._
-
 > This project implements an unofficial compatibility layer for a protocol that is not a stable
 > public API. A future ChatGPT update may require corresponding firmware changes.
 
@@ -32,12 +27,6 @@ _Concept product image generated from the project UI and the physical form shown
 </table>
 
 _Product concept renders supplied by the project owner._
-
-## Video demo
-
-[![Watch the Stopwatch Micro demo on YouTube](https://img.youtube.com/vi/PCNvLT41fwM/maxresdefault.jpg)](https://www.youtube.com/shorts/PCNvLT41fwM)
-
-_Click the preview to watch Stopwatch Micro controlling Codex in the YouTube Short._
 
 ## References and project status
 
@@ -124,8 +113,6 @@ value. See [`docs/bridge.md`](docs/bridge.md) for setup and the required one-tim
 The reviewable HTML version of the interface lives in [`web/index.html`](web/index.html). It models
 connection, page, touch, reasoning-arc, and physical-key interactions without requiring the device.
 The live GitHub Pages build is available below:
-
-![Stopwatch Micro Command UI preview](docs/assets/stopwatch-micro-ui.png)
 
 <https://dissipative-atlas.github.io/Stopwatch-Micro/>
 
