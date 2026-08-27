@@ -257,6 +257,9 @@ ready/connected/protocol `1/1/1`、无线额度更新拒绝数 `0`，以及
 
 - [Codex Micro 官方文档](https://learn.chatgpt.com/docs/features/codex-micro) 是配对、控制项、
   ChatGPT Desktop 行为和预期用户体验的权威参考。
+- [`xuruiray/Stopwatch-Micro`](https://github.com/xuruiray/Stopwatch-Micro) 提供了最初的公开项目
+  基础、仓库结构、板级支持集成和早期构建/界面工作。本仓库现为独立维护，同时保留并感谢这些
+  上游贡献和历史。
 - [`imliubo/codex-micro-4-core2`](https://github.com/imliubo/codex-micro-4-core2) 是非官方的
   逆向兼容实现，本项目参考其 BLE HID 身份、Codex Micro 控制 ID 和厂商 JSON-RPC 传输。
   审阅的上游版本为 [`2ee23a4`](https://github.com/imliubo/codex-micro-4-core2/commit/2ee23a4ab696f94bb78d250f28cc4a9b879ba079)。

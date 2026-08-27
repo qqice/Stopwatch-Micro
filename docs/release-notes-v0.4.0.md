@@ -60,6 +60,8 @@ bridge helpers, manifest, checksums, license, and third-party notices.
 The Codex credit records AI-assisted engineering work; it does not imply OpenAI sponsorship,
 endorsement, or official support. This independent community project is not affiliated with OpenAI,
 ChatGPT, Codex, Work Louder, or M5Stack. The compatibility protocol is not a stable public API.
+The project gratefully acknowledges the original public foundation and early engineering work from
+[`xuruiray/Stopwatch-Micro`](https://github.com/xuruiray/Stopwatch-Micro).
 
 ---
 
@@ -123,3 +125,5 @@ ZIP 包含全部固件镜像、刷机工具、桥接助手、manifest、校验�
 这里对 Codex 的署名用于记录 AI 辅助工程贡献，不代表 OpenAI 对项目提供赞助、背书或官方支持。
 本项目是独立社区项目，与 OpenAI、ChatGPT、Codex、Work Louder 或 M5Stack 不存在隶属关系；
 兼容协议也不是稳定的公共 API。
+项目感谢 [`xuruiray/Stopwatch-Micro`](https://github.com/xuruiray/Stopwatch-Micro) 提供的最初公开
+项目基础和早期工程贡献。

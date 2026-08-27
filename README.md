@@ -46,6 +46,9 @@ Stopwatch Micro was built with reference to the following sources:
 - [Official Codex Micro documentation](https://learn.chatgpt.com/docs/features/codex-micro) is the
   authoritative reference for pairing, controls, ChatGPT Desktop behavior, and the intended user
   experience.
+- [`xuruiray/Stopwatch-Micro`](https://github.com/xuruiray/Stopwatch-Micro) provided the original
+  public project foundation, repository structure, board-support integration, and early build/UI
+  work. This independently maintained repository retains that contribution and upstream history.
 - [`imliubo/codex-micro-4-core2`](https://github.com/imliubo/codex-micro-4-core2) is an unofficial,
   reverse-engineered compatibility implementation used as the engineering reference for the BLE
   HID identity, Codex Micro control IDs, and vendor JSON-RPC transport. The reviewed upstream
