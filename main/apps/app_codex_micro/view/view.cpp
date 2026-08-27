@@ -1205,9 +1205,9 @@ void CodexMicroView::update(const CodexMicroState& state)
 
     if (_page == Page::Command) {
         updateCenterStatus(state);
-        const bool keys_animated = state.keys.effect == CodexMicroLightEffect::Breath ||
-                                   state.keys.effect == CodexMicroLightEffect::ShallowBreath ||
-                                   state.keys.effect == CodexMicroLightEffect::Snake;
+        const bool keys_animated    = state.keys.effect == CodexMicroLightEffect::Breath ||
+                                      state.keys.effect == CodexMicroLightEffect::ShallowBreath ||
+                                      state.keys.effect == CodexMicroLightEffect::Snake;
         const bool keys_refresh_due = tick - _command_last_update_tick >= AnimatedLightingRefreshPeriodMs;
         if (state_changed || _page_dirty || (keys_animated && keys_refresh_due && !input_active)) {
             updateCommandLighting(state);

@@ -209,7 +209,7 @@ void SerialDebug::handleLine(char* line)
         const CodexMicroBleDiagnostics diagnostics = GetCodexMicroBle().diagnostics();
         const bool healthy = GetCodexMicroBle().protocolSelfTest() && diagnostics.inputDropped == 0 &&
                              diagnostics.txFailures == 0 && diagnostics.rpcErrors == 0;
-        char details[208] = {};
+        char details[208]  = {};
         std::snprintf(details, sizeof(details),
                       "controls=13 encoder=3 report_id=6 report_bytes=63 payload_bytes=61 dropped=%lu tx_failures=%lu "
                       "rpc_errors=%lu wireless_usage_accepted=%lu wireless_usage_rejected=%lu",
@@ -234,10 +234,10 @@ void SerialDebug::handleLine(char* line)
         char* credits_value     = ::strtok_r(nullptr, " \t", &save);
         char* extra             = ::strtok_r(nullptr, " \t", &save);
         const bool valid        = extra == nullptr && parseUnsignedStrict(sequence_value, 1, UINT32_MAX, sequence) &&
-                           parseUnsignedStrict(remaining_value, 0, 10000, remaining) &&
-                           parseUnsignedStrict(reset_value, 0, UINT32_MAX, reset_epoch) &&
-                           parseUnsignedStrict(captured_value, 1, UINT32_MAX, captured_epoch) &&
-                           parseUnsignedStrict(credits_value, 0, 99, reset_credits);
+                                  parseUnsignedStrict(remaining_value, 0, 10000, remaining) &&
+                                  parseUnsignedStrict(reset_value, 0, UINT32_MAX, reset_epoch) &&
+                                  parseUnsignedStrict(captured_value, 1, UINT32_MAX, captured_epoch) &&
+                                  parseUnsignedStrict(credits_value, 0, 99, reset_credits);
         if (!valid) {
             result("host-usage", "FAIL", "reason=invalid_fields");
             return;
@@ -682,8 +682,8 @@ void SerialDebug::updateTransportTest(uint32_t now)
         return;
     }
     const CodexMicroBleDiagnostics after = GetCodexMicroBle().diagnostics();
-    const bool sent = after.txMessages > _transport_tx_messages && after.txReports > _transport_tx_reports &&
-                      after.txFailures == _transport_tx_failures;
+    const bool sent   = after.txMessages > _transport_tx_messages && after.txReports > _transport_tx_reports &&
+                        after.txFailures == _transport_tx_failures;
     char details[112] = {};
     std::snprintf(details, sizeof(details), "messages_delta=%lu reports_delta=%lu failures_delta=%lu",
                   static_cast<unsigned long>(after.txMessages - _transport_tx_messages),
@@ -763,14 +763,14 @@ void SerialDebug::updatePerformanceTest(uint32_t now)
     const uint32_t messages                   = after.txMessages - _performance_tx_messages;
     const uint32_t reports                    = after.txReports - _performance_tx_reports;
     const uint32_t failures                   = after.txFailures - _performance_tx_failures;
-    const bool activity_ok                    = _performance_generate_traffic
-                                                    ? _performance_generated >= 40 && _performance_accepted == _performance_generated &&
+    const bool activity_ok = _performance_generate_traffic
+                                 ? _performance_generated >= 40 && _performance_accepted == _performance_generated &&
                                        queued == _performance_accepted
-                                                    : queued > 0 && processed > 0;
-    const bool responsive = activity_ok && dropped == 0 && processed > 0 && messages > 0 && reports > 0 &&
-                            failures == 0 && display.touchReads > 0 && display.touchMaxGapUs <= 50000 &&
-                            _performance_loop_max_gap_us <= 50000;
-    char details[320] = {};
+                                 : queued > 0 && processed > 0;
+    const bool responsive  = activity_ok && dropped == 0 && processed > 0 && messages > 0 && reports > 0 &&
+                             failures == 0 && display.touchReads > 0 && display.touchMaxGapUs <= 50000 &&
+                             _performance_loop_max_gap_us <= 50000;
+    char details[320]      = {};
     std::snprintf(details, sizeof(details),
                   "generated=%lu accepted=%lu queued=%lu processed=%lu dropped=%lu messages=%lu reports=%lu "
                   "failures=%lu queue_high=%lu tx_max_us=%lu loop_gap_max_us=%lu lvgl_core=%d tx_core=%d "

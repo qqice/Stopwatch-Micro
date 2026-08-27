@@ -17,6 +17,21 @@ _概念产品图根据本项目界面以及 [M5Stack StopWatch 官方产品页](
 > 本项目通过非稳定公开 API 的协议实现非官方兼容层。ChatGPT Desktop 后续更新可能导致行为
 > 变化，并需要同步更新固件或桥接程序。
 
+## 产品示意图
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/stopwatch-micro-command-product.jpg" alt="Stopwatch Micro Command 界面产品示意图"></td>
+    <td width="50%"><img src="docs/assets/stopwatch-micro-agents-product.jpg" alt="Stopwatch Micro Agent 界面产品示意图"></td>
+  </tr>
+  <tr>
+    <td align="center">Command 界面</td>
+    <td align="center">Agent 界面</td>
+  </tr>
+</table>
+
+_产品概念示意图由项目所有者提供。_
+
 ## 视频演示
 
 [![在 YouTube 上观看 Stopwatch Micro 演示](https://img.youtube.com/vi/PCNvLT41fwM/maxresdefault.jpg)](https://www.youtube.com/shorts/PCNvLT41fwM)

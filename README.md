@@ -18,6 +18,21 @@ _Concept product image generated from the project UI and the physical form shown
 > This project implements an unofficial compatibility layer for a protocol that is not a stable
 > public API. A future ChatGPT update may require corresponding firmware changes.
 
+## Product renders
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/stopwatch-micro-command-product.jpg" alt="Stopwatch Micro Command interface product render"></td>
+    <td width="50%"><img src="docs/assets/stopwatch-micro-agents-product.jpg" alt="Stopwatch Micro Agent interface product render"></td>
+  </tr>
+  <tr>
+    <td align="center">Command interface</td>
+    <td align="center">Agent interface</td>
+  </tr>
+</table>
+
+_Product concept renders supplied by the project owner._
+
 ## Video demo
 
 [![Watch the Stopwatch Micro demo on YouTube](https://img.youtube.com/vi/PCNvLT41fwM/maxresdefault.jpg)](https://www.youtube.com/shorts/PCNvLT41fwM)

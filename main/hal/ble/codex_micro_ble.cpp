@@ -743,15 +743,15 @@ CodexMicroBleDiagnostics CodexMicroBle::diagnostics() const
         .rpcErrors             = _rpc_errors.load(),
         .wirelessUsageAccepted = _wireless_usage_accepted.load(),
         .wirelessUsageRejected = _wireless_usage_rejected.load(),
-        .queuePending          = _input_queue == nullptr ? 0U
-                                                         : static_cast<uint32_t>(uxQueueMessagesWaiting(_input_queue) +
-                                                                                 uxQueueMessagesWaiting(_critical_input_queue) +
-                                                                                 uxQueueMessagesWaiting(_joystick_queue)),
-        .queueHighWater        = _queue_high_water.load(std::memory_order_relaxed),
-        .txMaxUs               = _tx_max_us.load(std::memory_order_relaxed),
-        .txTotalUs             = _tx_total_us.load(std::memory_order_relaxed),
-        .halfOpenRecoveries    = _half_open_recoveries.load(std::memory_order_relaxed),
-        .inputTaskCore         = _input_task_core.load(std::memory_order_relaxed),
+        .queuePending = _input_queue == nullptr ? 0U
+                                                : static_cast<uint32_t>(uxQueueMessagesWaiting(_input_queue) +
+                                                                        uxQueueMessagesWaiting(_critical_input_queue) +
+                                                                        uxQueueMessagesWaiting(_joystick_queue)),
+        .queueHighWater     = _queue_high_water.load(std::memory_order_relaxed),
+        .txMaxUs            = _tx_max_us.load(std::memory_order_relaxed),
+        .txTotalUs          = _tx_total_us.load(std::memory_order_relaxed),
+        .halfOpenRecoveries = _half_open_recoveries.load(std::memory_order_relaxed),
+        .inputTaskCore      = _input_task_core.load(std::memory_order_relaxed),
     };
 }
 
@@ -780,10 +780,10 @@ bool CodexMicroBle::protocolSelfTest() const
     }
 
     std::array<char, 112> key_message = {};
-    const int key_length              = std::snprintf(key_message.data(), key_message.size(),
-                                                      "{\"method\":\"v.oai.hid\",\"params\":{\"k\":\"%s\",\"act\":%u,\"ag\":%d}}",
-                                                      codexMicroControlCode(CodexMicroControl::Agent1),
-                                                      static_cast<unsigned>(CodexMicroKeyAction::Press), 0);
+    const int key_length = std::snprintf(key_message.data(), key_message.size(),
+                                         "{\"method\":\"v.oai.hid\",\"params\":{\"k\":\"%s\",\"act\":%u,\"ag\":%d}}",
+                                         codexMicroControlCode(CodexMicroControl::Agent1),
+                                         static_cast<unsigned>(CodexMicroKeyAction::Press), 0);
     if (key_length <= 0 || static_cast<std::size_t>(key_length) >= key_message.size() ||
         std::strcmp(key_message.data(), "{\"method\":\"v.oai.hid\",\"params\":{\"k\":\"AG00\",\"act\":1,\"ag\":0}}") !=
             0) {
@@ -1364,7 +1364,7 @@ void CodexMicroBle::onOutput(const uint8_t* data, std::size_t length)
     const char* payload             = reinterpret_cast<const char*>(data + offset + 2);
     constexpr char TopLevelPrefix[] = "{\"method\"";
     bool startsTopLevel             = payloadLength >= sizeof(TopLevelPrefix) - 1 &&
-                          std::memcmp(payload, TopLevelPrefix, sizeof(TopLevelPrefix) - 1) == 0;
+                                      std::memcmp(payload, TopLevelPrefix, sizeof(TopLevelPrefix) - 1) == 0;
     if (startsTopLevel && !_rpc_buffer.empty()) {
         _rpc_buffer.clear();
     }
