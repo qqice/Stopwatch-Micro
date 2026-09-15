@@ -21,15 +21,34 @@ HostBridge& GetHostBridge()
 bool HostBridge::applyUsage(uint32_t sequence, uint16_t remainingBasisPoints, uint32_t resetEpoch,
                             uint32_t capturedEpoch, uint8_t resetCredits, uint32_t receivedAtMs)
 {
-    if (sequence == 0 || remainingBasisPoints > 10000 || capturedEpoch == 0 || resetCredits > 99) {
+    return apply(false,sequence,remainingBasisPoints,resetEpoch,capturedEpoch,resetCredits,receivedAtMs);
+}
+
+bool HostBridge::applyNetworkUsage(uint16_t remainingBasisPoints, uint32_t resetEpoch,
+                                   uint32_t capturedEpoch, uint8_t resetCredits, uint32_t receivedAtMs)
+{
+    return apply(true,0,remainingBasisPoints,resetEpoch,capturedEpoch,resetCredits,receivedAtMs);
+}
+
+bool HostBridge::apply(bool network, uint32_t sequence, uint16_t remainingBasisPoints, uint32_t resetEpoch,
+                       uint32_t capturedEpoch, uint8_t resetCredits, uint32_t receivedAtMs)
+{
+    if ((!network && sequence == 0) || remainingBasisPoints > 10000 || capturedEpoch == 0 || resetCredits > 99) {
         return false;
     }
     portENTER_CRITICAL(&_mux);
-    if (!sequenceNewer(sequence, _last_usage_sequence)) {
+    if (!network && !sequenceNewer(sequence, _last_usage_sequence)) {
         portEXIT_CRITICAL(&_mux);
         return false;
     }
-    _last_usage_sequence    = sequence;
+    // Network snapshots must never advance the BLE sender's sequence space.
+    if (!network) _last_usage_sequence = sequence;
+    // A valid but older sample is acknowledged without replacing the current
+    // value. Do not misreport this as a BLE stale-sequence retry condition.
+    if (capturedEpoch < _captured_epoch) {
+        portEXIT_CRITICAL(&_mux);
+        return true;
+    }
     _remaining_basis_points = remainingBasisPoints;
     _reset_epoch            = resetEpoch;
     _captured_epoch         = capturedEpoch;

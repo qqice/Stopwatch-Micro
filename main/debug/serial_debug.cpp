@@ -8,6 +8,7 @@
 #include <hal/ble/codex_micro_ble.h>
 #include <hal/hal.h>
 #include <host/host_bridge.h>
+#include <host/network_quota.h>
 #include <system_config.h>
 
 #include <algorithm>
@@ -191,6 +192,35 @@ void SerialDebug::handleLine(char* line)
     }
     if (std::strcmp(command, "ping") == 0) {
         result("ping", "PASS", "reply=pong");
+        return;
+    }
+    if (std::strcmp(command, "network-config") == 0) {
+        const char* encoded = ::strtok_r(nullptr, " \t", &save);
+        const bool ok = GetNetworkQuota().configure(encoded);
+        const bool running=GetNetworkQuota().configured();
+        if (ok && !running) GetNetworkQuota().begin();
+        result("network-config", ok ? "PASS" : "FAIL", ok ? (running ? "restart_required=1" : "restart_required=0") : "invalid_config");
+        return;
+    }
+    if (std::strcmp(command, "network") == 0) {
+        char details[128]{};
+        auto& network=GetNetworkQuota();
+        std::snprintf(details,sizeof(details),"configured=%d connected=%d accepted=%lu failures=%lu",
+            network.configured(),network.connected(),static_cast<unsigned long>(network.accepted()),
+            static_cast<unsigned long>(network.failures()));
+        result("network", "PASS", details);
+        return;
+    }
+    if (std::strcmp(command, "network-selftest") == 0) {
+        HostBridge test;
+        bool ok=test.applyUsage(100,8000,5000,1000,0,100);
+        ok=ok && test.applyNetworkUsage(7000,5000,1001,0,200) && test.lastUsageSequence()==100;
+        ok=ok && test.applyUsage(101,6000,5000,1002,0,300);
+        ok=ok && test.applyNetworkUsage(9000,5000,999,0,400);
+        ok=ok && test.applyUsage(102,9000,5000,1001,0,400) && test.lastUsageSequence()==102;
+        ok=ok && test.snapshot(400).remainingBasisPoints==6000;
+        ok=ok && test.snapshot(131000).usageStale && !test.snapshot(601000).usageAvailable;
+        result("network-selftest",ok?"PASS":"FAIL","cases=7 source_sequence_and_freshness=1");
         return;
     }
     if (std::strcmp(command, "status") == 0) {

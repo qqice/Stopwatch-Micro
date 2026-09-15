@@ -5,6 +5,7 @@ set(APP_SRCS
     "apps/common/key_manager/key_manager.cpp"
     "debug/serial_debug.cpp"
     "host/host_bridge.cpp"
+    "host/network_quota.cpp"
 )
 
 set(PLATFORM_SRCS

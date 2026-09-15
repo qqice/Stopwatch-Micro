@@ -6,6 +6,7 @@
 #include <apps/common/audio/audio.h>
 #include <hal/hal.h>
 #include <host/host_bridge.h>
+#include <host/network_quota.h>
 #include <system_config.h>
 
 #include <algorithm>
@@ -1180,6 +1181,35 @@ void CodexMicroView::updateMicMeter()
 void CodexMicroView::update(const CodexMicroState& state)
 {
     const uint32_t tick = lv_tick_get();
+    if (GetNetworkQuota().configured() && !(state.connected && state.protocolReady)) {
+        if (!_offline_screen) {
+            _offline_screen=lv_obj_create(_root);
+            lv_obj_set_size(_offline_screen,466,466);
+            lv_obj_center(_offline_screen);
+            stylePanel(_offline_screen,Background,Background,0,0);
+            _offline_label=lv_label_create(_offline_screen);
+            lv_obj_set_width(_offline_label,350);
+            lv_obj_set_style_text_font(_offline_label,&lv_font_montserrat_28,0);
+            lv_obj_set_style_text_color(_offline_label,lv_color_hex(Green),0);
+            lv_obj_set_style_text_align(_offline_label,LV_TEXT_ALIGN_CENTER,0);
+            lv_obj_center(_offline_label);
+        }
+        lv_obj_remove_flag(_offline_screen,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(_offline_screen);
+        if (tick-_offline_update_tick>=1000 || !_offline_update_tick) {
+            const auto quota=GetHostBridge().snapshot(GetHAL().millis());
+            char text[160]{};
+            if (quota.usageAvailable) std::snprintf(text,sizeof(text),"CODEX QUOTA\n\n%u%% remaining\n%s\n\nBattery %u%%",
+                quota.remainingBasisPoints/100,quota.usageStale?"Stale":"Wi-Fi",GetHAL().getBatteryLevel());
+            else std::snprintf(text,sizeof(text),"CODEX QUOTA\n\n%s\n\nBattery %u%%",
+                GetNetworkQuota().connected()?"Waiting for server":"Connecting Wi-Fi",GetHAL().getBatteryLevel());
+            setLabelText(_offline_label,text);
+            _offline_update_tick=tick;
+        }
+        updateDisplayPower(tick,false);
+        return;
+    }
+    if (_offline_screen) lv_obj_add_flag(_offline_screen,LV_OBJ_FLAG_HIDDEN);
     updateDialReturn();
     updateMicMeter();
     const bool state_changed     = state.revision != _last_state_revision;

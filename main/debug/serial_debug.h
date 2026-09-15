@@ -28,7 +28,7 @@ private:
         Performance,
     };
 
-    static constexpr std::size_t LineCapacity = 192;
+    static constexpr std::size_t LineCapacity = 1536;
 
     void consume(char value);
     void handleLine(char* line);

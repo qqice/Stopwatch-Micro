@@ -22,11 +22,15 @@ class HostBridge {
 public:
     bool applyUsage(uint32_t sequence, uint16_t remainingBasisPoints, uint32_t resetEpoch, uint32_t capturedEpoch,
                     uint8_t resetCredits, uint32_t receivedAtMs);
+    bool applyNetworkUsage(uint16_t remainingBasisPoints, uint32_t resetEpoch, uint32_t capturedEpoch,
+                           uint8_t resetCredits, uint32_t receivedAtMs);
     HostBridgeSnapshot snapshot(uint32_t nowMs) const;
 
     uint32_t lastUsageSequence() const;
 
 private:
+    bool apply(bool network, uint32_t sequence, uint16_t remainingBasisPoints, uint32_t resetEpoch,
+               uint32_t capturedEpoch, uint8_t resetCredits, uint32_t receivedAtMs);
     static constexpr uint32_t BridgeStaleMs      = 130000;
     static constexpr uint32_t UsageUnavailableMs = 600000;
 

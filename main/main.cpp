@@ -10,6 +10,7 @@
 #include <apps/app_codex_micro/app_codex_micro.h>
 #include <hal/hal.h>
 #include <hal/ble/codex_micro_ble.h>
+#include <host/network_quota.h>
 #include <memory>
 #include <new>
 #include <utility>
@@ -35,6 +36,7 @@ extern "C" void app_main(void)
         return;
     }
     GetCodexMicroBle().setBattery(GetHAL().getBatteryLevel(), GetHAL().isBatteryCharging());
+    GetNetworkQuota().begin();
     uint32_t last_codex_battery_update = GetHAL().millis();
 
     // Setup ui hal

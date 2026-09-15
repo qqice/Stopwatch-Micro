@@ -120,6 +120,9 @@ private:
     lv_obj_t* _touch_control                  = nullptr;
     lv_obj_t* _mic_screen                     = nullptr;
     lv_obj_t* _pairing_screen                 = nullptr;
+    lv_obj_t* _offline_screen                 = nullptr;
+    lv_obj_t* _offline_label                  = nullptr;
+    uint32_t _offline_update_tick             = 0;
     lv_obj_t* _pairing_pulse                  = nullptr;
     lv_obj_t* _pairing_core                   = nullptr;
     lv_obj_t* _pairing_reset_control          = nullptr;
