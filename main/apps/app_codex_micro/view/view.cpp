@@ -73,8 +73,9 @@ constexpr float DialRatchetToneVolume                  = 0.30f;
 constexpr uint16_t DialRatchetVibrationDurationMs      = 10;
 constexpr uint8_t DialRatchetVibrationStrength         = 44;
 constexpr uint32_t AnimatedLightingRefreshPeriodMs     = 100;
-constexpr uint32_t DisplayDimDelayMs                   = 30000;
-constexpr uint32_t DisplayOffDelayMs                   = 120000;
+constexpr uint32_t DisplayLockDelayMs                  = 60000;
+constexpr uint32_t LockRefreshPeriodMs                 = 60000;
+constexpr int LockedBrightness                         = 8;
 constexpr uint32_t PixelShiftPeriodMs                  = 60000;
 constexpr float AmbientBrightnessScale                 = 0.42f;
 constexpr float AmbientSaturationScale                 = 0.72f;
@@ -490,6 +491,28 @@ void CodexMicroView::init(lv_obj_t* parent)
     lv_obj_add_event_cb(_wake_overlay, wakeOverlayEvent, LV_EVENT_RELEASED, this);
     lv_obj_add_event_cb(_wake_overlay, wakeOverlayEvent, LV_EVENT_PRESS_LOST, this);
 
+    _lock_screen = lv_obj_create(_root);
+    lv_obj_set_pos(_lock_screen, 0, 0);
+    lv_obj_set_size(_lock_screen, 466, 466);
+    lv_obj_add_flag(_lock_screen, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(_lock_screen, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(_lock_screen, LV_OBJ_FLAG_SCROLLABLE);
+    stylePanel(_lock_screen, 0x000000, 0x000000, 0, 0);
+
+    _lock_quota_label = lv_label_create(_lock_screen);
+    lv_obj_set_width(_lock_quota_label, 400);
+    lv_obj_set_style_text_font(_lock_quota_label, &lv_font_montserrat_28, LV_PART_MAIN);
+    lv_obj_set_style_text_color(_lock_quota_label, lv_color_hex(Text), LV_PART_MAIN);
+    lv_obj_set_style_text_align(_lock_quota_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(_lock_quota_label, LV_ALIGN_CENTER, 0, -42);
+
+    _lock_battery_label = lv_label_create(_lock_screen);
+    lv_obj_set_width(_lock_battery_label, 400);
+    lv_obj_set_style_text_font(_lock_battery_label, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_color(_lock_battery_label, lv_color_hex(KeyMuted), LV_PART_MAIN);
+    lv_obj_set_style_text_align(_lock_battery_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(_lock_battery_label, LV_ALIGN_CENTER, 0, 72);
+
     renderPage();
     ESP_LOGI(Tag, "Stopwatch Micro UI ready: 6 touch command + A mic + B send + 6 agent keys");
 }
@@ -793,7 +816,7 @@ void CodexMicroView::renderPage()
     if (_pairing_screen != nullptr && !lv_obj_has_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN)) {
         lv_obj_move_foreground(_pairing_screen);
     }
-    if (_wake_overlay != nullptr && (_wake_overlay_armed || _display_power == DisplayPowerState::Off)) {
+    if (_wake_overlay != nullptr && (_wake_overlay_armed || _display_power == DisplayPowerState::Locked)) {
         lv_obj_move_foreground(_wake_overlay);
     }
     ESP_LOGI(Tag, "page=%s", _page == Page::Command ? "command" : "agent");
@@ -834,6 +857,25 @@ bool CodexMicroView::micActive() const
     return _mic_active;
 }
 
+bool CodexMicroView::locked() const
+{
+    return _locked;
+}
+
+bool CodexMicroView::lockForDebug()
+{
+    if (!ready() || interactionActive()) {
+        return false;
+    }
+    lockDisplay();
+    return _locked;
+}
+
+uint32_t CodexMicroView::lockRefreshCount() const
+{
+    return _lock_refresh_count;
+}
+
 CodexMicroView::Page CodexMicroView::currentPage() const
 {
     return _page;
@@ -866,61 +908,97 @@ void CodexMicroView::setDisplayPower(DisplayPowerState state)
         return;
     }
 
-    _display_power = state;
-    int brightness = _display_base_brightness;
-    if (state == DisplayPowerState::Dimmed) {
-        brightness = std::max(10, _display_base_brightness / 4);
-    } else if (state == DisplayPowerState::Off) {
-        brightness = 0;
-    }
+    _display_power       = state;
+    const int brightness = state == DisplayPowerState::Locked ? LockedBrightness : _display_base_brightness;
     GetHAL().setBackLightBrightness(brightness, false);
-    if (_wake_overlay != nullptr) {
-        if (state == DisplayPowerState::Off) {
-            lv_obj_remove_flag(_wake_overlay, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_move_foreground(_wake_overlay);
-        } else if (!_wake_overlay_armed) {
-            lv_obj_add_flag(_wake_overlay, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-    ESP_LOGI(Tag, "display power=%s brightness=%d",
-             state == DisplayPowerState::Active   ? "active"
-             : state == DisplayPowerState::Dimmed ? "dimmed"
-                                                  : "off",
+    ESP_LOGI(Tag, "display power=%s brightness=%d", state == DisplayPowerState::Locked ? "locked" : "active",
              brightness);
 }
 
 void CodexMicroView::wakeDisplay()
 {
     _last_activity_tick = lv_tick_get();
+    if (_locked) {
+        _locked = false;
+        if (_lock_screen != nullptr) {
+            lv_obj_add_flag(_lock_screen, LV_OBJ_FLAG_HIDDEN);
+        }
+        _page_dirty = true;
+    }
+    if (_wake_overlay != nullptr && !_wake_overlay_armed) {
+        lv_obj_add_flag(_wake_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
     setDisplayPower(DisplayPowerState::Active);
 }
 
-void CodexMicroView::updateDisplayPower(uint32_t tick, bool hostStateChanged)
+void CodexMicroView::lockDisplay()
 {
-    if constexpr (system_config::DisplayAlwaysOn) {
-        if (_display_power != DisplayPowerState::Active) {
-            setDisplayPower(DisplayPowerState::Active);
-        }
-    } else {
-        if (hostStateChanged || interactionActive()) {
-            wakeDisplay();
-        } else {
-            const uint32_t idle = tick - _last_activity_tick;
-            if (idle >= DisplayOffDelayMs) {
-                setDisplayPower(DisplayPowerState::Off);
-            } else if (idle >= DisplayDimDelayMs) {
-                setDisplayPower(DisplayPowerState::Dimmed);
-            }
-        }
+    if (_locked || interactionActive()) {
+        return;
     }
+    releaseActiveInputs();
+    setMicActive(false);
+    _locked                 = true;
+    _lock_last_refresh_tick = 0;
+    if (_lock_screen != nullptr) {
+        lv_obj_remove_flag(_lock_screen, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(_lock_screen);
+    }
+    if (_wake_overlay != nullptr) {
+        lv_obj_remove_flag(_wake_overlay, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(_wake_overlay);
+    }
+    setDisplayPower(DisplayPowerState::Locked);
+    ESP_LOGI(Tag, "display locked after idle timeout");
+}
 
-    if (_display_power == DisplayPowerState::Off || _root == nullptr) {
+void CodexMicroView::updateDisplayPower(uint32_t tick)
+{
+    if (_locked) {
+        return;
+    }
+    if (interactionActive()) {
+        _last_activity_tick = tick;
+    } else if (tick - _last_activity_tick >= DisplayLockDelayMs) {
+        lockDisplay();
+    }
+    if (_locked || _root == nullptr) {
         return;
     }
     const uint8_t shift = static_cast<uint8_t>((tick / PixelShiftPeriodMs) % PixelShiftOffsets.size());
     if (shift != _pixel_shift_index) {
         _pixel_shift_index = shift;
         lv_obj_align(_root, LV_ALIGN_CENTER, PixelShiftOffsets[shift][0], PixelShiftOffsets[shift][1]);
+    }
+}
+
+void CodexMicroView::updateLockedScreen(const CodexMicroState& state, uint32_t tick, bool force)
+{
+    if (!force && _lock_last_refresh_tick != 0 && tick - _lock_last_refresh_tick < LockRefreshPeriodMs) {
+        return;
+    }
+    _lock_last_refresh_tick = tick;
+    ++_lock_refresh_count;
+    const HostBridgeSnapshot host = GetHostBridge().snapshot(GetHAL().millis());
+    char text[64]                 = {};
+    if (!host.usageAvailable) {
+        setLabelText(_lock_quota_label, "CODEX\n--");
+    } else {
+        std::snprintf(text, sizeof(text), "CODEX%s\n%u.%02u%%", host.usageStale ? " STALE" : "",
+                      static_cast<unsigned>(host.remainingBasisPoints / 100U),
+                      static_cast<unsigned>(host.remainingBasisPoints % 100U));
+        setLabelText(_lock_quota_label, text);
+    }
+    std::snprintf(text, sizeof(text), "%s %u%%%s", batterySymbol(state.battery), static_cast<unsigned>(state.battery),
+                  state.charging ? " +" : "");
+    setLabelText(_lock_battery_label, text);
+    if (_lock_screen != nullptr) {
+        const uint8_t shift = static_cast<uint8_t>(_lock_refresh_count % PixelShiftOffsets.size());
+        lv_obj_set_pos(_lock_screen, PixelShiftOffsets[shift][0], PixelShiftOffsets[shift][1]);
+        lv_obj_move_foreground(_lock_screen);
+    }
+    if (_wake_overlay != nullptr) {
+        lv_obj_move_foreground(_wake_overlay);
     }
 }
 
@@ -1136,7 +1214,9 @@ bool CodexMicroView::interactionActive() const
 {
     const auto key_active     = [](const KeyContext& context) { return context.active; };
     const auto command_active = [](const CommandContext& context) { return context.active; };
-    return _dial_pressed || _touch_pressed || _mic_active || _wake_overlay_armed ||
+    return GetHAL().btnA.isPressed() || GetHAL().btnB.isPressed() ||
+           (GetHAL().lvTouchpad != nullptr && lv_indev_get_state(GetHAL().lvTouchpad) == LV_INDEV_STATE_PRESSED) ||
+           _dial_pressed || _touch_pressed || _mic_active || _wake_overlay_armed ||
            std::any_of(_command_contexts.begin(), _command_contexts.end(), command_active) ||
            std::any_of(_agent_contexts.begin(), _agent_contexts.end(), key_active);
 }
@@ -1181,6 +1261,11 @@ void CodexMicroView::updateMicMeter()
 void CodexMicroView::update(const CodexMicroState& state)
 {
     const uint32_t tick = lv_tick_get();
+    updateDisplayPower(tick);
+    if (_locked) {
+        updateLockedScreen(state, tick, false);
+        return;
+    }
     if (GetNetworkQuota().configured() && !(state.connected && state.protocolReady)) {
         if (!_offline_screen) {
             _offline_screen = lv_obj_create(_root);
@@ -1210,15 +1295,12 @@ void CodexMicroView::update(const CodexMicroState& state)
             setLabelText(_offline_label, text);
             _offline_update_tick = tick;
         }
-        updateDisplayPower(tick, false);
         return;
     }
     if (_offline_screen) lv_obj_add_flag(_offline_screen, LV_OBJ_FLAG_HIDDEN);
     updateDialReturn();
     updateMicMeter();
-    const bool state_changed     = state.revision != _last_state_revision;
-    const bool attention_changed = state.attentionRevision != _last_attention_revision;
-    updateDisplayPower(tick, attention_changed);
+    const bool state_changed      = state.revision != _last_state_revision;
     const bool host_ready         = state.connected && state.protocolReady;
     const int8_t connection_phase = !host_ready ? static_cast<int8_t>((tick / 350U) % 3U) : 3;
     if (state_changed || connection_phase != _last_connection_phase) {
@@ -1257,9 +1339,8 @@ void CodexMicroView::update(const CodexMicroState& state)
             updateAgentLights(state);
         }
     }
-    _page_dirty              = false;
-    _last_state_revision     = state.revision;
-    _last_attention_revision = state.attentionRevision;
+    _page_dirty          = false;
+    _last_state_revision = state.revision;
 }
 
 void CodexMicroView::releaseActiveInputs()
@@ -1680,9 +1761,7 @@ void CodexMicroView::wakeOverlayEvent(lv_event_t* event)
     const lv_event_code_t code = lv_event_get_code(event);
     if (code == LV_EVENT_PRESSED) {
         owner->_wake_overlay_armed = true;
-        owner->_last_activity_tick = lv_tick_get();
-        owner->_display_power      = DisplayPowerState::Active;
-        GetHAL().setBackLightBrightness(owner->_display_base_brightness, false);
+        owner->wakeDisplay();
         ESP_LOGI(Tag, "display woken by touch; gesture consumed");
     } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         owner->_wake_overlay_armed = false;

@@ -40,6 +40,10 @@ public:
     const char* debugScreenName();
     void debugSetInputCapture(bool enabled);
     DebugInputState debugInputState();
+    bool debugDisplayLocked();
+    bool debugLockDisplay();
+    void debugWakeDisplay();
+    uint32_t debugLockRefreshCount();
 
 private:
     static constexpr uint32_t UiRefreshPeriodMs = 33;
@@ -51,4 +55,5 @@ private:
     bool _mic_host_active       = false;
     bool _send_host_active      = false;
     bool _debug_input_capture   = false;
+    bool _lock_wake_keys_held   = false;
 };

@@ -173,6 +173,7 @@ private:
 };
 
 Hal& GetHAL();
+uint32_t GetDisplayFrameCount();
 
 /** Scoped serialization for LVGL access from the Mooncake task. */
 class LvglLockGuard {

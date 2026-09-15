@@ -58,11 +58,26 @@ void AppCodexMicro::onRunning()
     if (_serial_debug != nullptr) {
         _serial_debug->poll();
     }
-    const input::KeyEvent event =
+    input::KeyEvent event =
         _key_manager == nullptr || _debug_input_capture ? input::KeyEvent::None : _key_manager->update(false);
-    const uint32_t now     = GetHAL().millis();
+    const uint32_t now = GetHAL().millis();
+    const bool physical_activity =
+        event != input::KeyEvent::None || GetHAL().btnA.wasPressed() || GetHAL().btnB.wasPressed();
+    if (_view != nullptr) {
+        LvglLockGuard lock;
+        if (_view->locked() && physical_activity) {
+            _view->wakeDisplay();
+            _lock_wake_keys_held = true;
+        }
+        if (_lock_wake_keys_held) {
+            event = input::KeyEvent::None;
+            if (GetHAL().btnA.isReleased() && GetHAL().btnB.isReleased()) {
+                _lock_wake_keys_held = false;
+            }
+        }
+    }
     const bool refresh_due = now - _last_ui_update_ms >= UiRefreshPeriodMs;
-    if (event == input::KeyEvent::None && !refresh_due) {
+    if (event == input::KeyEvent::None && !refresh_due && !physical_activity) {
         return;
     }
     const CodexMicroState state = GetCodexMicroBle().snapshot();
@@ -202,4 +217,30 @@ AppCodexMicro::DebugInputState AppCodexMicro::debugInputState()
         }
     }
     return state;
+}
+
+bool AppCodexMicro::debugDisplayLocked()
+{
+    LvglLockGuard lock;
+    return _view != nullptr && _view->locked();
+}
+
+bool AppCodexMicro::debugLockDisplay()
+{
+    LvglLockGuard lock;
+    return _view != nullptr && _view->lockForDebug();
+}
+
+void AppCodexMicro::debugWakeDisplay()
+{
+    LvglLockGuard lock;
+    if (_view != nullptr) {
+        _view->wakeDisplay();
+    }
+}
+
+uint32_t AppCodexMicro::debugLockRefreshCount()
+{
+    LvglLockGuard lock;
+    return _view == nullptr ? 0 : _view->lockRefreshCount();
 }

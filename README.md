@@ -98,7 +98,7 @@ StopWatch audio path for speaker output only: it does not enable the I2S receive
 built-in MEMS microphone, or transport PCM audio. The Mic screen animation is a PTT activity
 indicator, not an audio level meter.
 
-The AMOLED stays on at the configured brightness while the firmware is running. A small periodic
+After 60 seconds without local input, the AMOLED dims to 8% and shows quota and battery once per minute. See [idle display](docs/idle-display.md). A small periodic
 pixel shift remains enabled to reduce static-image wear. Always-on operation increases battery use
 and AMOLED aging; the pixel shift reduces but cannot eliminate burn-in risk.
 

@@ -32,12 +32,14 @@ public:
     bool setPageForDebug(Page page);
     void setInputSuppressed(bool suppressed);
     void wakeDisplay();
+    bool locked() const;
+    bool lockForDebug();
+    uint32_t lockRefreshCount() const;
 
 private:
     enum class DisplayPowerState : uint8_t {
         Active,
-        Dimmed,
-        Off,
+        Locked,
     };
 
     enum class Icon : uint8_t {
@@ -104,8 +106,10 @@ private:
     void updateCenterStatus(const CodexMicroState& state);
     void updateAgentLights(const CodexMicroState& state);
     void updateMicMeter();
-    void updateDisplayPower(uint32_t tick, bool hostStateChanged);
+    void updateDisplayPower(uint32_t tick);
     void setDisplayPower(DisplayPowerState state);
+    void lockDisplay();
+    void updateLockedScreen(const CodexMicroState& state, uint32_t tick, bool force);
     bool interactionActive() const;
     void invalidateCommandButton(std::size_t slot);
     void setDialVisualStep(float step);
@@ -127,6 +131,9 @@ private:
     lv_obj_t* _pairing_core                   = nullptr;
     lv_obj_t* _pairing_reset_control          = nullptr;
     lv_obj_t* _wake_overlay                   = nullptr;
+    lv_obj_t* _lock_screen                    = nullptr;
+    lv_obj_t* _lock_quota_label               = nullptr;
+    lv_obj_t* _lock_battery_label             = nullptr;
     lv_obj_t* _usage_card                     = nullptr;
     lv_obj_t* _usage_status_label             = nullptr;
     lv_obj_t* _usage_value_label              = nullptr;
@@ -176,13 +183,15 @@ private:
     bool _ambient_visible                    = false;
     uint32_t _touch_press_tick               = 0;
     uint32_t _last_state_revision            = UINT32_MAX;
-    uint32_t _last_attention_revision        = UINT32_MAX;
     int8_t _last_connection_phase            = -1;
     bool _functional_enabled                 = false;
     bool _input_suppressed                   = false;
     bool _wake_overlay_armed                 = false;
     DisplayPowerState _display_power         = DisplayPowerState::Active;
     uint32_t _last_activity_tick             = 0;
+    uint32_t _lock_last_refresh_tick         = 0;
+    uint32_t _lock_refresh_count             = 0;
+    bool _locked                             = false;
     uint8_t _pixel_shift_index               = UINT8_MAX;
     int _display_base_brightness             = 80;
     bool _page_dirty                         = true;

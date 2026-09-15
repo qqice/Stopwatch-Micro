@@ -309,6 +309,12 @@ static void lvgl_rtos_task(void *pvParameter)
     }
 }
 
+static std::atomic<uint32_t> _display_frame_count{0};
+uint32_t GetDisplayFrameCount()
+{
+    return _display_frame_count.load(std::memory_order_relaxed);
+}
+
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     M5GFX &gfx = *(M5GFX *)lv_display_get_driver_data(disp);
@@ -348,6 +354,7 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     // is sent to the AMOLED as one continuous framebuffer update.
     if (lv_display_flush_is_last(disp)) {
         gfx.display();
+        _display_frame_count.fetch_add(1, std::memory_order_relaxed);
     }
 
     lv_display_flush_ready(disp);

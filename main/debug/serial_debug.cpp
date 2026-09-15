@@ -248,6 +248,23 @@ void SerialDebug::handleLine(char* line)
         result("network-selftest", ok ? "PASS" : "FAIL", "cases=7 source_sequence_and_freshness=1");
         return;
     }
+    if (std::strcmp(command, "display-lock") == 0) {
+        result("display-lock", _app.debugLockDisplay() ? "PASS" : "FAIL");
+        return;
+    }
+    if (std::strcmp(command, "display-wake") == 0) {
+        _app.debugWakeDisplay();
+        result("display-wake", "PASS");
+        return;
+    }
+    if (std::strcmp(command, "display") == 0) {
+        char details[128]{};
+        std::snprintf(details, sizeof(details), "locked=%d refreshes=%lu frames=%lu brightness=%d",
+                      _app.debugDisplayLocked(), static_cast<unsigned long>(_app.debugLockRefreshCount()),
+                      static_cast<unsigned long>(GetDisplayFrameCount()), GetHAL().getBackLightBrightness());
+        result("display", "PASS", details);
+        return;
+    }
     if (std::strcmp(command, "status") == 0) {
         printStatus();
         return;

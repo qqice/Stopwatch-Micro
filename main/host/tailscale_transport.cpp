@@ -4,12 +4,14 @@
 #include <mbedtls/base64.h>
 #include <nvs.h>
 #include <esp_heap_caps.h>
+#include <esp_log.h>
 #include <esp_timer.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <strings.h>
 #include <cctype>
+#include <initializer_list>
 extern "C" esp_err_t ml_noise_selftest(void);
 
 namespace {
@@ -92,6 +94,10 @@ void TailnetQuota::start()
         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 16 * 1024)
         return;
     if (ml_noise_selftest() != ESP_OK) return;
+    // Avoid per-packet USB logging while the display is idle; errors remain visible.
+    for (const char* tag : {"ml_coord", "ml_derp", "ml_net_io", "ml_wg_mgr", "ml_stun", "ml_tcp", "ml_noise"}) {
+        esp_log_level_set(tag, ESP_LOG_ERROR);
+    }
     microlink_config_t config{};
     config.auth_key         = _key;
     config.device_name      = "stopwatch-micro";
