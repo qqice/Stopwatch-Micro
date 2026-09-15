@@ -1,0 +1,232 @@
+diff --git a/src/mooncake_log.cpp b/src/mooncake_log.cpp
+index 011e261..99e0c86 100644
+--- a/src/mooncake_log.cpp
++++ b/src/mooncake_log.cpp
+@@ -59,7 +59,7 @@ void mclog::internal::print_tag_time()
+ 
+         case TimeFormat_t::time_format_full: {
+             auto tm_result = std::localtime(&now_c);
+-            fmt::print("[{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}] ",
++            internal::print_safe("[{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}] ",
+                        tm_result->tm_year + 1900, // 年份
+                        tm_result->tm_mon + 1,     // 月
+                        tm_result->tm_mday,        // 日
+@@ -72,7 +72,7 @@ void mclog::internal::print_tag_time()
+ 
+         case TimeFormat_t::time_format_time_only: {
+             auto tm_result = std::localtime(&now_c);
+-            fmt::print("[{:02}:{:02}:{:02}.{:03}] ",
++            internal::print_safe("[{:02}:{:02}:{:02}.{:03}] ",
+                        tm_result->tm_hour,    // 时
+                        tm_result->tm_min,     // 分
+                        tm_result->tm_sec,     // 秒
+@@ -81,18 +81,18 @@ void mclog::internal::print_tag_time()
+         }
+ 
+         case TimeFormat_t::time_format_unix_seconds:
+-            fmt::print("[{}] ", std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
++            internal::print_safe("[{}] ", std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
+             break;
+ 
+         case TimeFormat_t::time_format_unix_milliseconds:
+-            fmt::print("[{}] ", std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
++            internal::print_safe("[{}] ", std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+             break;
+ 
+         case TimeFormat_t::time_format_iso_8601: {
+             auto tm_result = std::localtime(&now_c);
+             char tz_buf[16] = {0};
+             std::strftime(tz_buf, sizeof(tz_buf), "%z", tm_result);
+-            fmt::print("[{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}{}] ", tm_result->tm_year + 1900,
++            internal::print_safe("[{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}{}] ", tm_result->tm_year + 1900,
+                        tm_result->tm_mon + 1, tm_result->tm_mday, tm_result->tm_hour, tm_result->tm_min,
+                        tm_result->tm_sec, milliseconds.count(), tz_buf);
+             break;
+@@ -106,7 +106,7 @@ void mclog::internal::print_tag_level(const LogLevel_t& level)
+         return;
+     }
+ 
+-    fmt::print("[");
++    internal::print_safe("[");
+ 
+     switch (level) {
+         case LogLevel_t::level_info: {
+@@ -114,13 +114,13 @@ void mclog::internal::print_tag_level(const LogLevel_t& level)
+                 case LevelFormat_t::level_format_none:
+                     break;
+                 case LevelFormat_t::level_format_lowercase:
+-                    fmt::print(COLOR_INFO, "info");
++                    internal::print_safe(COLOR_INFO, "info");
+                     break;
+                 case LevelFormat_t::level_format_uppercase:
+-                    fmt::print(COLOR_INFO, "INFO");
++                    internal::print_safe(COLOR_INFO, "INFO");
+                     break;
+                 case LevelFormat_t::level_format_single_letter:
+-                    fmt::print(COLOR_INFO, "I");
++                    internal::print_safe(COLOR_INFO, "I");
+                     break;
+             }
+             break;
+@@ -130,13 +130,13 @@ void mclog::internal::print_tag_level(const LogLevel_t& level)
+                 case LevelFormat_t::level_format_none:
+                     break;
+                 case LevelFormat_t::level_format_lowercase:
+-                    fmt::print(COLOR_WARN, "warn");
++                    internal::print_safe(COLOR_WARN, "warn");
+                     break;
+                 case LevelFormat_t::level_format_uppercase:
+-                    fmt::print(COLOR_WARN, "WARN");
++                    internal::print_safe(COLOR_WARN, "WARN");
+                     break;
+                 case LevelFormat_t::level_format_single_letter:
+-                    fmt::print(COLOR_WARN, "W");
++                    internal::print_safe(COLOR_WARN, "W");
+                     break;
+             }
+             break;
+@@ -146,13 +146,13 @@ void mclog::internal::print_tag_level(const LogLevel_t& level)
+                 case LevelFormat_t::level_format_none:
+                     break;
+                 case LevelFormat_t::level_format_lowercase:
+-                    fmt::print(COLOR_ERROR, "error");
++                    internal::print_safe(COLOR_ERROR, "error");
+                     break;
+                 case LevelFormat_t::level_format_uppercase:
+-                    fmt::print(COLOR_ERROR, "ERROR");
++                    internal::print_safe(COLOR_ERROR, "ERROR");
+                     break;
+                 case LevelFormat_t::level_format_single_letter:
+-                    fmt::print(COLOR_ERROR, "E");
++                    internal::print_safe(COLOR_ERROR, "E");
+                     break;
+             }
+             break;
+@@ -162,18 +162,18 @@ void mclog::internal::print_tag_level(const LogLevel_t& level)
+                 case LevelFormat_t::level_format_none:
+                     break;
+                 case LevelFormat_t::level_format_lowercase:
+-                    fmt::print(COLOR_DEBUG, "debug");
++                    internal::print_safe(COLOR_DEBUG, "debug");
+                     break;
+                 case LevelFormat_t::level_format_uppercase:
+-                    fmt::print(COLOR_DEBUG, "DEBUG");
++                    internal::print_safe(COLOR_DEBUG, "DEBUG");
+                     break;
+                 case LevelFormat_t::level_format_single_letter:
+-                    fmt::print(COLOR_DEBUG, "D");
++                    internal::print_safe(COLOR_DEBUG, "D");
+                     break;
+             }
+             break;
+         }
+     }
+ 
+-    fmt::print("] ");
++    internal::print_safe("] ");
+ }
+diff --git a/src/mooncake_log.h b/src/mooncake_log.h
+index 6dded7f..72d9ad0 100644
+--- a/src/mooncake_log.h
++++ b/src/mooncake_log.h
+@@ -16,6 +16,8 @@
+ #include "fmt/chrono.h"
+ #include "mooncake_log_signal.h"
+ #include <string_view>
++#include <cstdio>
++#include <utility>
+ 
+ namespace mclog {
+ 
+@@ -49,6 +51,19 @@ struct Settings_t {
+ };
+ 
+ namespace internal {
++// Logging is best effort: an absent USB console must not abort the firmware.
++template <typename... Args>
++void print_safe(fmt::format_string<Args...> format, Args&&... args)
++{
++    const auto text = fmt::format(format, std::forward<Args>(args)...);
++    (void)std::fwrite(text.data(), 1, text.size(), stdout);
++}
++template <typename... Args>
++void print_safe(const fmt::text_style& style, fmt::format_string<Args...> format, Args&&... args)
++{
++    const auto text = fmt::format(style, format, std::forward<Args>(args)...);
++    (void)std::fwrite(text.data(), 1, text.size(), stdout);
++}
+ void print_tag_time();
+ void print_tag_level(const LogLevel_t& level);
+ LogLevel_t get_log_level();
+@@ -102,7 +117,7 @@ void info(fmt::format_string<Args...> fmt, Args&&... args)
+     internal::print_tag_level(level_info);
+ 
+     auto formatted_msg = fmt::format(fmt, std::forward<Args>(args)...);
+-    fmt::print("{}\n", formatted_msg);
++    internal::print_safe("{}\n", formatted_msg);
+ 
+     on_log.emit(level_info, formatted_msg);
+ }
+@@ -124,7 +139,7 @@ void warn(fmt::format_string<Args...> fmt, Args&&... args)
+     internal::print_tag_level(level_warn);
+ 
+     auto formatted_msg = fmt::format(fmt, std::forward<Args>(args)...);
+-    fmt::print("{}\n", formatted_msg);
++    internal::print_safe("{}\n", formatted_msg);
+ 
+     on_log.emit(level_warn, formatted_msg);
+ }
+@@ -146,7 +161,7 @@ void error(fmt::format_string<Args...> fmt, Args&&... args)
+     internal::print_tag_level(level_error);
+ 
+     auto formatted_msg = fmt::format(fmt, std::forward<Args>(args)...);
+-    fmt::print("{}\n", formatted_msg);
++    internal::print_safe("{}\n", formatted_msg);
+ 
+     on_log.emit(level_error, formatted_msg);
+ }
+@@ -168,7 +183,7 @@ void debug(fmt::format_string<Args...> fmt, Args&&... args)
+     internal::print_tag_level(level_debug);
+ 
+     auto formatted_msg = fmt::format(fmt, std::forward<Args>(args)...);
+-    fmt::print("{}\n", formatted_msg);
++    internal::print_safe("{}\n", formatted_msg);
+ 
+     on_log.emit(level_debug, formatted_msg);
+ }
+@@ -191,7 +206,7 @@ void tagInfo(std::string_view tag, fmt::format_string<Args...> fmt, Args&&... ar
+     internal::print_tag_level(level_info);
+ 
+     auto formatted_msg = fmt::format("[{}] {}", tag, fmt::format(fmt, std::forward<Args>(args)...));
+-    fmt::print("{}\n", formatted_msg);
++    internal::print_safe("{}\n", formatted_msg);
+ 
+     on_log.emit(level_info, formatted_msg);
+ }
+@@ -214,7 +229,7 @@ void tagWarn(std::string_view tag, fmt::format_string<Args...> fmt, Args&&... ar
+     internal::print_tag_level(level_warn);
+ 
+     auto formatted_msg = fmt::format("[{}] {}", tag, fmt::format(fmt, std::forward<Args>(args)...));
+-    fmt::print("{}\n", formatted_msg);
++    internal::print_safe("{}\n", formatted_msg);
+ 
+     on_log.emit(level_warn, formatted_msg);
+ }
+@@ -237,7 +252,7 @@ void tagError(std::string_view tag, fmt::format_string<Args...> fmt, Args&&... a
+     internal::print_tag_level(level_error);
+ 
+     auto formatted_msg = fmt::format("[{}] {}", tag, fmt::format(fmt, std::forward<Args>(args)...));
+-    fmt::print("{}\n", formatted_msg);
++    internal::print_safe("{}\n", formatted_msg);
+ 
+     on_log.emit(level_error, formatted_msg);
+ }
+@@ -260,7 +275,7 @@ void tagDebug(std::string_view tag, fmt::format_string<Args...> fmt, Args&&... a
+     internal::print_tag_level(level_debug);
+ 
+     auto formatted_msg = fmt::format("[{}] {}", tag, fmt::format(fmt, std::forward<Args>(args)...));
+-    fmt::print("{}\n", formatted_msg);
++    internal::print_safe("{}\n", formatted_msg);
+ 
+     on_log.emit(level_debug, formatted_msg);
+ }

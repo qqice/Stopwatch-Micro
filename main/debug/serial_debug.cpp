@@ -1,3 +1,4 @@
+#include "boot_trace.h"
 /*
  * SPDX-License-Identifier: MIT
  */
@@ -331,6 +332,7 @@ void SerialDebug::handleLine(char* line)
         printStatus();
         return;
     }
+    if (std::strcmp(command, "boot") == 0) { BootTracePrint(); return; }
     if (std::strcmp(command, "selftest") == 0) {
         runSelfTest();
         return;

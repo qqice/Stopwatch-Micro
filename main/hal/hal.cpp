@@ -1,3 +1,4 @@
+#include <debug/boot_trace.h>
 /*
  * SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
  *
@@ -33,11 +34,15 @@ void Hal::init()
     }
     ESP_ERROR_CHECK(ret);
 
+    BootTraceStage(2);
     i2c_init();
     pmic_init();
+    BootTraceStage(3);
     ioe_init();
+    BootTraceStage(4);
     delay(50);
     display_init();
+    BootTraceStage(5);
     touchpad_init();
     lvgl_init();
     audio_init();

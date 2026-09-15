@@ -4,6 +4,7 @@ set(APP_SRCS
     "apps/common/audio/audio.cpp"
     "apps/common/key_manager/key_manager.cpp"
     "debug/serial_debug.cpp"
+    "debug/boot_trace.cpp"
     "host/host_bridge.cpp"
     "host/network_quota.cpp"
     "host/tailscale_transport.cpp"

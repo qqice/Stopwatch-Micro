@@ -7,7 +7,8 @@
     {
         "url": "https://github.com/Forairaaaaa/mooncake_log.git",
         "path": "components/mooncake_log",
-        "commit": "554d55cd8c6e551b911b99cad274a46929f05bae"
+        "commit": "554d55cd8c6e551b911b99cad274a46929f05bae",
+        "patch": "patches/mooncake-log-console.patch"
     },
     {
         "url": "https://github.com/Forairaaaaa/smooth_ui_toolkit.git",

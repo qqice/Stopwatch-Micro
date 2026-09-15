@@ -1,3 +1,4 @@
+#include <debug/boot_trace.h>
 /*
  * SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
  *
@@ -21,12 +22,14 @@ using namespace smooth_ui_toolkit;
 
 extern "C" void app_main(void)
 {
+    BootTraceBegin();
     // Setup logger
     mclog::set_level(mclog::level_info);
     mclog::set_time_format(mclog::time_format_unix_milliseconds);
 
     // HAL init
     GetHAL().init();
+    BootTraceStage(6);
 
     // BLE is a system service and remains available for the device lifetime.
     if (!GetCodexMicroBle().begin()) {
@@ -55,6 +58,7 @@ extern "C" void app_main(void)
         return;
     }
 
+    BootTraceStage(7);
     // Main loop
     while (true) {
         GetHAL().feedTheDog();
