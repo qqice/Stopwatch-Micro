@@ -34,3 +34,26 @@ Firmware diagnostics: `debug history days`, `debug history hours`, `debug histor
 `debug history-selftest`. The rejection selftest checks malformed arrays, excessive nesting,
 and payload size while retaining the last valid cache. `tools/test_history_runtime.py` compares
 one official day on the device against the authenticated host response.
+
+## Local interaction and grouping
+
+Both the 24-hour and 30-day arrays are fetched together by the background
+network task and stored in RAM. Selection uses the current page snapshot with
+no HTTP operation or shared-cache copy. Mode changes reuse both cached arrays.
+Background revisions may refresh the snapshot independently.
+
+Selection invalidates only the old/new selected cells and changed detail text.
+The custom drawing callback skips cells outside the current LVGL clip. Rounded
+cells show only day-of-month or time; month labels (AUG/SEP etc.) and day labels
+(MM/DD) appear once at each group's first cell, in the gaps below the cells.
+The selected detail retains the full date and exact token count.
+
+`python tools/test_history_latency.py --port COM24` measures command dispatch
+to a completed display frame; it is not an optical finger-to-pixel measurement.
+
+With real history cached on the device, seven selections took 140–281 ms and
+two mode switches took 281/407 ms from USB command dispatch to completed frame.
+Nine samples averaged 218.6 ms; this includes USB/debug overhead and is not an
+optical measurement. Exact daily token, hourly selection and missing-data
+checks passed. Evidence: `.artifacts/history-latency-real-cache.log` and
+`.artifacts/history-ui-cache-regression.log`.

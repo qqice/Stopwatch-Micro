@@ -1096,11 +1096,22 @@ bool CodexMicroView::selectHistory(std::size_t index)
     if (!ready() || index >= count) {
         return false;
     }
-    _history_selected = index;
-    refreshHistory(false);
+    const auto previous = _history_selected;
+    _history_selected   = index;
+    // Selection uses the page's RAM snapshot only; background revision updates
+    // are handled by update(), never on the touch critical path.
     updateHistorySelection();
     if (_history_grid != nullptr) {
-        lv_obj_invalidate(_history_grid);
+        lv_area_t grid;
+        lv_obj_get_coords(_history_grid, &grid);
+        for (auto selected : {previous, index}) {
+            if (selected >= count) continue;
+            lv_area_t cell = {static_cast<lv_coord_t>(grid.x1 + (selected % 6) * 56),
+                              static_cast<lv_coord_t>(grid.y1 + (selected / 6) * 38),
+                              static_cast<lv_coord_t>(grid.x1 + (selected % 6) * 56 + 47),
+                              static_cast<lv_coord_t>(grid.y1 + (selected / 6) * 38 + 25)};
+            lv_obj_invalidate_area(_history_grid, &cell);
+        }
     }
     return selectedHistoryCell() != nullptr;
 }
@@ -1664,18 +1675,22 @@ void CodexMicroView::historyGridEvent(lv_event_t* event)
             draw.bg_opa       = LV_OPA_COVER;
             draw.border_color = lv_color_hex(index == owner->_history_selected ? Text : owner->_history_borders[index]);
             draw.border_width = index == owner->_history_selected ? 2 : 1;
-            draw.radius       = 3;
+            draw.radius       = 7;
             const lv_area_t area = {static_cast<lv_coord_t>(grid_area.x1 + col * PitchX),
                                     static_cast<lv_coord_t>(grid_area.y1 + row * PitchY),
                                     static_cast<lv_coord_t>(grid_area.x1 + col * PitchX + Width - 1),
                                     static_cast<lv_coord_t>(grid_area.y1 + row * PitchY + 25)};
+            // The draw callback can run once per clipped LVGL buffer chunk.
+            // Skip cells outside this chunk rather than enqueueing all labels.
+            const auto& clip = layer->_clip_area;
+            if (area.x2 < clip.x1 || area.x1 > clip.x2 || area.y1 > clip.y2 || area.y2 + 12 < clip.y1) continue;
             lv_draw_rect(layer, &draw, &area);
             if (owner->_history_snapshot != nullptr) {
                 const TokenHistoryCell& cell =
                     hourly ? owner->_history_snapshot->hours[index] : owner->_history_snapshot->days[index];
                 const char* label = cell.label;
                 if (hourly && std::strlen(label) >= 16) label += 11;
-                if (!hourly && std::strlen(label) >= 10) label += 5;
+                if (!hourly && std::strlen(label) >= 10) label += 8;
                 lv_draw_label_dsc_t text;
                 lv_draw_label_dsc_init(&text);
                 text.font            = &lv_font_montserrat_14;
@@ -1689,6 +1704,30 @@ void CodexMicroView::historyGridEvent(lv_event_t* event)
                 lv_area_t label_area = area;
                 label_area.y1 += 5;
                 lv_draw_label(layer, &text, &label_area);
+                const auto* cells =
+                    hourly ? owner->_history_snapshot->hours.data() : owner->_history_snapshot->days.data();
+                const size_t groupLength = hourly ? 10 : 7;
+                if (index == 0 || std::strncmp(cell.label, cells[index - 1].label, groupLength) != 0) {
+                    // One marker per month/day group, not repeated in every cell.
+                    char group[12]{};
+                    if (std::strlen(cell.label) >= 10) {
+                        if (hourly)
+                            std::snprintf(group, sizeof(group), "%.5s", cell.label + 5);
+                        else {
+                            constexpr const char* months[] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                                              "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+                            const int month                = (cell.label[5] - '0') * 10 + cell.label[6] - '0';
+                            std::snprintf(group, sizeof(group), "%s",
+                                          month >= 1 && month <= 12 ? months[month - 1] : "--");
+                        }
+                    }
+                    text.text     = group;
+                    text.font     = &lv_font_montserrat_12;
+                    text.color    = lv_color_hex(hourly ? CodexBlue : Green);
+                    label_area.y1 = area.y2 + 1;
+                    label_area.y2 = area.y2 + 13;
+                    lv_draw_label(layer, &text, &label_area);
+                }
             }
         }
         return;
