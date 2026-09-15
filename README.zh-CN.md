@@ -273,3 +273,5 @@ ready/connected/protocol `1/1/1`、无线额度更新拒绝数 `0`，以及
 第二屏 History 可切换 DAYS（绿色，官方每日 token）和 HOURS（蓝色，累计 token 的小时观察增量）。点击方块查看具体数值与数据质量；缺测、部分采样和计数修正会明确标记，不会伪造历史小时用量。详见 [历史说明](docs/history.md)、[局域网](docs/lan-service.md)、[Tailscale](docs/tailscale.md)。锁屏时第一次按键/触摸仅用于唤醒。
 
 热力图按天显示近 30 天并标注日期，按小时显示近 24 小时并标注时间。Token 使用 K/M 自动换算，点击方块仍显示完整整数值。
+
+锁屏默认启用省电策略：停止 Wi-Fi、断开蓝牙并停止广播，CPU 降至 80 MHz；每五分钟短暂联网更新额度，唤醒后恢复 240 MHz 并重连。每分钟显示缓存额度与电量。详见[省电策略与测量边界](docs/idle-power.md)。

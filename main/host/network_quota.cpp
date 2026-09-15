@@ -14,6 +14,10 @@
 #include <esp_netif_sntp.h>
 #include <ctime>
 #include <esp_timer.h>
+#include <esp_pm.h>
+#include <esp_private/esp_clk.h>
+#include <esp_log.h>
+#include <hal/ble/codex_micro_ble.h>
 #include <esp_wifi.h>
 #include <freertos/task.h>
 #include <mbedtls/base64.h>
@@ -45,6 +49,74 @@ bool number(cJSON* root, const char* key, double low, double high, uint32_t& out
 NetworkQuota& GetNetworkQuota()
 {
     return instance;
+}
+void NetworkQuota::setLocked(bool locked)
+{
+    if (_locked.exchange(locked) != locked && _task_handle) xTaskNotifyGive(_task_handle);
+    GetCodexMicroBle().requestRadioIdle(idleLocked());
+}
+void NetworkQuota::setPowerProfile(uint8_t profile)
+{
+    if (profile > 2) return;
+    _power_profile = profile;
+    GetCodexMicroBle().requestRadioIdle(idleLocked());
+    if (_task_handle) xTaskNotifyGive(_task_handle);
+}
+void NetworkQuota::refreshWhileLocked()
+{
+    if (!idleLocked()) return;
+    _force_refresh = true;
+    if (_task_handle) xTaskNotifyGive(_task_handle);
+}
+void NetworkQuota::wait(uint32_t milliseconds)
+{
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(milliseconds));
+}
+void NetworkQuota::setCpu(uint32_t mhz)
+{
+    if (_cpu_target == mhz) return;
+    esp_pm_config_t config{};
+    config.max_freq_mhz       = mhz;
+    config.min_freq_mhz       = mhz;
+    config.light_sleep_enable = false;
+    const esp_err_t result    = esp_pm_configure(&config);
+    _clock_error              = result;
+    if (result == ESP_OK) _cpu_target = mhz;
+}
+void NetworkQuota::recordWifiRunning(bool running)
+{
+    const uint64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&_power_mux);
+    if (!running && _wifi_running) _off_since_us = now;
+    if (running && !_wifi_running && _off_since_us) {
+        _off_completed_us += now - _off_since_us;
+        _off_since_us = 0;
+    }
+    _wifi_running = running;
+    portEXIT_CRITICAL(&_power_mux);
+}
+IdlePowerStats NetworkQuota::powerStats() const
+{
+    IdlePowerStats stats;
+    stats.locked     = _locked;
+    stats.profile    = _power_profile;
+    stats.phase      = _power_phase;
+    stats.cpuMHz     = esp_clk_cpu_freq() / 1000000;
+    stats.cycles     = _power_cycles;
+    stats.clockError = _clock_error;
+    portENTER_CRITICAL(&_power_mux);
+    stats.wifiRunning = _wifi_running;
+    stats.offMs       = (_off_completed_us + (_off_since_us ? esp_timer_get_time() - _off_since_us : 0)) / 1000;
+    portEXIT_CRITICAL(&_power_mux);
+    return stats;
+}
+void NetworkQuota::setPhase(uint8_t phase)
+{
+    if (_power_phase.exchange(phase) != phase) {
+        const auto stats = powerStats();
+        ESP_LOGI("IdlePower", "phase=%u cpu_mhz=%lu wifi_running=%d cycles=%lu", phase,
+                 static_cast<unsigned long>(stats.cpuMHz), stats.wifiRunning, static_cast<unsigned long>(stats.cycles));
+    }
 }
 
 bool NetworkQuota::configure(const char* encoded)
@@ -88,7 +160,7 @@ void NetworkQuota::begin()
     nvs_close(handle);
     if (!ok || !_ssid[0] || !_url[0] || !_token[0]) return;
     _configured = true;
-    if (xTaskCreate(task, "quota_wifi", 8192, this, 2, nullptr) != pdPASS) {
+    if (xTaskCreate(task, "quota_wifi", 8192, this, 2, &_task_handle) != pdPASS) {
         _configured = false;
         ++_failures;
     }
@@ -100,6 +172,7 @@ void NetworkQuota::task(void* arg)
 }
 void NetworkQuota::run()
 {
+    setCpu(240);
     if (esp_netif_init() != ESP_OK) {
         ++_failures;
         return;
@@ -126,10 +199,72 @@ void NetworkQuota::run()
         ++_failures;
         return;
     }
+    recordWifiRunning(true);
     esp_sntp_config_t timeConfig = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
     esp_netif_sntp_init(&timeConfig);
     bool hadConnection = false;
+    bool wasLocked = false, updateWindow = false;
+    int64_t nextRefresh = 0, windowDeadline = 0;
+    constexpr int64_t RefreshIntervalUs = 300LL * 1000000;
+    constexpr int64_t UpdateWindowUs    = 90LL * 1000000;
     while (true) {
+        const bool locked = idleLocked();
+        const int64_t now = esp_timer_get_time();
+        GetCodexMicroBle().requestRadioIdle(locked);
+        if (locked && !wasLocked) {
+            nextRefresh  = now + RefreshIntervalUs;
+            updateWindow = false;
+        }
+        wasLocked = locked;
+        if (locked && (_force_refresh.exchange(false) || now >= nextRefresh)) {
+            updateWindow   = true;
+            windowDeadline = now + UpdateWindowUs;
+            nextRefresh    = now + RefreshIntervalUs;
+        }
+        if (locked && updateWindow && now >= windowDeadline) updateWindow = false;
+        if (locked && !updateWindow) {
+            if (_wifi_running) {
+                setPhase(1);
+                if (!GetTailnetQuota().pause()) {
+                    setPhase(4);
+                    wait(1000);
+                    continue;
+                }
+                if (!idleLocked()) continue;
+                esp_wifi_disconnect();
+                if (esp_wifi_stop() != ESP_OK) {
+                    setPhase(4);
+                    wait(1000);
+                    continue;
+                }
+                recordWifiRunning(false);
+                _connected    = false;
+                hadConnection = false;
+            }
+            if (!idleLocked()) continue;
+            const auto ble = GetCodexMicroBle().diagnostics();
+            if (GetCodexMicroBle().connected() || ble.advertising) {
+                setPhase(1);
+                wait(100);
+                continue;
+            }
+            setCpu(_power_profile == 2 ? 80 : 240);
+            setPhase(2);
+            const int64_t remaining = (nextRefresh - esp_timer_get_time()) / 1000;
+            wait(static_cast<uint32_t>(remaining > 0 ? remaining : 1));
+            continue;
+        }
+        setCpu(240);
+        if (!_wifi_running) {
+            if (esp_wifi_start() != ESP_OK) {
+                setPhase(4);
+                wait(1000);
+                continue;
+            }
+            recordWifiRunning(true);
+        }
+        setPhase(locked ? 3 : 0);
+        if (!locked) updateWindow = false;
         wifi_ap_record_t ap{};
         esp_netif_ip_info_t ip{};
         esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -138,21 +273,26 @@ void NetworkQuota::run()
         if (!_connected) {
             hadConnection = false;
             esp_wifi_connect();
-            vTaskDelay(pdMS_TO_TICKS(10000));
+            wait(5000);
             continue;
         }
         if (GetTailnetQuota().enabled()) {
             // A real clock is required before certificate verification.
             if (std::time(nullptr) < 1735689600) {
-                vTaskDelay(pdMS_TO_TICKS(5000));
+                wait(5000);
                 continue;
             }
-            const bool started = GetTailnetQuota().state() >= 0;
             GetTailnetQuota().start();
-            if (!hadConnection && started) GetTailnetQuota().rebind();
+            // start() resumes a paused context; rebind is only for live link loss.
+            if (!hadConnection && GetTailnetQuota().ready()) GetTailnetQuota().rebind();
         }
         hadConnection = true;
-        if (fetch())
+        if (GetTailnetQuota().enabled() && !GetTailnetQuota().ready()) {
+            wait(5000);
+            continue;
+        }
+        const bool quotaOk = fetch();
+        if (quotaOk)
             ++_accepted;
         else
             ++_failures;
@@ -162,7 +302,12 @@ void NetworkQuota::run()
             else
                 ++_history_failures;
         }
-        vTaskDelay(pdMS_TO_TICKS(GetTailnetQuota().enabled() && !GetTailnetQuota().ready() ? 5000 : 60000));
+        if (locked && quotaOk) {
+            ++_power_cycles;
+            updateWindow = false;
+            continue;
+        }
+        wait(locked ? 5000 : 60000);
     }
 }
 bool NetworkQuota::requestJson(const char* path, char* body, size_t capacity, int& used)

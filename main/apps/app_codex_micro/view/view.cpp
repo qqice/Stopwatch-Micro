@@ -1166,6 +1166,7 @@ void CodexMicroView::setDisplayPower(DisplayPowerState state)
 
 void CodexMicroView::wakeDisplay()
 {
+    GetNetworkQuota().setLocked(false);
     _last_activity_tick = lv_tick_get();
     if (_locked) {
         _locked = false;
@@ -1187,7 +1188,8 @@ void CodexMicroView::lockDisplay()
     }
     releaseActiveInputs();
     setMicActive(false);
-    _locked                 = true;
+    _locked = true;
+    GetNetworkQuota().setLocked(true);
     _lock_last_refresh_tick = 0;
     if (_lock_screen != nullptr) {
         lv_obj_remove_flag(_lock_screen, LV_OBJ_FLAG_HIDDEN);
@@ -1234,7 +1236,8 @@ void CodexMicroView::updateLockedScreen(const CodexMicroState& state, uint32_t t
         setLabelText(_lock_quota_label, "CODEX\n--");
     } else {
         // App Server exposes usedPercent as int32; transport basis points add no precision.
-        std::snprintf(text, sizeof(text), "CODEX%s\n%u%%", host.usageStale ? " STALE" : "",
+        std::snprintf(text, sizeof(text), "CODEX%s\n%u%%",
+                      GetNetworkQuota().idleLocked() ? " CACHED" : (host.usageStale ? " STALE" : ""),
                       static_cast<unsigned>(host.remainingBasisPoints / 100U));
         setLabelText(_lock_quota_label, text);
     }

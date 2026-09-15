@@ -49,6 +49,7 @@ constexpr uint8_t WirelessUsageMarker        = 0xA5;
 constexpr uint8_t WirelessUsageVersion       = 1;
 constexpr std::size_t WirelessUsageDataSize  = 17;
 constexpr std::size_t WirelessUsageFrameSize = 21;
+constexpr uint32_t RadioIdleRetryMs          = 5000;
 
 static_assert(WirelessUsageDataSize + sizeof(uint32_t) == WirelessUsageFrameSize);
 
@@ -351,6 +352,10 @@ bool CodexMicroBle::begin()
 
 void CodexMicroBle::poll()
 {
+    serviceRadioIdle();
+    if (radioIdleRequested()) {
+        return;
+    }
     if (!connected()) {
         return;
     }
@@ -387,6 +392,12 @@ bool CodexMicroBle::initializeController()
         return false;
     }
     if (logStepError("esp_bt_controller_enable", esp_bt_controller_enable(ESP_BT_MODE_BLE))) {
+        return false;
+    }
+    const esp_err_t sleep_error = esp_bt_sleep_enable();
+    if (sleep_error == ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGW(Tag, "BT modem sleep is not supported by this controller configuration");
+    } else if (logStepError("esp_bt_sleep_enable", sleep_error)) {
         return false;
     }
 
@@ -480,13 +491,22 @@ void CodexMicroBle::gapEventCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_c
         case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
             if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
                 ESP_LOGI(Tag, "advertising as %s", DeviceName);
+                owner.serviceRadioIdle();
             } else {
                 owner._advertising.store(false);
+                owner._radio_idle_stop_in_flight.store(false);
                 ESP_LOGE(Tag, "advertising start failed: %d", param->adv_start_cmpl.status);
             }
             break;
         case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
-            owner._advertising.store(false);
+            if (param->adv_stop_cmpl.status == ESP_BT_STATUS_SUCCESS)
+                owner._advertising.store(false);
+            else
+                ESP_LOGW(Tag, "advertising stop failed: %d", param->adv_stop_cmpl.status);
+            owner._radio_idle_stop_in_flight.store(false);
+            if (!owner.radioIdleRequested()) {
+                owner.maybeStartAdvertising();
+            }
             break;
         case ESP_GAP_BLE_SEC_REQ_EVT:
             esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
@@ -555,6 +575,7 @@ void CodexMicroBle::hidEventCallback(void*, esp_event_base_t, int32_t id, void* 
             owner._advertising.store(false);
             owner.onConnected(true);
             ESP_LOGI(Tag, "host connected");
+            owner.serviceRadioIdle();
             break;
         case ESP_HIDD_OUTPUT_EVENT:
             if (data != nullptr && data->output.report_id == ReportId) {
@@ -574,7 +595,8 @@ void CodexMicroBle::hidEventCallback(void*, esp_event_base_t, int32_t id, void* 
 
 void CodexMicroBle::maybeStartAdvertising()
 {
-    if (!_adv_data_ready.load() || !_scan_rsp_ready.load() || !_hid_ready.load() || connected()) {
+    if (radioIdleRequested() || !_adv_data_ready.load() || !_scan_rsp_ready.load() || !_hid_ready.load() ||
+        connected()) {
         return;
     }
     if (_advertising.exchange(true)) {
@@ -584,6 +606,85 @@ void CodexMicroBle::maybeStartAdvertising()
     if (error != ESP_OK) {
         _advertising.store(false);
         ESP_LOGE(Tag, "esp_ble_gap_start_advertising failed: %s", esp_err_to_name(error));
+    }
+}
+
+void CodexMicroBle::requestRadioIdle(bool requested)
+{
+    _radio_idle_requested.store(requested, std::memory_order_release);
+    if (!requested) {
+        maybeStartAdvertising();
+        return;
+    }
+    serviceRadioIdle();
+}
+
+bool CodexMicroBle::radioIdleRequested() const
+{
+    return _radio_idle_requested.load(std::memory_order_acquire);
+}
+
+void CodexMicroBle::serviceRadioIdle()
+{
+    if (!_initialized.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!radioIdleRequested()) {
+        return;
+    }
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    stopAdvertisingForIdle(now);
+    disconnectForIdle(now);
+}
+
+void CodexMicroBle::stopAdvertisingForIdle(uint32_t now)
+{
+    if (!_advertising.load(std::memory_order_acquire) || _radio_idle_stop_in_flight.load(std::memory_order_acquire)) {
+        return;
+    }
+    const uint32_t previous = _radio_idle_last_stop_attempt_ms.load(std::memory_order_relaxed);
+    if (previous != 0 && now - previous < RadioIdleRetryMs) {
+        return;
+    }
+    _radio_idle_last_stop_attempt_ms.store(now, std::memory_order_relaxed);
+    if (_radio_idle_stop_in_flight.exchange(true)) return;
+    const esp_err_t error = esp_ble_gap_stop_advertising();
+    if (error != ESP_OK) {
+        _radio_idle_stop_in_flight.store(false);
+        ESP_LOGW(Tag, "radio-idle advertising stop failed: %s", esp_err_to_name(error));
+    }
+}
+
+void CodexMicroBle::disconnectForIdle(uint32_t now)
+{
+    if (!connected() || _radio_idle_disconnect_in_flight.load(std::memory_order_acquire)) {
+        return;
+    }
+    const uint32_t previous = _radio_idle_last_disconnect_attempt_ms.load(std::memory_order_relaxed);
+    if (previous != 0 && now - previous < RadioIdleRetryMs) {
+        return;
+    }
+
+    esp_bd_addr_t peer = {};
+    if (_state_mutex == nullptr) {
+        return;
+    }
+    xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    const bool peer_valid = _peer_address_valid.load(std::memory_order_acquire);
+    if (peer_valid) {
+        std::memcpy(peer, _peer_address.data(), ESP_BD_ADDR_LEN);
+    }
+    xSemaphoreGive(_state_mutex);
+    if (!peer_valid) {
+        return;
+    }
+
+    _radio_idle_last_disconnect_attempt_ms.store(now, std::memory_order_relaxed);
+    if (_radio_idle_disconnect_in_flight.exchange(true)) return;
+    const esp_err_t error = esp_ble_gap_disconnect(peer);
+    if (error != ESP_OK) {
+        _radio_idle_disconnect_in_flight.store(false);
+        ESP_LOGW(Tag, "radio-idle disconnect request failed: %s", esp_err_to_name(error));
     }
 }
 
@@ -608,6 +709,7 @@ void CodexMicroBle::onConnected(bool connectedValue)
         // Otherwise another core could briefly pair the new generation with
         // the old Ready link and send into a connection that is closing.
         _connected.store(false, std::memory_order_release);
+        _radio_idle_disconnect_in_flight.store(false, std::memory_order_release);
     }
     _connection_generation.fetch_add(1, std::memory_order_acq_rel);
     _link_state.store(connectedValue ? ProtocolLinkState::Awaiting : ProtocolLinkState::Disconnected,
@@ -945,7 +1047,7 @@ void CodexMicroBle::runInputTask()
     bool encoder_pending           = false;
     const auto event_is_current    = [this](const InputEvent& candidate) {
         return candidate.generation == _connection_generation.load(std::memory_order_acquire) &&
-               _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Ready;
+               _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Ready && !radioIdleRequested();
     };
     while (true) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -1066,14 +1168,15 @@ void CodexMicroBle::runInputTask()
 bool CodexMicroBle::queueInput(const InputEvent& event)
 {
     const uint32_t generation = _connection_generation.load(std::memory_order_acquire);
-    if (!connected() || _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
+    if (radioIdleRequested() || !connected() ||
+        _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
         return false;
     }
     InputEvent queued_event = event;
     queued_event.generation = generation;
     if (_input_queue == nullptr || _critical_input_queue == nullptr || _joystick_queue == nullptr ||
         _input_task == nullptr) {
-        if (queued_event.generation != _connection_generation.load(std::memory_order_acquire) ||
+        if (radioIdleRequested() || queued_event.generation != _connection_generation.load(std::memory_order_acquire) ||
             _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
             return false;
         }
@@ -1082,7 +1185,8 @@ bool CodexMicroBle::queueInput(const InputEvent& event)
         }
         bool sent = true;
         for (uint16_t index = 0; index < queued_event.repeat; ++index) {
-            if (queued_event.generation != _connection_generation.load(std::memory_order_acquire) ||
+            if (radioIdleRequested() ||
+                queued_event.generation != _connection_generation.load(std::memory_order_acquire) ||
                 _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
                 return false;
             }
@@ -1092,7 +1196,7 @@ bool CodexMicroBle::queueInput(const InputEvent& event)
         return sent;
     }
 
-    if (generation != _connection_generation.load(std::memory_order_acquire) ||
+    if (radioIdleRequested() || generation != _connection_generation.load(std::memory_order_acquire) ||
         _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
         return false;
     }
@@ -1127,7 +1231,7 @@ bool CodexMicroBle::queueInput(const InputEvent& event)
         ++_input_dropped;
         ESP_LOGE(Tag, "input queue full kind=%u action=%u repeat=%u", static_cast<unsigned>(queued_event.kind),
                  static_cast<unsigned>(queued_event.action), static_cast<unsigned>(queued_event.repeat));
-        if (must_preserve && connected() &&
+        if (must_preserve && !radioIdleRequested() && connected() &&
             queued_event.generation == _connection_generation.load(std::memory_order_acquire) &&
             _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Ready) {
             ESP_LOGE(Tag, "critical input was not queued; restarting to release host controls");
@@ -1135,7 +1239,7 @@ bool CodexMicroBle::queueInput(const InputEvent& event)
         }
         return false;
     }
-    if (queued_event.generation != _connection_generation.load(std::memory_order_acquire) ||
+    if (radioIdleRequested() || queued_event.generation != _connection_generation.load(std::memory_order_acquire) ||
         _link_state.load(std::memory_order_acquire) != ProtocolLinkState::Ready) {
         ++_input_dropped;
         xTaskNotifyGive(_input_task);

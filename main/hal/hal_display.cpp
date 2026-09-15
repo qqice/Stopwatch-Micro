@@ -257,6 +257,7 @@ bool Hal::touch_ready() const
 #include <cstring>  // for memset
 #include <lvgl.h>
 #include <atomic>
+#include <host/network_quota.h>
 
 static SemaphoreHandle_t xGuiSemaphore;
 static std::atomic<bool> _lvgl_update_enabled     = false;
@@ -305,7 +306,7 @@ static void lvgl_rtos_task(void *pvParameter)
                          static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 20 : 10));
     }
 }
 

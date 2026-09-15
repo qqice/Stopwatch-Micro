@@ -13,6 +13,7 @@ public:
     }
     void start();
     void rebind();
+    bool pause();  // Call only from the network owner, after HTTP requests finish.
     bool fetch(const char* token, char* body, size_t capacity, int& length, const char* pathOverride = nullptr);
     int state() const;
     bool ready() const;
@@ -21,6 +22,7 @@ public:
 private:
     std::atomic<bool> _enabled{false};
     std::atomic<bool> _valid{false};
+    std::atomic<bool> _pause_requested{false};
     std::atomic<microlink_s*> _client{nullptr};
     char _key[257]{}, _host[16]{}, _path[192]{};
     uint16_t _port = 0;

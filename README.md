@@ -282,3 +282,5 @@ M5Stack StopWatch user demo, and the compatibility transport is adapted from
 Blue B opens History as the second page. DAYS uses green for official daily totals; HOURS uses blue for observed cumulative token increments. Tap a cell for its exact value and quality. Missing hours are not zero and cannot be reconstructed from daily totals. See [history](docs/history.md), [LAN service](docs/lan-service.md), and [Tailscale](docs/tailscale.md). In idle mode the first key or touch only wakes the screen.
 
 History shows the last 30 days with date labels, or the last 24 hours with time labels. Compact token values use K/M; selected cells also expose the full integer.
+
+The idle eco policy stops Wi-Fi, disconnects BLE and stops advertising, and runs at 80 MHz between five-minute quota updates. Wake restores 240 MHz and connections. See [power policy and measurement limits](docs/idle-power.md).

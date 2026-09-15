@@ -88,7 +88,14 @@ void TailnetQuota::load()
 }
 void TailnetQuota::start()
 {
-    if (!_enabled || !_valid || _client) return;
+    if (!_enabled || !_valid) return;
+    if (_client) {
+        if (_pause_requested) {
+            if (microlink_stop(_client) != ESP_OK) return;
+            if (microlink_start(_client) == ESP_OK) _pause_requested = false;
+        }
+        return;
+    }
     // Keep room for MicroLink's task stacks and the existing BLE/UI workers.
     if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 80 * 1024 ||
         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 16 * 1024)
@@ -107,11 +114,16 @@ void TailnetQuota::start()
     config.max_peers        = 4;
     config.priority_peer_ip = _peer;
     _client                 = microlink_init(&config);
-    if (_client) microlink_start(_client);
+    if (_client) _pause_requested = microlink_start(_client) != ESP_OK;
+}
+bool TailnetQuota::pause()
+{
+    _pause_requested = true;
+    return !_client || microlink_stop(_client) == ESP_OK;
 }
 void TailnetQuota::rebind()
 {
-    if (_client) microlink_rebind(_client);
+    if (_client && !_pause_requested) microlink_rebind(_client);
 }
 int TailnetQuota::state() const
 {
@@ -119,7 +131,7 @@ int TailnetQuota::state() const
 }
 bool TailnetQuota::ready() const
 {
-    return _client && microlink_is_connected(_client);
+    return !_pause_requested && _client && microlink_is_connected(_client);
 }
 uint32_t TailnetQuota::ip() const
 {
@@ -128,7 +140,7 @@ uint32_t TailnetQuota::ip() const
 bool TailnetQuota::fetch(const char* token, char* body, size_t capacity, int& length, const char* pathOverride)
 {
     length = 0;
-    if (!_client || !microlink_is_connected(_client) || !body || capacity < 2) return false;
+    if (_pause_requested || !_client || !microlink_is_connected(_client) || !body || capacity < 2) return false;
     auto* socket = microlink_tcp_connect(_client, _peer, _port, 7000);
     if (!socket) return false;
     char request[640]{};

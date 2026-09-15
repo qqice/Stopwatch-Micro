@@ -38,6 +38,48 @@ index 35b0bda..1c4fb3e 100644
  )
  
  idf_component_register(
+diff --git a/components/microlink/components/wireguard_lwip/src/wireguard-platform-esp32.c b/components/microlink/components/wireguard_lwip/src/wireguard-platform-esp32.c
+index f974c67..fa76a14 100644
+--- a/components/microlink/components/wireguard_lwip/src/wireguard-platform-esp32.c
++++ b/components/microlink/components/wireguard_lwip/src/wireguard-platform-esp32.c
+@@ -8,6 +8,7 @@
+ #include "esp_timer.h"
+ #include "lwip/sys.h"
+ #include <string.h>
++#include <sys/time.h>
+ 
+ /* ============================================================================
+  * Time Functions
+@@ -19,22 +20,13 @@ uint32_t wireguard_sys_now() {
+ }
+ 
+ void wireguard_tai64n_now(uint8_t *output) {
+-    // TAI64N format: 8 bytes seconds + 4 bytes nanoseconds
+-    // For simplicity, use Unix epoch time
+-    uint64_t now_us = esp_timer_get_time();
+-    uint64_t seconds = now_us / 1000000ULL;
+-    uint32_t nanoseconds = (now_us % 1000000ULL) * 1000;
+-
+-    // Log raw uptime before TAI offset (only every ~5s to avoid spam)
+-    static uint64_t last_log_s = 0;
+-    if (seconds - last_log_s >= 5) {
+-        printf("[TAI64N] uptime=%llu s, nano=%lu\n", (unsigned long long)seconds, (unsigned long)nanoseconds);
+-        last_log_s = seconds;
+-    }
+-
+-    // TAI64 starts at 1970-01-01 00:00:10 TAI (Unix epoch + 10 seconds)
+-    // Add TAI offset: 2^62 + Unix time
+-    seconds += 0x400000000000000AULL;
++    // WireGuard compares these across handshakes and device restarts.
++    // Uptime resets on boot and causes anti-replay rejection by an existing peer.
++    // NetworkQuota waits for SNTP before starting this transport.
++    struct timeval now;
++    gettimeofday(&now, NULL);
++    uint64_t seconds = (uint64_t)now.tv_sec + 0x400000000000000AULL;
++    uint32_t nanoseconds = ((uint32_t)now.tv_usec * 1000U) & ~0xFFFFFFU;
+ 
+     // Write in big-endian format
+     output[0] = (seconds >> 56) & 0xFF;
 diff --git a/components/microlink/components/wireguard_lwip/src/wireguard.c b/components/microlink/components/wireguard_lwip/src/wireguard.c
 index a11aefd..30704e9 100644
 --- a/components/microlink/components/wireguard_lwip/src/wireguard.c
@@ -90,7 +132,7 @@ index 9126a53..7073671 100644
  typedef struct {
      const char *auth_key;       /* Tailscale auth key (tskey-auth-...) */
 diff --git a/components/microlink/include/microlink_internal.h b/components/microlink/include/microlink_internal.h
-index add69c7..862b849 100644
+index add69c7..91cc638 100644
 --- a/components/microlink/include/microlink_internal.h
 +++ b/components/microlink/include/microlink_internal.h
 @@ -24,8 +24,6 @@
@@ -102,7 +144,19 @@ index add69c7..862b849 100644
  #include "esp_heap_caps.h"
  
  #ifdef CONFIG_ML_ZERO_COPY_WG
-@@ -324,8 +322,6 @@ typedef struct {
+@@ -181,6 +179,11 @@ typedef struct {
+ #define ML_EVT_SHUTDOWN_REQUEST     BIT6
+ #define ML_EVT_DERP_RECONNECT       BIT7
+ #define ML_EVT_DERP_CONNECT_REQ     BIT8
++#define ML_EVT_NET_IO_EXITED         BIT9
++#define ML_EVT_DERP_TX_EXITED        BIT10
++#define ML_EVT_COORD_EXITED          BIT11
++#define ML_EVT_WG_MGR_EXITED         BIT12
++#define ML_EVT_TASK_EXITED_MASK      (ML_EVT_NET_IO_EXITED | ML_EVT_DERP_TX_EXITED | ML_EVT_COORD_EXITED | ML_EVT_WG_MGR_EXITED)
+ 
+ /* ============================================================================
+  * Queue Message Types
+@@ -324,8 +327,6 @@ typedef struct {
      int sockfd;                     /* Raw TCP socket */
      mbedtls_ssl_context ssl;        /* TLS context (owned exclusively by DERP I/O task) */
      mbedtls_ssl_config ssl_conf;
@@ -111,8 +165,25 @@ index add69c7..862b849 100644
      bool connected;
      uint64_t last_recv_ms;          /* For keepalive watchdog */
  } ml_derp_conn_t;
+@@ -350,6 +351,7 @@ struct microlink_s {
+     TaskHandle_t derp_tx_task;
+     TaskHandle_t coord_task;
+     TaskHandle_t wg_mgr_task;
++    EventBits_t lifecycle_expected;
+ 
+     /* Queues */
+     QueueHandle_t derp_tx_queue;        /* -> derp_tx task */
+@@ -526,7 +528,7 @@ esp_err_t ml_peer_nvs_clear(void);
+ #ifdef CONFIG_ML_ZERO_COPY_WG
+ /* ml_zerocopy.c */
+ esp_err_t ml_zerocopy_init(microlink_t *ml);
+-void ml_zerocopy_deinit(microlink_t *ml);
++esp_err_t ml_zerocopy_deinit(microlink_t *ml);
+ esp_err_t ml_zerocopy_send(microlink_t *ml, const uint8_t *data, size_t len,
+                             uint32_t dest_ip, uint16_t dest_port);
+ #endif
 diff --git a/components/microlink/src/microlink.c b/components/microlink/src/microlink.c
-index 237f039..2078b1c 100644
+index 237f039..0c47bab 100644
 --- a/components/microlink/src/microlink.c
 +++ b/components/microlink/src/microlink.c
 @@ -15,6 +15,7 @@
@@ -123,7 +194,31 @@ index 237f039..2078b1c 100644
  #include <string.h>
  #include <stdio.h>
  #include <fcntl.h>
-@@ -156,6 +157,10 @@ microlink_t *microlink_init(const microlink_config_t *config) {
+@@ -26,6 +27,23 @@
+ 
+ static const char *TAG = "microlink";
+ 
++#define ML_STOP_TIMEOUT_MS 15000
++
++static void drain_packet_queue(QueueHandle_t queue) {
++    ml_rx_packet_t packet;
++    while (queue && xQueueReceive(queue, &packet, 0) == pdTRUE) free(packet.data);
++}
++
++static void drain_peer_queue(QueueHandle_t queue) {
++    ml_peer_update_t *update;
++    while (queue && xQueueReceive(queue, &update, 0) == pdTRUE) free(update);
++}
++
++static void drain_derp_queue(QueueHandle_t queue) {
++    ml_derp_tx_item_t item;
++    while (queue && xQueueReceive(queue, &item, 0) == pdTRUE) free(item.data);
++}
++
+ /* NVS keys */
+ #define NVS_NAMESPACE       "microlink"
+ #define NVS_KEY_MACHINE_PRI "machine_pri"
+@@ -156,6 +174,10 @@ microlink_t *microlink_init(const microlink_config_t *config) {
          ESP_LOGE(TAG, "Invalid config: auth_key required");
          return NULL;
      }
@@ -134,8 +229,149 @@ index 237f039..2078b1c 100644
  
      /* Route cJSON to PSRAM */
      cJSON_Hooks hooks = {
+@@ -304,6 +326,16 @@ esp_err_t microlink_start(microlink_t *ml) {
+         return ESP_ERR_INVALID_STATE;
+     }
+ 
++    xEventGroupClearBits(ml->events, ML_EVT_SHUTDOWN_REQUEST | ML_EVT_TASK_EXITED_MASK |
++                                         ML_EVT_COORD_REGISTERED | ML_EVT_DERP_CONNECTED | ML_EVT_WG_READY);
++    ml->lifecycle_expected = 0;
++    drain_derp_queue(ml->derp_tx_queue);
++    drain_packet_queue(ml->disco_rx_queue);
++    drain_packet_queue(ml->wg_rx_queue);
++    drain_packet_queue(ml->stun_rx_queue);
++    drain_peer_queue(ml->peer_update_queue);
++    ml_coord_cmd_t stale_cmd;
++    while (xQueueReceive(ml->coord_cmd_queue, &stale_cmd, 0) == pdTRUE) {}
+     ml->state = ML_STATE_WIFI_WAIT;
+ 
+     /* Set WiFi TX power if configured */
+@@ -374,29 +406,33 @@ skip_bsd_socket:
+                                    ml, ML_TASK_NET_IO_PRIO, &ml->net_io_task, ML_TASK_NET_IO_CORE);
+     if (ret != pdPASS) {
+         ESP_LOGE(TAG, "Failed to create net_io task");
+-        return ESP_FAIL;
++        goto start_failure;
+     }
++    ml->lifecycle_expected |= ML_EVT_NET_IO_EXITED;
+ 
+     ret = xTaskCreatePinnedToCore(ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK,
+                                    ml, ML_TASK_DERP_TX_PRIO, &ml->derp_tx_task, ML_TASK_DERP_TX_CORE);
+     if (ret != pdPASS) {
+         ESP_LOGE(TAG, "Failed to create derp_tx task");
+-        return ESP_FAIL;
++        goto start_failure;
+     }
++    ml->lifecycle_expected |= ML_EVT_DERP_TX_EXITED;
+ 
+     ret = xTaskCreatePinnedToCore(ml_coord_task, "ml_coord", ML_TASK_COORD_STACK,
+                                    ml, ML_TASK_COORD_PRIO, &ml->coord_task, ML_TASK_COORD_CORE);
+     if (ret != pdPASS) {
+         ESP_LOGE(TAG, "Failed to create coord task");
+-        return ESP_FAIL;
++        goto start_failure;
+     }
++    ml->lifecycle_expected |= ML_EVT_COORD_EXITED;
+ 
+     ret = xTaskCreatePinnedToCore(ml_wg_mgr_task, "ml_wg_mgr", ML_TASK_WG_MGR_STACK,
+                                    ml, ML_TASK_WG_MGR_PRIO, &ml->wg_mgr_task, ML_TASK_WG_MGR_CORE);
+     if (ret != pdPASS) {
+         ESP_LOGE(TAG, "Failed to create wg_mgr task");
+-        return ESP_FAIL;
++        goto start_failure;
+     }
++    ml->lifecycle_expected |= ML_EVT_WG_MGR_EXITED;
+ 
+     /* WiFi is expected to be connected before microlink_start() is called.
+      * Signal the event so coord/wg_mgr tasks proceed immediately. */
+@@ -413,6 +449,10 @@ skip_bsd_socket:
+ 
+     ESP_LOGI(TAG, "All tasks started");
+     return ESP_OK;
++
++start_failure:
++    microlink_stop(ml);
++    return ESP_FAIL;
+ }
+ 
+ esp_err_t microlink_rebind(microlink_t *ml) {
+@@ -463,7 +503,7 @@ esp_err_t microlink_rebind(microlink_t *ml) {
+ 
+     /* Step 5: Recreate DISCO UDP socket on the new interface */
+ #ifdef CONFIG_ML_ZERO_COPY_WG
+-    ml_zerocopy_deinit(ml);
++    if (ml_zerocopy_deinit(ml) != ESP_OK) return ESP_FAIL;
+     if (ml_zerocopy_init(ml) == ESP_OK) {
+         ESP_LOGI(TAG, "Rebind: zero-copy DISCO PCB recreated");
+         goto rebind_wg_update;
+@@ -508,15 +548,24 @@ rebind_wg_update:
+ esp_err_t microlink_stop(microlink_t *ml) {
+     if (!ml) return ESP_ERR_INVALID_ARG;
+ 
++    if (ml->state == ML_STATE_IDLE && ml->lifecycle_expected == 0) return ESP_OK;
++
+     ESP_LOGI(TAG, "Stopping...");
+     xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
++    ml_coord_cmd_t disconnect = ML_CMD_DISCONNECT;
++    if (ml->coord_cmd_queue) xQueueSend(ml->coord_cmd_queue, &disconnect, 0);
++    if (ml->coord_sock >= 0) shutdown(ml->coord_sock, SHUT_RDWR);
++    if (ml->derp.sockfd >= 0) shutdown(ml->derp.sockfd, SHUT_RDWR);
++    if (ml->disco_sock4 >= 0) shutdown(ml->disco_sock4, SHUT_RDWR);
++    if (ml->stun_sock >= 0) shutdown(ml->stun_sock, SHUT_RDWR);
++    if (ml->stun_sock6 >= 0) shutdown(ml->stun_sock6, SHUT_RDWR);
+ 
+-    /* Wait for tasks to exit (they check ML_EVT_SHUTDOWN_REQUEST).
+-     * Tasks call vTaskDelete(NULL) to self-delete, so we must NOT call
+-     * vTaskDelete() on them again — that causes a crash in uxListRemove
+-     * because the task's list node is already invalid. Just wait and
+-     * NULL the handles. */
+-    vTaskDelay(pdMS_TO_TICKS(3000));
++    const EventBits_t exited = xEventGroupWaitBits(ml->events, ml->lifecycle_expected,
++                                                     pdFALSE, pdTRUE, pdMS_TO_TICKS(ML_STOP_TIMEOUT_MS));
++    if ((exited & ml->lifecycle_expected) != ml->lifecycle_expected) {
++        ESP_LOGE(TAG, "Stop timed out waiting for task cleanup");
++        return ESP_ERR_TIMEOUT;
++    }
+ 
+     ml->net_io_task = NULL;
+     ml->derp_tx_task = NULL;
+@@ -530,7 +579,7 @@ esp_err_t microlink_stop(microlink_t *ml) {
+ 
+     /* Clean up zero-copy PCB if active */
+ #ifdef CONFIG_ML_ZERO_COPY_WG
+-    ml_zerocopy_deinit(ml);
++    if (ml_zerocopy_deinit(ml) != ESP_OK) return ESP_ERR_TIMEOUT;
+ #endif
+ 
+     /* Close sockets */
+@@ -538,6 +587,13 @@ esp_err_t microlink_stop(microlink_t *ml) {
+     if (ml->stun_sock >= 0) { ml_close_sock(ml->stun_sock); ml->stun_sock = -1; }
+     if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
+ 
++    drain_derp_queue(ml->derp_tx_queue);
++    drain_packet_queue(ml->disco_rx_queue);
++    drain_packet_queue(ml->wg_rx_queue);
++    drain_packet_queue(ml->stun_rx_queue);
++    drain_peer_queue(ml->peer_update_queue);
++    ml->lifecycle_expected = 0;
++
+     ml->state = ML_STATE_IDLE;
+     ESP_LOGI(TAG, "Stopped");
+     return ESP_OK;
+@@ -546,7 +602,10 @@ esp_err_t microlink_stop(microlink_t *ml) {
+ void microlink_destroy(microlink_t *ml) {
+     if (!ml) return;
+ 
+-    microlink_stop(ml);
++    if (microlink_stop(ml) != ESP_OK) {
++        ESP_LOGE(TAG, "Destroy deferred until all tasks exit");
++        return;
++    }
+ 
+     /* Deinitialize peer NVS */
+     ml_peer_nvs_deinit();
 diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_coord.c
-index 8da8d4d..6c48241 100644
+index 8da8d4d..8fc51a7 100644
 --- a/components/microlink/src/ml_coord.c
 +++ b/components/microlink/src/ml_coord.c
 @@ -990,10 +990,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
@@ -162,8 +398,35 @@ index 8da8d4d..6c48241 100644
              }
  
              /* Parse KeyExpiry (ISO 8601: "YYYY-MM-DDTHH:MM:SSZ") */
+@@ -2150,8 +2144,7 @@ void ml_coord_task(void *arg) {
+                              pdFALSE, pdFALSE, portMAX_DELAY);
+         if (wb & ML_EVT_SHUTDOWN_REQUEST) {
+             ESP_LOGI(TAG, "Shutdown requested before WiFi, exiting");
+-            vTaskDelete(NULL);
+-            return;
++            goto cleanup;
+         }
+     }
+ 
+@@ -2581,6 +2574,7 @@ void ml_coord_task(void *arg) {
+         }
+     }
+ 
++cleanup:
+     /* Cleanup */
+     if (ml->coord_sock >= 0) {
+         ml_close_sock(ml->coord_sock);
+@@ -2588,6 +2582,8 @@ void ml_coord_task(void *arg) {
+     }
+     memset(&noise, 0, sizeof(noise));
+ 
++    ml->coord_task = NULL;
++    xEventGroupSetBits(ml->events, ML_EVT_COORD_EXITED);
+     ESP_LOGI(TAG, "Coord task exiting");
+     vTaskDelete(NULL);
+ }
 diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_derp.c
-index c57fd0f..98438cf 100644
+index c57fd0f..5a8e76d 100644
 --- a/components/microlink/src/ml_derp.c
 +++ b/components/microlink/src/ml_derp.c
 @@ -21,6 +21,7 @@
@@ -174,7 +437,17 @@ index c57fd0f..98438cf 100644
  #include "esp_timer.h"
  #include "esp_random.h"
  #include "lwip/sockets.h"
-@@ -711,22 +712,27 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+@@ -630,6 +631,9 @@ void ml_derp_tx_task(void *arg) {
+         vTaskDelay(pdMS_TO_TICKS(1));
+     }
+ 
++    ml_derp_disconnect(ml);
++    ml->derp_tx_task = NULL;
++    xEventGroupSetBits(ml->events, ML_EVT_DERP_TX_EXITED);
+     ESP_LOGI(TAG, "DERP I/O task exiting");
+     vTaskDelete(NULL);
+ }
+@@ -711,22 +715,27 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
      /* TLS setup */
      mbedtls_ssl_init(&ml->derp.ssl);
      mbedtls_ssl_config_init(&ml->derp.ssl_conf);
@@ -216,7 +489,7 @@ index c57fd0f..98438cf 100644
      /* Store socket fd BEFORE setting bio.
       * Use custom BIO callbacks that route through ml_read_sock/ml_write_sock,
       * which transparently support both lwIP and AT socket backends.
-@@ -736,7 +742,6 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+@@ -736,7 +745,6 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
                           ml_derp_bio_send, NULL, ml_derp_bio_recv_timeout);
  
      /* TLS handshake - socket has 10s SO_RCVTIMEO from connect phase. */
@@ -224,7 +497,7 @@ index c57fd0f..98438cf 100644
      while ((ret = mbedtls_ssl_handshake(&ml->derp.ssl)) != 0) {
          if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
              continue;
-@@ -955,11 +960,7 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+@@ -955,11 +963,7 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
          memcpy(ci_payload + 32 + NACL_BOX_NONCEBYTES, ciphertext, ciphertext_len);
          free(ciphertext);
  
@@ -237,7 +510,7 @@ index c57fd0f..98438cf 100644
  
          /* Send ClientInfo frame */
          if (derp_write_frame(ml, DERP_FRAME_CLIENT_INFO, ci_payload, ci_payload_len) < 0) {
-@@ -1029,8 +1030,6 @@ void ml_derp_disconnect(microlink_t *ml) {
+@@ -1029,8 +1033,6 @@ void ml_derp_disconnect(microlink_t *ml) {
          mbedtls_ssl_close_notify(&ml->derp.ssl);
          mbedtls_ssl_free(&ml->derp.ssl);
          mbedtls_ssl_config_free(&ml->derp.ssl_conf);
@@ -246,6 +519,19 @@ index c57fd0f..98438cf 100644
          ml_close_sock(ml->derp.sockfd);
          ml->derp.sockfd = -1;
      }
+diff --git a/components/microlink/src/ml_net_io.c b/components/microlink/src/ml_net_io.c
+index f8b6799..6da6446 100644
+--- a/components/microlink/src/ml_net_io.c
++++ b/components/microlink/src/ml_net_io.c
+@@ -208,6 +208,8 @@ void ml_net_io_task(void *arg) {
+         }
+     }
+ 
++    ml->net_io_task = NULL;
++    xEventGroupSetBits(ml->events, ML_EVT_NET_IO_EXITED);
+     ESP_LOGI(TAG, "Net I/O task exiting");
+     vTaskDelete(NULL);
+ }
 diff --git a/components/microlink/src/ml_noise.c b/components/microlink/src/ml_noise.c
 index 1b0fac2..0d94a4b 100644
 --- a/components/microlink/src/ml_noise.c
@@ -542,10 +828,18 @@ index e65d72d..d64d23c 100644
  
              setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_wg_mgr.c
-index ed40942..1f64ed9 100644
+index ed40942..378b626 100644
 --- a/components/microlink/src/ml_wg_mgr.c
 +++ b/components/microlink/src/ml_wg_mgr.c
-@@ -128,9 +128,8 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+@@ -24,6 +24,7 @@
+ #include "lwip/ip_addr.h"
+ #include "lwip/ip.h"
+ #include "lwip/tcpip.h"
++#include "lwip/udp.h"
+ #include "nacl_box.h"
+ #include "wireguardif.h"
+ #include "wireguard.h"
+@@ -128,9 +129,8 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
          return ERR_CONN;
      }
  
@@ -556,7 +850,7 @@ index ed40942..1f64ed9 100644
          const char *hostname = "?";
          for (int i = 0; i < ml->peer_count; i++) {
              if (memcmp(ml->peers[i].public_key, peer_public_key, 32) == 0) {
-@@ -138,35 +137,7 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+@@ -138,35 +138,7 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
                  break;
              }
          }
@@ -593,7 +887,56 @@ index ed40942..1f64ed9 100644
      }
  
      esp_err_t err = ml_derp_queue_send(ml, peer_public_key, data, len);
-@@ -315,14 +286,9 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
+@@ -181,6 +153,48 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+  * on that thread. */
+ static struct udp_pcb *s_wg_output_pcb = NULL;
+ 
++typedef struct {
++    microlink_t *ml;
++    SemaphoreHandle_t done;
++    bool complete;
++} wg_cleanup_ctx_t;
++
++static void wg_cleanup_in_tcpip(void *arg) {
++    wg_cleanup_ctx_t *ctx = (wg_cleanup_ctx_t *)arg;
++    struct netif *netif = (struct netif *)ctx->ml->wg_netif;
++    if (netif) {
++        wireguardif_shutdown(netif);
++        netif_set_link_down(netif);
++        netif_set_down(netif);
++        netif_remove(netif);
++        free(netif);
++        ctx->ml->wg_netif = NULL;
++    }
++    if (s_wg_output_pcb) {
++        udp_remove(s_wg_output_pcb);
++        s_wg_output_pcb = NULL;
++    }
++    ctx->complete = true;
++    xSemaphoreGive(ctx->done);
++}
++
++static bool wg_cleanup_interface(microlink_t *ml) {
++    if (!ml->wg_netif && !s_wg_output_pcb) return true;
++    wg_cleanup_ctx_t ctx = {
++        .ml = ml,
++        .done = xSemaphoreCreateBinary(),
++        .complete = false,
++    };
++    if (!ctx.done) return false;
++    if (tcpip_callback(wg_cleanup_in_tcpip, &ctx) != ERR_OK) {
++        vSemaphoreDelete(ctx.done);
++        return false;
++    }
++    xSemaphoreTake(ctx.done, portMAX_DELAY);
++    vSemaphoreDelete(ctx.done);
++    return ctx.complete;
++}
++
+ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
+                                 const uint8_t *data, size_t len, void *ctx) {
+     microlink_t *ml = (microlink_t *)ctx;
+@@ -315,14 +329,9 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
          struct wireguard_device *dev = (struct wireguard_device *)netif->state;
          if (dev) {
              bool match = (memcmp(dev->public_key, ml->wg_public_key, 32) == 0);
@@ -610,7 +953,7 @@ index ed40942..1f64ed9 100644
              }
          }
      }
-@@ -464,10 +430,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+@@ -464,10 +473,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
  
      char ip_str[16];
      microlink_ip_to_str(update->vpn_ip, ip_str);
@@ -623,7 +966,7 @@ index ed40942..1f64ed9 100644
  
      /* Add to wireguard-lwip */
      if (ml->wg_netif) {
-@@ -523,11 +487,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+@@ -523,11 +530,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
              if (dev && wg_peer_idx < WIREGUARD_MAX_PEERS) {
                  struct wireguard_peer *wp = &dev->peers[wg_peer_idx];
                  bool key_match = (memcmp(wp->public_key, p->public_key, 32) == 0);
@@ -637,7 +980,33 @@ index ed40942..1f64ed9 100644
              }
  
              /* DON'T initiate handshakes to all peers on add.
-@@ -1018,9 +979,8 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
+@@ -647,6 +651,25 @@ static void process_peer_updates(microlink_t *ml) {
+     }
+ }
+ 
++static void rebuild_wg_peers(microlink_t *ml) {
++    const int count = ml->peer_count;
++    for (int index = 0; index < count; ++index) {
++        const ml_peer_t *peer = &ml->peers[index];
++        if (!peer->active) continue;
++        ml_peer_update_t update = {
++            .action = ML_PEER_ADD,
++            .vpn_ip = peer->vpn_ip,
++            .derp_region = peer->derp_region,
++            .endpoint_count = peer->endpoint_count,
++        };
++        memcpy(update.public_key, peer->public_key, sizeof(update.public_key));
++        memcpy(update.disco_key, peer->disco_key, sizeof(update.disco_key));
++        memcpy(update.hostname, peer->hostname, sizeof(update.hostname));
++        memcpy(update.endpoints, peer->endpoints, sizeof(update.endpoints));
++        add_peer(ml, &update);
++    }
++}
++
+ /* ============================================================================
+  * DISCO Protocol
+  * ========================================================================== */
+@@ -1018,9 +1041,8 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
      /* Verify DISCO magic */
      if (memcmp(pkt->data, DISCO_MAGIC, 6) != 0) return;
  
@@ -649,7 +1018,7 @@ index ed40942..1f64ed9 100644
  
      /* Extract sender's disco public key */
      const uint8_t *sender_disco_key = pkt->data + 6;
-@@ -1372,13 +1332,10 @@ bool ml_wg_mgr_peer_is_up(microlink_t *ml, uint32_t vpn_ip) {
+@@ -1372,13 +1394,10 @@ bool ml_wg_mgr_peer_is_up(microlink_t *ml, uint32_t vpn_ip) {
          if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
              struct wireguard_peer *wp = &dev->peers[p->wg_peer_index];
              bool key_match = (memcmp(wp->public_key, p->public_key, 32) == 0);
@@ -665,6 +1034,102 @@ index ed40942..1f64ed9 100644
          }
      }
      return up;
+@@ -1518,8 +1537,7 @@ void ml_wg_mgr_task(void *arg) {
+ 
+     if (wait_bits & ML_EVT_SHUTDOWN_REQUEST) {
+         ESP_LOGI(TAG, "Shutdown requested before registration, exiting");
+-        vTaskDelete(NULL);
+-        return;  /* Not reached */
++        goto cleanup;
+     }
+ 
+     ESP_LOGI(TAG, "Coord registered, initializing WireGuard...");
+@@ -1530,6 +1548,7 @@ void ml_wg_mgr_task(void *arg) {
+     } else {
+         /* Update VPN IP if coord already set it */
+         wg_update_vpn_ip(ml);
++        rebuild_wg_peers(ml);
+         xEventGroupSetBits(ml->events, ML_EVT_WG_READY);
+     }
+ 
+@@ -1639,18 +1658,33 @@ void ml_wg_mgr_task(void *arg) {
+         vTaskDelay(pdMS_TO_TICKS(10));
+     }
+ 
+-    /* Shutdown WireGuard interface */
+-    if (ml->wg_netif) {
+-        struct netif *netif = (struct netif *)ml->wg_netif;
+-        wireguardif_shutdown(netif);
+-        netif_set_link_down(netif);
+-        netif_set_down(netif);
+-        vTaskDelay(pdMS_TO_TICKS(100));
+-        netif_remove(netif);
+-        free(netif);
+-        ml->wg_netif = NULL;
++cleanup:
++    /* tcpip_input and raw UDP callbacks can still reference the netif. The
++     * callback owns removal and only signals this task after it is complete. */
++#ifdef CONFIG_ML_ZERO_COPY_WG
++    if (ml_zerocopy_deinit(ml) != ESP_OK) {
++        ESP_LOGE(TAG, "Zero-copy cleanup callback could not be queued; retaining resources");
++        vTaskDelete(NULL);
++        return;
+     }
++#endif
++    if (!wg_cleanup_interface(ml)) {
++        ESP_LOGE(TAG, "WG cleanup callback could not be queued; retaining resources");
++        vTaskDelete(NULL);
++        return;
++    }
++    for (int index = 0; index < ml->peer_count; ++index) {
++        ml->peers[index].wg_peer_index = -1;
++        ml->peers[index].has_direct_path = false;
++        ml->peers[index].best_ip = 0;
++        ml->peers[index].best_port = 0;
++        ml->peers[index].tried_initial_handshake = false;
++    }
++    memset(pending_probes, 0, sizeof(pending_probes));
++    xEventGroupClearBits(ml->events, ML_EVT_WG_READY);
+ 
++    ml->wg_mgr_task = NULL;
++    xEventGroupSetBits(ml->events, ML_EVT_WG_MGR_EXITED);
+     ESP_LOGI(TAG, "WG Manager task exiting");
+     vTaskDelete(NULL);
+ }
+diff --git a/components/microlink/src/ml_zerocopy.c b/components/microlink/src/ml_zerocopy.c
+index e9a46e0..899c6d5 100644
+--- a/components/microlink/src/ml_zerocopy.c
++++ b/components/microlink/src/ml_zerocopy.c
+@@ -227,8 +227,8 @@ esp_err_t ml_zerocopy_init(microlink_t *ml) {
+     return ESP_OK;
+ }
+ 
+-void ml_zerocopy_deinit(microlink_t *ml) {
+-    if (!ml->zc.pcb) return;
++esp_err_t ml_zerocopy_deinit(microlink_t *ml) {
++    if (!ml->zc.pcb) return ESP_OK;
+ 
+     ESP_LOGI(TAG, "Shutting down zero-copy WG path");
+ 
+@@ -236,11 +236,16 @@ void ml_zerocopy_deinit(microlink_t *ml) {
+         .ml = ml,
+         .done = xSemaphoreCreateBinary(),
+     };
+-    if (!ctx.done) return;
++    if (!ctx.done) return ESP_ERR_NO_MEM;
+ 
+-    tcpip_callback(zc_pcb_remove_in_tcpip, &ctx);
++    if (tcpip_callback(zc_pcb_remove_in_tcpip, &ctx) != ERR_OK) {
++        vSemaphoreDelete(ctx.done);
++        return ESP_FAIL;
++    }
+     xSemaphoreTake(ctx.done, portMAX_DELAY);
+     vSemaphoreDelete(ctx.done);
++    memset(&ml->zc, 0, sizeof(ml->zc));
++    return ESP_OK;
+ }
+ 
+ esp_err_t ml_zerocopy_send(microlink_t *ml, const uint8_t *data, size_t len,
 diff --git a/components/microlink/src/nacl_box.c b/components/microlink/src/nacl_box.c
 index 93bfd5f..4de7d33 100644
 --- a/components/microlink/src/nacl_box.c

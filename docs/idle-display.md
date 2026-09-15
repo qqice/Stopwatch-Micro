@@ -18,3 +18,8 @@ test. It ends with the normal screen awake.
 On-device acceptance: automatic idle lock reached brightness8; over the following65s,
 lock refresh count1->2 and completed display frames81->82. Debug wake restored brightness70.
 Host regression30/30 passed. Raw evidence: .artifacts/idle-display-runtime.log.
+
+The default eco policy also stops Wi-Fi, disconnects BLE and stops advertising,
+and runs at 80 MHz between five-minute quota updates. The once-minute display
+uses cached quota while offline. Wake restores 240 MHz and reconnects.
+See [idle radio policy and measurement limits](idle-power.md).

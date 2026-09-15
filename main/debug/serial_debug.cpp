@@ -12,6 +12,7 @@
 #include <host/tailscale_transport.h>
 #include <host/token_history.h>
 #include <host/token_units_font.h>
+#include <esp_bt.h>
 extern "C" esp_err_t ml_noise_selftest(void);
 #include <system_config.h>
 
@@ -255,6 +256,38 @@ void SerialDebug::handleLine(char* line)
     }
     if (std::strcmp(command, "display-lock") == 0) {
         result("display-lock", _app.debugLockDisplay() ? "PASS" : "FAIL");
+        return;
+    }
+    if (std::strcmp(command, "power-refresh") == 0) {
+        GetNetworkQuota().refreshWhileLocked();
+        result("power-refresh", "PASS");
+        return;
+    }
+    if (std::strcmp(command, "power") == 0) {
+        const char* profile = ::strtok_r(nullptr, " \t", &save);
+        if (profile) {
+            if (!std::strcmp(profile, "baseline"))
+                GetNetworkQuota().setPowerProfile(0);
+            else if (!std::strcmp(profile, "radio"))
+                GetNetworkQuota().setPowerProfile(1);
+            else if (!std::strcmp(profile, "eco"))
+                GetNetworkQuota().setPowerProfile(2);
+            else {
+                result("power", "FAIL", "invalid_profile");
+                return;
+            }
+        }
+        const auto state = GetNetworkQuota().powerStats();
+        const auto ble   = GetCodexMicroBle().diagnostics();
+        char details[256]{};
+        std::snprintf(details, sizeof(details),
+                      "locked=%d profile=%u phase=%u wifi_running=%d wifi_connected=%d bt_connected=%d "
+                      "bt_advertising=%d bt_sleeping=%d cpu_mhz=%lu off_ms=%llu cycles=%lu clock_error=%d",
+                      state.locked, state.profile, state.phase, state.wifiRunning, GetNetworkQuota().connected(),
+                      GetCodexMicroBle().connected(), ble.advertising, esp_bt_controller_is_sleeping(),
+                      static_cast<unsigned long>(state.cpuMHz), static_cast<unsigned long long>(state.offMs),
+                      static_cast<unsigned long>(state.cycles), state.clockError);
+        result("power", "PASS", details);
         return;
     }
     if (std::strcmp(command, "display-wake") == 0) {
