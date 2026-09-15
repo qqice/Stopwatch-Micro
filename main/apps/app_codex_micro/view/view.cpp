@@ -1233,9 +1233,9 @@ void CodexMicroView::updateLockedScreen(const CodexMicroState& state, uint32_t t
     if (!host.usageAvailable) {
         setLabelText(_lock_quota_label, "CODEX\n--");
     } else {
-        std::snprintf(text, sizeof(text), "CODEX%s\n%u.%02u%%", host.usageStale ? " STALE" : "",
-                      static_cast<unsigned>(host.remainingBasisPoints / 100U),
-                      static_cast<unsigned>(host.remainingBasisPoints % 100U));
+        // App Server exposes usedPercent as int32; transport basis points add no precision.
+        std::snprintf(text, sizeof(text), "CODEX%s\n%u%%", host.usageStale ? " STALE" : "",
+                      static_cast<unsigned>(host.remainingBasisPoints / 100U));
         setLabelText(_lock_quota_label, text);
     }
     std::snprintf(text, sizeof(text), "%s %u%%%s", batterySymbol(state.battery), static_cast<unsigned>(state.battery),
@@ -1410,8 +1410,7 @@ void CodexMicroView::updateCenterStatus(const CodexMicroState& state)
             lv_obj_set_style_text_color(_usage_status_label, lv_color_hex(host.usageStale ? StatusStale : KeyMuted),
                                         LV_PART_MAIN);
         }
-        std::snprintf(text, sizeof(text), "%u.%02u%%", static_cast<unsigned>(host.remainingBasisPoints / 100U),
-                      static_cast<unsigned>(host.remainingBasisPoints % 100U));
+        std::snprintf(text, sizeof(text), "%u%%", static_cast<unsigned>(host.remainingBasisPoints / 100U));
         setLabelText(_usage_value_label, text);
         if (host.resetAvailable) {
             formatResetCountdown(text, sizeof(text), host.resetSeconds);
