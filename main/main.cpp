@@ -71,6 +71,6 @@ extern "C" void app_main(void)
         }
         // main_task, Bluedroid, and the HID TX worker share CPU0. Yield one
         // tick so transport activity cannot reduce touch/UI scheduling time.
-        vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 20 : 1));
+        vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 1));
     }
 }

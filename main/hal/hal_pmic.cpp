@@ -6,6 +6,7 @@
 #include "hal.h"
 #include <mooncake_log.h>
 #include <M5PM1.h>
+#include <host/network_quota.h>
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -74,7 +75,7 @@ void bat_reading_task(void* param)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(_bat_reading_period_ms));
+        vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 10000 : _bat_reading_period_ms));
     }
 }
 

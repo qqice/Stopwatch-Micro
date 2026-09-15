@@ -7,6 +7,8 @@
 #include "utils/settings/settings.h"
 
 #include <algorithm>
+#include <atomic>
+#include <functional>
 #include <cstdint>
 #include <driver/i2s_std.h>
 #include <esp_codec_dev.h>
@@ -32,8 +34,9 @@ class AudioCodec {
 public:
     static constexpr int SampleRate = 44100;
 
-    void init(i2c_master_bus_handle_t i2c_bus)
+    void init(i2c_master_bus_handle_t i2c_bus, std::function<void(bool)> power_control)
     {
+        _power_control = std::move(power_control);
         _silence_buffer.assign(SampleRate / 10, 0);
         initI2s();
 
@@ -69,6 +72,10 @@ public:
         sample_info.sample_rate                 = SampleRate;
         ESP_ERROR_CHECK(esp_codec_dev_open(_device, &sample_info));
 
+        ESP_ERROR_CHECK(esp_codec_dev_close(_device));
+        _power_control(false);
+        _suspended = true;
+
         if (xTaskCreatePinnedToCore(taskEntry, "audio_task", 4 * 1024, this, 5, &_task_handle, AudioTaskCore) !=
             pdPASS) {
             ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
@@ -77,16 +84,17 @@ public:
 
     void setVolume(int volume)
     {
-        std::lock_guard<std::mutex> lock(_mutex);
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(_device, volume));
+        std::lock_guard<std::mutex> lock(_io_mutex);
+        _volume = volume;
+        if (!_suspended) ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(_device, volume));
     }
-
     int getVolume()
     {
-        std::lock_guard<std::mutex> lock(_mutex);
-        int volume = 0;
-        ESP_ERROR_CHECK(esp_codec_dev_get_out_vol(_device, &volume));
-        return volume;
+        return _volume;
+    }
+    bool suspended() const
+    {
+        return _suspended;
     }
 
     void play(const std::vector<int16_t>& data, bool async)
@@ -97,7 +105,10 @@ public:
                 mclog::tagWarn(Tag, "audio is already playing");
                 return;
             }
+            std::lock_guard<std::mutex> io_lock(_io_mutex);
+            resumeOutput();
             write(data);
+            suspendOutput();
             return;
         }
 
@@ -153,6 +164,8 @@ private:
                     _audio_data.clear();
                 }
 
+                std::lock_guard<std::mutex> io_lock(_io_mutex);
+                resumeOutput();
                 bool interrupted                   = false;
                 std::size_t offset                 = 0;
                 constexpr std::size_t ChunkSamples = 512;
@@ -170,13 +183,32 @@ private:
                 }
 
                 if (interrupted) {
-                    ESP_ERROR_CHECK(i2s_channel_disable(_tx_handle));
-                    ESP_ERROR_CHECK(i2s_channel_enable(_tx_handle));
+                    suspendOutput();
                     continue;
                 }
                 writeSilence();
+                suspendOutput();
             }
         }
+    }
+
+    void resumeOutput()
+    {
+        if (!_suspended) return;
+        esp_codec_dev_sample_info_t info{};
+        info.bits_per_sample = 16;
+        info.channel         = 1;
+        info.sample_rate     = SampleRate;
+        ESP_ERROR_CHECK(esp_codec_dev_open(_device, &info));
+        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(_device, _volume));
+        _power_control(true);
+        _suspended = false;
+    }
+    void suspendOutput()
+    {
+        _power_control(false);
+        ESP_ERROR_CHECK(esp_codec_dev_close(_device));
+        _suspended = true;
     }
 
     void write(const std::vector<int16_t>& data)
@@ -216,6 +248,10 @@ private:
     const audio_codec_if_t* _codec_interface        = nullptr;
     TaskHandle_t _task_handle                       = nullptr;
     std::mutex _mutex;
+    std::mutex _io_mutex;
+    std::function<void(bool)> _power_control;
+    std::atomic<bool> _suspended{true};
+    std::atomic<int> _volume{50};
     std::vector<int16_t> _audio_data;
     std::vector<int16_t> _silence_buffer;
     bool _is_playing = false;
@@ -228,8 +264,7 @@ AudioCodec Audio;
 void Hal::audio_init()
 {
     mclog::tagInfo(Tag, "init");
-    Audio.init(i2c_bus_get_internal_bus_handle(_i2c_bus));
-    ioe_speaker_enable(true);
+    Audio.init(i2c_bus_get_internal_bus_handle(_i2c_bus), [this](bool on) { ioe_speaker_enable(on); });
     setSpeakerVolume(getSpeakerVolume(true), false);
 }
 
@@ -284,4 +319,9 @@ int Hal::getAudioSampleRate()
 bool Hal::audio_ready() const
 {
     return Audio.ready();
+}
+
+bool Hal::audioSuspended() const
+{
+    return Audio.suspended();
 }

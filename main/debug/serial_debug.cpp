@@ -281,13 +281,14 @@ void SerialDebug::handleLine(char* line)
         const auto state = GetNetworkQuota().powerStats();
         const auto ble   = GetCodexMicroBle().diagnostics();
         char details[256]{};
-        std::snprintf(details, sizeof(details),
-                      "locked=%d profile=%u phase=%u wifi_running=%d wifi_connected=%d bt_connected=%d "
-                      "bt_advertising=%d bt_sleeping=%d cpu_mhz=%lu off_ms=%llu cycles=%lu clock_error=%d",
-                      state.locked, state.profile, state.phase, state.wifiRunning, GetNetworkQuota().connected(),
-                      GetCodexMicroBle().connected(), ble.advertising, esp_bt_controller_is_sleeping(),
-                      static_cast<unsigned long>(state.cpuMHz), static_cast<unsigned long long>(state.offMs),
-                      static_cast<unsigned long>(state.cycles), state.clockError);
+        std::snprintf(
+            details, sizeof(details),
+            "locked=%d profile=%u phase=%u wifi_running=%d wifi_connected=%d bt_connected=%d "
+            "bt_advertising=%d bt_sleeping=%d cpu_mhz=%lu off_ms=%llu cycles=%lu clock_error=%d audio_suspended=%d",
+            state.locked, state.profile, state.phase, state.wifiRunning, GetNetworkQuota().connected(),
+            GetCodexMicroBle().connected(), ble.advertising, esp_bt_controller_is_sleeping(),
+            static_cast<unsigned long>(state.cpuMHz), static_cast<unsigned long long>(state.offMs),
+            static_cast<unsigned long>(state.cycles), state.clockError, GetHAL().audioSuspended());
         result("power", "PASS", details);
         return;
     }
@@ -332,7 +333,10 @@ void SerialDebug::handleLine(char* line)
         printStatus();
         return;
     }
-    if (std::strcmp(command, "boot") == 0) { BootTracePrint(); return; }
+    if (std::strcmp(command, "boot") == 0) {
+        BootTracePrint();
+        return;
+    }
     if (std::strcmp(command, "selftest") == 0) {
         runSelfTest();
         return;

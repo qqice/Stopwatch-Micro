@@ -60,3 +60,28 @@ One real scheduled cycle passed on the StopWatch with ESP-IDF 6.1:
 
 Raw local evidence: `.artifacts/idle-power-cycle.log`,
 `.artifacts/idle-power-final-status.log`, `.artifacts/idle-power-host-tests.log`.
+
+## Idle peripherals
+
+Audio is demand-driven: the external speaker amplifier is disabled and
+`esp_codec_dev_close` stops the ES8311 DAC and I2S data path whenever playback
+ends, including cancellation. The worker enables them only for actual sound.
+`debug power` reports `audio_suspended=1` after the close completes. This is
+software/API state, not a measured current reading.
+
+Locked UI/main polling runs every 100 ms (previously 20 ms), battery sampling
+every 10 seconds (previously 1 second), and LVGL reads the monotonic clock on
+demand rather than waking a dedicated timer every 10 ms. The vibrator task
+already blocks when idle with PWM duty zero. The local microphone is unused.
+
+AMOLED, touch/IO-expander power, RTC and USB diagnostics remain available; BLE
+retains its initialized controller with modem sleep. This is not deep sleep.
+No shared display/touch power rail or battery charging setting is changed.
+Physical heat and energy reduction are not quantified without measurement.
+
+On-board acceptance after this update: two playback requests returned to
+`audio_suspended=1`; locked phase 2 reported CPU 80 MHz, Wi-Fi stopped, BLE
+disconnected/no advertising and audio suspended. Across 65 seconds, refreshes
+1->2 and completed display frames 22->23. Hardware self-test 17/17 and host
+regression 36/36 passed. Evidence: `.artifacts/idle-audio-runtime.log`.
+These API/state checks do not measure current or enclosure temperature.

@@ -282,12 +282,6 @@ static void update_max(std::atomic<uint32_t> &destination, uint32_t value)
     }
 }
 
-static void lvgl_tick_timer(void *arg)
-{
-    (void)arg;
-    lv_tick_inc(10);
-}
-
 static void lvgl_rtos_task(void *pvParameter)
 {
     (void)pvParameter;
@@ -306,7 +300,7 @@ static void lvgl_rtos_task(void *pvParameter)
                          static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 20 : 10));
+        vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 10));
     }
 }
 
@@ -421,16 +415,8 @@ void Hal::lvgl_init()
         ESP_LOGE("HAL-Display", "failed to create LVGL mutex");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
-    const esp_timer_create_args_t periodic_timer_args = {
-        .callback              = &lvgl_tick_timer,
-        .arg                   = nullptr,
-        .dispatch_method       = ESP_TIMER_TASK,
-        .name                  = "lvgl_tick_timer",
-        .skip_unhandled_events = false,
-    };
-    esp_timer_handle_t periodic_timer;
-    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 10 * 1000));
+    // Read time on demand; no 100 Hz timer wakeups while the UI is idle.
+    lv_tick_set_cb([]() -> uint32_t { return static_cast<uint32_t>(esp_timer_get_time() / 1000); });
     // Bluetooth controller/host and main_task are pinned to CPU0 by sdkconfig.
     // Keep rendering and touch sampling on CPU1 so HID traffic cannot steal a
     // frame, and give it priority over background application workers.

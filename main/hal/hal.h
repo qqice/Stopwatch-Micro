@@ -120,6 +120,7 @@ public:
     void setSpeakerVolume(int volume, bool saveToSettings = false);
     int getSpeakerVolume(bool loadFromSettings = false);
     int getAudioSampleRate();
+    bool audioSuspended() const;
     void audioPlay(std::vector<int16_t>& data, bool async = true);
     void setMicrophoneMeterEnabled(bool enabled);
     bool isMicrophoneMeterEnabled();
