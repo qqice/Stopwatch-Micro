@@ -29,13 +29,18 @@ def run_git(
 
 def apply_patch(repo: Path, patch: Path) -> None:
     """Apply a patch once and fail when it matches neither state."""
-    if run_git(repo, "apply", "--check", str(patch), check=False, quiet=True).returncode == 0:
-        run_git(repo, "apply", str(patch))
+    # Dependencies may retain upstream CRLF while project patches use LF.
+    # Ignore whitespace only while locating patch context; verify_repo_state()
+    # below still compares the normalized complete diff byte-for-byte, so this
+    # does not allow arbitrary source drift.
+    apply_args = ("apply", "--ignore-space-change")
+    if run_git(repo, *apply_args, "--check", str(patch), check=False, quiet=True).returncode == 0:
+        run_git(repo, *apply_args, str(patch))
         print(f"Applied {patch.relative_to(ROOT)} to {repo.relative_to(ROOT)}")
         return
 
     if run_git(
-        repo, "apply", "--reverse", "--check", str(patch), check=False, quiet=True
+        repo, *apply_args, "--reverse", "--check", str(patch), check=False, quiet=True
     ).returncode == 0:
         print(f"Patch already applied: {patch.relative_to(ROOT)}")
         return
@@ -76,7 +81,17 @@ def verify_repo_state(repo: Path, patch: Path | None) -> None:
         capture_output=True,
     ).stdout.strip()
     actual = subprocess.run(
-        ["git", "-C", str(repo), "diff", "--binary", "--no-ext-diff", "HEAD", "--"],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "diff",
+            "--ignore-space-at-eol",
+            "--binary",
+            "--no-ext-diff",
+            "HEAD",
+            "--",
+        ],
         check=True,
         text=True,
         encoding="utf-8",

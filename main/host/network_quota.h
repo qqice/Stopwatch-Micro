@@ -6,10 +6,23 @@ class NetworkQuota {
 public:
     void begin();
     bool configure(const char* base64);
-    bool configured() const { return _configured; }
-    bool connected() const { return _connected; }
-    uint32_t accepted() const { return _accepted; }
-    uint32_t failures() const { return _failures; }
+    bool configured() const
+    {
+        return _configured;
+    }
+    bool connected() const
+    {
+        return _connected;
+    }
+    uint32_t accepted() const
+    {
+        return _accepted;
+    }
+    uint32_t failures() const
+    {
+        return _failures;
+    }
+
 private:
     static void task(void* arg);
     void run();

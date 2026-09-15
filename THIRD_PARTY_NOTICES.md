@@ -58,6 +58,7 @@ with those terms.
 | LVGL | `85aa60d18b3d5e5588d7b247abf90198f07c8a63` | Copyright (c) 2025 LVGL Kft | [source](https://github.com/lvgl/lvgl/tree/85aa60d18b3d5e5588d7b247abf90198f07c8a63) |
 | M5IOE1 | `37db04861687858b6748f5dbd1a84439a6635c46` plus the project patch in `patches/M5IOE1.patch` | Copyright (c) 2026 M5Stack Technology CO LTD | [source](https://github.com/m5stack/M5IOE1/tree/37db04861687858b6748f5dbd1a84439a6635c46) |
 | M5PM1 | `8f1f1a60b3040088cd0ca2b9eb9d024ccc4d907f` plus the project patch in `patches/M5PM1.patch` | Copyright (c) 2025 M5Stack Technology CO LTD | [source](https://github.com/m5stack/M5PM1/tree/8f1f1a60b3040088cd0ca2b9eb9d024ccc4d907f) |
+| MicroLink | `216da3300f0493b0860247d43f7af5ce29df63a5` plus the project patch in `patches/microlink-idf61.patch` | Copyright (c) 2025-2026 Cameron Malone | [source](https://github.com/CamM2325/microlink/tree/216da3300f0493b0860247d43f7af5ce29df63a5) |
 | ThorVG | 0.15.3, bundled with the pinned LVGL revision above | Copyright (c) 2020-2025 notice for the ThorVG Project (see CONTRIBUTORS) | [bundled source](https://github.com/lvgl/lvgl/tree/85aa60d18b3d5e5588d7b247abf90198f07c8a63/src/libs/thorvg) |
 
 LVGL contains optional third-party modules. Stopwatch Micro uses the LVGL core

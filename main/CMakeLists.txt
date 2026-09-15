@@ -6,6 +6,7 @@ set(APP_SRCS
     "debug/serial_debug.cpp"
     "host/host_bridge.cpp"
     "host/network_quota.cpp"
+    "host/tailscale_transport.cpp"
 )
 
 set(PLATFORM_SRCS

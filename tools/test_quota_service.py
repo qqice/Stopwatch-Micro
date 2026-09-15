@@ -7,6 +7,7 @@ import json
 import sys
 import threading
 import unittest
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -35,6 +36,16 @@ class FakeClient:
 
 class QuotaServiceTests(unittest.TestCase):
     token = "0123456789abcdef"
+
+    def test_bind_addresses_are_explicit_and_private(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'config.json'
+            data={'device_token':self.token,'server_host':'192.168.1.10','additional_hosts':['100.74.22.89']}
+            path.write_text(json.dumps(data))
+            self.assertEqual(quota_service.load_config(path).additional_hosts,('100.74.22.89',))
+            for invalid in ('0.0.0.0','8.8.8.8',32):
+                data['additional_hosts']=[invalid];path.write_text(json.dumps(data))
+                with self.assertRaises(quota_service.BridgeError):quota_service.load_config(path)
 
     def setUp(self) -> None:
         self.wall_now = 2000

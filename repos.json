@@ -36,5 +36,11 @@
         "path": "components/M5PM1",
         "commit": "8f1f1a60b3040088cd0ca2b9eb9d024ccc4d907f",
         "patch": "patches/M5PM1.patch"
+    },
+    {
+        "url": "https://github.com/CamM2325/microlink.git",
+        "path": "components/microlink-source",
+        "commit": "216da3300f0493b0860247d43f7af5ce29df63a5",
+        "patch": "patches/microlink-idf61.patch"
     }
 ]

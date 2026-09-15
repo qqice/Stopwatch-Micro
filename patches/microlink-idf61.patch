@@ -1,0 +1,692 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7367f56..6945952 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,3 +1,8 @@
+ # MicroLink v2 - Top-level project CMakeLists
+ # This is not a standalone project - examples include this as a component
+ cmake_minimum_required(VERSION 3.16)
++
++# This repository is vendored beneath components/.  Register its root as an
++# empty component so ESP-IDF does not attempt to treat this project file as a
++# malformed component while the two real components are supplied explicitly.
++idf_component_register()
+diff --git a/components/microlink/CMakeLists.txt b/components/microlink/CMakeLists.txt
+index 35b0bda..1c4fb3e 100644
+--- a/components/microlink/CMakeLists.txt
++++ b/components/microlink/CMakeLists.txt
+@@ -13,10 +13,6 @@ set(SRCS
+     "src/nacl_box.c"
+     "src/x25519.c"
+     "src/ml_zerocopy.c"
+-    "src/ml_cellular.c"
+-    "src/ml_at_socket.c"
+-    "src/ml_net_switch.c"
+-    "src/ml_config_httpd.c"
+ )
+ 
+ set(REQUIRES
+@@ -27,10 +23,9 @@ set(REQUIRES
+     esp_timer
+     lwip
+     mbedtls
+-    json
++    espressif__cjson
+     driver
+     esp_driver_tsens
+-    esp_http_server
+ )
+ 
+ idf_component_register(
+diff --git a/components/microlink/components/wireguard_lwip/src/wireguard.c b/components/microlink/components/wireguard_lwip/src/wireguard.c
+index a11aefd..30704e9 100644
+--- a/components/microlink/components/wireguard_lwip/src/wireguard.c
++++ b/components/microlink/components/wireguard_lwip/src/wireguard.c
+@@ -44,10 +44,10 @@
+ 
+ // 5.4 Messages
+ // Constants
+-static const uint8_t CONSTRUCTION[37] = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"; // The UTF-8 string literal "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s", 37 bytes of output
+-static const uint8_t IDENTIFIER[34] = "WireGuard v1 zx2c4 Jason@zx2c4.com"; // The UTF-8 string literal "WireGuard v1 zx2c4 Jason@zx2c4.com", 34 bytes of output
+-static const uint8_t LABEL_MAC1[8] = "mac1----"; // Label-Mac1 The UTF-8 string literal "mac1----", 8 bytes of output.
+-static const uint8_t LABEL_COOKIE[8] = "cookie--"; // Label-Cookie The UTF-8 string literal "cookie--", 8 bytes of output
++static const uint8_t CONSTRUCTION[37] __attribute__((nonstring)) = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"; // The UTF-8 string literal "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s", 37 bytes of output
++static const uint8_t IDENTIFIER[34] __attribute__((nonstring)) = "WireGuard v1 zx2c4 Jason@zx2c4.com"; // The UTF-8 string literal "WireGuard v1 zx2c4 Jason@zx2c4.com", 34 bytes of output
++static const uint8_t LABEL_MAC1[8] __attribute__((nonstring)) = "mac1----"; // Label-Mac1 The UTF-8 string literal "mac1----", 8 bytes of output.
++static const uint8_t LABEL_COOKIE[8] __attribute__((nonstring)) = "cookie--"; // Label-Cookie The UTF-8 string literal "cookie--", 8 bytes of output
+ 
+ static const char *base64_lookup = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+ 
+diff --git a/components/microlink/include/microlink.h b/components/microlink/include/microlink.h
+index 9126a53..7073671 100644
+--- a/components/microlink/include/microlink.h
++++ b/components/microlink/include/microlink.h
+@@ -23,6 +23,12 @@ extern "C" {
+ /* Opaque handle */
+ typedef struct microlink_s microlink_t;
+ 
++/**
++ * Run a deterministic ChaCha20-Poly1305 known-answer and tamper-rejection test.
++ * This performs no network or account operation.
++ */
++esp_err_t ml_noise_selftest(void);
++
+ /* Configuration */
+ typedef struct {
+     const char *auth_key;       /* Tailscale auth key (tskey-auth-...) */
+diff --git a/components/microlink/include/microlink_internal.h b/components/microlink/include/microlink_internal.h
+index add69c7..862b849 100644
+--- a/components/microlink/include/microlink_internal.h
++++ b/components/microlink/include/microlink_internal.h
+@@ -24,8 +24,6 @@
+ #include "freertos/event_groups.h"
+ #include "freertos/semphr.h"
+ #include "mbedtls/ssl.h"
+-#include "mbedtls/entropy.h"
+-#include "mbedtls/ctr_drbg.h"
+ #include "esp_heap_caps.h"
+ 
+ #ifdef CONFIG_ML_ZERO_COPY_WG
+@@ -324,8 +322,6 @@ typedef struct {
+     int sockfd;                     /* Raw TCP socket */
+     mbedtls_ssl_context ssl;        /* TLS context (owned exclusively by DERP I/O task) */
+     mbedtls_ssl_config ssl_conf;
+-    mbedtls_entropy_context entropy;
+-    mbedtls_ctr_drbg_context ctr_drbg;
+     bool connected;
+     uint64_t last_recv_ms;          /* For keepalive watchdog */
+ } ml_derp_conn_t;
+diff --git a/components/microlink/src/microlink.c b/components/microlink/src/microlink.c
+index 237f039..2078b1c 100644
+--- a/components/microlink/src/microlink.c
++++ b/components/microlink/src/microlink.c
+@@ -15,6 +15,7 @@
+ #include "nvs_flash.h"
+ #include "nvs.h"
+ #include "cJSON.h"
++#include "psa/crypto.h"
+ #include <string.h>
+ #include <stdio.h>
+ #include <fcntl.h>
+@@ -156,6 +157,10 @@ microlink_t *microlink_init(const microlink_config_t *config) {
+         ESP_LOGE(TAG, "Invalid config: auth_key required");
+         return NULL;
+     }
++    if (psa_crypto_init() != PSA_SUCCESS) {
++        ESP_LOGE(TAG, "PSA crypto initialization failed");
++        return NULL;
++    }
+ 
+     /* Route cJSON to PSRAM */
+     cJSON_Hooks hooks = {
+diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_coord.c
+index 8da8d4d..6c48241 100644
+--- a/components/microlink/src/ml_coord.c
++++ b/components/microlink/src/ml_coord.c
+@@ -990,10 +990,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
+         }
+         cJSON *self_key = cJSON_GetObjectItem(node, "Key");
+         if (self_key && self_key->valuestring) {
+-            ESP_LOGI(TAG, "Self-Node Key (from server): %s", self_key->valuestring);
+-            char our_key_hex[65];
+-            bytes_to_hex(ml->wg_public_key, 32, our_key_hex);
+-            ESP_LOGI(TAG, "Our WG pubkey (local):       nodekey:%s", our_key_hex);
++            ESP_LOGI(TAG, "Self-node key received from control plane");
+         }
+     }
+ 
+@@ -1653,10 +1650,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+             }
+             cJSON *self_key = cJSON_GetObjectItem(node, "Key");
+             if (self_key && self_key->valuestring) {
+-                ESP_LOGI(TAG, "Self-Node Key (server): %.40s...", self_key->valuestring);
+-                char our_hex[65];
+-                bytes_to_hex(ml->wg_public_key, 32, our_hex);
+-                ESP_LOGI(TAG, "Our WG pubkey (local):  nodekey:%.32s...", our_hex);
++                ESP_LOGI(TAG, "Self-node key refreshed by control plane");
+             }
+ 
+             /* Parse KeyExpiry (ISO 8601: "YYYY-MM-DDTHH:MM:SSZ") */
+diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_derp.c
+index c57fd0f..98438cf 100644
+--- a/components/microlink/src/ml_derp.c
++++ b/components/microlink/src/ml_derp.c
+@@ -21,6 +21,7 @@
+ 
+ #include "microlink_internal.h"
+ #include "esp_log.h"
++#include "esp_crt_bundle.h"
+ #include "esp_timer.h"
+ #include "esp_random.h"
+ #include "lwip/sockets.h"
+@@ -711,22 +712,27 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+     /* TLS setup */
+     mbedtls_ssl_init(&ml->derp.ssl);
+     mbedtls_ssl_config_init(&ml->derp.ssl_conf);
+-    mbedtls_entropy_init(&ml->derp.entropy);
+-    mbedtls_ctr_drbg_init(&ml->derp.ctr_drbg);
+-
+-    mbedtls_ctr_drbg_seed(&ml->derp.ctr_drbg, mbedtls_entropy_func,
+-                           &ml->derp.entropy, NULL, 0);
+-
+-    mbedtls_ssl_config_defaults(&ml->derp.ssl_conf,
+-                                 MBEDTLS_SSL_IS_CLIENT,
+-                                 MBEDTLS_SSL_TRANSPORT_STREAM,
+-                                 MBEDTLS_SSL_PRESET_DEFAULT);
+-    mbedtls_ssl_conf_authmode(&ml->derp.ssl_conf, MBEDTLS_SSL_VERIFY_NONE);
+-    mbedtls_ssl_conf_rng(&ml->derp.ssl_conf, mbedtls_ctr_drbg_random, &ml->derp.ctr_drbg);
++
++    int ret = mbedtls_ssl_config_defaults(&ml->derp.ssl_conf,
++                                          MBEDTLS_SSL_IS_CLIENT,
++                                          MBEDTLS_SSL_TRANSPORT_STREAM,
++                                          MBEDTLS_SSL_PRESET_DEFAULT);
++    if (ret != 0 || esp_crt_bundle_attach(&ml->derp.ssl_conf) != ESP_OK) {
++        ESP_LOGE(TAG, "TLS certificate verification setup failed");
++        ml_close_sock(sock);
++        ml->derp.sockfd = -1;
++        return ESP_FAIL;
++    }
++    mbedtls_ssl_conf_authmode(&ml->derp.ssl_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+     mbedtls_ssl_conf_read_timeout(&ml->derp.ssl_conf, DERP_CONNECT_TIMEOUT_MS);
+ 
+-    mbedtls_ssl_setup(&ml->derp.ssl, &ml->derp.ssl_conf);
+-    mbedtls_ssl_set_hostname(&ml->derp.ssl, derp_host);
++    if (mbedtls_ssl_setup(&ml->derp.ssl, &ml->derp.ssl_conf) != 0 ||
++        mbedtls_ssl_set_hostname(&ml->derp.ssl, derp_host) != 0) {
++        ESP_LOGE(TAG, "TLS hostname verification setup failed");
++        ml_close_sock(sock);
++        ml->derp.sockfd = -1;
++        return ESP_FAIL;
++    }
+     /* Store socket fd BEFORE setting bio.
+      * Use custom BIO callbacks that route through ml_read_sock/ml_write_sock,
+      * which transparently support both lwIP and AT socket backends.
+@@ -736,7 +742,6 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+                          ml_derp_bio_send, NULL, ml_derp_bio_recv_timeout);
+ 
+     /* TLS handshake - socket has 10s SO_RCVTIMEO from connect phase. */
+-    int ret;
+     while ((ret = mbedtls_ssl_handshake(&ml->derp.ssl)) != 0) {
+         if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+             continue;
+@@ -955,11 +960,7 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+         memcpy(ci_payload + 32 + NACL_BOX_NONCEBYTES, ciphertext, ciphertext_len);
+         free(ciphertext);
+ 
+-        ESP_LOGI(TAG, "DERP ClientInfo node_key=%02x%02x%02x%02x%02x%02x%02x%02x",
+-                 ml->wg_public_key[0], ml->wg_public_key[1],
+-                 ml->wg_public_key[2], ml->wg_public_key[3],
+-                 ml->wg_public_key[4], ml->wg_public_key[5],
+-                 ml->wg_public_key[6], ml->wg_public_key[7]);
++        ESP_LOGI(TAG, "DERP ClientInfo prepared");
+ 
+         /* Send ClientInfo frame */
+         if (derp_write_frame(ml, DERP_FRAME_CLIENT_INFO, ci_payload, ci_payload_len) < 0) {
+@@ -1029,8 +1030,6 @@ void ml_derp_disconnect(microlink_t *ml) {
+         mbedtls_ssl_close_notify(&ml->derp.ssl);
+         mbedtls_ssl_free(&ml->derp.ssl);
+         mbedtls_ssl_config_free(&ml->derp.ssl_conf);
+-        mbedtls_ctr_drbg_free(&ml->derp.ctr_drbg);
+-        mbedtls_entropy_free(&ml->derp.entropy);
+         ml_close_sock(ml->derp.sockfd);
+         ml->derp.sockfd = -1;
+     }
+diff --git a/components/microlink/src/ml_noise.c b/components/microlink/src/ml_noise.c
+index 1b0fac2..0d94a4b 100644
+--- a/components/microlink/src/ml_noise.c
++++ b/components/microlink/src/ml_noise.c
+@@ -17,8 +17,7 @@
+ #include "microlink_internal.h"
+ #include "esp_log.h"
+ #include "esp_random.h"
+-#include "mbedtls/chacha20.h"
+-#include "mbedtls/chachapoly.h"
++#include "psa/crypto.h"
+ #include <string.h>
+ 
+ static const char *TAG = "ml_noise";
+@@ -167,17 +166,22 @@ static int chacha20poly1305_encrypt(const uint8_t *key, uint64_t nonce,
+     nonce_bytes[10] = (nonce >> 8) & 0xFF;
+     nonce_bytes[11] = nonce & 0xFF;
+ 
+-    mbedtls_chachapoly_context ctx;
+-    mbedtls_chachapoly_init(&ctx);
+-    mbedtls_chachapoly_setkey(&ctx, key);
+-
+-    /* ciphertext layout: encrypted_data(pt_len) + tag(16) */
+-    int ret = mbedtls_chachapoly_encrypt_and_tag(&ctx,
+-                pt_len, nonce_bytes, ad, ad_len,
+-                plaintext, ciphertext, ciphertext + pt_len);
+-
+-    mbedtls_chachapoly_free(&ctx);
+-    return ret;
++    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
++    psa_key_id_t key_id = 0;
++    size_t ciphertext_len = 0;
++    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_ENCRYPT);
++    psa_set_key_algorithm(&attributes, PSA_ALG_CHACHA20_POLY1305);
++    psa_set_key_type(&attributes, PSA_KEY_TYPE_CHACHA20);
++    psa_set_key_bits(&attributes, 256);
++    psa_status_t status = psa_import_key(&attributes, key, 32, &key_id);
++    psa_reset_key_attributes(&attributes);
++    if (status == PSA_SUCCESS) {
++        status = psa_aead_encrypt(key_id, PSA_ALG_CHACHA20_POLY1305,
++                                  nonce_bytes, sizeof(nonce_bytes), ad, ad_len,
++                                  plaintext, pt_len, ciphertext, pt_len + 16, &ciphertext_len);
++        psa_destroy_key(key_id);
++    }
++    return (status == PSA_SUCCESS && ciphertext_len == pt_len + 16) ? 0 : -1;
+ }
+ 
+ static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
+@@ -198,19 +202,115 @@ static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
+     nonce_bytes[10] = (nonce >> 8) & 0xFF;
+     nonce_bytes[11] = nonce & 0xFF;
+ 
+-    size_t payload_len = ct_len - 16;
+-    const uint8_t *tag = ciphertext + payload_len;
+-
+-    mbedtls_chachapoly_context ctx;
+-    mbedtls_chachapoly_init(&ctx);
+-    mbedtls_chachapoly_setkey(&ctx, key);
+-
+-    int ret = mbedtls_chachapoly_auth_decrypt(&ctx,
+-                payload_len, nonce_bytes, ad, ad_len,
+-                tag, ciphertext, plaintext);
++    const size_t payload_len = ct_len - 16;
++    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
++    psa_key_id_t key_id = 0;
++    size_t plaintext_len = 0;
++    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_DECRYPT);
++    psa_set_key_algorithm(&attributes, PSA_ALG_CHACHA20_POLY1305);
++    psa_set_key_type(&attributes, PSA_KEY_TYPE_CHACHA20);
++    psa_set_key_bits(&attributes, 256);
++    psa_status_t status = psa_import_key(&attributes, key, 32, &key_id);
++    psa_reset_key_attributes(&attributes);
++    if (status == PSA_SUCCESS) {
++        status = psa_aead_decrypt(key_id, PSA_ALG_CHACHA20_POLY1305,
++                                  nonce_bytes, sizeof(nonce_bytes), ad, ad_len,
++                                  ciphertext, ct_len, plaintext, payload_len, &plaintext_len);
++        psa_destroy_key(key_id);
++    }
++    return (status == PSA_SUCCESS && plaintext_len == payload_len) ? 0 : -1;
++}
+ 
+-    mbedtls_chachapoly_free(&ctx);
+-    return ret;
++esp_err_t ml_noise_selftest(void) {
++    static const uint8_t key[32] = {
++        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
++        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
++        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
++        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
++    };
++    static const uint8_t aad[] = "Stopwatch-Micro";
++    static const uint8_t plaintext[] = "quota-test";
++    static const uint8_t expected[] = {
++        0x59, 0x33, 0x7a, 0x37, 0x2f, 0xae, 0x5e, 0x3b, 0x1f, 0x19,
++        0x23, 0xe1, 0xf7, 0x2f, 0xe0, 0x40, 0x24, 0x88, 0x57, 0x82,
++        0x5a, 0xe8, 0x96, 0x75, 0x1d, 0x3d,
++    };
++    static const uint8_t expected_empty[] = {
++        0xd1, 0x56, 0x0a, 0xae, 0x98, 0xb7, 0xc1, 0x09,
++        0xa5, 0x7a, 0xdc, 0x58, 0xbc, 0xc5, 0x56, 0xca,
++    };
++    static const uint8_t expected_msg1[] = {
++        0x00, 0x83, 0x01, 0x00, 0x60, 0x35, 0x80, 0x72, 0xd6, 0x36,
++        0x58, 0x80, 0xd1, 0xae, 0xea, 0x32, 0x9a, 0xdf, 0x91, 0x21,
++        0x38, 0x38, 0x51, 0xed, 0x21, 0xa2, 0x8e, 0x3b, 0x75, 0xe9,
++        0x65, 0xd0, 0xd2, 0xcd, 0x16, 0x62, 0x54, 0xcd, 0xc1, 0x7a,
++        0x45, 0x36, 0x3a, 0x71, 0x7b, 0xdd, 0x0d, 0xcd, 0x1b, 0xd8,
++        0xbe, 0x4a, 0xb3, 0xed, 0x4d, 0x4b, 0x10, 0x13, 0xb1, 0xd4,
++        0xb9, 0x3c, 0x4c, 0xa1, 0xaf, 0x38, 0x19, 0xe8, 0x05, 0xdc,
++        0xaf, 0xf9, 0x9c, 0x84, 0x2c, 0x41, 0x14, 0x9c, 0xd0, 0x08,
++        0x01, 0x0d, 0x65, 0x10, 0x86, 0x2a, 0x74, 0xa2, 0x66, 0x1b,
++        0x33, 0xd3, 0x42, 0xd7, 0x75, 0x47, 0x58, 0xa2, 0x75, 0xaf,
++        0xe8,
++    };
++    uint8_t ciphertext[sizeof(expected)] = {0};
++    uint8_t decrypted[sizeof(plaintext) - 1] = {0};
++    uint8_t empty_tag[sizeof(expected_empty)] = {0};
++    uint8_t local_private[32];
++    uint8_t local_public[32];
++    uint8_t ephemeral_private[32];
++    uint8_t ephemeral_public[32];
++    uint8_t msg1[sizeof(expected_msg1)] = {0};
++    size_t msg1_len = 0;
++    ml_noise_state_t state;
++    const char *stage = "aead";
++    esp_err_t result = ESP_FAIL;
++
++    if (psa_crypto_init() != PSA_SUCCESS ||
++        chacha20poly1305_encrypt(key, 7, aad, sizeof(aad) - 1,
++                                 plaintext, sizeof(plaintext) - 1, ciphertext) != 0 ||
++        memcmp(ciphertext, expected, sizeof(expected)) != 0 ||
++        chacha20poly1305_decrypt(key, 7, aad, sizeof(aad) - 1,
++                                 ciphertext, sizeof(ciphertext), decrypted) != 0 ||
++        memcmp(decrypted, plaintext, sizeof(decrypted)) != 0 ||
++        chacha20poly1305_encrypt(key, 7, aad, sizeof(aad) - 1,
++                                 NULL, 0, empty_tag) != 0 ||
++        memcmp(empty_tag, expected_empty, sizeof(expected_empty)) != 0) {
++        goto out;
++    }
++    stage = "tamper_tag";
++    empty_tag[sizeof(empty_tag) - 1] ^= 0x01;
++    if (chacha20poly1305_decrypt(key, 7, aad, sizeof(aad) - 1,
++                                 empty_tag, sizeof(empty_tag), NULL) == 0) {
++        goto out;
++    }
++    for (size_t index = 0; index < sizeof(local_private); ++index) {
++        local_private[index] = (uint8_t)index;
++        ephemeral_private[index] = (uint8_t)(index + 32);
++    }
++    x25519_base(local_public, local_private, 1);
++    x25519_base(ephemeral_public, ephemeral_private, 1);
++    ml_noise_init(&state, local_private, local_public, NULL);
++    memcpy(state.local_ephemeral_private, ephemeral_private, sizeof(ephemeral_private));
++    memcpy(state.local_ephemeral_public, ephemeral_public, sizeof(ephemeral_public));
++    stage = "noise_msg1";
++    if (ml_noise_write_msg1(&state, msg1, &msg1_len) != ESP_OK ||
++        msg1_len != sizeof(expected_msg1) ||
++        memcmp(msg1, expected_msg1, sizeof(expected_msg1)) != 0) {
++        goto out;
++    }
++    result = ESP_OK;
++out:
++    memset(ciphertext, 0, sizeof(ciphertext));
++    memset(decrypted, 0, sizeof(decrypted));
++    memset(empty_tag, 0, sizeof(empty_tag));
++    memset(local_private, 0, sizeof(local_private));
++    memset(local_public, 0, sizeof(local_public));
++    memset(ephemeral_private, 0, sizeof(ephemeral_private));
++    memset(ephemeral_public, 0, sizeof(ephemeral_public));
++    memset(msg1, 0, sizeof(msg1));
++    memset(&state, 0, sizeof(state));
++    if (result != ESP_OK) ESP_LOGE(TAG, "Noise self-test failed at %s", stage);
++    return result;
+ }
+ 
+ /* ============================================================================
+@@ -269,6 +369,7 @@ void ml_noise_init(ml_noise_state_t *state,
+  * Header: [version(2)][type(1)=0x01][length(2)=96]
+  */
+ esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out_len) {
++    if (state == NULL || out == NULL || out_len == NULL) return ESP_ERR_INVALID_ARG;
+     size_t pos = 0;
+ 
+     /* Header: version(2) + type(1) + payload_length(2) = 5 bytes */
+@@ -292,9 +393,11 @@ esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out
+     memset(dh_output, 0, 32);
+ 
+     /* s: Encrypt and send static public key (32 + 16 MAC = 48 bytes) */
+-    chacha20poly1305_encrypt(k, 0, state->h, 32,
+-                              state->local_static_public, 32,
+-                              out + pos);
++    if (chacha20poly1305_encrypt(k, 0, state->h, 32,
++                                 state->local_static_public, 32,
++                                 out + pos) != 0) {
++        goto crypto_failure;
++    }
+     noise_mix_hash(state->h, out + pos, 48);
+     pos += 48;
+ 
+@@ -304,8 +407,10 @@ esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out
+     memset(dh_output, 0, 32);
+ 
+     /* Empty payload encrypted (just the 16-byte auth tag) */
+-    chacha20poly1305_encrypt(k, 0, state->h, 32,
+-                              NULL, 0, out + pos);
++    if (chacha20poly1305_encrypt(k, 0, state->h, 32,
++                                 NULL, 0, out + pos) != 0) {
++        goto crypto_failure;
++    }
+     noise_mix_hash(state->h, out + pos, 16);
+     pos += 16;
+ 
+@@ -314,6 +419,14 @@ esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out
+ 
+     ESP_LOGI(TAG, "Noise msg1 built: %d bytes", (int)pos);
+     return ESP_OK;
++
++crypto_failure:
++    memset(dh_output, 0, sizeof(dh_output));
++    memset(k, 0, sizeof(k));
++    memset(out, 0, pos);
++    *out_len = 0;
++    ESP_LOGE(TAG, "Noise msg1 encryption failed");
++    return ESP_FAIL;
+ }
+ 
+ /**
+diff --git a/components/microlink/src/ml_tcp.c b/components/microlink/src/ml_tcp.c
+index e65d72d..d64d23c 100644
+--- a/components/microlink/src/ml_tcp.c
++++ b/components/microlink/src/ml_tcp.c
+@@ -94,22 +94,22 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
+         return NULL;
+     }
+ 
+-    /* Bind to our VPN IP so lwIP routes through the WG netif.
+-     * Without this, the PPP default route may catch 100.x.x.x traffic
+-     * and send it out the cellular modem raw (unroutable). */
+-    if (ml->vpn_ip != 0) {
+-        struct sockaddr_in src = {
+-            .sin_family = AF_INET,
+-            .sin_port = 0,  /* ephemeral */
+-            .sin_addr.s_addr = htonl(ml->vpn_ip),
+-        };
+-        if (bind(fd, (struct sockaddr *)&src, sizeof(src)) != 0) {
+-            ESP_LOGW(TAG, "bind() to VPN IP failed: errno=%d (continuing)", errno);
+-        } else {
+-            char src_str[16];
+-            microlink_ip_to_str(ml->vpn_ip, src_str);
+-            ESP_LOGI(TAG, "TCP socket bound to VPN IP %s", src_str);
+-        }
++    /* Fail closed: a missing or failed VPN bind must never use a LAN/default
++     * route, because callers use this API only for encrypted tunnel traffic. */
++    if (ml->vpn_ip == 0) {
++        ESP_LOGE(TAG, "VPN IP is unavailable");
++        close(fd);
++        return NULL;
++    }
++    struct sockaddr_in src = {
++        .sin_family = AF_INET,
++        .sin_port = 0,  /* ephemeral */
++        .sin_addr.s_addr = htonl(ml->vpn_ip),
++    };
++    if (bind(fd, (struct sockaddr *)&src, sizeof(src)) != 0) {
++        ESP_LOGE(TAG, "bind() to VPN IP failed: errno=%d", errno);
++        close(fd);
++        return NULL;
+     }
+ 
+     /* Set connect/send timeout */
+@@ -163,14 +163,16 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
+             fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+             if (fd < 0) return NULL;
+ 
+-            /* Bind to VPN IP for routing */
+-            if (ml->vpn_ip != 0) {
+-                struct sockaddr_in retry_src = {
+-                    .sin_family = AF_INET,
+-                    .sin_port = 0,
+-                    .sin_addr.s_addr = htonl(ml->vpn_ip),
+-                };
+-                bind(fd, (struct sockaddr *)&retry_src, sizeof(retry_src));
++            /* Retry must keep the same fail-closed VPN routing guarantee. */
++            struct sockaddr_in retry_src = {
++                .sin_family = AF_INET,
++                .sin_port = 0,
++                .sin_addr.s_addr = htonl(ml->vpn_ip),
++            };
++            if (bind(fd, (struct sockaddr *)&retry_src, sizeof(retry_src)) != 0) {
++                ESP_LOGE(TAG, "retry bind() to VPN IP failed: errno=%d", errno);
++                close(fd);
++                return NULL;
+             }
+ 
+             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_wg_mgr.c
+index ed40942..1f64ed9 100644
+--- a/components/microlink/src/ml_wg_mgr.c
++++ b/components/microlink/src/ml_wg_mgr.c
+@@ -128,9 +128,8 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+         return ERR_CONN;
+     }
+ 
+-    /* Log WG handshake initiations with key and one-time hex dump */
++    /* Do not log key or handshake material. */
+     if (len >= 4 && data[0] == 0x01) {
+-        static int init_dump_count = 0;
+         const char *hostname = "?";
+         for (int i = 0; i < ml->peer_count; i++) {
+             if (memcmp(ml->peers[i].public_key, peer_public_key, 32) == 0) {
+@@ -138,35 +137,7 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+                 break;
+             }
+         }
+-        ESP_LOGI(TAG, "WG INIT -> %s len=%d key=%02x%02x%02x%02x%02x%02x%02x%02x",
+-                 hostname, (int)len,
+-                 peer_public_key[0], peer_public_key[1],
+-                 peer_public_key[2], peer_public_key[3],
+-                 peer_public_key[4], peer_public_key[5],
+-                 peer_public_key[6], peer_public_key[7]);
+-
+-        /* Dump first handshake fully for byte-level verification */
+-        if (init_dump_count < 1 && len == 148) {
+-            init_dump_count++;
+-            /* WG handshake init: type(1) reserved(3) sender(4) ephemeral(32)
+-             * enc_static(48) enc_timestamp(28) mac1(16) mac2(16) = 148 */
+-            ESP_LOGI(TAG, "  type=%02x res=%02x%02x%02x sender=%02x%02x%02x%02x",
+-                     data[0], data[1], data[2], data[3],
+-                     data[4], data[5], data[6], data[7]);
+-            ESP_LOGI(TAG, "  ephemeral=%02x%02x%02x%02x...%02x%02x%02x%02x",
+-                     data[8], data[9], data[10], data[11],
+-                     data[36], data[37], data[38], data[39]);
+-            ESP_LOGI(TAG, "  mac1=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+-                     data[116], data[117], data[118], data[119],
+-                     data[120], data[121], data[122], data[123],
+-                     data[124], data[125], data[126], data[127],
+-                     data[128], data[129], data[130], data[131]);
+-            ESP_LOGI(TAG, "  mac2=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+-                     data[132], data[133], data[134], data[135],
+-                     data[136], data[137], data[138], data[139],
+-                     data[140], data[141], data[142], data[143],
+-                     data[144], data[145], data[146], data[147]);
+-        }
++        ESP_LOGI(TAG, "WG handshake initiated for %s (%d bytes)", hostname, (int)len);
+     }
+ 
+     esp_err_t err = ml_derp_queue_send(ml, peer_public_key, data, len);
+@@ -315,14 +286,9 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
+         struct wireguard_device *dev = (struct wireguard_device *)netif->state;
+         if (dev) {
+             bool match = (memcmp(dev->public_key, ml->wg_public_key, 32) == 0);
+-            ESP_LOGI(TAG, "WG device pubkey: %02x%02x%02x%02x... %s ml->wg_public_key",
+-                     dev->public_key[0], dev->public_key[1],
+-                     dev->public_key[2], dev->public_key[3],
+-                     match ? "MATCHES" : "MISMATCH!");
++            ESP_LOGI(TAG, "WG device public-key consistency: %s", match ? "match" : "mismatch");
+             if (!match) {
+-                ESP_LOGE(TAG, "  Expected: %02x%02x%02x%02x...",
+-                         ml->wg_public_key[0], ml->wg_public_key[1],
+-                         ml->wg_public_key[2], ml->wg_public_key[3]);
++                ESP_LOGE(TAG, "WireGuard device public-key mismatch");
+             }
+         }
+     }
+@@ -464,10 +430,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+ 
+     char ip_str[16];
+     microlink_ip_to_str(update->vpn_ip, ip_str);
+-    ESP_LOGI(TAG, "Peer added: %s (%s) idx=%d endpoints=%d derp=%d key=%02x%02x%02x%02x%02x%02x%02x%02x",
+-             p->hostname, ip_str, idx, p->endpoint_count, p->derp_region,
+-             p->public_key[0], p->public_key[1], p->public_key[2], p->public_key[3],
+-             p->public_key[4], p->public_key[5], p->public_key[6], p->public_key[7]);
++    ESP_LOGI(TAG, "Peer added: %s (%s) idx=%d endpoints=%d derp=%d",
++             p->hostname, ip_str, idx, p->endpoint_count, p->derp_region);
+ 
+     /* Add to wireguard-lwip */
+     if (ml->wg_netif) {
+@@ -523,11 +487,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+             if (dev && wg_peer_idx < WIREGUARD_MAX_PEERS) {
+                 struct wireguard_peer *wp = &dev->peers[wg_peer_idx];
+                 bool key_match = (memcmp(wp->public_key, p->public_key, 32) == 0);
+-                ESP_LOGI(TAG, "WG peer added: wg_idx=%d internal_key=%02x%02x%02x%02x %s",
+-                         wg_peer_idx,
+-                         wp->public_key[0], wp->public_key[1],
+-                         wp->public_key[2], wp->public_key[3],
+-                         key_match ? "KEY_OK" : "KEY_MISMATCH!");
++                ESP_LOGI(TAG, "WG peer added: wg_idx=%d key consistency=%s",
++                         wg_peer_idx, key_match ? "match" : "mismatch");
+             }
+ 
+             /* DON'T initiate handshakes to all peers on add.
+@@ -1018,9 +979,8 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
+     /* Verify DISCO magic */
+     if (memcmp(pkt->data, DISCO_MAGIC, 6) != 0) return;
+ 
+-    ESP_LOGI(TAG, "DISCO RX: %d bytes via %s, disco_key=%02x%02x%02x%02x",
+-             (int)pkt->len, pkt->via_derp ? "DERP" : "direct",
+-             pkt->data[6], pkt->data[7], pkt->data[8], pkt->data[9]);
++    ESP_LOGI(TAG, "DISCO RX: %d bytes via %s", (int)pkt->len,
++             pkt->via_derp ? "DERP" : "direct");
+ 
+     /* Extract sender's disco public key */
+     const uint8_t *sender_disco_key = pkt->data + 6;
+@@ -1372,13 +1332,10 @@ bool ml_wg_mgr_peer_is_up(microlink_t *ml, uint32_t vpn_ip) {
+         if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
+             struct wireguard_peer *wp = &dev->peers[p->wg_peer_index];
+             bool key_match = (memcmp(wp->public_key, p->public_key, 32) == 0);
+-            ESP_LOGI(TAG, "WG peer UP: %s wg_idx=%d ep=%s:%u key=%02x%02x%02x%02x %s",
++            ESP_LOGI(TAG, "WG peer UP: %s wg_idx=%d ep=%s:%u key consistency=%s",
+                      p->hostname, p->wg_peer_index,
+                      ip_addr_isany(&cur_ip) ? "DERP" : ipaddr_ntoa(&cur_ip),
+-                     cur_port,
+-                     wp->public_key[0], wp->public_key[1],
+-                     wp->public_key[2], wp->public_key[3],
+-                     key_match ? "KEY_OK" : "KEY_MISMATCH!");
++                     cur_port, key_match ? "match" : "mismatch");
+         }
+     }
+     return up;
+diff --git a/components/microlink/src/nacl_box.c b/components/microlink/src/nacl_box.c
+index 93bfd5f..4de7d33 100644
+--- a/components/microlink/src/nacl_box.c
++++ b/components/microlink/src/nacl_box.c
+@@ -108,7 +108,7 @@ static void hsalsa20(uint8_t *out, const uint8_t *nonce, const uint8_t *key) {
+     int i;
+ 
+     /* sigma = "expand 32-byte k" */
+-    static const uint8_t sigma[16] = "expand 32-byte k";
++    static const uint8_t sigma[16] __attribute__((nonstring)) = "expand 32-byte k";
+ 
+     x[0]  = load32_le(sigma);
+     x[5]  = load32_le(sigma + 4);
+@@ -189,7 +189,7 @@ static void xsalsa20(uint8_t *out, const uint8_t *in, size_t len,
+     hsalsa20(subkey, nonce, key);
+ 
+     /* sigma = "expand 32-byte k" */
+-    static const uint8_t sigma[16] = "expand 32-byte k";
++    static const uint8_t sigma[16] __attribute__((nonstring)) = "expand 32-byte k";
+ 
+     /* Set up state for Salsa20 with remaining 8 bytes of nonce
+      * Salsa20 state layout (16 x 32-bit words):
+@@ -420,7 +420,7 @@ static int secretbox(uint8_t *ciphertext,
+     uint8_t subkey[32];
+     uint8_t block0[64];
+     uint8_t state[64];
+-    static const uint8_t sigma[16] = "expand 32-byte k";
++    static const uint8_t sigma[16] __attribute__((nonstring)) = "expand 32-byte k";
+ 
+     NACL_LOG_HEX("secretbox key", key, 32);
+     NACL_LOG_HEX("secretbox nonce", nonce, 24);
+@@ -583,7 +583,7 @@ static int secretbox_open(uint8_t *plaintext,
+     uint8_t block0[64];
+     uint8_t state[64];
+     uint8_t computed_mac[16];
+-    static const uint8_t sigma[16] = "expand 32-byte k";
++    static const uint8_t sigma[16] __attribute__((nonstring)) = "expand 32-byte k";
+ 
+     if (ciphertext_len < NACL_BOX_MACBYTES) {
+         return -1;

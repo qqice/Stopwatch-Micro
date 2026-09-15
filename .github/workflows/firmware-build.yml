@@ -47,10 +47,10 @@ jobs:
       - name: Fetch pinned source dependencies
         run: python3 fetch_repos.py
 
-      - name: Build with ESP-IDF 5.5.4
+      - name: Build with ESP-IDF 6.1
         uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
         with:
-          esp_idf_version: v5.5.4
+          esp_idf_version: v6.1
           target: esp32s3
           path: .
 
@@ -63,10 +63,10 @@ jobs:
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install host packaging dependencies
-        run: python3 -m pip install --disable-pip-version-check esptool==4.9.0
+        run: python3 -m pip install --disable-pip-version-check esptool==5.4.0
 
       - name: Run host regression tests
-        run: python3 -m unittest -v tools.test_host_tools
+        run: python3 -m unittest -v tools.test_host_tools tools.test_quota_service
 
       - name: Package flashing bundle
         run: >-

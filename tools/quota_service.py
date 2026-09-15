@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
+import ipaddress
 import sys
 import threading
 import time
@@ -33,6 +34,7 @@ class ServiceConfig:
     server_host: str
     server_port: int
     device_token: str
+    additional_hosts: tuple[str, ...] = ()
 
 
 def load_config(path: Path) -> ServiceConfig:
@@ -57,7 +59,18 @@ def load_config(path: Path) -> ServiceConfig:
         or len(token) > 512
     ):
         raise BridgeError("invalid device_token in LAN service configuration")
-    return ServiceConfig(host, port, token)
+    additional=raw.get("additional_hosts", [])
+    if not isinstance(additional,list) or len(additional)>3:
+        raise BridgeError("invalid additional_hosts")
+    for address in [host]+additional:
+        if not isinstance(address,str):raise BridgeError("service bind addresses must be strings")
+        try:
+            ip=ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise BridgeError("service bind addresses must be IP literals") from exc
+        if ip.is_unspecified or not (ip.is_private or ip in ipaddress.ip_network('100.64.0.0/10')):
+            raise BridgeError("service must bind explicit LAN, loopback or tailnet addresses")
+    return ServiceConfig(host, port, token, tuple(dict.fromkeys(x for x in additional if x!=host)))
 
 
 class SnapshotStore:
@@ -199,24 +212,31 @@ def parse_args() -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> int:
+    servers=[]
     try:
         config = load_config(args.config)
         collector = QuotaCollector(lambda: AppServerClient(locate_codex(args.codex_path)), SnapshotStore())
         stop = threading.Event()
         worker = threading.Thread(target=run_collector, args=(collector, stop), daemon=True)
-        server = ThreadingHTTPServer((config.server_host, config.server_port), make_handler(collector._store, config.device_token))
+        for host in (config.server_host,)+config.additional_hosts:
+            servers.append(ThreadingHTTPServer((host, config.server_port), make_handler(collector._store, config.device_token)))
     except (BridgeError, OSError) as exc:
+        for server in servers: server.server_close()
         print(f"QUOTA SERVICE ERROR {exc}", file=sys.stderr)
         return 2
     worker.start()
+    serving=[threading.Thread(target=server.serve_forever,kwargs={'poll_interval':0.5},daemon=True) for server in servers]
+    for thread in serving:thread.start()
     try:
-        server.serve_forever(poll_interval=0.5)
+        while not stop.wait(1):
+            if any(not thread.is_alive() for thread in serving):return 2
     except KeyboardInterrupt:
         return 130
     finally:
         stop.set()
-        server.shutdown()
-        server.server_close()
+        for server in servers:
+            server.shutdown()
+            server.server_close()
         worker.join(timeout=2)
         collector.close()
 

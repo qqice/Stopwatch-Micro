@@ -21,13 +21,13 @@ HostBridge& GetHostBridge()
 bool HostBridge::applyUsage(uint32_t sequence, uint16_t remainingBasisPoints, uint32_t resetEpoch,
                             uint32_t capturedEpoch, uint8_t resetCredits, uint32_t receivedAtMs)
 {
-    return apply(false,sequence,remainingBasisPoints,resetEpoch,capturedEpoch,resetCredits,receivedAtMs);
+    return apply(false, sequence, remainingBasisPoints, resetEpoch, capturedEpoch, resetCredits, receivedAtMs);
 }
 
-bool HostBridge::applyNetworkUsage(uint16_t remainingBasisPoints, uint32_t resetEpoch,
-                                   uint32_t capturedEpoch, uint8_t resetCredits, uint32_t receivedAtMs)
+bool HostBridge::applyNetworkUsage(uint16_t remainingBasisPoints, uint32_t resetEpoch, uint32_t capturedEpoch,
+                                   uint8_t resetCredits, uint32_t receivedAtMs)
 {
-    return apply(true,0,remainingBasisPoints,resetEpoch,capturedEpoch,resetCredits,receivedAtMs);
+    return apply(true, 0, remainingBasisPoints, resetEpoch, capturedEpoch, resetCredits, receivedAtMs);
 }
 
 bool HostBridge::apply(bool network, uint32_t sequence, uint16_t remainingBasisPoints, uint32_t resetEpoch,
