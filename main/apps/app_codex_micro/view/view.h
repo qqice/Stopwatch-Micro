@@ -6,8 +6,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 #include <hal/ble/codex_micro_ble.h>
+#include <host/token_history.h>
 #include <lvgl.h>
 
 namespace view {
@@ -16,6 +18,7 @@ class CodexMicroView {
 public:
     enum class Page : uint8_t {
         Command = 0,
+        History,
         Agent,
     };
 
@@ -35,6 +38,9 @@ public:
     bool locked() const;
     bool lockForDebug();
     uint32_t lockRefreshCount() const;
+    bool showHistory(bool hourly);
+    bool selectHistory(std::size_t index);
+    void historyDetails(char* out, std::size_t capacity) const;
 
 private:
     enum class DisplayPowerState : uint8_t {
@@ -56,6 +62,8 @@ private:
         Plan,
     };
 
+    enum class HistoryMode : uint8_t { Days, Hours };
+
     struct KeyContext {
         CodexMicroView* owner     = nullptr;
         CodexMicroControl control = CodexMicroControl::Agent1;
@@ -76,6 +84,11 @@ private:
         bool active               = false;
     };
 
+    struct HistoryCellContext {
+        CodexMicroView* owner = nullptr;
+        std::size_t index     = 0;
+    };
+
     static void keyEvent(lv_event_t* event);
     static void commandEvent(lv_event_t* event);
     static void iconEvent(lv_event_t* event);
@@ -84,6 +97,8 @@ private:
     static void dialEvent(lv_event_t* event);
     static void touchEvent(lv_event_t* event);
     static void wakeOverlayEvent(lv_event_t* event);
+    static void historyGridEvent(lv_event_t* event);
+    static void historyModeEvent(lv_event_t* event);
 
     void setPage(Page page);
     void renderPage();
@@ -91,6 +106,10 @@ private:
     void renderNavigation(lv_obj_t* parent);
     void renderCenterStatus(lv_obj_t* parent);
     void renderAgent(lv_obj_t* parent);
+    void renderHistory(lv_obj_t* parent);
+    void refreshHistory(bool force);
+    void updateHistorySelection();
+    const TokenHistoryCell* selectedHistoryCell() const;
     void releaseActiveInputs();
 
     lv_obj_t* createPageRoot();
@@ -126,6 +145,7 @@ private:
     lv_obj_t* _pairing_screen                 = nullptr;
     lv_obj_t* _offline_screen                 = nullptr;
     lv_obj_t* _offline_label                  = nullptr;
+    uint32_t _history_hint_tick               = 0;
     uint32_t _offline_update_tick             = 0;
     lv_obj_t* _pairing_pulse                  = nullptr;
     lv_obj_t* _pairing_core                   = nullptr;
@@ -142,17 +162,23 @@ private:
     lv_obj_t* _battery_label                  = nullptr;
     std::array<lv_obj_t*, 9> _mic_bars        = {};
     std::array<lv_obj_t*, 3> _pairing_dots    = {};
-    std::array<lv_obj_t*, 2> _page_roots      = {};
+    std::array<lv_obj_t*, 3> _page_roots      = {};
 
-    std::array<lv_obj_t*, 6> _command_buttons       = {};
-    std::array<CommandContext, 6> _command_contexts = {};
-    std::array<bool, 6> _command_lit                = {};
-    std::array<uint32_t, 6> _command_light_colors   = {};
-    std::array<lv_obj_t*, 6> _agent_buttons         = {};
-    std::array<lv_obj_t*, 6> _agent_labels          = {};
-    std::array<lv_obj_t*, 6> _agent_dots            = {};
-    std::array<KeyContext, 6> _agent_contexts       = {};
-    std::array<IconContext, 8> _icon_contexts       = {};
+    std::array<lv_obj_t*, 6> _command_buttons                = {};
+    std::array<CommandContext, 6> _command_contexts          = {};
+    std::array<bool, 6> _command_lit                         = {};
+    std::array<uint32_t, 6> _command_light_colors            = {};
+    std::array<lv_obj_t*, 6> _agent_buttons                  = {};
+    std::array<lv_obj_t*, 6> _agent_labels                   = {};
+    std::array<lv_obj_t*, 6> _agent_dots                     = {};
+    std::array<KeyContext, 6> _agent_contexts                = {};
+    std::array<IconContext, 8> _icon_contexts                = {};
+    lv_obj_t* _history_grid                                  = nullptr;
+    std::array<uint32_t, 30> _history_colors                 = {};
+    std::array<uint32_t, 30> _history_borders                = {};
+    std::array<lv_obj_t*, 2> _history_mode_buttons           = {};
+    std::array<HistoryCellContext, 2> _history_mode_contexts = {};
+    lv_obj_t* _history_footer                                = nullptr;
 
     lv_obj_t* _dial                   = nullptr;
     lv_obj_t* _dial_thumb             = nullptr;
@@ -196,6 +222,11 @@ private:
     int _display_base_brightness             = 80;
     bool _page_dirty                         = true;
     Page _page                               = Page::Command;
+    std::unique_ptr<TokenHistorySnapshot> _history_snapshot;
+    uint32_t _history_revision    = UINT32_MAX;
+    HistoryMode _history_mode     = HistoryMode::Days;
+    std::size_t _history_selected = SIZE_MAX;
+    bool _history_dirty           = true;
 };
 
 }  // namespace view

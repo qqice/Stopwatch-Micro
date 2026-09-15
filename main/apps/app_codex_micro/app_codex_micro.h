@@ -44,6 +44,9 @@ public:
     bool debugLockDisplay();
     void debugWakeDisplay();
     uint32_t debugLockRefreshCount();
+    bool debugShowHistory(bool hourly);
+    bool debugSelectHistory(size_t index);
+    void debugHistoryDetails(char* out, size_t capacity);
 
 private:
     static constexpr uint32_t UiRefreshPeriodMs = 33;
@@ -53,7 +56,6 @@ private:
     std::unique_ptr<SerialDebug> _serial_debug;
     uint32_t _last_ui_update_ms = 0;
     bool _mic_host_active       = false;
-    bool _send_host_active      = false;
     bool _debug_input_capture   = false;
     bool _lock_wake_keys_held   = false;
 };

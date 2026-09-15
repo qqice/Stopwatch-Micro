@@ -7,6 +7,7 @@ set(APP_SRCS
     "host/host_bridge.cpp"
     "host/network_quota.cpp"
     "host/tailscale_transport.cpp"
+    "host/token_history.cpp"
 )
 
 set(PLATFORM_SRCS

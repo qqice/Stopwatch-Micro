@@ -9,6 +9,7 @@
 #include <mooncake_log.h>
 #include <system_config.h>
 #include <new>
+#include <cstdio>
 #include <utility>
 #include <vector>
 
@@ -38,7 +39,6 @@ void AppCodexMicro::onOpen()
     _key_manager       = std::move(key_manager);
     _last_ui_update_ms = 0;
     _mic_host_active   = false;
-    _send_host_active  = false;
 
     LvglLockGuard lock;
     GetHAL().bootLogo.reset();
@@ -83,17 +83,13 @@ void AppCodexMicro::onRunning()
     const CodexMicroState state = GetCodexMicroBle().snapshot();
 
     if (!state.connected) {
-        _mic_host_active  = false;
-        _send_host_active = false;
+        _mic_host_active = false;
     }
 
     bool mic_view_changed = false;
     if (input::hasKeyEvent(event, input::KeyEvent::MicPress) && state.connected) {
         _mic_host_active = GetCodexMicroBle().sendKey(CodexMicroControl::Mic, CodexMicroKeyAction::Press);
         mic_view_changed = true;
-    }
-    if (input::hasKeyEvent(event, input::KeyEvent::SendPress) && state.connected) {
-        _send_host_active = GetCodexMicroBle().sendKey(CodexMicroControl::Send, CodexMicroKeyAction::Press);
     }
     if (input::hasKeyEvent(event, input::KeyEvent::MicRelease)) {
         if (_mic_host_active && state.connected) {
@@ -102,13 +98,10 @@ void AppCodexMicro::onRunning()
         _mic_host_active = false;
         mic_view_changed = true;
     }
-    if (input::hasKeyEvent(event, input::KeyEvent::SendRelease)) {
-        if (_send_host_active && state.connected) {
-            GetCodexMicroBle().sendKey(CodexMicroControl::Send, CodexMicroKeyAction::Release);
-        }
-        _send_host_active = false;
-    }
-    const bool toggle_page = input::hasKeyEvent(event, input::KeyEvent::TogglePage) && state.connected;
+    // The physical blue B button is a local page control. It must never emit a
+    // host Send HID report, including the release half of a short tap.
+    const bool toggle_page =
+        input::hasKeyEvent(event, input::KeyEvent::SendPress) || input::hasKeyEvent(event, input::KeyEvent::TogglePage);
 
     // BLE report creation/transmission is intentionally outside the LVGL
     // mutex. Holding that mutex here prevented the touch task from sampling
@@ -137,10 +130,6 @@ void AppCodexMicro::onClose()
     if (_mic_host_active) {
         GetCodexMicroBle().sendKey(CodexMicroControl::Mic, CodexMicroKeyAction::Release);
         _mic_host_active = false;
-    }
-    if (_send_host_active) {
-        GetCodexMicroBle().sendKey(CodexMicroControl::Send, CodexMicroKeyAction::Release);
-        _send_host_active = false;
     }
     _key_manager.reset();
     if (_serial_debug != nullptr) {
@@ -188,7 +177,15 @@ const char* AppCodexMicro::debugScreenName()
     if (_view->micActive()) {
         return "mic";
     }
-    return _view->currentPage() == view::CodexMicroView::Page::Command ? "command" : "agent";
+    switch (_view->currentPage()) {
+        case view::CodexMicroView::Page::Command:
+            return "command";
+        case view::CodexMicroView::Page::History:
+            return "history";
+        case view::CodexMicroView::Page::Agent:
+            return "agent";
+    }
+    return "unavailable";
 }
 
 void AppCodexMicro::debugSetInputCapture(bool enabled)
@@ -243,4 +240,29 @@ uint32_t AppCodexMicro::debugLockRefreshCount()
 {
     LvglLockGuard lock;
     return _view == nullptr ? 0 : _view->lockRefreshCount();
+}
+
+bool AppCodexMicro::debugShowHistory(bool hourly)
+{
+    LvglLockGuard lock;
+    return _view != nullptr && _view->ready() && _view->showHistory(hourly);
+}
+
+bool AppCodexMicro::debugSelectHistory(size_t index)
+{
+    LvglLockGuard lock;
+    return _view != nullptr && _view->ready() && _view->selectHistory(index);
+}
+
+void AppCodexMicro::debugHistoryDetails(char* out, size_t capacity)
+{
+    if (out == nullptr || capacity == 0) {
+        return;
+    }
+    LvglLockGuard lock;
+    if (_view == nullptr || !_view->ready()) {
+        std::snprintf(out, capacity, "unavailable");
+        return;
+    }
+    _view->historyDetails(out, capacity);
 }

@@ -10,6 +10,8 @@
 #include <host/host_bridge.h>
 #include <host/network_quota.h>
 #include <host/tailscale_transport.h>
+#include <host/token_history.h>
+#include <host/token_units_font.h>
 extern "C" esp_err_t ml_noise_selftest(void);
 #include <system_config.h>
 
@@ -206,11 +208,14 @@ void SerialDebug::handleLine(char* line)
         return;
     }
     if (std::strcmp(command, "network") == 0) {
-        char details[128]{};
+        char details[192]{};
         auto& network = GetNetworkQuota();
-        std::snprintf(details, sizeof(details), "configured=%d connected=%d accepted=%lu failures=%lu",
+        std::snprintf(details, sizeof(details),
+                      "configured=%d connected=%d accepted=%lu failures=%lu history_accepted=%lu history_failures=%lu",
                       network.configured(), network.connected(), static_cast<unsigned long>(network.accepted()),
-                      static_cast<unsigned long>(network.failures()));
+                      static_cast<unsigned long>(network.failures()),
+                      static_cast<unsigned long>(network.historyAccepted()),
+                      static_cast<unsigned long>(network.historyFailures()));
         result("network", "PASS", details);
         return;
     }
@@ -263,6 +268,30 @@ void SerialDebug::handleLine(char* line)
                       _app.debugDisplayLocked(), static_cast<unsigned long>(_app.debugLockRefreshCount()),
                       static_cast<unsigned long>(GetDisplayFrameCount()), GetHAL().getBackLightBrightness());
         result("display", "PASS", details);
+        return;
+    }
+    if (std::strcmp(command, "history") == 0) {
+        const char* action = ::strtok_r(nullptr, " \t", &save);
+        bool ok            = true;
+        if (action && std::strcmp(action, "hours") == 0)
+            ok = _app.debugShowHistory(true);
+        else if (action && std::strcmp(action, "days") == 0)
+            ok = _app.debugShowHistory(false);
+        else if (action && std::strcmp(action, "select") == 0) {
+            const char* index         = ::strtok_r(nullptr, " \t", &save);
+            char* end                 = nullptr;
+            const unsigned long value = index ? std::strtoul(index, &end, 10) : UINT32_MAX;
+            ok                        = index && end && *end == 0 && value < 168 && _app.debugSelectHistory(value);
+        } else if (action)
+            ok = false;
+        char details[240]{};
+        _app.debugHistoryDetails(details, sizeof(details));
+        result("history", ok ? "PASS" : "FAIL", details);
+        return;
+    }
+    if (std::strcmp(command, "history-selftest") == 0) {
+        result("history-selftest", TokenHistoryRejectionSelfTest() && TokenAmountSelfTest() ? "PASS" : "FAIL",
+               "malformed_depth_size_rejected=1 cache_preserved=1 token_units=K/M");
         return;
     }
     if (std::strcmp(command, "status") == 0) {

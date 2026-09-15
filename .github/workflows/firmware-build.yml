@@ -66,7 +66,7 @@ jobs:
         run: python3 -m pip install --disable-pip-version-check esptool==5.4.0
 
       - name: Run host regression tests
-        run: python3 -m unittest -v tools.test_host_tools tools.test_quota_service
+        run: python3 -m unittest -v tools.test_host_tools tools.test_quota_service tools.test_history_store
 
       - name: Package flashing bundle
         run: >-

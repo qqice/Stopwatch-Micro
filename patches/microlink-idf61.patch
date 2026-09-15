@@ -57,6 +57,21 @@ index a11aefd..30704e9 100644
  
  static const char *base64_lookup = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
  
+diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/components/microlink/components/wireguard_lwip/src/wireguardif.c
+index 6627fd0..7981cce 100644
+--- a/components/microlink/components/wireguard_lwip/src/wireguardif.c
++++ b/components/microlink/components/wireguard_lwip/src/wireguardif.c
+@@ -755,8 +755,8 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
+ 
+ 	uint8_t type = wireguard_get_message_type(data, len);
+ 
+-	// Always log incoming WG packets (critical for debugging handshake issues)
+-	printf("[WG_RX] type=%d (%s) len=%u from %s:%u\n",
++	// Packet tracing is opt-in; bulk history transfers must not flood USB.
++	WG_DEBUG("[WG_RX] type=%d (%s) len=%u from %s:%u\n",
+ 		type,
+ 		type == 1 ? "INIT" : type == 2 ? "RESP" : type == 3 ? "COOKIE" : type == 4 ? "DATA" : "?",
+ 		(unsigned)len,
 diff --git a/components/microlink/include/microlink.h b/components/microlink/include/microlink.h
 index 9126a53..7073671 100644
 --- a/components/microlink/include/microlink.h

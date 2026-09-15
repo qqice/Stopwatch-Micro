@@ -6,7 +6,7 @@
 [![clang-format](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/clang-format-check.yml/badge.svg?branch=main)](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/clang-format-check.yml)
 
 Stopwatch Micro is dedicated firmware that turns the M5Stack StopWatch into an unofficial
-Codex Micro-compatible controller. It boots directly into a two-page LVGL interface and keeps
+Codex Micro-compatible controller. It boots directly into a Command / History / Agent LVGL interface and keeps
 Bluetooth Low Energy active as a system service; the original Mooncake launcher and demo apps are
 not included.
 
@@ -51,9 +51,7 @@ upstream copyright and MIT license notice.
 
 ## Interface and controls
 
-The functional UI is locked behind the connection state. When no compatible host is connected,
-the display shows the Pairing screen; a successful connection opens Command, and a disconnect
-returns immediately to Pairing.
+Command and Agent controls require a compatible Bluetooth host. With Wi-Fi configured, quota and History remain available without Bluetooth; an unconfigured device shows Pairing. Blue B cycles the available local pages.
 
 | Input | Host control | Behavior |
 | --- | --- | --- |
@@ -64,8 +62,8 @@ returns immediately to Pairing.
 | Command right-middle | `ACT09` | Fork |
 | Command right-bottom | `ACT08` | Decline |
 | Yellow physical A | `ACT10` | Hold for host push-to-talk; release to stop |
-| Blue physical B | `ACT12` | Send |
-| Physical A + B | local UI | Toggle Command and Agent |
+| Blue physical B | local UI | Cycle Command, History, Agent (Agent requires host connection) |
+| Physical A + B | local UI | Cycle pages |
 | Agent 1–6 | `AG00`–`AG05` | Select the corresponding agent/thread |
 | Top reasoning arc | `ENC_CC`, `ENC`, `ENC_CW` | Decrease/increase reasoning effort; press/select; returns to center |
 | Bottom touch sensor | local system | Hold for 3 seconds to erase BLE bonds and restart pairing |
@@ -278,3 +276,9 @@ The project is distributed under the MIT License. The original board support is 
 M5Stack StopWatch user demo, and the compatibility transport is adapted from
 [`imliubo/codex-micro-4-core2`](https://github.com/imliubo/codex-micro-4-core2). See
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for revision and license details.
+
+## Token history and offline access
+
+Blue B opens History as the second page. DAYS uses green for official daily totals; HOURS uses blue for observed cumulative token increments. Tap a cell for its exact value and quality. Missing hours are not zero and cannot be reconstructed from daily totals. See [history](docs/history.md), [LAN service](docs/lan-service.md), and [Tailscale](docs/tailscale.md). In idle mode the first key or touch only wakes the screen.
+
+History shows the last 30 days with date labels, or the last 24 hours with time labels. Compact token values use K/M; selected cells also expose the full integer.

@@ -6,7 +6,7 @@
 [![clang-format](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/clang-format-check.yml/badge.svg?branch=main)](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/clang-format-check.yml)
 
 Stopwatch Micro 是一套面向 M5Stack StopWatch Dev Kit（ESP32-S3）的专用固件，把它变成一个
-非官方的 Codex Micro 兼容控制器。设备开机后直接进入双页面 LVGL 界面，并把低功耗蓝牙作为
+非官方的 Codex Micro 兼容控制器。设备开机后直接进入Command / History / Agent 多页面 LVGL 界面，并把低功耗蓝牙作为
 系统服务持续运行；原厂 Mooncake 启动器和演示应用不包含在本固件中。
 
 > 本项目通过非稳定公开 API 的协议实现非官方兼容层。ChatGPT Desktop 后续更新可能导致行为
@@ -32,13 +32,12 @@ _产品概念示意图由项目所有者提供。_
 - 六个带分层、高光与按压反馈的圆形 Command 按钮，环绕中央状态圆盘。
 - 顶部弧形触控区用于降低、选择或提高推理强度。
 - 中央圆盘显示 Codex 剩余额度、重置倒计时，以及 StopWatch 电池图标和百分比。
-- Agent 页面提供六个会话选择键，可用实体 A+B 键切换 Command 与 Agent 页面。
-- 黄色实体 A 键控制电脑端按住说话，蓝色实体 B 键发送编辑器中的消息。
+- History 为第二屏；Agent 页面保留六个会话选择键，连接主机时作为第三屏。
+- 黄色实体 A 键控制电脑端按住说话，蓝色实体 B 键仅切换本地页面。
 - BLE 配对信息持久保存，正常重启或重新上电后会自动重连。
 - 60 秒无操作后进入 8% 亮度锁屏，每分钟刷新额度、电量并移动像素。
 
-未连接兼容主机时显示 Pairing 页面；连接成功后进入 Command 页面；断开连接则立即返回
-Pairing 页面。
+Command 和 Agent 控制需要蓝牙主机；配置 Wi-Fi 后，断开蓝牙仍可查看额度和 History。未配置网络的设备显示 Pairing。
 
 | 输入 | 主机控制 | 功能 |
 | --- | --- | --- |
@@ -49,8 +48,8 @@ Pairing 页面。
 | Command 右中 | `ACT09` | Fork，在新对话中继续 |
 | Command 右下 | `ACT08` | Decline，拒绝当前请求 |
 | 黄色实体 A 键 | `ACT10` | 按住调用电脑麦克风，松开结束 |
-| 蓝色实体 B 键 | `ACT12` | 发送编辑器内容 |
-| 实体 A+B 键 | 本地界面 | 切换 Command 与 Agent 页面 |
+| 蓝色实体 B 键 | 本地界面 | Command → History → Agent；离线时跳过 Agent |
+| 实体 A+B 键 | 本地界面 | 循环切换页面 |
 | Agent 1–6 | `AG00`–`AG05` | 选择对应 Agent/对话 |
 | 顶部推理弧 | `ENC_CC`、`ENC`、`ENC_CW` | 降低/提高推理强度，按下确认，随后回中 |
 | 底部触摸传感器 | 本地系统 | 长按 3 秒清除 BLE 绑定并重新进入配对 |
@@ -268,3 +267,9 @@ ready/connected/protocol `1/1/1`、无线额度更新拒绝数 `0`，以及
 本项目采用 [MIT License](LICENSE)。原始板级支持源自 M5Stack StopWatch 用户演示，兼容传输
 改编自 [`imliubo/codex-micro-4-core2`](https://github.com/imliubo/codex-micro-4-core2)。相关上游
 版本、版权和 MIT 许可声明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+
+## 历史与独立联网
+
+第二屏 History 可切换 DAYS（绿色，官方每日 token）和 HOURS（蓝色，累计 token 的小时观察增量）。点击方块查看具体数值与数据质量；缺测、部分采样和计数修正会明确标记，不会伪造历史小时用量。详见 [历史说明](docs/history.md)、[局域网](docs/lan-service.md)、[Tailscale](docs/tailscale.md)。锁屏时第一次按键/触摸仅用于唤醒。
+
+热力图按天显示近 30 天并标注日期，按小时显示近 24 小时并标注时间。Token 使用 K/M 自动换算，点击方块仍显示完整整数值。

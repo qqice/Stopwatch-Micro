@@ -12,6 +12,7 @@ import argparse
 import hmac
 import json
 import ipaddress
+import sqlite3
 import sys
 import threading
 import time
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from stopwatch_bridge import AppServerClient, BridgeError, UsageSnapshot, locate_codex
+from history_store import HistoryStore, unavailable_response
 
 
 POLL_SECONDS = 60.0
@@ -35,6 +37,7 @@ class ServiceConfig:
     server_port: int
     device_token: str
     additional_hosts: tuple[str, ...] = ()
+    history_db: Path | None = None
 
 
 def load_config(path: Path) -> ServiceConfig:
@@ -70,7 +73,14 @@ def load_config(path: Path) -> ServiceConfig:
             raise BridgeError("service bind addresses must be IP literals") from exc
         if ip.is_unspecified or not (ip.is_private or ip in ipaddress.ip_network('100.64.0.0/10')):
             raise BridgeError("service must bind explicit LAN, loopback or tailnet addresses")
-    return ServiceConfig(host, port, token, tuple(dict.fromkeys(x for x in additional if x!=host)))
+    history_value = raw.get("history_db")
+    if history_value is not None and (not isinstance(history_value, str) or not history_value):
+        raise BridgeError("invalid history_db")
+    config_parent = path.parent.resolve()
+    history_path = (config_parent / history_value).resolve() if history_value else config_parent / "private" / "history.sqlite3"
+    if not history_path.is_relative_to(config_parent):
+        raise BridgeError("history_db must stay under the configuration directory")
+    return ServiceConfig(host, port, token, tuple(dict.fromkeys(x for x in additional if x != host)), history_path)
 
 
 class SnapshotStore:
@@ -133,16 +143,23 @@ class SnapshotStore:
 class QuotaCollector:
     """Poll App Server independently from HTTP clients and retain only quota data."""
 
-    def __init__(self, client_factory: Callable[[], AppServerClient], store: SnapshotStore) -> None:
+    def __init__(self, client_factory: Callable[[], AppServerClient], store: SnapshotStore, history: HistoryStore) -> None:
         self._client_factory = client_factory
         self._store = store
+        self._history = history
         self._client: AppServerClient | None = None
 
     def poll_once(self) -> None:
         if self._client is None:
             self._client = self._client_factory()
             self._client.start()
-        self._store.save(self._client.read_usage())
+        snapshot = self._client.read_usage()
+        self._store.save(snapshot)
+        try:
+            usage = self._client._request("account/usage/read")
+            self._history.record_usage(usage, int(time.time()))
+        except (BridgeError, OSError, OverflowError, ValueError, sqlite3.Error) as exc:
+            print(f"QUOTA HISTORY ERROR {exc}", file=sys.stderr)
 
     def close(self) -> None:
         if self._client is not None:
@@ -169,7 +186,7 @@ def is_authorized(authorization: str, device_token: str) -> bool:
     return hmac.compare_digest(supplied, f"Bearer {device_token}".encode("ascii"))
 
 
-def make_handler(store: SnapshotStore, device_token: str) -> type[BaseHTTPRequestHandler]:
+def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore | None = None) -> type[BaseHTTPRequestHandler]:
     class QuotaHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -182,15 +199,22 @@ def make_handler(store: SnapshotStore, device_token: str) -> type[BaseHTTPReques
             return
 
         def do_GET(self) -> None:  # noqa: N802 - required BaseHTTPRequestHandler name
-            if self.path != "/v1/status":
+            if self.path not in {"/v1/status", "/v1/history"}:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             authorization = self.headers.get("Authorization", "")
             if not is_authorized(authorization, device_token):
                 self.send_error(HTTPStatus.UNAUTHORIZED)
                 return
-            body, available = store.status()
+            if self.path == "/v1/history":
+                body = history.response() if history is not None else unavailable_response(int(time.time()))
+                available = True
+            else:
+                body, available = store.status()
             payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            if len(payload) > 32768:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
             self.send_response(HTTPStatus.OK if available else HTTPStatus.SERVICE_UNAVAILABLE)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
@@ -215,11 +239,12 @@ def run(args: argparse.Namespace) -> int:
     servers=[]
     try:
         config = load_config(args.config)
-        collector = QuotaCollector(lambda: AppServerClient(locate_codex(args.codex_path)), SnapshotStore())
+        history = HistoryStore(config.history_db if config.history_db is not None else args.config.parent / "private" / "history.sqlite3")
+        collector = QuotaCollector(lambda: AppServerClient(locate_codex(args.codex_path)), SnapshotStore(), history)
         stop = threading.Event()
         worker = threading.Thread(target=run_collector, args=(collector, stop), daemon=True)
         for host in (config.server_host,)+config.additional_hosts:
-            servers.append(ThreadingHTTPServer((host, config.server_port), make_handler(collector._store, config.device_token)))
+            servers.append(ThreadingHTTPServer((host, config.server_port), make_handler(collector._store, config.device_token, history)))
     except (BridgeError, OSError) as exc:
         for server in servers: server.server_close()
         print(f"QUOTA SERVICE ERROR {exc}", file=sys.stderr)
@@ -239,6 +264,7 @@ def run(args: argparse.Namespace) -> int:
             server.server_close()
         worker.join(timeout=2)
         collector.close()
+        history.close()
 
 
 def main() -> int:

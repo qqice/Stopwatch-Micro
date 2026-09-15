@@ -1,6 +1,9 @@
 #include "network_quota.h"
 #include "host_bridge.h"
 #include "tailscale_transport.h"
+#include "token_history.h"
+#include <memory>
+#include <new>
 #include <cJSON.h>
 #include <cmath>
 #include <cstring>
@@ -74,6 +77,7 @@ bool NetworkQuota::configure(const char* encoded)
 
 void NetworkQuota::begin()
 {
+    InitTokenHistory();
     GetTailnetQuota().load();
     nvs_handle_t handle;
     if (nvs_open("quota_net", NVS_READONLY, &handle) != ESP_OK) return;
@@ -152,20 +156,38 @@ void NetworkQuota::run()
             ++_accepted;
         else
             ++_failures;
+        if (!GetTailnetQuota().enabled() || GetTailnetQuota().ready()) {
+            if (fetchHistory())
+                ++_history_accepted;
+            else
+                ++_history_failures;
+        }
         vTaskDelay(pdMS_TO_TICKS(GetTailnetQuota().enabled() && !GetTailnetQuota().ready() ? 5000 : 60000));
     }
 }
-bool NetworkQuota::fetch()
+bool NetworkQuota::requestJson(const char* path, char* body, size_t capacity, int& used)
 {
-    char body[2048]{};
-    int used = 0;
-    bool ok  = false;
+    used = 0;
+    if (!body || capacity < 2) return false;
+    body[0] = 0;
+    bool ok = false;
     if (GetTailnetQuota().enabled()) {
         // Fail closed: an enabled tailnet never falls back to LAN cleartext.
-        ok = GetTailnetQuota().fetch(_token, body, sizeof(body), used);
+        ok = GetTailnetQuota().fetch(_token, body, capacity, used, path);
     } else {
+        char requestUrl[288]{};
+        std::strcpy(requestUrl, _url);
+        if (path) {
+            const char* scheme = std::strstr(_url, "://");
+            if (!scheme) return false;
+            const char* slash   = std::strchr(scheme + 3, '/');
+            const size_t origin = slash ? static_cast<size_t>(slash - _url) : std::strlen(_url);
+            if (origin + std::strlen(path) >= sizeof(requestUrl)) return false;
+            requestUrl[origin] = 0;
+            std::strcat(requestUrl, path);
+        }
         esp_http_client_config_t config{};
-        config.url                      = _url;
+        config.url                      = requestUrl;
         config.timeout_ms               = 7000;
         config.crt_bundle_attach        = esp_crt_bundle_attach;
         config.disable_auto_redirect    = true;
@@ -180,8 +202,8 @@ bool NetworkQuota::fetch()
             esp_http_client_fetch_headers(client);
             ok = esp_http_client_get_status_code(client) == 200;
         }
-        while (ok && used < static_cast<int>(sizeof(body)) - 1) {
-            int count = esp_http_client_read(client, body + used, sizeof(body) - 1 - used);
+        while (ok && used < static_cast<int>(capacity) - 1) {
+            int count = esp_http_client_read(client, body + used, capacity - 1 - used);
             if (count < 0) {
                 ok = false;
                 break;
@@ -194,13 +216,27 @@ bool NetworkQuota::fetch()
         esp_http_client_cleanup(client);
         std::memset(authorization, 0, sizeof(authorization));
     }
-    if (!ok) return false;
+    body[used] = 0;
+    return ok;
+}
+bool NetworkQuota::fetchHistory()
+{
+    std::unique_ptr<char[]> body(new (std::nothrow) char[32769]);
+    int used = 0;
+    return body && requestJson("/v1/history", body.get(), 32769, used) && ApplyTokenHistory(body.get(), used);
+}
+bool NetworkQuota::fetch()
+{
+    char body[2048]{};
+    int used = 0;
+    if (!requestJson(nullptr, body, sizeof(body), used) || !JsonNestingValid(body, used)) return false;
     cJSON* root      = cJSON_ParseWithLength(body, used);
     uint32_t version = 0, remaining = 0, reset = 0, captured = 0, credits = 0, age = 0;
-    ok = root && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "available")) &&
-         number(root, "version", 1, 1, version) && number(root, "remaining_bp", 0, 10000, remaining) &&
-         number(root, "reset_epoch", 0, UINT32_MAX, reset) && number(root, "captured_epoch", 1, UINT32_MAX, captured) &&
-         number(root, "reset_credits", 0, 99, credits) && number(root, "age_seconds", 0, 120, age);
+    bool ok = root && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "available")) &&
+              number(root, "version", 1, 1, version) && number(root, "remaining_bp", 0, 10000, remaining) &&
+              number(root, "reset_epoch", 0, UINT32_MAX, reset) &&
+              number(root, "captured_epoch", 1, UINT32_MAX, captured) &&
+              number(root, "reset_credits", 0, 99, credits) && number(root, "age_seconds", 0, 120, age);
     cJSON_Delete(root);
     if (!ok) return false;
     return GetHostBridge().applyNetworkUsage(remaining, reset, captured, credits,

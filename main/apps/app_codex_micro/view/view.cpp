@@ -7,6 +7,8 @@
 #include <hal/hal.h>
 #include <host/host_bridge.h>
 #include <host/network_quota.h>
+#include <host/token_history.h>
+#include <host/token_units_font.h>
 #include <system_config.h>
 
 #include <algorithm>
@@ -14,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include <esp_log.h>
 #include <esp_timer.h>
@@ -54,6 +57,10 @@ constexpr uint32_t StatusCard              = 0x121714;
 constexpr uint32_t StatusBorder            = 0x3B4540;
 constexpr uint32_t StatusStale             = 0xE4AF57;
 constexpr uint32_t BatteryLow              = 0xFF666A;
+constexpr uint32_t HistoryMissing          = 0x343A37;
+constexpr uint32_t HistoryCorrection       = 0xD7A94C;
+constexpr std::size_t HistoryDayCount      = 30;
+constexpr std::size_t HistoryHourCount     = 24;
 constexpr lv_style_selector_t PressedStyle =
     static_cast<lv_style_selector_t>(LV_PART_MAIN) | static_cast<lv_style_selector_t>(LV_STATE_PRESSED);
 
@@ -364,6 +371,7 @@ void CodexMicroView::init(lv_obj_t* parent)
         lv_obj_add_flag(page_root, LV_OBJ_FLAG_HIDDEN);
     }
     renderCommand(_page_roots[static_cast<std::size_t>(Page::Command)]);
+    renderHistory(_page_roots[static_cast<std::size_t>(Page::History)]);
     renderAgent(_page_roots[static_cast<std::size_t>(Page::Agent)]);
     lv_obj_remove_flag(_page_roots[static_cast<std::size_t>(_page)], LV_OBJ_FLAG_HIDDEN);
 
@@ -739,6 +747,166 @@ void CodexMicroView::renderAgent(lv_obj_t* parent)
     }
 }
 
+void CodexMicroView::renderHistory(lv_obj_t* parent)
+{
+    stylePanel(parent, Background, Background, LV_RADIUS_CIRCLE, 0);
+    lv_obj_t* title = lv_label_create(parent);
+    lv_label_set_text(title, "TOKEN HISTORY");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, lv_color_hex(Text), LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 42);
+
+    constexpr std::array<const char*, 2> ModeNames = {"30 DAYS", "24 HOURS"};
+    for (std::size_t index = 0; index < _history_mode_buttons.size(); ++index) {
+        lv_obj_t* button             = lv_button_create(parent);
+        _history_mode_buttons[index] = button;
+        lv_obj_set_pos(button, 132 + static_cast<int>(index) * 104, 96);
+        lv_obj_set_size(button, 98, 36);
+        stylePanel(button, StatusCard, StatusBorder, 18, 1);
+        lv_obj_t* label = lv_label_create(button);
+        lv_label_set_text(label, ModeNames[index]);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_center(label);
+        _history_mode_contexts[index] = {.owner = this, .index = index};
+        lv_obj_add_event_cb(button, historyModeEvent, LV_EVENT_CLICKED, &_history_mode_contexts[index]);
+    }
+
+    _history_grid = lv_obj_create(parent);
+    lv_obj_remove_style_all(_history_grid);
+    lv_obj_set_pos(_history_grid, 65, 145);
+    lv_obj_set_size(_history_grid, 340, 190);
+    lv_obj_add_flag(_history_grid, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(_history_grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(_history_grid, historyGridEvent, LV_EVENT_DRAW_MAIN, this);
+    lv_obj_add_event_cb(_history_grid, historyGridEvent, LV_EVENT_CLICKED, this);
+
+    _history_footer = lv_label_create(parent);
+    lv_obj_set_width(_history_footer, 360);
+    lv_obj_set_style_text_font(_history_footer, GetTokenUnitFont(), LV_PART_MAIN);
+    lv_obj_set_style_text_color(_history_footer, lv_color_hex(KeyMuted), LV_PART_MAIN);
+    lv_obj_set_style_text_align(_history_footer, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(_history_footer, LV_ALIGN_TOP_MID, 0, 345);
+    setLabelText(_history_footer, "Waiting for token history");
+}
+
+const TokenHistoryCell* CodexMicroView::selectedHistoryCell() const
+{
+    if (_history_snapshot == nullptr || _history_selected == SIZE_MAX) {
+        return nullptr;
+    }
+    if (_history_mode == HistoryMode::Hours) {
+        return _history_selected < _history_snapshot->hours.size() ? &_history_snapshot->hours[_history_selected]
+                                                                   : nullptr;
+    }
+    return _history_selected < _history_snapshot->days.size() ? &_history_snapshot->days[_history_selected] : nullptr;
+}
+
+void CodexMicroView::updateHistorySelection()
+{
+    const TokenHistoryCell* cell = selectedHistoryCell();
+    char details[192]{};
+    if (cell == nullptr) {
+        std::snprintf(details, sizeof(details),
+                      _history_snapshot != nullptr && _history_snapshot->available
+                          ? (_history_mode == HistoryMode::Hours ? "Observed updates | tap for details"
+                                                                 : "Official daily tokens | tap a date")
+                          : "Waiting for token history");
+    } else {
+        const char* quality = "missing";
+        switch (cell->quality) {
+            case TokenHistoryQuality::Official:
+                quality = "official";
+                break;
+            case TokenHistoryQuality::Observed:
+                quality = "observed cumulative delta";
+                break;
+            case TokenHistoryQuality::Partial:
+                quality = "observed / partial";
+                break;
+            case TokenHistoryQuality::Correction:
+                quality = "correction";
+                break;
+            case TokenHistoryQuality::Missing:
+                break;
+        }
+        if (cell->valid) {
+            char amount[32]{};
+            FormatTokenAmount(cell->tokens, amount, sizeof(amount));
+            std::snprintf(details, sizeof(details), "%s\n%s (%llu) | %s", cell->label, amount,
+                          static_cast<unsigned long long>(cell->tokens), quality);
+        } else {
+            std::snprintf(details, sizeof(details), "%s\n%s", cell->label[0] ? cell->label : "Unavailable", quality);
+        }
+    }
+    if (_history_snapshot != nullptr && _history_snapshot->available) {
+        const uint32_t elapsed = (GetHAL().millis() - _history_snapshot->receivedAtMs) / 1000U;
+        if (static_cast<uint64_t>(_history_snapshot->ageSecondsAtReceipt) + elapsed > 600U) {
+            std::strncat(details, "\nCACHED / STALE", sizeof(details) - std::strlen(details) - 1U);
+        }
+    }
+    setLabelText(_history_footer, details);
+}
+
+void CodexMicroView::refreshHistory(bool force)
+{
+    const uint32_t revision = TokenHistoryRevision();
+    if (!force && !_history_dirty && revision == _history_revision) {
+        return;
+    }
+    if (_history_snapshot == nullptr) {
+        _history_snapshot.reset(new (std::nothrow) TokenHistorySnapshot());
+        if (_history_snapshot == nullptr) {
+            return;
+        }
+    }
+    if (revision != _history_revision || force) {
+        if (CopyTokenHistory(*_history_snapshot)) {
+            _history_revision = revision;
+        } else if (revision == 0 && !_history_snapshot->available) {
+            _history_revision = 0;
+        } else {
+            return;  // Keep the previous cache on a transient mutex timeout.
+        }
+    }
+    const bool hourly             = _history_mode == HistoryMode::Hours;
+    const std::size_t count       = hourly ? _history_snapshot->hours.size() : _history_snapshot->days.size();
+    const TokenHistoryCell* cells = hourly ? _history_snapshot->hours.data() : _history_snapshot->days.data();
+    uint64_t maximum              = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        if (cells[index].valid) maximum = std::max(maximum, cells[index].tokens);
+    }
+    const double max_log = maximum == 0 ? 1.0 : std::log1p(static_cast<double>(maximum));
+    for (std::size_t index = 0; index < _history_colors.size(); ++index) {
+        if (index >= count) {
+            _history_colors[index]  = Background;
+            _history_borders[index] = Background;
+            continue;
+        }
+        const TokenHistoryCell& cell = cells[index];
+        uint32_t color               = HistoryMissing;
+        if (cell.quality == TokenHistoryQuality::Correction)
+            color = HistoryCorrection;
+        else if (cell.valid) {
+            const float level   = static_cast<float>(std::log1p(static_cast<double>(cell.tokens)) / max_log);
+            const uint32_t base = hourly ? CodexBlue : Green;
+            color               = scaledColor(base, 0.25f + 0.75f * level);
+        }
+        _history_colors[index]  = color;
+        _history_borders[index] = cell.quality == TokenHistoryQuality::Correction ? HistoryCorrection
+                                  : cell.quality == TokenHistoryQuality::Partial  ? 0xA879E6
+                                  : cell.valid                                    ? color
+                                                                                  : StatusBorder;
+    }
+    for (std::size_t index = 0; index < _history_mode_buttons.size(); ++index) {
+        const bool selected = static_cast<std::size_t>(_history_mode) == index;
+        stylePanel(_history_mode_buttons[index], selected ? (index == 0 ? Green : CodexBlue) : StatusCard,
+                   selected ? Text : StatusBorder, 18, 1);
+    }
+    updateHistorySelection();
+    _history_dirty = false;
+    if (_history_grid != nullptr) lv_obj_invalidate(_history_grid);
+}
+
 void CodexMicroView::renderNavigation(lv_obj_t* parent)
 {
     lv_obj_add_event_cb(parent, dialTrackEvent, LV_EVENT_DRAW_MAIN, this);
@@ -813,13 +981,26 @@ void CodexMicroView::renderPage()
     if (_mic_screen != nullptr && _mic_active) {
         lv_obj_move_foreground(_mic_screen);
     }
-    if (_pairing_screen != nullptr && !lv_obj_has_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN)) {
-        lv_obj_move_foreground(_pairing_screen);
+    if (_pairing_screen != nullptr) {
+        if (_page == Page::History) {
+            lv_obj_add_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN);
+        } else if (!_functional_enabled) {
+            lv_obj_remove_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(_pairing_screen);
+        } else {
+            lv_obj_add_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (_offline_screen != nullptr && _page == Page::History) {
+        lv_obj_add_flag(_offline_screen, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (_page == Page::History) {
+        refreshHistory(false);
     }
     if (_wake_overlay != nullptr && (_wake_overlay_armed || _display_power == DisplayPowerState::Locked)) {
         lv_obj_move_foreground(_wake_overlay);
     }
-    ESP_LOGI(Tag, "page=%s", _page == Page::Command ? "command" : "agent");
+    ESP_LOGI(Tag, "page=%s", _page == Page::Command ? "command" : _page == Page::History ? "history" : "agent");
 }
 
 void CodexMicroView::setPage(Page page)
@@ -836,10 +1017,11 @@ void CodexMicroView::setPage(Page page)
 
 void CodexMicroView::togglePage()
 {
-    if (!_functional_enabled) {
-        return;
+    if (_functional_enabled) {
+        setPage(_page == Page::Command ? Page::History : _page == Page::History ? Page::Agent : Page::Command);
+    } else {
+        setPage(_page == Page::Command ? Page::History : Page::Command);
     }
-    setPage(_page == Page::Command ? Page::Agent : Page::Command);
 }
 
 bool CodexMicroView::ready() const
@@ -883,12 +1065,79 @@ CodexMicroView::Page CodexMicroView::currentPage() const
 
 bool CodexMicroView::setPageForDebug(Page page)
 {
-    if (!_functional_enabled || !ready()) {
+    if (!ready() || (page == Page::Agent && !_functional_enabled)) {
         return false;
     }
     setMicActive(false);
     setPage(page);
     return _page == page;
+}
+
+bool CodexMicroView::showHistory(bool hourly)
+{
+    if (!ready()) {
+        return false;
+    }
+    const HistoryMode requested = hourly ? HistoryMode::Hours : HistoryMode::Days;
+    if (_history_mode != requested) {
+        _history_mode     = requested;
+        _history_selected = SIZE_MAX;
+        _history_dirty    = true;
+    }
+    setMicActive(false);
+    setPage(Page::History);
+    refreshHistory(false);
+    return _page == Page::History;
+}
+
+bool CodexMicroView::selectHistory(std::size_t index)
+{
+    const std::size_t count = _history_mode == HistoryMode::Hours ? HistoryHourCount : HistoryDayCount;
+    if (!ready() || index >= count) {
+        return false;
+    }
+    _history_selected = index;
+    refreshHistory(false);
+    updateHistorySelection();
+    if (_history_grid != nullptr) {
+        lv_obj_invalidate(_history_grid);
+    }
+    return selectedHistoryCell() != nullptr;
+}
+
+void CodexMicroView::historyDetails(char* out, std::size_t capacity) const
+{
+    if (out == nullptr || capacity == 0) {
+        return;
+    }
+    const TokenHistoryCell* cell = selectedHistoryCell();
+    if (cell == nullptr) {
+        std::snprintf(out, capacity, "no history selection");
+        return;
+    }
+    const char* quality = "missing";
+    switch (cell->quality) {
+        case TokenHistoryQuality::Official:
+            quality = "official";
+            break;
+        case TokenHistoryQuality::Observed:
+            quality = "observed";
+            break;
+        case TokenHistoryQuality::Partial:
+            quality = "partial";
+            break;
+        case TokenHistoryQuality::Correction:
+            quality = "correction";
+            break;
+        case TokenHistoryQuality::Missing:
+            break;
+    }
+    if (cell->valid) {
+        std::snprintf(out, capacity, "%s: %llu tokens (%s)", cell->label, static_cast<unsigned long long>(cell->tokens),
+                      quality);
+    } else {
+        std::snprintf(out, capacity, "%s: %s", cell->label[0] ? cell->label : "Unavailable", quality);
+    }
 }
 
 void CodexMicroView::setInputSuppressed(bool suppressed)
@@ -1038,15 +1287,19 @@ void CodexMicroView::updateConnection(const CodexMicroState& state)
             if (_pairing_screen != nullptr) {
                 lv_obj_add_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN);
             }
-            setPage(Page::Command);
+            if (_page != Page::History) setPage(Page::Command);
             ESP_LOGI(Tag, "Codex handshake complete; functional pages enabled");
         } else {
             releaseActiveInputs();
             _functional_enabled = false;
             setMicActive(false);
             if (_pairing_screen != nullptr) {
-                lv_obj_remove_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_move_foreground(_pairing_screen);
+                if (_page != Page::History) {
+                    lv_obj_remove_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_move_foreground(_pairing_screen);
+                } else {
+                    lv_obj_add_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN);
+                }
             }
             ESP_LOGW(Tag, "%s; pairing screen active",
                      state.connected ? "waiting for Codex handshake" : "connection lost");
@@ -1266,7 +1519,17 @@ void CodexMicroView::update(const CodexMicroState& state)
         updateLockedScreen(state, tick, false);
         return;
     }
-    if (GetNetworkQuota().configured() && !(state.connected && state.protocolReady)) {
+    if (_page == Page::History) {
+        refreshHistory(false);
+        if (tick - _history_hint_tick >= 1000) {
+            updateHistorySelection();
+            _history_hint_tick = tick;
+        }
+        if (_pairing_screen != nullptr) {
+            lv_obj_add_flag(_pairing_screen, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (GetNetworkQuota().configured() && !(state.connected && state.protocolReady) && _page != Page::History) {
         if (!_offline_screen) {
             _offline_screen = lv_obj_create(_root);
             lv_obj_set_size(_offline_screen, 466, 466);
@@ -1370,6 +1633,104 @@ void CodexMicroView::releaseActiveInputs()
     }
     _touch_pressed = false;
     resetDial();
+}
+
+void CodexMicroView::historyGridEvent(lv_event_t* event)
+{
+    auto* owner = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
+    if (owner == nullptr || owner->_history_grid == nullptr) {
+        return;
+    }
+    if (lv_event_get_code(event) == LV_EVENT_DRAW_MAIN) {
+        lv_layer_t* layer = lv_event_get_layer(event);
+        if (layer == nullptr) {
+            return;
+        }
+        lv_area_t grid_area;
+        lv_obj_get_coords(owner->_history_grid, &grid_area);
+        const bool hourly       = owner->_history_mode == HistoryMode::Hours;
+        const std::size_t count = hourly ? HistoryHourCount : HistoryDayCount;
+        constexpr int Width     = 48;
+        constexpr int PitchX    = 56;
+        constexpr int PitchY    = 38;
+        for (std::size_t index = 0; index < count; ++index) {
+            const int row = static_cast<int>(index / 6U);
+            const int col = static_cast<int>(index % 6U);
+            lv_draw_rect_dsc_t draw;
+            lv_draw_rect_dsc_init(&draw);
+            draw.bg_color     = lv_color_hex(owner->_history_colors[index]);
+            draw.bg_opa       = LV_OPA_COVER;
+            draw.border_color = lv_color_hex(index == owner->_history_selected ? Text : owner->_history_borders[index]);
+            draw.border_width = index == owner->_history_selected ? 2 : 1;
+            draw.radius       = 3;
+            const lv_area_t area = {static_cast<lv_coord_t>(grid_area.x1 + col * PitchX),
+                                    static_cast<lv_coord_t>(grid_area.y1 + row * PitchY),
+                                    static_cast<lv_coord_t>(grid_area.x1 + col * PitchX + Width - 1),
+                                    static_cast<lv_coord_t>(grid_area.y1 + row * PitchY + 25)};
+            lv_draw_rect(layer, &draw, &area);
+            if (owner->_history_snapshot != nullptr) {
+                const TokenHistoryCell& cell =
+                    hourly ? owner->_history_snapshot->hours[index] : owner->_history_snapshot->days[index];
+                const char* label = cell.label;
+                if (hourly && std::strlen(label) >= 16) label += 11;
+                if (!hourly && std::strlen(label) >= 10) label += 5;
+                lv_draw_label_dsc_t text;
+                lv_draw_label_dsc_init(&text);
+                text.font            = &lv_font_montserrat_14;
+                const uint32_t color = owner->_history_colors[index];
+                text.color           = lv_color_hex(
+                    ((color >> 16U) & 0xFFU) + ((color >> 8U) & 0xFFU) + (color & 0xFFU) > 384U ? KeyInk : Text);
+                text.opa             = LV_OPA_COVER;
+                text.text            = label;
+                text.text_local      = 1;
+                text.align           = LV_TEXT_ALIGN_CENTER;
+                lv_area_t label_area = area;
+                label_area.y1 += 5;
+                lv_draw_label(layer, &text, &label_area);
+            }
+        }
+        return;
+    }
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED || owner->_input_suppressed) {
+        return;
+    }
+    lv_indev_t* indev = lv_event_get_indev(event);
+    if (indev == nullptr) {
+        return;
+    }
+    lv_point_t point;
+    lv_indev_get_point(indev, &point);
+    lv_area_t grid_area;
+    lv_obj_get_coords(owner->_history_grid, &grid_area);
+    const int x          = point.x - grid_area.x1;
+    const int y          = point.y - grid_area.y1;
+    const bool hourly    = owner->_history_mode == HistoryMode::Hours;
+    constexpr int Width  = 48;
+    constexpr int PitchX = 56;
+    constexpr int PitchY = 38;
+    if (x < 0 || y < 0 || x >= 340 || y >= 190 || x % PitchX >= Width || y % PitchY >= 26) {
+        return;
+    }
+    const int col = x / PitchX;
+    const int row = y / PitchY;
+    if (col >= 6) return;
+    const std::size_t index = static_cast<std::size_t>(row * 6 + col);
+    const std::size_t count = hourly ? HistoryHourCount : HistoryDayCount;
+    if (index >= count) {
+        return;
+    }
+    owner->wakeDisplay();
+    owner->selectHistory(index);
+}
+
+void CodexMicroView::historyModeEvent(lv_event_t* event)
+{
+    auto* context = static_cast<HistoryCellContext*>(lv_event_get_user_data(event));
+    if (context == nullptr || context->owner == nullptr || context->owner->_input_suppressed ||
+        lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    context->owner->showHistory(context->index == static_cast<std::size_t>(HistoryMode::Hours));
 }
 
 void CodexMicroView::keyEvent(lv_event_t* event)

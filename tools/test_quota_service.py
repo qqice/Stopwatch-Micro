@@ -16,6 +16,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS_DIR))
 
 import quota_service  # noqa: E402
+from history_store import HistoryStore  # noqa: E402
 from stopwatch_bridge import UsageSnapshot, normalize_rate_limits  # noqa: E402
 
 
@@ -30,6 +31,10 @@ class FakeClient:
     def read_usage(self) -> UsageSnapshot:
         return self.snapshot
 
+    def _request(self, method: str) -> dict[str, object]:
+        self.assert_method = method
+        return {"summary": {"lifetimeTokens": 1}, "dailyUsageBuckets": []}
+
     def close(self) -> None:
         return
 
@@ -40,9 +45,9 @@ class QuotaServiceTests(unittest.TestCase):
     def test_bind_addresses_are_explicit_and_private(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'config.json'
-            data={'device_token':self.token,'server_host':'192.168.1.10','additional_hosts':['100.74.22.89']}
+            data={'device_token':self.token,'server_host':'192.168.1.10','additional_hosts':['100.100.100.100']}
             path.write_text(json.dumps(data))
-            self.assertEqual(quota_service.load_config(path).additional_hosts,('100.74.22.89',))
+            self.assertEqual(quota_service.load_config(path).additional_hosts,('100.100.100.100',))
             for invalid in ('0.0.0.0','8.8.8.8',32):
                 data['additional_hosts']=[invalid];path.write_text(json.dumps(data))
                 with self.assertRaises(quota_service.BridgeError):quota_service.load_config(path)
@@ -54,7 +59,9 @@ class QuotaServiceTests(unittest.TestCase):
             wall_now=lambda: self.wall_now,
             monotonic_now=lambda: self.monotonic_now,
         )
-        self.server = quota_service.ThreadingHTTPServer(("127.0.0.1", 0), quota_service.make_handler(self.store, self.token))
+        self.history_dir = tempfile.TemporaryDirectory()
+        self.history = HistoryStore(Path(self.history_dir.name) / "history.sqlite3", now=lambda: self.wall_now)
+        self.server = quota_service.ThreadingHTTPServer(("127.0.0.1", 0), quota_service.make_handler(self.store, self.token, self.history))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_port}/v1/status"
@@ -63,6 +70,8 @@ class QuotaServiceTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=1)
+        self.history.close()
+        self.history_dir.cleanup()
 
     def request(self, token: str | None = None, path: str | None = None) -> tuple[int, dict[str, object]]:
         headers = {} if token is None else {"Authorization": f"Bearer {token}"}
@@ -84,6 +93,17 @@ class QuotaServiceTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(body, {"version": 1, "captured_epoch": None, "remaining_bp": None, "reset_epoch": None, "reset_credits": None, "age_seconds": None, "available": False})
 
+    def test_history_endpoint_requires_auth_and_has_fixed_shape(self) -> None:
+        self.assertEqual(self.request(path=self.url.replace("/v1/status", "/v1/history"))[0], 401)
+        status, body = self.request(self.token, self.url.replace("/v1/status", "/v1/history"))
+        self.assertEqual(status, 200)
+        self.assertFalse(body["available"])
+        self.assertEqual((len(body["days"]), len(body["hours"])), (30, 24))
+        self.history.record_usage({"summary": {"lifetimeTokens": None}, "dailyUsageBuckets": [{"startDate": "1970-01-01", "tokens": 4}]}, 1999)
+        status, body = self.request(self.token, self.url.replace("/v1/status", "/v1/history"))
+        self.assertEqual(status, 200)
+        self.assertIn({"label": "1970-01-01", "tokens": 4, "quality": "official"}, body["days"])
+
     def test_stale_timestamp_returns_unavailable_with_original_values(self) -> None:
         self.store.save(UsageSnapshot(8123, 3000, 1980, 2))
         self.monotonic_now += quota_service.MAX_AGE_SECONDS - 20 + 1
@@ -104,7 +124,7 @@ class QuotaServiceTests(unittest.TestCase):
 
     def test_collector_uses_normalized_snapshot(self) -> None:
         client = FakeClient(UsageSnapshot(9000, 3000, 1999, 0))
-        collector = quota_service.QuotaCollector(lambda: client, self.store)
+        collector = quota_service.QuotaCollector(lambda: client, self.store, self.history)
         collector.poll_once()
         status, body = self.request(self.token)
         self.assertEqual(status, 200)
