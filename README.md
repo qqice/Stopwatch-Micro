@@ -146,15 +146,15 @@ linked into the firmware accidentally.
 
 ## Build and flash
 
-The validated toolchain is ESP-IDF v5.5.4.
+This local port targets ESP-IDF v6.1; upstream v0.4.0 release binaries use v5.5.4.
 
 On Windows, use the checked-in PowerShell entry point. It validates the toolchain, discovers the
 ESP32-S3 USB Serial/JTAG port, refuses to flash until a full backup exists, and provides a guarded
-factory restore path. Set `IDF_PATH` to your ESP-IDF v5.5.4 checkout, or pass `-IdfPath` to commands
+factory restore path. Set `IDF_PATH` to your ESP-IDF v6.1 checkout, or pass `-IdfPath` to commands
 that use the toolchain:
 
 ```powershell
-$env:IDF_PATH = 'C:\path\to\esp-idf-v5.5.4'
+$env:IDF_PATH = 'C:\esp\v6.1\esp-idf'
 .\tools\stopwatch.ps1 doctor -Port COM5
 .\tools\stopwatch.ps1 deps -DirectGit
 .\tools\stopwatch.ps1 build -SkipDeps

@@ -21,7 +21,7 @@
 namespace {
 
 constexpr std::string_view Tag     = "HAL-Audio";
-constexpr i2s_port_t I2sPort       = I2S_NUM_0;
+constexpr int I2sPort              = I2S_NUM_0;
 constexpr gpio_num_t I2sMclk       = GPIO_NUM_18;
 constexpr gpio_num_t I2sBclk       = GPIO_NUM_17;
 constexpr gpio_num_t I2sLrck       = GPIO_NUM_15;

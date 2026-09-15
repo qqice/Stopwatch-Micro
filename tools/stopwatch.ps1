@@ -65,8 +65,8 @@ function Enter-EspIdf {
     . $exportScript
     $idfVersion = (& idf.py --version | Out-String).Trim()
     Assert-LastExitCode 'idf.py --version'
-    if ($idfVersion -notmatch '5\.5\.4') {
-        throw "ESP-IDF 5.5.4 is required; detected: $idfVersion"
+    if ($idfVersion -notmatch 'ESP-IDF v?6\.1(?:\D|$)') {
+        throw "ESP-IDF 6.1 is required; detected: $idfVersion"
     }
     Write-Host "ESP-IDF: $idfVersion"
 }

@@ -17,12 +17,13 @@
     {
         "url": "https://github.com/m5stack/M5GFX.git",
         "path": "components/M5GFX",
-        "commit": "53a7184601f3667b030ba141c58b87ce2acfaa2a"
+        "commit": "d91077b9a607b59404e4e4a49f775c792bfae382"
     },
     {
         "url": "https://github.com/lvgl/lvgl.git",
         "path": "components/lvgl",
-        "commit": "85aa60d18b3d5e5588d7b247abf90198f07c8a63"
+        "commit": "85aa60d18b3d5e5588d7b247abf90198f07c8a63",
+        "patch": "patches/lvgl-idf61.patch"
     },
     {
         "url": "https://github.com/m5stack/M5IOE1",

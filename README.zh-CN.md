@@ -82,16 +82,16 @@ Pairing 页面。
 - 首次备份和刷机需要可传输数据的 USB-C 线。
 - 日常控制和无线额度更新可拔掉 USB 线，通过已配对的 Bluetooth HID 运行。
 - Windows 无线额度桥接需要已登录的 ChatGPT Desktop、Python，以及 `hidapi`。
-- 构建固件使用 ESP-IDF v5.5.4；依赖版本由 `repos.json` 和 `dependencies.lock` 固定。
+- 构建固件使用 ESP-IDF v6.1；依赖版本由 `repos.json` 和 `dependencies.lock` 固定。
 
 ## Windows 构建与刷机
 
 仓库自带的 PowerShell 入口会检查工具链、发现 ESP32-S3 USB Serial/JTAG 端口，并在没有完整
-备份时拒绝刷机。先把 `IDF_PATH` 设为你的 ESP-IDF v5.5.4 路径；示例端口 `COM5` 请替换为
+备份时拒绝刷机。先把 `IDF_PATH` 设为你的 ESP-IDF v6.1 路径；示例端口 `COM5` 请替换为
 你的实际端口：
 
 ```powershell
-$env:IDF_PATH = 'C:\path\to\esp-idf-v5.5.4'
+$env:IDF_PATH = 'C:\esp\v6.1\esp-idf'
 .\tools\stopwatch.ps1 doctor -Port COM5
 .\tools\stopwatch.ps1 deps -DirectGit
 .\tools\stopwatch.ps1 build -SkipDeps
