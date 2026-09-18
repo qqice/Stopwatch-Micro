@@ -15,6 +15,7 @@
 #include <host/token_units_font.h>
 #include <esp_bt.h>
 extern "C" esp_err_t ml_noise_selftest(void);
+extern "C" esp_err_t ml_derp_pin_selftest(void);
 #include <system_config.h>
 
 #include <algorithm>
@@ -240,7 +241,8 @@ void SerialDebug::handleLine(char* line)
         return;
     }
     if (std::strcmp(command, "tailscale-crypto") == 0) {
-        result("tailscale-crypto", ml_noise_selftest() == ESP_OK ? "PASS" : "FAIL", "known_answer_and_tampered_tag=1");
+        result("tailscale-crypto", ml_noise_selftest() == ESP_OK && ml_derp_pin_selftest() == ESP_OK ? "PASS" : "FAIL",
+               "known_answer_and_tampered_tag=1 derp_pin_match_and_reject=1");
         return;
     }
     if (std::strcmp(command, "network-selftest") == 0) {

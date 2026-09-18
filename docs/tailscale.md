@@ -20,7 +20,8 @@ select internal memory when required; the transport's 80 KiB free-internal and
 16 KiB largest-block guard remains the final startup decision.
 
 DERP uses certificate verification with the ESP-IDF certificate bundle and a
-hostname-bound TLS session. Time synchronization must complete before startup,
+hostname-bound TLS session, or an exact certificate pin explicitly provided by
+the authenticated DERPMap. Time synchronization must complete before startup,
 because certificate validity checks are intentionally not bypassed. The
 control-plane Noise authentication and its random-number generator are also
 left enabled and failures abort connection setup.
@@ -79,3 +80,25 @@ Verified on StopWatch with ESP-IDF6.1: crypto known-answer/tampered-tag/full-msg
 tailnet registered and WireGuard TCP to PC quota port succeeded; network accepted=1 after
 3 initial connection-not-ready polls, HAL selftest17/17, internal_free53615 bytes.
 This verifies the tested tailnet path; it is not a general-purpose VPN interoperability audit.
+
+## Cross-network quota peer and private DERP
+
+The watch uses a single DERP connection. When the configured priority quota
+peer advertises a home DERP region, connect to that region instead of blindly
+using the watch's default region; otherwise a different-region target may
+never receive handshake packets. This is a single-quota-peer optimization, not
+general simultaneous multi-region VPN routing. The watch also publishes the
+same region through a non-streaming Hostinfo update (even without STUN results),
+so peers send replies to the relay it actually listens on.
+
+The authenticated DERPMap `CertName` can select a certificate DNS name or
+`sha256-raw:<64 hex digits>`. The latter verifies SHA-256 over the full leaf DER
+certificate, following Tailscale's pin format. A malformed or nonmatching pin
+fails closed. Ordinary nodes still use the CA bundle and hostname verification.
+`InsecureForTests` is never used to bypass verification. TLS remains VERIFY_REQUIRED;
+the standard trust-store attachment also satisfies the TLS library's CA-chain
+configuration requirement, while the explicit pin callback enforces pin identity.
+`debug tailscale-crypto` checks a matching and a modified certificate fingerprint
+in addition to the existing Noise/AEAD known-answer and tamper tests.
+
+Reference: [Tailscale DERP TLS configuration](https://github.com/tailscale/tailscale/blob/main/derp/derphttp/derphttp_client.go).
