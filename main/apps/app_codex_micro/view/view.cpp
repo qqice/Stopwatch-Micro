@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "view.h"
+#include "history_hit_test.h"
 
 #include <apps/common/audio/audio.h>
 #include <hal/hal.h>
@@ -760,15 +761,18 @@ void CodexMicroView::renderHistory(lv_obj_t* parent)
     for (std::size_t index = 0; index < _history_mode_buttons.size(); ++index) {
         lv_obj_t* button             = lv_button_create(parent);
         _history_mode_buttons[index] = button;
-        lv_obj_set_pos(button, 132 + static_cast<int>(index) * 104, 96);
-        lv_obj_set_size(button, 98, 36);
+        lv_obj_set_pos(button, 98 + static_cast<int>(index) * 140, 90);
+        lv_obj_set_size(button, 132, 46);
+        lv_obj_set_ext_click_area(button, 4);
+        lv_obj_remove_flag(button, LV_OBJ_FLAG_SCROLLABLE);
         stylePanel(button, StatusCard, StatusBorder, 18, 1);
         lv_obj_t* label = lv_label_create(button);
         lv_label_set_text(label, ModeNames[index]);
+        lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_text_font(label, &lv_font_montserrat_14, LV_PART_MAIN);
         lv_obj_center(label);
         _history_mode_contexts[index] = {.owner = this, .index = index};
-        lv_obj_add_event_cb(button, historyModeEvent, LV_EVENT_CLICKED, &_history_mode_contexts[index]);
+        lv_obj_add_event_cb(button, historyModeEvent, LV_EVENT_PRESSED, &_history_mode_contexts[index]);
     }
 
     _history_grid = lv_obj_create(parent);
@@ -776,9 +780,10 @@ void CodexMicroView::renderHistory(lv_obj_t* parent)
     lv_obj_set_pos(_history_grid, 65, 145);
     lv_obj_set_size(_history_grid, 340, 190);
     lv_obj_add_flag(_history_grid, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(_history_grid, 4);
     lv_obj_remove_flag(_history_grid, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(_history_grid, historyGridEvent, LV_EVENT_DRAW_MAIN, this);
-    lv_obj_add_event_cb(_history_grid, historyGridEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(_history_grid, historyGridEvent, LV_EVENT_PRESSED, this);
 
     _history_footer = lv_label_create(parent);
     lv_obj_set_width(_history_footer, 360);
@@ -1732,7 +1737,7 @@ void CodexMicroView::historyGridEvent(lv_event_t* event)
         }
         return;
     }
-    if (lv_event_get_code(event) != LV_EVENT_CLICKED || owner->_input_suppressed) {
+    if (lv_event_get_code(event) != LV_EVENT_PRESSED || owner->_input_suppressed) {
         return;
     }
     lv_indev_t* indev = lv_event_get_indev(event);
@@ -1746,20 +1751,8 @@ void CodexMicroView::historyGridEvent(lv_event_t* event)
     const int x          = point.x - grid_area.x1;
     const int y          = point.y - grid_area.y1;
     const bool hourly    = owner->_history_mode == HistoryMode::Hours;
-    constexpr int Width  = 48;
-    constexpr int PitchX = 56;
-    constexpr int PitchY = 38;
-    if (x < 0 || y < 0 || x >= 340 || y >= 190 || x % PitchX >= Width || y % PitchY >= 26) {
-        return;
-    }
-    const int col = x / PitchX;
-    const int row = y / PitchY;
-    if (col >= 6) return;
-    const std::size_t index = static_cast<std::size_t>(row * 6 + col);
-    const std::size_t count = hourly ? HistoryHourCount : HistoryDayCount;
-    if (index >= count) {
-        return;
-    }
+    const int index = HistoryHitCell(x, y, hourly);
+    if (index < 0) return;
     owner->wakeDisplay();
     owner->selectHistory(index);
 }
@@ -1768,7 +1761,7 @@ void CodexMicroView::historyModeEvent(lv_event_t* event)
 {
     auto* context = static_cast<HistoryCellContext*>(lv_event_get_user_data(event));
     if (context == nullptr || context->owner == nullptr || context->owner->_input_suppressed ||
-        lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        lv_event_get_code(event) != LV_EVENT_PRESSED) {
         return;
     }
     context->owner->showHistory(context->index == static_cast<std::size_t>(HistoryMode::Hours));

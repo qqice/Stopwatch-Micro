@@ -1,3 +1,4 @@
+#include <apps/app_codex_micro/view/history_hit_test.h>
 #include "boot_trace.h"
 /*
  * SPDX-License-Identifier: MIT
@@ -328,8 +329,8 @@ void SerialDebug::handleLine(char* line)
         return;
     }
     if (std::strcmp(command, "history-selftest") == 0) {
-        result("history-selftest", TokenHistoryRejectionSelfTest() && TokenAmountSelfTest() ? "PASS" : "FAIL",
-               "malformed_depth_size_rejected=1 cache_preserved=1 token_units=K/M");
+        result("history-selftest", TokenHistoryRejectionSelfTest() && TokenAmountSelfTest() && HistoryHitSelfTest() ? "PASS" : "FAIL",
+               "malformed_depth_size_rejected=1 cache_preserved=1 token_units=K/M touch_partition=1");
         return;
     }
     if (std::strcmp(command, "status") == 0) {
