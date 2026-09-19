@@ -1,34 +1,56 @@
 # Usage history
 
-The LAN quota service stores a private SQLite database beside its configuration
-by default: `.artifacts/private/history.sqlite3`. Set `history_db` in the local
-service configuration to choose another relative path. The database contains
-only sample epochs, cumulative lifetime token counts, and official daily token
-buckets. It never stores OpenAI credentials, account identifiers, request text,
-or device tokens.
+The quota service keeps a private SQLite database beside its configuration.
+It contains cumulative account observations, reported daily buckets, and optional
+local completion events (timestamp, token count, SHA256 deduplication key, source).
+It never stores prompts, tool output, account credentials, or device tokens.
 
-`GET /v1/history` uses the same Bearer token as `/v1/status`. It returns 30
-calendar days and 24 local hours using UTC+08:00. Daily values are official
-`startDate` source buckets and retain their source dates. Hours are observed differences of
-the later cumulative sample, so they are not an exact hourly billing record.
+`GET /v1/history` uses the same Bearer token as `/v1/status`. There are 30 days
+and 24 local hours (UTC+08:00). Reported daily buckets retain upstream `startDate`;
+this is not the weekly quota reset period. Upstream daily/cumulative counts may
+lag. Repeated fresh HTTP responses do not mean the underlying counters are current.
 
-`observed` requires near-full hourly sampling coverage. `partial` marks a long
-gap or incomplete coverage. `missing` means there is no defensible observed
-value, including a baseline-only interval. `correction` marks a negative
-cumulative jump such as a reset; it is never converted to zero. Future hours
-and unavailable historical days remain `missing`.
+**Do not differentiate delayed lifetime counters into consumption hours.** On
+2026-09-19 the counter stayed unchanged from16:00 through21:00 despite active use.
+Zero deltas do not prove zero usage; later catch-up deltas cannot be assigned to
+that arrival hour. `reported_delta` is retained for diagnostics only. Without a
+local completion event, hourly `tokens` is null (`pending` or `missing`), never a
+fabricated zero. Old cumulative observations remain in SQLite for audit.
 
-Samples older than 90 days are removed. The service does not infer historical
-hours from official daily totals.
+Optional local collection uses Codex `event_msg/token_count` completion timestamps
+and `last_token_usage.total_tokens`. Repeated cumulative totals are skipped. A
+SHA256 of timestamp and usage counters deduplicates copied/forked logs and retries
+across both machines. No chat text or paths leave the originating computer.
+Totals include cached input as reported by Codex; cached/reasoning components are
+not added a second time. Completion-time attribution is not a measurement of
+how a long request consumed tokens continuously across an hour boundary.
 
-UI: Blue B cycles Command -> History -> Agent when a host is connected, and Command ->
-History offline. DAYS uses green squares, HOURS uses blue squares; grey is missing and an
-orange correction marker is not a numeric zero. Tap a square for the exact value and quality.
-The first touch/key while idle-locked is consumed for wake. Host Agent controls remain available.
+`local` values cover only connected Windows/Mac logs, **not the whole account**.
+Hours use these events; today's daily cell uses the local calendar-day sum,
+with upstream value separately retained as `reported_tokens`. Older available
+official daily buckets remain separate; official and local totals are never added.
+No-event hours stay unknown because complete account coverage cannot be proved.
+Weekly quota percentage is a distinct metric, not a fixed Token conversion.
+Switching accounts requires separate log scope/databases; old local logs do not
+carry enough account identity to automatically establish historical ownership.
 
-Hourly data begins when this service starts sampling; it cannot backfill prior hours from day
-buckets. A partial observation is not an exact hourly bill. Keep a separate database when
-switching accounts, since cumulative counters from different accounts are not comparable.
+Deployment:
+- Mac service `--collect-local`: incremental scanner under the existing LaunchAgent.
+- Windows `tools/local_usage_agent.py --db <private-cursor-db> --ssh-host MacMiniM4`:
+  incremental scanner, durable outbox, authenticated SSH ingest (no HTTP write API).
+  Configure a hidden user login startup entry. See agent `--log-file` and `--once`.
+- Ingest command paths target the documented Mac deployment. Edit for other hosts.
+- Startup backfills up to30 days of existing local logs; both sources retain numeric
+  cursors privately. Local events/account observations retained90 days. Restarts,
+  retries and archived/copy logs are idempotent. Partial JSONL appends wait for newline.
+- Heartbeat timestamps are exposed as `local_sources_last_seen`; a fresh Mac source
+  does not imply Windows is online. Watch details always label local coverage partial.
+- Current deployment uses Windows `Startup/StopWatch-LocalUsage.vbs` and Mac
+  `com.qqice.stopwatch-quota`; both are login auto-start, not pre-login services.
+
+UI: B opens History. DAYS is green, HOURS blue. Tap a square for source and exact
+count. Pending is not zero; reported daily values may lag. First locked touch wakes.
+Changing mode/selection remains entirely local to the watch's cached snapshot.
 
 Firmware diagnostics: `debug history days`, `debug history hours`, `debug history select N`,
 `debug history-selftest`. The rejection selftest checks malformed arrays, excessive nesting,

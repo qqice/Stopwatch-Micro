@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from stopwatch_bridge import AppServerClient, BridgeError, UsageSnapshot, locate_codex
 from history_store import HistoryStore, unavailable_response
+from local_usage import LocalUsageScanner
 
 
 POLL_SECONDS = 60.0
@@ -143,13 +144,24 @@ class SnapshotStore:
 class QuotaCollector:
     """Poll App Server independently from HTTP clients and retain only quota data."""
 
-    def __init__(self, client_factory: Callable[[], AppServerClient], store: SnapshotStore, history: HistoryStore) -> None:
+    def __init__(self, client_factory: Callable[[], AppServerClient], store: SnapshotStore, history: HistoryStore,
+                 local_scanner: LocalUsageScanner | None = None) -> None:
+        self._local_scanner = local_scanner
         self._client_factory = client_factory
         self._store = store
         self._history = history
         self._client: AppServerClient | None = None
 
     def poll_once(self) -> None:
+        if self._local_scanner is not None:
+            try:
+                self._local_scanner.scan()
+                self._history.record_local_events([], "mac")
+                while events := self._local_scanner.pending():
+                    self._history.record_local_events(events, "mac")
+                    self._local_scanner.acknowledge(events)
+            except (OSError, ValueError, sqlite3.Error):
+                print("LOCAL_USAGE scan failed", file=sys.stderr)
         if self._client is None:
             self._client = self._client_factory()
             self._client.start()
@@ -232,6 +244,7 @@ def parse_args() -> argparse.Namespace:
         help="JSON file containing server_host, server_port, and device_token",
     )
     parser.add_argument("--codex-path", type=Path, help="explicit desktop-managed codex.exe")
+    parser.add_argument("--collect-local", action="store_true", help="collect this Mac user\'s numeric completion logs")
     return parser.parse_args()
 
 
@@ -240,7 +253,8 @@ def run(args: argparse.Namespace) -> int:
     try:
         config = load_config(args.config)
         history = HistoryStore(config.history_db if config.history_db is not None else args.config.parent / "private" / "history.sqlite3")
-        collector = QuotaCollector(lambda: AppServerClient(locate_codex(args.codex_path)), SnapshotStore(), history)
+        scanner = LocalUsageScanner(args.config.parent / "local-usage-cursor.sqlite3", Path.home() / ".codex") if getattr(args, "collect_local", False) else None
+        collector = QuotaCollector(lambda: AppServerClient(locate_codex(args.codex_path)), SnapshotStore(), history, scanner)
         stop = threading.Event()
         worker = threading.Thread(target=run_collector, args=(collector, stop), daemon=True)
         for host in (config.server_host,)+config.additional_hosts:

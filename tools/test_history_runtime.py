@@ -9,9 +9,9 @@ def main():
     config=json.loads(a.config.read_text(encoding='utf-8-sig'))
     request=urllib.request.Request(f"http://{config['server_host']}:{config.get('server_port',8765)}/v1/history",
         headers={'Authorization':'Bearer '+config['device_token']})
-    with urllib.request.urlopen(request,timeout=10) as response: history=json.loads(response.read())
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request,timeout=10) as response: history=json.loads(response.read())
     assert history['available']
-    index=next(i for i in range(min(len(history['days'])-1,22),-1,-1) if history['days'][i]['tokens'] is not None)
+    index=next(i for i in range(min(len(history['days'])-1,22),-1,-1) if history['days'][i]['quality'] == "official")
     expected=history['days'][index]
     c=DebugClient(a.port)
     try:
@@ -29,7 +29,7 @@ def main():
         assert c.command('debug history days','history').status=='PASS'
         detail=c.command(f'debug history select {index}','history')
         assert detail.status=='PASS' and expected['label'] in detail.details
-        assert f": {expected['tokens']} tokens (official)" in detail.details,detail.details
+        assert f": {expected['tokens']} tokens (reported / may lag)" in detail.details,detail.details
         assert c.command('debug history hours','history').status=='PASS'
         first=c.command('debug history select 0','history')
         assert first.status=='PASS'

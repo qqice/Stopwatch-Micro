@@ -45,8 +45,9 @@ class HistoryStoreTests(unittest.TestCase):
                 store.record_usage(usage(100), epoch)
             store.record_usage(usage(130), now)
             hours = {item["label"]: item for item in store.response()["hours"]}
-            self.assertEqual(hours["2024-01-01 19:00"]["tokens"], 30)
-            self.assertEqual(hours["2024-01-01 19:00"]["quality"], "observed")
+            self.assertIsNone(hours["2024-01-01 19:00"]["tokens"])
+            self.assertEqual(hours["2024-01-01 19:00"]["reported_delta"], 30)
+            self.assertEqual(hours["2024-01-01 19:00"]["quality"], "pending")
             self.assertEqual(hours["2024-01-01 18:00"]["quality"], "missing")
             store.close()
 
@@ -58,7 +59,8 @@ class HistoryStoreTests(unittest.TestCase):
             store.record_usage(usage(120), now - 3500)
             store.record_usage(usage(90), now - 60)
             hours = {item["label"]: item for item in store.response()["hours"]}
-            self.assertEqual(hours["2024-01-01 19:00"], {"label": "2024-01-01 19:00", "tokens": None, "quality": "correction"})
+            self.assertIsNone(hours["2024-01-01 19:00"]["tokens"])
+            self.assertIsNone(hours["2024-01-01 19:00"]["reported_delta"])
             store.close()
 
     def test_hour_boundary_and_long_gap_are_partial(self) -> None:
@@ -69,7 +71,7 @@ class HistoryStoreTests(unittest.TestCase):
             store.record_usage(usage(5), now - 3500)
             store.record_usage(usage(10), now - 10)
             hours = {item["label"]: item for item in store.response()["hours"]}
-            self.assertEqual(hours["2024-01-01 19:00"]["quality"], "partial")
+            self.assertEqual(hours["2024-01-01 19:00"]["quality"], "pending")
             store.close()
 
 

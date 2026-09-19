@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-enum class TokenHistoryQuality : uint8_t { Missing, Official, Observed, Partial, Correction };
+enum class TokenHistoryQuality : uint8_t { Missing, Official, Observed, Partial, Correction, Pending, Local };
 struct TokenHistoryCell {
     char label[24]{};
     uint64_t tokens             = 0;

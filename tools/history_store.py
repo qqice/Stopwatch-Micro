@@ -34,6 +34,8 @@ class HistoryStore:
         )
         self._db.execute("CREATE TABLE IF NOT EXISTS daily (label TEXT PRIMARY KEY, tokens INTEGER NOT NULL)")
         self._db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+        self._db.execute("CREATE TABLE IF NOT EXISTS local_events (id TEXT PRIMARY KEY, epoch INTEGER NOT NULL, tokens INTEGER NOT NULL, source TEXT NOT NULL)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS local_events_epoch ON local_events(epoch)")
         self._db.commit()
         self._live_capture: int | None = None
         self._live_saved_monotonic: float | None = None
@@ -75,10 +77,30 @@ class HistoryStore:
         self._live_saved_monotonic = self._monotonic_now()
         return True
 
+    def record_local_events(self, events: Any, source: str) -> None:
+        if source not in ("windows", "mac") or not isinstance(events, list) or len(events) > 1000:
+            raise ValueError("invalid local usage batch")
+        now = int(self._now())
+        rows = []
+        for event in events:
+            if not isinstance(event, dict): raise ValueError("invalid event")
+            key, epoch, tokens = event.get("id"), event.get("epoch"), event.get("tokens")
+            if (not isinstance(key, str) or len(key) != 64 or any(c not in "0123456789abcdef" for c in key)
+                or type(epoch) is not int or not now - RETENTION_DAYS * 86400 <= epoch <= now + 300
+                or type(tokens) is not int or not 0 < tokens <= MAX_TOKENS):
+                raise ValueError("invalid local usage event")
+            rows.append((key, epoch, tokens, source))
+        with self._lock, self._db:
+            self._db.executemany("INSERT OR IGNORE INTO local_events VALUES(?,?,?,?)", rows)
+            self._db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("local_capture_" + source, now))
+            self._db.execute("DELETE FROM local_events WHERE epoch < ?", (now - RETENTION_DAYS * 86400,))
+
     def response(self) -> dict[str, Any]:
         with self._lock:
             meta = self._db.execute("SELECT value FROM meta WHERE key='last_capture'").fetchone()
-            newest = meta[0] if meta else None
+            captures = dict(self._db.execute("SELECT key,value FROM meta WHERE key LIKE 'local_capture_%'"))
+            newest = max([meta[0] if meta else 0, *captures.values()]) or None
+            local_rows = self._db.execute("SELECT epoch,tokens FROM local_events WHERE epoch >= ?", (int(self._now()) - 31 * 86400,)).fetchall()
             daily = dict(self._db.execute("SELECT label,tokens FROM daily").fetchall())
             cutoff = int(self._now()) - (UI_HOURS + 1) * 3600
             baseline = self._db.execute(
@@ -90,15 +112,31 @@ class HistoryStore:
         if newest is None:
             return {"version": 1, "available": False, "captured_epoch": 0, "age_seconds": 0,
                     "days": self._days({}, int(self._now())), "hours": self._hours([], int(self._now())),
-                    "timezone_offset_minutes": self._offset}
+                    "timezone_offset_minutes": self._offset,
+                "hourly_attribution": "connected_device_completions_only"}
         now = int(self._now())
         if newest == self._live_capture and self._live_saved_monotonic is not None:
             age = max(0, int(self._monotonic_now() - self._live_saved_monotonic))
         else:
             age = max(0, now - newest)
+        days, hours = self._days(daily, now), self._hours(samples, now)
+        local_days: dict[str, int] = {}
+        local_hours: dict[str, int] = {}
+        for epoch, tokens in local_rows:
+            stamp = self._local(epoch)
+            day, hour = stamp.strftime("%Y-%m-%d"), stamp.strftime("%Y-%m-%d %H:00")
+            local_days[day] = local_days.get(day, 0) + tokens
+            local_hours[hour] = local_hours.get(hour, 0) + tokens
+        for cell in hours:
+            if cell["label"] in local_hours:
+                cell.update(tokens=local_hours[cell["label"]], quality="local", source="connected_device_completions")
+        for cell in days:
+            if cell["label"] in local_days and (cell["label"] == self._local(now).date().isoformat() or cell["tokens"] is None):
+                cell.update(reported_tokens=cell["tokens"], tokens=local_days[cell["label"]], quality="local")
         return {"version": 1, "available": True, "captured_epoch": newest, "age_seconds": age,
-                "days": self._days(daily, now), "hours": self._hours(samples, now),
-                "timezone_offset_minutes": self._offset}
+                "days": days, "hours": hours, "local_sources_last_seen": captures,
+                "timezone_offset_minutes": self._offset,
+                "hourly_attribution": "connected_device_completions_only"}
 
     def _local(self, epoch: int) -> dt.datetime:
         return dt.datetime.fromtimestamp(epoch, tz=dt.timezone(dt.timedelta(minutes=self._offset)))
@@ -142,17 +180,17 @@ class HistoryStore:
                 if gap > LONG_GAP_SECONDS and overlap:
                     partial.add(label)
                 cursor += dt.timedelta(hours=1)
+        # A poll timestamp is not an event timestamp. The upstream lifetime
+        # counter can lag for hours then catch up in a batch. Never label its
+        # derivative as tokens consumed in the hour (including false zeroes).
         result: list[dict[str, Any]] = []
         for hour in starts:
             label = hour.strftime("%Y-%m-%d %H:00")
-            if label in correction:
-                result.append({"label": label, "tokens": None, "quality": "correction"})
-            elif label not in values:
-                result.append({"label": label, "tokens": None, "quality": "missing"})
-            elif label in partial or coverage.get(label, 0) < OBSERVED_COVERAGE_SECONDS:
-                result.append({"label": label, "tokens": values[label], "quality": "partial"})
-            else:
-                result.append({"label": label, "tokens": values[label], "quality": "observed"})
+            sampled = label in coverage or label in values or label in correction
+            result.append({"label": label, "tokens": None,
+                           "quality": "pending" if sampled else "missing",
+                           "reported_delta": None if label in correction else values.get(label),
+                           "source": "delayed_account_counter"})
         return result
 
 

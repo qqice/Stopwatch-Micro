@@ -813,14 +813,14 @@ void CodexMicroView::updateHistorySelection()
     if (cell == nullptr) {
         std::snprintf(details, sizeof(details),
                       _history_snapshot != nullptr && _history_snapshot->available
-                          ? (_history_mode == HistoryMode::Hours ? "Observed updates | tap for details"
-                                                                 : "Official daily tokens | tap a date")
+                          ? (_history_mode == HistoryMode::Hours ? "Hourly tokens | tap for source"
+                                                                 : "Reported daily tokens | may lag")
                           : "Waiting for token history");
     } else {
         const char* quality = "missing";
         switch (cell->quality) {
             case TokenHistoryQuality::Official:
-                quality = "official";
+                quality = "reported / may lag";
                 break;
             case TokenHistoryQuality::Observed:
                 quality = "observed cumulative delta";
@@ -830,6 +830,12 @@ void CodexMicroView::updateHistorySelection()
                 break;
             case TokenHistoryQuality::Correction:
                 quality = "correction";
+                break;
+            case TokenHistoryQuality::Local:
+                quality = "device logs / partial coverage";
+                break;
+            case TokenHistoryQuality::Pending:
+                quality = "Pending: no hourly source";
                 break;
             case TokenHistoryQuality::Missing:
                 break;
@@ -1134,7 +1140,7 @@ void CodexMicroView::historyDetails(char* out, std::size_t capacity) const
     const char* quality = "missing";
     switch (cell->quality) {
         case TokenHistoryQuality::Official:
-            quality = "official";
+            quality = "reported / may lag";
             break;
         case TokenHistoryQuality::Observed:
             quality = "observed";
@@ -1144,6 +1150,12 @@ void CodexMicroView::historyDetails(char* out, std::size_t capacity) const
             break;
         case TokenHistoryQuality::Correction:
             quality = "correction";
+            break;
+        case TokenHistoryQuality::Local:
+            quality = "local / partial coverage";
+            break;
+        case TokenHistoryQuality::Pending:
+            quality = "pending (not zero)";
             break;
         case TokenHistoryQuality::Missing:
             break;

@@ -41,6 +41,10 @@ bool cells(cJSON* root, const char* name, std::array<TokenHistoryCell, N>& desti
         std::strcpy(cell.label, label->valuestring);
         if (!std::strcmp(quality->valuestring, "missing"))
             cell.quality = TokenHistoryQuality::Missing;
+        else if (!std::strcmp(quality->valuestring, "local"))
+            cell.quality = TokenHistoryQuality::Local;
+        else if (!daily && !std::strcmp(quality->valuestring, "pending"))
+            cell.quality = TokenHistoryQuality::Pending;
         else if (daily && !std::strcmp(quality->valuestring, "official"))
             cell.quality = TokenHistoryQuality::Official;
         else if (!daily && !std::strcmp(quality->valuestring, "observed"))
@@ -52,11 +56,13 @@ bool cells(cJSON* root, const char* name, std::array<TokenHistoryCell, N>& desti
         else
             return false;
         if (cJSON_IsNull(count)) {
-            if (cell.quality != TokenHistoryQuality::Missing && cell.quality != TokenHistoryQuality::Correction)
+            if (cell.quality != TokenHistoryQuality::Missing && cell.quality != TokenHistoryQuality::Correction &&
+                cell.quality != TokenHistoryQuality::Pending)
                 return false;
         } else {
             double value = 0;
             if (cell.quality == TokenHistoryQuality::Missing || cell.quality == TokenHistoryQuality::Correction ||
+                cell.quality == TokenHistoryQuality::Pending ||
                 !integer(entry, "tokens", 0, 9007199254740991.0, value))
                 return false;
             cell.tokens = static_cast<uint64_t>(value);
