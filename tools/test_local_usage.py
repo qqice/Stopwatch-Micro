@@ -40,11 +40,14 @@ class LocalUsageTests(unittest.TestCase):
    s.record_usage({'summary':{'lifetimeTokens':1000}},NOW-60)
    s.record_usage({'summary':{'lifetimeTokens':9000}},NOW)
    r=s.response();h={x['label']:x for x in r['hours']}
-   self.assertEqual(h['2026-09-19 20:00']['tokens'],50)
-   self.assertEqual(h['2026-09-19 21:00']['tokens'],50)
-   self.assertEqual(h['2026-09-19 21:00']['quality'],'local')
-   self.assertEqual(r['days'][-1]['tokens'],100)
-   self.assertEqual(r['days'][-1]['quality'],'local');s.close()
+   self.assertIsNone(h['2026-09-19 20:00']['tokens'])
+   self.assertIsNone(h['2026-09-19 21:00']['tokens'])
+   self.assertEqual(h['2026-09-19 21:00']['quality'],'pending')
+   self.assertIsNone(r['days'][-1]['tokens'])
+   self.assertEqual(r['source'],'official_account_api')
+   self.assertFalse(r['hourly_supported'])
+   self.assertEqual(s._db.execute('select count(*) from local_events').fetchone()[0],2)
+   s.close()
  def test_invalid_batch_is_atomic(self):
   with tempfile.TemporaryDirectory() as t:
    s=HistoryStore(Path(t)/'h.db',now=lambda:NOW);a,_=event_from_record(record(50,50),None)

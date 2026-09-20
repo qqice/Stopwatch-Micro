@@ -1,61 +1,68 @@
-# Usage history
+# Official usage history
 
-The quota service keeps a private SQLite database beside its configuration.
-It contains cumulative account observations, reported daily buckets, and optional
-local completion events (timestamp, token count, SHA256 deduplication key, source).
-It never stores prompts, tool output, account credentials, or device tokens.
+The service polls Codex app-server `account/usage/read` and
+`account/rateLimits/read` every 60 seconds. This is the official account app-server
+interface, not the API-platform organization usage API. Local Windows/Mac session
+logs are no longer collected or included in responses. Historical local event
+rows and legacy import tools remain inactive for audit/rollback only.
 
-`GET /v1/history` uses the same Bearer token as `/v1/status`. There are 30 days
-and 24 local hours (UTC+08:00). Reported daily buckets retain upstream `startDate`;
-this is not the weekly quota reset period. Upstream daily/cumulative counts may
-lag. Repeated fresh HTTP responses do not mean the underlying counters are current.
+`GET /v1/history` requires the same Bearer token as `/v1/status`. It returns 30
+calendar days and 24 hour placeholders (display timezone UTC+08:00). Daily labels
+retain upstream `startDate`; they are not the weekly quota reset period.
 
-**Do not differentiate delayed lifetime counters into consumption hours.** On
-2026-09-19 the counter stayed unchanged from16:00 through21:00 despite active use.
-Zero deltas do not prove zero usage; later catch-up deltas cannot be assigned to
-that arrival hour. `reported_delta` is retained for diagnostics only. Without a
-local completion event, hourly `tokens` is null (`pending` or `missing`), never a
-fabricated zero. Old cumulative observations remain in SQLite for audit.
+## Delayed statistics policy
 
-Optional local collection uses Codex `event_msg/token_count` completion timestamps
-and `last_token_usage.total_tokens`. Repeated cumulative totals are skipped. A
-SHA256 of timestamp and usage counters deduplicates copied/forked logs and retries
-across both machines. No chat text or paths leave the originating computer.
-Totals include cached input as reported by Codex; cached/reasoning components are
-not added a second time. Completion-time attribution is not a measurement of
-how a long request consumed tokens continuously across an hour boundary.
+- Reconcile every returned daily bucket on every poll, including old dates and
+  downward corrections. Missing buckets do not erase previously reported values.
+- Missing days are `tokens: null, quality: pending`, never fabricated zeroes.
+- Previously reported daily values remain provisional: upstream does not provide
+  a finality marker or a reliable data-as-of timestamp. Midnight does not finalize
+  yesterday. Explicit official zeroes remain zeroes.
+- Preserve the last valid SQLite cache on upstream errors or empty/malformed
+  responses and retry at the next poll. Quota and history polls are independent.
+- `last_successful_poll_epoch` measures retrieval, not data freshness.
+  `last_value_change_epoch` measures when the observed official response changed,
+  not when tokens were consumed. `cache_status` becomes `stale_cache` after 180s;
+  `upstream_data_delay_seconds` is null because actual lag is unknown.
+- `daily_revisions` keeps observed corrections for 90 days. Cumulative observations
+  are also retained 90 days. Previously known daily buckets survive response gaps.
 
-`local` values cover only connected Windows/Mac logs, **not the whole account**.
-Hours use these events; today's daily cell uses the local calendar-day sum,
-with upstream value separately retained as `reported_tokens`. Older available
-official daily buckets remain separate; official and local totals are never added.
-No-event hours stay unknown because complete account coverage cannot be proved.
-Weekly quota percentage is a distinct metric, not a fixed Token conversion.
-Switching accounts requires separate log scope/databases; old local logs do not
-carry enough account identity to automatically establish historical ownership.
+**The official interface supplies no true hourly token buckets.** All hourly
+`tokens` are null and `hourly_supported` is false. The UI explicitly explains this.
+`reported_delta` is diagnostic counter arrival data only, not hourly consumption.
+A delayed catch-up must not be assigned to the hour it arrives. Quota percentage
+cannot be converted to tokens, either. Official daily counts include whatever
+upstream reports; we do not reinterpret their accounting or timezone.
 
-Deployment:
-- Mac service `--collect-local`: incremental scanner under the existing LaunchAgent.
-- Windows `tools/local_usage_agent.py --db <private-cursor-db> --ssh-host MacMiniM4`:
-  incremental scanner, durable outbox, authenticated SSH ingest (no HTTP write API).
-  Configure a hidden user login startup entry. See agent `--log-file` and `--once`.
-- Ingest command paths target the documented Mac deployment. Edit for other hosts.
-- Startup backfills up to30 days of existing local logs; both sources retain numeric
-  cursors privately. Local events/account observations retained90 days. Restarts,
-  retries and archived/copy logs are idempotent. Partial JSONL appends wait for newline.
-- Heartbeat timestamps are exposed as `local_sources_last_seen`; a fresh Mac source
-  does not imply Windows is online. Watch details always label local coverage partial.
-- Current deployment uses Windows `Startup/StopWatch-LocalUsage.vbs` and Mac
-  `com.qqice.stopwatch-quota`; both are login auto-start, not pre-login services.
+The current deployment disables Windows `Startup/StopWatch-LocalUsage.vbs` and
+removes Mac `--collect-local`. The quota LaunchAgent remains login auto-start.
+Neither local event heartbeats nor old local rows can freshen the official cache.
 
-UI: B opens History. DAYS is green, HOURS blue. Tap a square for source and exact
-count. Pending is not zero; reported daily values may lag. First locked touch wakes.
-Changing mode/selection remains entirely local to the watch's cached snapshot.
+UI: B opens History. DAYS is green; HOURS is unsupported/pending. Selection and
+mode changes use the cached in-memory snapshot. First locked touch wakes. Locked
+refresh only shuts radios down early after BOTH quota and history succeed; failed
+history retries inside the existing bounded 90-second window, then tries again on
+the next 5-minute cycle. This preserves battery limits without treating quota-only
+success as successful history refresh. This corrects premature shutdown only;
+it does not guarantee tunnel recovery. Repeated hardware tests still reproduce
+intermittent MicroLink warm-reconnect failures, even after successful full map
+retrieval. Network failure and an upstream pending day are separate conditions.
+`Quota-Map` logs snapshot field presence/counts, without credentials or peer keys,
+to support continued diagnosis. A successful cold boot is not proof of reconnect
+reliability.
 
-Firmware diagnostics: `debug history days`, `debug history hours`, `debug history select N`,
-`debug history-selftest`. The rejection selftest checks malformed arrays, excessive nesting,
-and payload size while retaining the last valid cache. `tools/test_history_runtime.py` compares
-one official day on the device against the authenticated host response.
+## Future browser frontend (not implemented here)
+
+Reuse the authenticated status/history APIs and their cache/source/availability
+metadata. Keep OpenAI credentials on the Mac backend, not in browser JavaScript.
+Serve the frontend same-origin behind Tailnet access and HTTPS; do not expose the
+current plain-HTTP service or device Bearer token on the public internet. A web UI
+should display last poll, last observed change, pending days and unknown upstream
+lag separately. Do not draw an hourly consumption chart from `reported_delta`.
+
+Firmware diagnostics: `debug history days`, `debug history hours`,
+`debug history select N`, `debug history-selftest`.
+`tools/test_history_runtime.py` compares a reported day with the host response.
 
 ## Local interaction and grouping
 

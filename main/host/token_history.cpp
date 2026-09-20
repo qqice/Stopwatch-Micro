@@ -43,7 +43,7 @@ bool cells(cJSON* root, const char* name, std::array<TokenHistoryCell, N>& desti
             cell.quality = TokenHistoryQuality::Missing;
         else if (!std::strcmp(quality->valuestring, "local"))
             cell.quality = TokenHistoryQuality::Local;
-        else if (!daily && !std::strcmp(quality->valuestring, "pending"))
+        else if (!std::strcmp(quality->valuestring, "pending"))
             cell.quality = TokenHistoryQuality::Pending;
         else if (daily && !std::strcmp(quality->valuestring, "official"))
             cell.quality = TokenHistoryQuality::Official;

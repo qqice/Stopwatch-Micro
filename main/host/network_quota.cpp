@@ -296,13 +296,15 @@ void NetworkQuota::run()
             ++_accepted;
         else
             ++_failures;
+        bool historyOk = false;
         if (!GetTailnetQuota().enabled() || GetTailnetQuota().ready()) {
-            if (fetchHistory())
+            historyOk = fetchHistory();
+            if (historyOk)
                 ++_history_accepted;
             else
                 ++_history_failures;
         }
-        if (locked && quotaOk) {
+        if (locked && quotaOk && historyOk) {
             ++_power_cycles;
             updateWindow = false;
             continue;

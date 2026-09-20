@@ -131,6 +131,29 @@ class QuotaServiceTests(unittest.TestCase):
         self.assertTrue(client.started)
         self.assertEqual(body["remaining_bp"], 9000)
 
+    def test_failed_quota_does_not_skip_official_history(self):
+        class FailedQuota(FakeClient):
+            def read_usage(self):
+                raise quota_service.BridgeError('quota unavailable')
+        client = FailedQuota(None)
+        collector = quota_service.QuotaCollector(lambda: client, self.store, self.history)
+        with self.assertRaises(quota_service.BridgeError):
+            collector.poll_once()
+        self.assertTrue(self.history.response()['available'])
+        self.assertEqual(client.assert_method, 'account/usage/read')
+
+    def test_failed_history_preserves_cache_and_resets_client(self):
+        self.history.record_usage({'summary': {'lifetimeTokens': 10}}, 1999)
+        class FailedHistory(FakeClient):
+            def _request(self, method):
+                raise quota_service.BridgeError('history unavailable')
+        client = FailedHistory(UsageSnapshot(9000, 3000, 1999, 0))
+        collector = quota_service.QuotaCollector(lambda: client, self.store, self.history)
+        collector.poll_once()
+        self.assertEqual(self.history.response()['captured_epoch'], 1999)
+        self.assertIsNone(collector._client)
+        self.assertEqual(self.request(self.token)[0], 200)
+
     def test_rate_limit_parser_preserves_canonical_codex_window(self) -> None:
         snapshot = normalize_rate_limits(
             {

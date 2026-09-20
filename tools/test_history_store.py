@@ -48,7 +48,7 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertIsNone(hours["2024-01-01 19:00"]["tokens"])
             self.assertEqual(hours["2024-01-01 19:00"]["reported_delta"], 30)
             self.assertEqual(hours["2024-01-01 19:00"]["quality"], "pending")
-            self.assertEqual(hours["2024-01-01 18:00"]["quality"], "missing")
+            self.assertEqual(hours["2024-01-01 18:00"]["quality"], "pending")
             store.close()
 
     def test_negative_and_gap_are_not_presented_as_normal_usage(self) -> None:
@@ -72,6 +72,39 @@ class HistoryStoreTests(unittest.TestCase):
             store.record_usage(usage(10), now - 10)
             hours = {item["label"]: item for item in store.response()["hours"]}
             self.assertEqual(hours["2024-01-01 19:00"]["quality"], "pending")
+            store.close()
+
+    def test_delayed_backfill_correction_and_missing_buckets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            now = 1789897440
+            store = HistoryStore(Path(folder) / 'h.db', now=lambda: now)
+            store.record_usage(usage(100, '2026-09-19', 10), now - 120)
+            store.record_usage(usage(100, '2026-09-19', 10), now - 60)
+            self.assertEqual(store.response()['last_value_change_epoch'], now - 120)
+            self.assertEqual(store.response()['last_successful_poll_epoch'], now - 60)
+            store.record_usage(usage(1000, '2026-09-19', 900), now)
+            store.record_usage(usage(999, '2026-09-19', 899), now + 60)
+            store.record_usage({'summary': {'lifetimeTokens': 999}}, now + 120)
+            self.assertFalse(store.record_usage({}, now + 180))
+            response = store.response()
+            self.assertIn({'label': '2026-09-19', 'tokens': 899, 'quality': 'official'}, response['days'])
+            self.assertIsNone(response['days'][-1]['tokens'])
+            self.assertIsNone(response['upstream_data_delay_seconds'])
+            self.assertEqual(store._db.execute('select count(*) from daily_revisions').fetchone()[0], 3)
+            store.close()
+
+    def test_local_heartbeat_does_not_refresh_official_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'h.db'
+            store = HistoryStore(path, now=lambda: 2000)
+            store.record_usage({'summary': {'lifetimeTokens': 10}}, 1000)
+            store.close()
+            store = HistoryStore(path, now=lambda: 2000)
+            store.record_local_events([], 'mac')
+            r = store.response()
+            self.assertEqual(r['captured_epoch'], 1000)
+            self.assertEqual(r['age_seconds'], 1000)
+            self.assertEqual(r['cache_status'], 'stale_cache')
             store.close()
 
 

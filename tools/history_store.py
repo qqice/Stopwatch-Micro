@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import sqlite3
 import threading
 import time
@@ -15,8 +17,6 @@ RETENTION_DAYS = 90
 UI_DAYS = 30
 UI_HOURS = 24
 MAX_TOKENS = (1 << 53) - 1
-LONG_GAP_SECONDS = 120
-OBSERVED_COVERAGE_SECONDS = 3500
 
 
 class HistoryStore:
@@ -36,6 +36,8 @@ class HistoryStore:
         self._db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
         self._db.execute("CREATE TABLE IF NOT EXISTS local_events (id TEXT PRIMARY KEY, epoch INTEGER NOT NULL, tokens INTEGER NOT NULL, source TEXT NOT NULL)")
         self._db.execute("CREATE INDEX IF NOT EXISTS local_events_epoch ON local_events(epoch)")
+        self._db.execute("CREATE TABLE IF NOT EXISTS official_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        self._db.execute("CREATE TABLE IF NOT EXISTS daily_revisions (label TEXT, observed_epoch INTEGER, tokens INTEGER, PRIMARY KEY(label,observed_epoch))")
         self._db.commit()
         self._live_capture: int | None = None
         self._live_saved_monotonic: float | None = None
@@ -66,7 +68,17 @@ class HistoryStore:
                         continue
         if not valid_lifetime and not daily_rows:
             return False
+        fingerprint = hashlib.sha256(json.dumps([lifetime if valid_lifetime else None, sorted(daily_rows)], separators=(",", ":")).encode()).hexdigest()
         with self._lock:
+            previous = self._db.execute("SELECT value FROM official_state WHERE key='fingerprint'").fetchone()
+            if previous is None or previous[0] != fingerprint:
+                self._db.execute("INSERT OR REPLACE INTO official_state VALUES('fingerprint',?)", (fingerprint,))
+                self._db.execute("INSERT OR REPLACE INTO meta VALUES('last_change',?)", (captured_epoch,))
+            for label, tokens in daily_rows:
+                old = self._db.execute("SELECT tokens FROM daily WHERE label=?", (label,)).fetchone()
+                if old is None or old[0] != tokens:
+                    self._db.execute("INSERT OR REPLACE INTO daily_revisions VALUES(?,?,?)", (label,captured_epoch,tokens))
+            self._db.execute("DELETE FROM daily_revisions WHERE observed_epoch < ?", (captured_epoch - RETENTION_DAYS * 86400,))
             if valid_lifetime:
                 self._db.execute("INSERT OR REPLACE INTO samples(epoch,lifetime_tokens) VALUES(?,?)", (captured_epoch, lifetime))
             self._db.executemany("INSERT OR REPLACE INTO daily(label,tokens) VALUES(?,?)", daily_rows)
@@ -98,9 +110,8 @@ class HistoryStore:
     def response(self) -> dict[str, Any]:
         with self._lock:
             meta = self._db.execute("SELECT value FROM meta WHERE key='last_capture'").fetchone()
-            captures = dict(self._db.execute("SELECT key,value FROM meta WHERE key LIKE 'local_capture_%'"))
-            newest = max([meta[0] if meta else 0, *captures.values()]) or None
-            local_rows = self._db.execute("SELECT epoch,tokens FROM local_events WHERE epoch >= ?", (int(self._now()) - 31 * 86400,)).fetchall()
+            newest = meta[0] if meta else None
+            changed = self._db.execute("SELECT value FROM meta WHERE key='last_change'").fetchone()
             daily = dict(self._db.execute("SELECT label,tokens FROM daily").fetchall())
             cutoff = int(self._now()) - (UI_HOURS + 1) * 3600
             baseline = self._db.execute(
@@ -113,30 +124,24 @@ class HistoryStore:
             return {"version": 1, "available": False, "captured_epoch": 0, "age_seconds": 0,
                     "days": self._days({}, int(self._now())), "hours": self._hours([], int(self._now())),
                     "timezone_offset_minutes": self._offset,
-                "hourly_attribution": "connected_device_completions_only"}
+                    "source": "official_account_api", "hourly_supported": False,
+                    "last_successful_poll_epoch": None, "last_value_change_epoch": None,
+                    "cache_status": "unavailable", "upstream_data_delay_seconds": None,
+                    "finality": "not_provided_by_upstream"}
         now = int(self._now())
         if newest == self._live_capture and self._live_saved_monotonic is not None:
             age = max(0, int(self._monotonic_now() - self._live_saved_monotonic))
         else:
             age = max(0, now - newest)
-        days, hours = self._days(daily, now), self._hours(samples, now)
-        local_days: dict[str, int] = {}
-        local_hours: dict[str, int] = {}
-        for epoch, tokens in local_rows:
-            stamp = self._local(epoch)
-            day, hour = stamp.strftime("%Y-%m-%d"), stamp.strftime("%Y-%m-%d %H:00")
-            local_days[day] = local_days.get(day, 0) + tokens
-            local_hours[hour] = local_hours.get(hour, 0) + tokens
-        for cell in hours:
-            if cell["label"] in local_hours:
-                cell.update(tokens=local_hours[cell["label"]], quality="local", source="connected_device_completions")
-        for cell in days:
-            if cell["label"] in local_days and (cell["label"] == self._local(now).date().isoformat() or cell["tokens"] is None):
-                cell.update(reported_tokens=cell["tokens"], tokens=local_days[cell["label"]], quality="local")
         return {"version": 1, "available": True, "captured_epoch": newest, "age_seconds": age,
-                "days": days, "hours": hours, "local_sources_last_seen": captures,
+                "days": self._days(daily, now), "hours": self._hours(samples, now),
                 "timezone_offset_minutes": self._offset,
-                "hourly_attribution": "connected_device_completions_only"}
+                "source": "official_account_api", "hourly_supported": False,
+                "last_successful_poll_epoch": newest,
+                "last_value_change_epoch": changed[0] if changed else None,
+                "cache_status": "fresh_poll" if age <= 180 else "stale_cache",
+                "upstream_data_delay_seconds": None,
+                "finality": "not_provided_by_upstream"}
 
     def _local(self, epoch: int) -> dt.datetime:
         return dt.datetime.fromtimestamp(epoch, tz=dt.timezone(dt.timedelta(minutes=self._offset)))
@@ -146,7 +151,7 @@ class HistoryStore:
         return [
             {"label": (today - dt.timedelta(days=UI_DAYS - 1 - index)).isoformat(),
              "tokens": daily.get((today - dt.timedelta(days=UI_DAYS - 1 - index)).isoformat()),
-             "quality": "official" if (today - dt.timedelta(days=UI_DAYS - 1 - index)).isoformat() in daily else "missing"}
+             "quality": "official" if (today - dt.timedelta(days=UI_DAYS - 1 - index)).isoformat() in daily else "pending"}
             for index in range(UI_DAYS)
         ]
 
@@ -154,8 +159,6 @@ class HistoryStore:
         current_hour = self._local(now).replace(minute=0, second=0, microsecond=0)
         starts = [current_hour - dt.timedelta(hours=UI_HOURS - 1 - index) for index in range(UI_HOURS)]
         values: dict[str, int] = {}
-        coverage: dict[str, int] = {}
-        partial: set[str] = set()
         correction: set[str] = set()
         for (previous_epoch, previous_tokens), (epoch, tokens) in zip(samples, samples[1:]):
             if epoch <= previous_epoch:
@@ -166,29 +169,14 @@ class HistoryStore:
                 correction.add(later)
             else:
                 values[later] = values.get(later, 0) + delta
-            gap = epoch - previous_epoch
-            if gap > LONG_GAP_SECONDS:
-                partial.add(later)
-            cursor = self._local(previous_epoch).replace(minute=0, second=0, microsecond=0)
-            end = self._local(epoch)
-            while cursor <= end.replace(minute=0, second=0, microsecond=0):
-                label = cursor.strftime("%Y-%m-%d %H:00")
-                start_epoch = int(cursor.timestamp())
-                end_epoch = start_epoch + 3600
-                overlap = max(0, min(epoch, end_epoch) - max(previous_epoch, start_epoch))
-                coverage[label] = coverage.get(label, 0) + overlap
-                if gap > LONG_GAP_SECONDS and overlap:
-                    partial.add(label)
-                cursor += dt.timedelta(hours=1)
         # A poll timestamp is not an event timestamp. The upstream lifetime
         # counter can lag for hours then catch up in a batch. Never label its
         # derivative as tokens consumed in the hour (including false zeroes).
         result: list[dict[str, Any]] = []
         for hour in starts:
             label = hour.strftime("%Y-%m-%d %H:00")
-            sampled = label in coverage or label in values or label in correction
             result.append({"label": label, "tokens": None,
-                           "quality": "pending" if sampled else "missing",
+                           "quality": "pending",
                            "reported_delta": None if label in correction else values.get(label),
                            "source": "delayed_account_counter"})
         return result

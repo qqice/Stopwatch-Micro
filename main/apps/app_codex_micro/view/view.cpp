@@ -813,7 +813,7 @@ void CodexMicroView::updateHistorySelection()
     if (cell == nullptr) {
         std::snprintf(details, sizeof(details),
                       _history_snapshot != nullptr && _history_snapshot->available
-                          ? (_history_mode == HistoryMode::Hours ? "Hourly tokens | tap for source"
+                          ? (_history_mode == HistoryMode::Hours ? "Official API: daily tokens only"
                                                                  : "Reported daily tokens | may lag")
                           : "Waiting for token history");
     } else {
@@ -835,7 +835,7 @@ void CodexMicroView::updateHistorySelection()
                 quality = "device logs / partial coverage";
                 break;
             case TokenHistoryQuality::Pending:
-                quality = "Pending: no hourly source";
+                quality = "Pending / not provided";
                 break;
             case TokenHistoryQuality::Missing:
                 break;
