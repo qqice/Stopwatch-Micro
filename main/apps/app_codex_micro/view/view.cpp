@@ -813,23 +813,26 @@ void CodexMicroView::updateHistorySelection()
     if (cell == nullptr) {
         std::snprintf(details, sizeof(details),
                       _history_snapshot != nullptr && _history_snapshot->available
-                          ? (_history_mode == HistoryMode::Hours ? "Official API: daily tokens only"
-                                                                 : "Reported daily tokens | may lag")
+                          ? (_history_mode == HistoryMode::Hours ? "API reported delta | UTC+8"
+                                                                 : "API dates | timezone unknown")
                           : "Waiting for token history");
     } else {
         const char* quality = "missing";
         switch (cell->quality) {
             case TokenHistoryQuality::Official:
-                quality = "reported / may lag";
+                quality = "API day / timezone unknown";
                 break;
             case TokenHistoryQuality::Observed:
-                quality = "observed cumulative delta";
+                quality = "API reported / may lag";
                 break;
             case TokenHistoryQuality::Partial:
-                quality = "observed / partial";
+                quality = "API reported / partial";
+                break;
+            case TokenHistoryQuality::Gap:
+                quality = "Sampling gap / unallocated";
                 break;
             case TokenHistoryQuality::Correction:
-                quality = "correction";
+                quality = "API correction";
                 break;
             case TokenHistoryQuality::Local:
                 quality = "device logs / partial coverage";
@@ -848,6 +851,12 @@ void CodexMicroView::updateHistorySelection()
         } else {
             std::snprintf(details, sizeof(details), "%s\n%s", cell->label[0] ? cell->label : "Unavailable", quality);
         }
+    }
+    if (cell && (cell->quality == TokenHistoryQuality::Correction || cell->quality == TokenHistoryQuality::Gap)) {
+        std::snprintf(details, sizeof(details), "%s\n%s: %+lld\nNot hourly consumption", cell->label,
+                      cell->quality == TokenHistoryQuality::Correction ? "API correction" : "Gap delta",
+                      static_cast<long long>(cell->quality == TokenHistoryQuality::Correction
+                                                 ? cell->correctionDelta : cell->gapDelta));
     }
     if (_history_snapshot != nullptr && _history_snapshot->available) {
         const uint32_t elapsed = (GetHAL().millis() - _history_snapshot->receivedAtMs) / 1000U;
@@ -897,6 +906,8 @@ void CodexMicroView::refreshHistory(bool force)
         uint32_t color               = HistoryMissing;
         if (cell.quality == TokenHistoryQuality::Correction)
             color = HistoryCorrection;
+        else if (cell.quality == TokenHistoryQuality::Gap)
+            color = 0xA879E6;
         else if (cell.valid) {
             const float level   = static_cast<float>(std::log1p(static_cast<double>(cell.tokens)) / max_log);
             const uint32_t base = hourly ? CodexBlue : Green;
@@ -1140,13 +1151,16 @@ void CodexMicroView::historyDetails(char* out, std::size_t capacity) const
     const char* quality = "missing";
     switch (cell->quality) {
         case TokenHistoryQuality::Official:
-            quality = "reported / may lag";
+            quality = "API day / timezone unknown";
             break;
         case TokenHistoryQuality::Observed:
             quality = "observed";
             break;
         case TokenHistoryQuality::Partial:
             quality = "partial";
+            break;
+        case TokenHistoryQuality::Gap:
+            quality = "sampling gap (unallocated)";
             break;
         case TokenHistoryQuality::Correction:
             quality = "correction";

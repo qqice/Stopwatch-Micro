@@ -45,10 +45,10 @@ class HistoryStoreTests(unittest.TestCase):
                 store.record_usage(usage(100), epoch)
             store.record_usage(usage(130), now)
             hours = {item["label"]: item for item in store.response()["hours"]}
-            self.assertIsNone(hours["2024-01-01 19:00"]["tokens"])
+            self.assertEqual(hours["2024-01-01 19:00"]["tokens"], 30)
             self.assertEqual(hours["2024-01-01 19:00"]["reported_delta"], 30)
-            self.assertEqual(hours["2024-01-01 19:00"]["quality"], "pending")
-            self.assertEqual(hours["2024-01-01 18:00"]["quality"], "pending")
+            self.assertEqual(hours["2024-01-01 19:00"]["quality"], "observed")
+            self.assertEqual(hours["2024-01-01 18:00"]["quality"], "missing")
             store.close()
 
     def test_negative_and_gap_are_not_presented_as_normal_usage(self) -> None:
@@ -60,7 +60,9 @@ class HistoryStoreTests(unittest.TestCase):
             store.record_usage(usage(90), now - 60)
             hours = {item["label"]: item for item in store.response()["hours"]}
             self.assertIsNone(hours["2024-01-01 19:00"]["tokens"])
-            self.assertIsNone(hours["2024-01-01 19:00"]["reported_delta"])
+            self.assertEqual(hours["2024-01-01 19:00"]["reported_delta"], -10)
+            self.assertEqual(hours["2024-01-01 19:00"]["correction_delta"], -30)
+            self.assertEqual(hours["2024-01-01 19:00"]["quality"], "correction")
             store.close()
 
     def test_hour_boundary_and_long_gap_are_partial(self) -> None:
@@ -71,7 +73,7 @@ class HistoryStoreTests(unittest.TestCase):
             store.record_usage(usage(5), now - 3500)
             store.record_usage(usage(10), now - 10)
             hours = {item["label"]: item for item in store.response()["hours"]}
-            self.assertEqual(hours["2024-01-01 19:00"]["quality"], "pending")
+            self.assertEqual(hours["2024-01-01 19:00"]["quality"], "gap")
             store.close()
 
     def test_delayed_backfill_correction_and_missing_buckets(self):
@@ -106,6 +108,77 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(r['age_seconds'], 1000)
             self.assertEqual(r['cache_status'], 'stale_cache')
             store.close()
+
+    def test_hourly_observations_timezone_boundaries_and_daily_labels(self):
+        import datetime as dt
+        epoch = int(dt.datetime(2024, 1, 1, 16, tzinfo=dt.timezone.utc).timestamp())
+        with tempfile.TemporaryDirectory() as folder:
+            for offset, label in ((480, '2024-01-02 00:00'), (0, '2024-01-01 16:00'), (-300, '2024-01-01 11:00')):
+                store = HistoryStore(Path(folder) / str(offset), now=lambda: epoch + 60,
+                                     timezone_offset_minutes=offset)
+                for t, total in ((epoch - 60, 100), (epoch, 150), (epoch + 60, 180)):
+                    store.record_usage(usage(total, '2024-01-01', 123), t)
+                r = store.response()
+                hour = next(x for x in r['hours'] if x['label'] == label)
+                self.assertEqual(hour['tokens'], 80)
+                self.assertEqual(hour['start_epoch'], epoch)
+                self.assertIn({'label': '2024-01-01', 'tokens': 123, 'quality': 'official'}, r['days'])
+                self.assertIsNone(r['daily_timezone'])
+                self.assertFalse(r['hourly_actual_consumption_supported'])
+                store.close()
+
+    def test_utc_midnight_is_beijing_eight_and_delayed_jump_stays_at_arrival(self):
+        import datetime as dt
+        midnight = int(dt.datetime(2024, 1, 2, tzinfo=dt.timezone.utc).timestamp())
+        with tempfile.TemporaryDirectory() as folder:
+            s = HistoryStore(Path(folder)/'h.db', now=lambda: midnight + 60)
+            for epoch in range(midnight - 3600, midnight, 60):
+                s.record_usage({'summary': {'lifetimeTokens': 100}}, epoch)
+            s.record_usage({'summary': {'lifetimeTokens': 1100}}, midnight)
+            s.record_usage({'summary': {'lifetimeTokens': 1100}}, midnight + 60)
+            hours = {x['label']: x for x in s.response()['hours']}
+            self.assertEqual(hours['2024-01-02 07:00']['tokens'], 0)
+            self.assertEqual(hours['2024-01-02 08:00']['tokens'], 1000)
+            self.assertEqual(hours['2024-01-02 08:00']['start_epoch'], midnight)
+            s.close()
+
+    def test_zero_is_reported_zero_not_missing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            s = HistoryStore(Path(folder)/'h.db', now=lambda: 1789897440)
+            s.record_usage({'summary': {'lifetimeTokens': 100}}, 1789897380)
+            s.record_usage({'summary': {'lifetimeTokens': 100}}, 1789897440)
+            r = s.response()
+            self.assertEqual(r['hours'][-1]['tokens'], 0)
+            self.assertIsNone(r['hours'][-2]['tokens'])
+            self.assertEqual(r['hourly_semantics'], 'official_reported_delta_by_observation_time')
+            s.close()
+
+    def test_gap_not_spread_or_assigned_and_restart_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'h.db'; now = 1789897440
+            s = HistoryStore(path, now=lambda: now)
+            for t, total in ((now-7200,100), (now-120,1100), (now-60,1120), (now,1120)):
+                s.record_usage({'summary': {'lifetimeTokens': total}}, t)
+            r = s.response()['hours'][-1]
+            self.assertEqual(r['tokens'], 20)
+            self.assertEqual(r['quality'], 'partial')
+            self.assertEqual(r['gap_delta'], 1000)
+            self.assertEqual(r['reported_delta'], 1020)
+            self.assertEqual(r['gap_start_epoch'], now-7200)
+            s.close(); s = HistoryStore(path, now=lambda: now)
+            self.assertEqual(s.response()['hours'][-1], r)
+            s.close()
+
+    def test_negative_revision_is_not_zero_or_normal_growth(self):
+        with tempfile.TemporaryDirectory() as folder:
+            now = 1789897440; s = HistoryStore(Path(folder)/'h.db', now=lambda: now)
+            for t, total in ((now-180,100),(now-120,120),(now-60,90),(now,94)):
+                s.record_usage({'summary': {'lifetimeTokens': total}}, t)
+            r = s.response()['hours'][-1]
+            self.assertIsNone(r['tokens'])
+            self.assertEqual((r['positive_delta'],r['correction_delta'],r['reported_delta']), (24,-30,-6))
+            self.assertEqual(r['quality'], 'correction')
+            s.close()
 
 
 if __name__ == "__main__":

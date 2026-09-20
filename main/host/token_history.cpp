@@ -51,22 +51,33 @@ bool cells(cJSON* root, const char* name, std::array<TokenHistoryCell, N>& desti
             cell.quality = TokenHistoryQuality::Observed;
         else if (!daily && !std::strcmp(quality->valuestring, "partial"))
             cell.quality = TokenHistoryQuality::Partial;
+        else if (!daily && !std::strcmp(quality->valuestring, "gap"))
+            cell.quality = TokenHistoryQuality::Gap;
         else if (!daily && !std::strcmp(quality->valuestring, "correction"))
             cell.quality = TokenHistoryQuality::Correction;
         else
             return false;
         if (cJSON_IsNull(count)) {
             if (cell.quality != TokenHistoryQuality::Missing && cell.quality != TokenHistoryQuality::Correction &&
-                cell.quality != TokenHistoryQuality::Pending)
+                cell.quality != TokenHistoryQuality::Pending && cell.quality != TokenHistoryQuality::Gap)
                 return false;
         } else {
             double value = 0;
             if (cell.quality == TokenHistoryQuality::Missing || cell.quality == TokenHistoryQuality::Correction ||
-                cell.quality == TokenHistoryQuality::Pending ||
+                cell.quality == TokenHistoryQuality::Pending || cell.quality == TokenHistoryQuality::Gap ||
                 !integer(entry, "tokens", 0, 9007199254740991.0, value))
                 return false;
             cell.tokens = static_cast<uint64_t>(value);
             cell.valid  = true;
+        }
+        for (const char* field : {"correction_delta", "gap_delta"}) {
+            if (!cJSON_GetObjectItemCaseSensitive(entry, field)) continue;
+            double value = 0;
+            if (!integer(entry, field, -9007199254740991.0, 9007199254740991.0, value)) return false;
+            if (std::strcmp(field, "correction_delta") == 0) {
+                if (value > 0) return false;
+                cell.correctionDelta = static_cast<int64_t>(value);
+            } else cell.gapDelta = static_cast<int64_t>(value);
         }
     }
     return true;

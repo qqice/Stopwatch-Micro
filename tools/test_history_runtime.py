@@ -29,12 +29,23 @@ def main():
         assert c.command('debug history days','history').status=='PASS'
         detail=c.command(f'debug history select {index}','history')
         assert detail.status=='PASS' and expected['label'] in detail.details
-        assert f": {expected['tokens']} tokens (reported / may lag)" in detail.details,detail.details
+        assert f": {expected['tokens']} tokens (API day / timezone unknown)" in detail.details,detail.details
         assert c.command('debug history hours','history').status=='PASS'
         first=c.command('debug history select 0','history')
         assert first.status=='PASS'
         if history['hours'][0]['tokens'] is None:assert 'tokens' not in first.details
         last=c.command('debug history select 23','history');assert last.status=='PASS'
+        # Completed observation hours are stable between host reads and device
+        # refresh; never compare the actively accumulating current hour.
+        positive = next((i for i in range(22, -1, -1) if history['hours'][i]['tokens'] is not None
+                         and history['hours'][i]['tokens'] > 0), None)
+        if positive is not None:
+            expected_hour = history['hours'][positive]
+            detail = c.command(f'debug history select {positive}', 'history')
+            assert detail.status == 'PASS' and expected_hour['label'] in detail.details
+            assert f": {expected_hour['tokens']} tokens ({expected_hour['quality']})" in detail.details, detail.details
+            print('HOST OBSERVED HOUR EXACT PASS', expected_hour['label'], expected_hour['tokens'])
+
         assert c.command('debug selftest','selftest',8).status=='PASS'
         print('HOST HISTORY PASS daily_exact=1 hourly_selection=1 missing_not_zero=1')
     finally:c.close()

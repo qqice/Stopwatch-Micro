@@ -7,7 +7,7 @@ logs are no longer collected or included in responses. Historical local event
 rows and legacy import tools remain inactive for audit/rollback only.
 
 `GET /v1/history` requires the same Bearer token as `/v1/status`. It returns 30
-calendar days and 24 hour placeholders (display timezone UTC+08:00). Daily labels
+calendar dates and 24 observation-hour buckets (display timezone UTC+08:00). Daily labels
 retain upstream `startDate`; they are not the weekly quota reset period.
 
 ## Delayed statistics policy
@@ -27,18 +27,59 @@ retain upstream `startDate`; they are not the weekly quota reset period.
 - `daily_revisions` keeps observed corrections for 90 days. Cumulative observations
   are also retained 90 days. Previously known daily buckets survive response gaps.
 
-**The official interface supplies no true hourly token buckets.** All hourly
-`tokens` are null and `hourly_supported` is false. The UI explicitly explains this.
-`reported_delta` is diagnostic counter arrival data only, not hourly consumption.
-A delayed catch-up must not be assigned to the hour it arrives. Quota percentage
-cannot be converted to tokens, either. Official daily counts include whatever
-upstream reports; we do not reinterpret their accounting or timezone.
+## Hourly official reported increments
+
+`hourly_supported: true` enables the observation heatmap, while
+`hourly_actual_consumption_supported: false` explicitly rejects the claim that
+these are the hours when tokens were actually consumed. `hourly_semantics` is
+`official_reported_delta_by_observation_time`. Only official `lifetimeTokens`
+samples are used; old local log rows remain ignored.
+
+Samples retain UTC Unix epochs in SQLite. Each consecutive difference is placed
+in the UTC+08:00 hour containing the later observation, not a guessed consumption
+hour. `start_epoch`/`end_epoch` define exact [start,end) boundaries for browser
+clients; the host OS timezone is not used. The current hour is ongoing.
+
+- Normal nonnegative increments appear as `tokens` with `observed` quality.
+  Zero means "no newly reported tokens in sampled intervals", NOT "no consumption".
+- Insufficient coverage gives `partial`; `covered_seconds` and
+  `observation_count` quantify the sampled portion. An entirely unobserved hour
+  stays null/missing. There is no interpolated backfill into unsampled hours.
+- A sample interval exceeding 180 seconds is a gap. Its signed difference stays
+  in `gap_delta`, with `gap_count` and earliest/latest gap bounds, and is excluded
+  from the normal heatmap amount. Gap-only cells are purple (`quality: gap`, null
+  tokens); mixed cells show the known increments with a partial border. The gap
+  bounds describe an outage interval, not the time when those tokens were used.
+- Any negative difference marks `correction` (orange, null tokens). The signed
+  decrease is retained in `correction_delta`, non-gap positive changes separately
+  in `positive_delta`; neither is silently clamped or mixed into ordinary growth.
+- `reported_delta` retains the signed sum of ALL deltas observed in the hour,
+  including gaps/corrections. It is an audit field, not the heatmap consumption
+  amount. Subsequent positive changes are measured against the corrected counter.
+
+These buckets are rebuilt from retained observations, so previous official
+samples immediately populate the restored heatmap without collecting local logs.
+Restarts and repeated reads do not duplicate increments. Delayed upstream jumps
+remain in their observation hour and are never retroactively assigned to an
+invented consumption hour. Quota percentage is not converted to tokens.
+
+## Daily timezone boundary
+
+The published account-usage schema/docs supply `startDate` and `tokens`, but do
+not specify the daily timezone. `daily_timezone: null` and
+`daily_date_basis: upstream_startDate` expose this uncertainty. The UI labels
+these API dates with unknown timezone; it does not call them Beijing-day totals.
+The 30-date viewport ends at the local calendar date, but bucket labels/amounts
+are preserved verbatim. Missing current dates alone do not prove upstream delay.
+If UTC daily boundaries are later established, such a day spans 08:00-08:00 in
+Beijing; a whole daily total cannot be split into Beijing days without finer data.
+Source: https://learn.chatgpt.com/docs/app-server (Token usage section).
 
 The current deployment disables Windows `Startup/StopWatch-LocalUsage.vbs` and
 removes Mac `--collect-local`. The quota LaunchAgent remains login auto-start.
 Neither local event heartbeats nor old local rows can freshen the official cache.
 
-UI: B opens History. DAYS is green; HOURS is unsupported/pending. Selection and
+UI: B opens History. DAYS is green; HOURS shows blue official reported increments (UTC+08:00). Selection and
 mode changes use the cached in-memory snapshot. First locked touch wakes. Locked
 refresh only shuts radios down early after BOTH quota and history succeed; failed
 history retries inside the existing bounded 90-second window, then tries again on
@@ -58,7 +99,8 @@ metadata. Keep OpenAI credentials on the Mac backend, not in browser JavaScript.
 Serve the frontend same-origin behind Tailnet access and HTTPS; do not expose the
 current plain-HTTP service or device Bearer token on the public internet. A web UI
 should display last poll, last observed change, pending days and unknown upstream
-lag separately. Do not draw an hourly consumption chart from `reported_delta`.
+lag separately. Reuse the observation heatmap and label it as reported increments,
+not exact hourly consumption; preserve correction and gap indicators.
 
 Firmware diagnostics: `debug history days`, `debug history hours`,
 `debug history select N`, `debug history-selftest`.

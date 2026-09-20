@@ -3,10 +3,12 @@
 #include <cstddef>
 #include <cstdint>
 
-enum class TokenHistoryQuality : uint8_t { Missing, Official, Observed, Partial, Correction, Pending, Local };
+enum class TokenHistoryQuality : uint8_t { Missing, Official, Observed, Partial, Correction, Pending, Local, Gap };
 struct TokenHistoryCell {
     char label[24]{};
     uint64_t tokens             = 0;
+    int64_t correctionDelta     = 0;
+    int64_t gapDelta            = 0;
     bool valid                  = false;
     TokenHistoryQuality quality = TokenHistoryQuality::Missing;
 };

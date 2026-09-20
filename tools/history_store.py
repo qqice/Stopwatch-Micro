@@ -17,6 +17,7 @@ RETENTION_DAYS = 90
 UI_DAYS = 30
 UI_HOURS = 24
 MAX_TOKENS = (1 << 53) - 1
+MAX_SAMPLE_GAP_SECONDS = 180
 
 
 class HistoryStore:
@@ -124,7 +125,11 @@ class HistoryStore:
             return {"version": 1, "available": False, "captured_epoch": 0, "age_seconds": 0,
                     "days": self._days({}, int(self._now())), "hours": self._hours([], int(self._now())),
                     "timezone_offset_minutes": self._offset,
-                    "source": "official_account_api", "hourly_supported": False,
+                    "source": "official_account_api", "hourly_supported": True,
+                    "hourly_semantics": "official_reported_delta_by_observation_time",
+                    "hourly_actual_consumption_supported": False,
+                    "daily_timezone": None, "daily_date_basis": "upstream_startDate",
+                    "max_sample_gap_seconds": MAX_SAMPLE_GAP_SECONDS,
                     "last_successful_poll_epoch": None, "last_value_change_epoch": None,
                     "cache_status": "unavailable", "upstream_data_delay_seconds": None,
                     "finality": "not_provided_by_upstream"}
@@ -136,7 +141,11 @@ class HistoryStore:
         return {"version": 1, "available": True, "captured_epoch": newest, "age_seconds": age,
                 "days": self._days(daily, now), "hours": self._hours(samples, now),
                 "timezone_offset_minutes": self._offset,
-                "source": "official_account_api", "hourly_supported": False,
+                "source": "official_account_api", "hourly_supported": True,
+                "hourly_semantics": "official_reported_delta_by_observation_time",
+                "hourly_actual_consumption_supported": False,
+                "daily_timezone": None, "daily_date_basis": "upstream_startDate",
+                "max_sample_gap_seconds": MAX_SAMPLE_GAP_SECONDS,
                 "last_successful_poll_epoch": newest,
                 "last_value_change_epoch": changed[0] if changed else None,
                 "cache_status": "fresh_poll" if age <= 180 else "stale_cache",
@@ -156,29 +165,57 @@ class HistoryStore:
         ]
 
     def _hours(self, samples: list[tuple[int, int]], now: int) -> list[dict[str, Any]]:
-        current_hour = self._local(now).replace(minute=0, second=0, microsecond=0)
-        starts = [current_hour - dt.timedelta(hours=UI_HOURS - 1 - index) for index in range(UI_HOURS)]
-        values: dict[str, int] = {}
-        correction: set[str] = set()
+        current = self._local(now).replace(minute=0, second=0, microsecond=0)
+        result = []
+        for index in range(UI_HOURS):
+            start = current - dt.timedelta(hours=UI_HOURS - 1 - index)
+            epoch = int(start.timestamp())
+            result.append({"label": start.strftime("%Y-%m-%d %H:00"),
+                           "start_epoch": epoch, "end_epoch": epoch + 3600,
+                           "tokens": None, "quality": "missing",
+                           "reported_delta": None, "positive_delta": 0,
+                           "correction_delta": 0, "gap_delta": 0, "gap_count": 0,
+                           "gap_start_epoch": None, "gap_end_epoch": None,
+                           "covered_seconds": 0, "observation_count": 0,
+                           "source": "official_counter_observation"})
+        by_epoch = {row["start_epoch"]: row for row in result}
         for (previous_epoch, previous_tokens), (epoch, tokens) in zip(samples, samples[1:]):
-            if epoch <= previous_epoch:
+            if epoch <= previous_epoch or epoch > now:
                 continue
-            later = self._local(epoch).replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:00")
+            gap = epoch - previous_epoch
+            if gap <= MAX_SAMPLE_GAP_SECONDS:
+                for row in result:
+                    row["covered_seconds"] += max(0, min(epoch, row["end_epoch"]) -
+                                                  max(previous_epoch, row["start_epoch"]))
+            start = int(self._local(epoch).replace(minute=0, second=0, microsecond=0).timestamp())
+            row = by_epoch.get(start)
+            if row is None:
+                continue
             delta = tokens - previous_tokens
+            row["reported_delta"] = (row["reported_delta"] or 0) + delta
             if delta < 0:
-                correction.add(later)
+                row["correction_delta"] += delta
+            if gap > MAX_SAMPLE_GAP_SECONDS:
+                # Preserve catch-up for audit, never assign an outage interval's
+                # total to a single hour or spread it into invented hourly usage.
+                row["gap_delta"] += delta
+                row["gap_count"] += 1
+                if row["gap_start_epoch"] is None:
+                    row["gap_start_epoch"] = previous_epoch
+                row["gap_end_epoch"] = epoch
             else:
-                values[later] = values.get(later, 0) + delta
-        # A poll timestamp is not an event timestamp. The upstream lifetime
-        # counter can lag for hours then catch up in a batch. Never label its
-        # derivative as tokens consumed in the hour (including false zeroes).
-        result: list[dict[str, Any]] = []
-        for hour in starts:
-            label = hour.strftime("%Y-%m-%d %H:00")
-            result.append({"label": label, "tokens": None,
-                           "quality": "pending",
-                           "reported_delta": None if label in correction else values.get(label),
-                           "source": "delayed_account_counter"})
+                row["observation_count"] += 1
+                row["positive_delta"] += max(0, delta)
+        for row in result:
+            if row["correction_delta"] < 0:
+                row["quality"] = "correction"
+            elif row["observation_count"]:
+                row["tokens"] = row["positive_delta"]
+                expected = min(now, row["end_epoch"]) - row["start_epoch"]
+                complete = row["covered_seconds"] >= max(0, expected - MAX_SAMPLE_GAP_SECONDS)
+                row["quality"] = "observed" if complete and not row["gap_count"] else "partial"
+            elif row["gap_count"]:
+                row["quality"] = "gap"
         return result
 
 
