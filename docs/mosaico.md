@@ -61,6 +61,43 @@ sampling for wake. It does not call the port-stop API.
 
 ## Square-screen monitor UI
 
+### Design rules
+
+Every visible element must communicate a value, a state, a unit, an identity or
+an actionable selection. Do not add decoration, redundant headings, tutorials,
+explanatory sentences or placeholder panels. Keep full data semantics in this
+document and diagnostics rather than repeating prose on the display. Missing or
+pending values remain unavailable (`?`), never zero; stale, gap and correction
+have distinct color/symbol states. Short data units (`UTC+8`, `TZ?`, `%`, `C`)
+are retained because they change how a value is interpreted.
+
+Use dot-matrix numerical type and segmented dot meters for the large quota and
+reset-time values, drawing widgets rather than allocating one object per dot.
+Earned resets are represented by reset-card icons; battery capacity, charging,
+Wi-Fi and cache age use status glyphs. These icons are read-only, not reset or
+purchase controls. The reset-time meter shows time remaining within the returned
+window duration, separately from quota remaining; neither estimates token usage.
+The charge glyph represents observed positive gauge current, not mere USB
+presence. The battery calibration approximation marker is retained.
+
+The reset-card count is capped visually at three cards plus the remaining count,
+not silently clipped. Large percentages and countdowns use a 5x7 original dot
+alphabet with gaps; very long exact history values remain available in details.
+There are no per-dot LVGL objects, animation timers or additional network polls.
+
+The visual inspiration is the compact dot-graph language of
+[btop](https://github.com/aristocratos/btop); glyph patterns and drawing code are
+original and do not copy btop assets or require a terminal/font dependency.
+
+Use restrained functional accents: mint for quota, amber/gold for time and the
+credit coin, cool blue for Wi-Fi and muted violet for earned-reset cards; other
+chrome remains black/gray/white. Quota and time rows use identical text, icon and
+meter dimensions. The full window length stays an internal timer denominator,
+not an extra standalone label. `Pro200` is the owner's requested local badge for
+the canonical Pro bucket, **not** an API-returned price or a change to allowance.
+`Points` is the display name for the unchanged official credit balance; there is
+no conversion to dollars or tokens.
+
 The first page is an independent 480x480 dashboard, not the old circular control
 page with buttons removed. Each quota bucket has a large remaining-percentage
 card, up to two window progress bars, actual duration, reset countdown and optional
@@ -68,10 +105,10 @@ plan/credits/limit-state metadata. Multiple buckets can be scrolled; at most eig
 are retained, with overflow explicitly marked. Snapshot reset credits are read-only.
 All-zero decimal fractions are omitted. A single returned window fills the card;
 missing windows are hidden, never shown as a fabricated five-hour allowance or
-an empty second column. No window at all shows "Quota unknown". Credits are
+an empty second column. No window at all shows `--`. Credits are
 separate from Token history. Static screens have no scrollbars or horizontal
 scrolling; only multiple actual buckets enable vertical scrolling. Metadata uses
-larger 20px text and history cells/details use 16px text.
+larger 20px text; history cells use 16px and selected details use 20px text.
 
 History uses 6x4 (24h) or 6x5 (30d) full-width grids. Each rounded tile has a 73x44
 touch slot, displays an hour or day and compact amount, and opens a separate exact

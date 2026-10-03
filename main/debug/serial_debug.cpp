@@ -12,6 +12,7 @@
 #include <host/host_bridge.h>
 #ifdef MOSAICO_BOARD
 #include <host/quota_monitor.h>
+#include <apps/app_codex_micro/view/dot_widgets.h>
 #endif
 #include <host/network_quota.h>
 #include <host/tailscale_transport.h>
@@ -241,6 +242,11 @@ void SerialDebug::handleLine(char* line)
         return;
     }
 #ifdef MOSAICO_BOARD
+    if (std::strcmp(command, "dot-selftest") == 0) {
+        result("dot-selftest", mosaico_dot::selfTest() ? "PASS" : "FAIL",
+               "layout_font_meter_bounds=1 known_unknown_distinct=1 endpoints_monotonic=1");
+        return;
+    }
     if (std::strcmp(command, "quota-selftest") == 0) {
         result("quota-selftest", QuotaMonitorRejectionSelfTest() ? "PASS" : "FAIL",
                "known_unknown_windows=1 malformed_depth_size_rejected=1 nonmutating=1");

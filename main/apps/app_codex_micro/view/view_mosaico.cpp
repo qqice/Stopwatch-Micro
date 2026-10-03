@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "view_mosaico.h"
+#include "dot_widgets.h"
 #include <hal/hal.h>
 #include <host/network_quota.h>
 #include <algorithm>
@@ -12,7 +13,10 @@ namespace {
 constexpr int Margin = 20, Columns = 6, SlotWidth = 73, CellWidth = 66, CellHeight = 44;
 static_assert(SlotWidth >= 60 && Margin + Columns * SlotWidth <= 480 - Margin);
 static_assert(128 + 5 * CellHeight <= 348 && 380 + 80 <= 480 - Margin);
+using namespace mosaico_dot;
 constexpr uint32_t Green = 0x67E7AE, Gray = 0x343A40, Purple = 0x9868CD, Orange = 0xD18C37;
+constexpr uint32_t ResetPurple = 0xB399F7, Gold = 0xE9C46A, Blue = 0x65B6F0;
+void place(lv_obj_t* obj, int x, int y) { if (obj) lv_obj_set_pos(obj, x, y); }
 void panel(lv_obj_t* obj, int x, int y, int w, int h, uint32_t color = 0x15191F) {
     lv_obj_set_pos(obj, x, y); lv_obj_set_size(obj, w, h);
     lv_obj_set_style_bg_color(obj, lv_color_hex(color), 0);
@@ -50,12 +54,6 @@ void compact(uint64_t value, char* out, size_t size) {
     else if (value >= 1000) std::snprintf(out, size, "%.1fK", static_cast<double>(value) / 1000);
     else std::snprintf(out, size, "%llu", static_cast<unsigned long long>(value));
 }
-void duration(uint32_t mins, char* out, size_t size) {
-    if (!mins) std::snprintf(out, size, "window unknown");
-    else if (mins % 1440 == 0) std::snprintf(out, size, "%ud", static_cast<unsigned>(mins / 1440));
-    else if (mins % 60 == 0) std::snprintf(out, size, "%uh", static_cast<unsigned>(mins / 60));
-    else std::snprintf(out, size, "%um", static_cast<unsigned>(mins));
-}
 void percent(uint16_t bp, char* out, size_t size) {
     if (bp % 100 == 0) std::snprintf(out, size, "%u%%", bp / 100);
     else if (bp % 10 == 0) std::snprintf(out, size, "%u.%u%%", bp / 100, (bp % 100) / 10);
@@ -78,47 +76,67 @@ void CodexMicroView::init(lv_obj_t* parent) {
     _brightness = std::max(10, GetHAL().getBackLightBrightness());
     _root = lv_obj_create(parent); panel(_root, 0, 0, 480, 480, 0x000000);
     lv_obj_add_event_cb(_root, touchEvent, LV_EVENT_PRESSED, this);
-    label(_root, 20, 20, 290, "QUOTA MONITOR", &lv_font_montserrat_20);
-    _battery = label(_root, 322, 24, 138, "Battery --");
+    _wifiIcon = createIcon(_root, Icon::WifiOff, 28, Orange); place(_wifiIcon, 20, 22);
+    _batteryIcon = createIcon(_root, Icon::Battery, 32); place(_batteryIcon, 296, 20);
+    _boltIcon = createIcon(_root, Icon::Bolt, 24, Gold); place(_boltIcon, 266, 24);
+    _battery = label(_root, 338, 26, 122, "?", &lv_font_montserrat_20);
+    for (size_t i = 0; i < 3; ++i) { _resetIcons[i] = createIcon(_root, Icon::ResetCard, 28, Gray); place(_resetIcons[i], 70 + i * 34, 22); }
+    _resetCount = label(_root, 174, 26, 84, "?", &lv_font_montserrat_20);
     _quotaPage = lv_obj_create(_root); panel(_quotaPage, 20, 64, 440, 370, 0);
-    lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_set_scroll_dir(_quotaPage, LV_DIR_VER);
-    _quotaStatus = label(_quotaPage, 0, 0, 440, "Waiting for quota snapshot", &lv_font_montserrat_16);
-    lv_obj_set_height(_quotaStatus, 42);
-    lv_label_set_long_mode(_quotaStatus, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_EVENT_BUBBLE); lv_obj_set_scroll_dir(_quotaPage, LV_DIR_VER);
+    _quotaStatus = createText(_quotaPage, 440, 78); place(_quotaStatus, 0, 116); setText(_quotaStatus, "--", Gray);
     for (size_t i = 0; i < _cards.size(); ++i) {
-        _cards[i] = lv_obj_create(_quotaPage); panel(_cards[i], 0, 52 + static_cast<int>(i) * 300, 436, 288);
+        _cards[i] = lv_obj_create(_quotaPage); panel(_cards[i], 0, static_cast<int>(i) * 362, 436, 350, 0);
         lv_obj_add_flag(_cards[i], LV_OBJ_FLAG_EVENT_BUBBLE);
-        _cardTitles[i] = label(_cards[i], 14, 10, 408, "", &lv_font_montserrat_20);
-        lv_obj_set_height(_cardTitles[i], 30);
-        lv_label_set_long_mode(_cardTitles[i], LV_LABEL_LONG_MODE_DOTS);
-        _cardValues[i] = label(_cards[i], 14, 54, 198, "--", &lv_font_montserrat_48);
-        _secondValues[i] = label(_cards[i], 226, 54, 198, "--", &lv_font_montserrat_48);
+        _cardTitles[i] = label(_cards[i], 14, 0, 408, "", &lv_font_montserrat_20);
+        lv_obj_set_height(_cardTitles[i], 30); lv_label_set_long_mode(_cardTitles[i], LV_LABEL_LONG_MODE_DOTS);
+        _cardBadges[i] = createText(_cards[i], 408, 40, 5, 0xE9EDF2); place(_cardBadges[i], 14, 0);
+        _cardValues[i] = createText(_cards[i], 160, 56, 4); place(_cardValues[i], 52, 48);
+        _secondValues[i] = createText(_cards[i], 160, 56, 4); place(_secondValues[i], 264, 48);
         for (size_t j = 0; j < 2; ++j) {
-            _windowLabels[i][j] = label(_cards[i], 14 + j * 212, 114, 198, "Window unknown", &lv_font_montserrat_20);
-            _windowBars[i][j] = lv_bar_create(_cards[i]); panel(_windowBars[i][j], 14 + j * 212, 138, 198, 8, Gray);
-            lv_obj_set_style_bg_color(_windowBars[i][j], lv_color_hex(Green), LV_PART_INDICATOR);
-            lv_bar_set_range(_windowBars[i][j], 0, 10000);
+            const int x = 14 + j * 212;
+            _windowBars[i][j] = createMeter(_cards[i], 198, 24, 3); place(_windowBars[i][j], x, 110);
+            _quotaIcons[i][j] = createIcon(_cards[i], Icon::Quota, 28, Green); place(_quotaIcons[i][j], x, 62);
+            _hourglassIcons[i][j] = createIcon(_cards[i], Icon::Hourglass, 28, Gold); place(_hourglassIcons[i][j], x, 174);
+            _resetTimes[i][j] = createText(_cards[i], 160, 56, 4, Gold); place(_resetTimes[i][j], x + 38, 160);
+            _resetBars[i][j] = createMeter(_cards[i], 198, 24, 3); place(_resetBars[i][j], x, 222);
         }
-        _cardMeta[i] = label(_cards[i], 14, 160, 408, "", &lv_font_montserrat_20);
-        lv_obj_set_height(_cardMeta[i], 116);
-        lv_label_set_long_mode(_cardMeta[i], LV_LABEL_LONG_MODE_DOTS);
+        _creditIcons[i] = createIcon(_cards[i], Icon::Coin, 28, Gold); place(_creditIcons[i], 14, 278);
+        _creditValues[i] = label(_cards[i], 52, 280, 370, "", &lv_font_montserrat_20);
+        lv_obj_set_style_text_color(_creditValues[i], lv_color_hex(Gold), 0);
+        lv_obj_set_height(_creditValues[i], 26); lv_label_set_long_mode(_creditValues[i], LV_LABEL_LONG_MODE_DOTS);
+        _cardMeta[i] = label(_cards[i], 14, 314, 408, "", &lv_font_montserrat_20);
+        lv_obj_set_height(_cardMeta[i], 30); lv_label_set_long_mode(_cardMeta[i], LV_LABEL_LONG_MODE_DOTS);
         lv_obj_add_flag(_cards[i], LV_OBJ_FLAG_HIDDEN);
     }
-    _footer = label(_root, 20, 438, 440, "No cached data", &lv_font_montserrat_16);
-    lv_obj_set_height(_footer, 22);
-    lv_label_set_long_mode(_footer, LV_LABEL_LONG_MODE_DOTS);
+    _clockIcon = createIcon(_root, Icon::Clock, 20, Gray); place(_clockIcon, 20, 440);
+    _footer = createText(_root, 180, 22, 3); place(_footer, 44, 438);
+    _bucketCount = label(_root, 290, 440, 170, "", &lv_font_montserrat_14);
+    lv_obj_set_style_text_align(_bucketCount, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN);
     _historyPage = lv_obj_create(_root); panel(_historyPage, 20, 52, 440, 408, 0);
     lv_obj_add_flag(_historyPage, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_HIDDEN));
     for (size_t i = 0; i < 2; ++i) {
         auto* button = lv_button_create(_historyPage); panel(button, static_cast<int>(i) * 224, 0, 216, 48);
-        auto* text = label(button, 0, 12, 216, i == 0 ? "30 DAYS" : "24 HOURS", &lv_font_montserrat_20);
+        auto* text = label(button, 0, 12, 216, i == 0 ? "30d" : "24h", &lv_font_montserrat_20);
         lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0);
+        auto* timezone = label(button, 148, 32, 62, i == 0 ? "TZ?" : "UTC+8", &lv_font_montserrat_12);
+        lv_obj_set_style_text_align(timezone, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_remove_flag(timezone, LV_OBJ_FLAG_CLICKABLE);
+        if (i == 1) {
+            // Delta is data notation; the bundled Latin font has no Greek glyph.
+            lv_obj_set_width(text, 176);
+            static const lv_point_precise_t delta[] = {{8, 0}, {16, 16}, {0, 16}, {8, 0}};
+            auto* symbol = lv_line_create(button); lv_line_set_points(symbol, delta, 4);
+            lv_obj_set_pos(symbol, 124, 16); lv_obj_set_style_line_width(symbol, 2, 0);
+            lv_obj_set_style_line_color(symbol, lv_color_hex(0xE9EDF2), 0);
+            lv_obj_remove_flag(symbol, LV_OBJ_FLAG_CLICKABLE);
+        }
         _modeButtons[i] = button;
         _modeHits[i] = {this, i}; lv_obj_add_event_cb(button, modeEvent, LV_EVENT_CLICKED, &_modeHits[i]);
         lv_obj_add_flag(button, LV_OBJ_FLAG_EVENT_BUBBLE);
     }
-    _range = label(_historyPage, 0, 54, 440, "History unavailable", &lv_font_montserrat_16);
+    _range = label(_historyPage, 0, 54, 324, "--", &lv_font_montserrat_16);
     lv_obj_set_height(_range, 20);
     lv_label_set_long_mode(_range, LV_LABEL_LONG_MODE_DOTS);
     for (size_t i = 0; i < 30; ++i) {
@@ -136,23 +154,31 @@ void CodexMicroView::init(lv_obj_t* parent) {
         _hits[i] = {this, i}; lv_obj_add_event_cb(button, cellEvent, LV_EVENT_CLICKED, &_hits[i]);
         lv_obj_add_flag(button, LV_OBJ_FLAG_EVENT_BUBBLE);
     }
-    _legend = label(_historyPage, 0, 296, 440, "");
-    lv_obj_set_height(_legend, 32);
-    lv_label_set_long_mode(_legend, LV_LABEL_LONG_MODE_DOTS);
-    auto* detail = lv_obj_create(_historyPage); panel(detail, 0, 328, 440, 80);
+    _historyClock = createIcon(_historyPage, Icon::Clock, 20, Gray); place(_historyClock, 330, 54);
+    _historyAge = createText(_historyPage, 86, 20, 2); place(_historyAge, 354, 54);
+    auto* detail = lv_obj_create(_historyPage); panel(detail, 0, 296, 440, 112, 0);
     lv_obj_add_flag(detail, LV_OBJ_FLAG_EVENT_BUBBLE);
-    _details = label(detail, 12, 8, 416, "Select a time slot", &lv_font_montserrat_16);
-    lv_obj_set_height(_details, 64);
-    lv_obj_set_style_text_line_space(_details, 0, 0);
+    _details = label(detail, 12, 8, 416, "", &lv_font_montserrat_20);
+    lv_obj_set_height(_details, 58); lv_obj_set_style_text_line_space(_details, 0, 0);
     lv_label_set_long_mode(_details, LV_LABEL_LONG_MODE_DOTS);
+    _qualityIcon = createIcon(detail, Icon::Unknown, 28, Gray); place(_qualityIcon, 12, 76);
+    _qualityValue = createText(detail, 370, 36, 4); place(_qualityValue, 52, 68);
     _lockPanel = lv_obj_create(_root); panel(_lockPanel, 0, 0, 480, 480, 0);
-    _lockQuota = label(_lockPanel, 40, 178, 400, "Quota unknown", &lv_font_montserrat_48);
-    _lockBattery = label(_lockPanel, 40, 306, 400, "Battery unknown", &lv_font_montserrat_20);
+    _lockQuota = createText(_lockPanel, 400, 90, 12); place(_lockQuota, 40, 172);
+    _lockBatteryIcon = createIcon(_lockPanel, Icon::Battery, 36); place(_lockBatteryIcon, 152, 306);
+    _lockBattery = label(_lockPanel, 204, 310, 200, "?", &lv_font_montserrat_20);
     lv_obj_add_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN);
     _overlay = lv_obj_create(_root); panel(_overlay, 0, 0, 480, 480, 0);
     lv_obj_set_style_bg_opa(_overlay, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_overlay, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN));
     lv_obj_add_event_cb(_overlay, wakeEvent, LV_EVENT_ALL, this);
+    bool widgetsReady = _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _qualityIcon && _qualityValue && _lockQuota && _lockBatteryIcon;
+    for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
+    for (size_t i = 0; i < _cards.size(); ++i) {
+        widgetsReady = widgetsReady && _cardBadges[i] && _cardValues[i] && _secondValues[i] && _creditIcons[i];
+        for (size_t j = 0; j < 2; ++j) widgetsReady = widgetsReady && _windowBars[i][j] && _quotaIcons[i][j] && _hourglassIcons[i][j] && _resetTimes[i][j] && _resetBars[i][j];
+    }
+    if (!widgetsReady) { lv_obj_delete(_root); _root = nullptr; return; }
     _activity = lv_tick_get(); _refresh = _activity; refreshQuota(GetHAL().millis()); refreshHistory();
 }
 void CodexMicroView::touchEvent(lv_event_t* e) {
@@ -189,18 +215,29 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         _quota->stale = age > 130;
         _quota->available = age <= 600;
     }
-    char buf[512];
+    char buf[128];
     const auto battery = GetHAL().getBatteryLevel();
-    if (GetHAL().isBatteryLevelValid()) std::snprintf(buf, sizeof(buf), "Battery ~%u%%", battery);
-    else std::snprintf(buf, sizeof(buf), "Battery unknown");
-    lv_label_set_text(_battery, buf);
-    lv_label_set_text(_lockBattery, buf);
-    std::snprintf(buf, sizeof(buf), "%s%s", !_quota->available ? "Waiting for quota snapshot" : "Remaining quota / cached official report", _quota->stale ? " STALE" : "");
-    if (_quota->resetCreditsKnown) {
-        char extra[48]; std::snprintf(extra, sizeof(extra), "\nReset credits: %u", _quota->resetCredits);
-        std::strncat(buf, extra, sizeof(buf) - std::strlen(buf) - 1);
+    const bool batteryValid = GetHAL().isBatteryLevelValid();
+    if (batteryValid) std::snprintf(buf, sizeof(buf), "~%u%%", battery); else std::snprintf(buf, sizeof(buf), "?");
+    lv_label_set_text(_battery, buf); lv_label_set_text(_lockBattery, buf);
+    setIcon(_batteryIcon, Icon::Battery, batteryValid ? Green : Gray, battery, batteryValid);
+    setIcon(_lockBatteryIcon, Icon::Battery, batteryValid ? Green : Gray, battery, batteryValid);
+    if (batteryValid && GetHAL().isBatteryCharging()) lv_obj_remove_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
+    const bool online = GetNetworkQuota().connected();
+    setIcon(_wifiIcon, online ? Icon::Wifi : Icon::WifiOff, online ? Blue : Orange);
+    const unsigned cards = _quota->resetCreditsKnown ? std::min<unsigned>(3, _quota->resetCredits) : 1;
+    for (size_t i = 0; i < _resetIcons.size(); ++i) {
+        if (i < std::max(1U, cards)) { lv_obj_remove_flag(_resetIcons[i], LV_OBJ_FLAG_HIDDEN); setIcon(_resetIcons[i], Icon::ResetCard, _quota->resetCreditsKnown && _quota->resetCredits ? ResetPurple : Gray); }
+        else lv_obj_add_flag(_resetIcons[i], LV_OBJ_FLAG_HIDDEN);
     }
-    lv_label_set_text(_quotaStatus, buf);
+    if (!_quota->resetCreditsKnown) std::snprintf(buf, sizeof(buf), "?");
+    else if (!_quota->resetCredits) std::snprintf(buf, sizeof(buf), "0");
+    else if (_quota->resetCredits > 3) std::snprintf(buf, sizeof(buf), "+%u", _quota->resetCredits - 3);
+    else buf[0] = 0;
+    lv_label_set_text(_resetCount, buf);
+    if (_quota->available && _quota->bucketCount) lv_obj_add_flag(_quotaStatus, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(_quotaStatus, LV_OBJ_FLAG_HIDDEN);
     if (_quota->available && _quota->bucketCount > 1) lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_SCROLLABLE);
     else { lv_obj_remove_flag(_quotaPage, LV_OBJ_FLAG_SCROLLABLE); lv_obj_scroll_to_y(_quotaPage, 0, LV_ANIM_OFF); }
     const uint64_t epoch = static_cast<uint64_t>(_quota->capturedEpoch) + _quota->ageSeconds;
@@ -210,91 +247,92 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         const auto& bucket = _quota->buckets[i];
         std::snprintf(buf, sizeof(buf), "%s%s%s", bucket.name[0] ? bucket.name : bucket.id, bucket.plan[0] ? " / " : "", bucket.plan);
         lv_label_set_text(_cardTitles[i], buf);
+        const bool proAlias = std::strcmp(bucket.id, "codex") == 0 && std::strcmp(bucket.plan, "pro") == 0;
+        if (proAlias) {
+            lv_obj_add_flag(_cardTitles[i], LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_cardBadges[i], LV_OBJ_FLAG_HIDDEN);
+            setText(_cardBadges[i], "Pro200", 0xE9EDF2);
+        } else { lv_obj_remove_flag(_cardTitles[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_cardBadges[i], LV_OBJ_FLAG_HIDDEN); }
         const size_t validWindows = static_cast<size_t>(bucket.windows[0].available) + static_cast<size_t>(bucket.windows[1].available);
-        if (!validWindows) {
-            lv_obj_remove_flag(_cardValues[i], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(_cardValues[i], 14, 54); lv_obj_set_width(_cardValues[i], 408);
-            lv_obj_set_style_text_align(_cardValues[i], LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_style_text_font(_cardValues[i], &lv_font_montserrat_24, 0);
-            lv_label_set_text(_cardValues[i], "Quota unknown");
-            lv_obj_add_flag(_secondValues[i], LV_OBJ_FLAG_HIDDEN);
-        }
-        char resets[220] = {};
-        for (size_t j = 0; j < bucket.windows.size(); ++j) {
-            const auto& w = bucket.windows[j];
-            char windowText[40], windowPercent[24]; duration(w.durationMinutes, windowText, sizeof(windowText));
-            percent(w.remainingBasisPoints, windowPercent, sizeof(windowPercent));
-            auto* valueLabel = j ? _secondValues[i] : _cardValues[i];
+        if (!validWindows) { lv_obj_remove_flag(_cardValues[i], LV_OBJ_FLAG_HIDDEN); place(_cardValues[i], 54, 48); lv_obj_set_width(_cardValues[i], 368); setTextPitch(_cardValues[i], 8); setText(_cardValues[i], "--", Gray); lv_obj_add_flag(_secondValues[i], LV_OBJ_FLAG_HIDDEN); }
+        for (size_t j = 0; j < 2; ++j) {
+            const auto& w = bucket.windows[j]; auto* value = j ? _secondValues[i] : _cardValues[i];
             if (!w.available) {
-                if (validWindows) lv_obj_add_flag(valueLabel, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(_windowLabels[i][j], LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(_windowBars[i][j], LV_OBJ_FLAG_HIDDEN);
+                if (validWindows) lv_obj_add_flag(value, LV_OBJ_FLAG_HIDDEN);
+                for (auto* obj : {_windowBars[i][j], _quotaIcons[i][j], _hourglassIcons[i][j], _resetTimes[i][j], _resetBars[i][j]}) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
                 continue;
             }
             const int x = validWindows == 1 ? 14 : 14 + static_cast<int>(j) * 212;
             const int width = validWindows == 1 ? 408 : 198;
-            lv_obj_remove_flag(valueLabel, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(valueLabel, x, 54); lv_obj_set_width(valueLabel, width);
-            lv_obj_set_style_text_font(valueLabel, &lv_font_montserrat_48, 0);
-            lv_obj_set_style_text_align(valueLabel, LV_TEXT_ALIGN_CENTER, 0);
-            lv_label_set_text(valueLabel, windowPercent);
-            lv_obj_remove_flag(_windowLabels[i][j], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(_windowLabels[i][j], x, 114); lv_obj_set_width(_windowLabels[i][j], width);
-            lv_obj_set_style_text_align(_windowLabels[i][j], LV_TEXT_ALIGN_CENTER, 0);
-            lv_label_set_text(_windowLabels[i][j], windowText);
-            lv_obj_remove_flag(_windowBars[i][j], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(_windowBars[i][j], x, 142); lv_obj_set_width(_windowBars[i][j], width);
-            lv_bar_set_value(_windowBars[i][j], w.remainingBasisPoints, LV_ANIM_OFF);
-            char dur[32], item[96]; duration(w.durationMinutes, dur, sizeof(dur));
-            if (!w.resetEpoch || !_quota->capturedEpoch) std::snprintf(item, sizeof(item), "%s%s reset unknown", resets[0] ? "\n" : "", dur);
-            else if (w.resetEpoch <= epoch) std::snprintf(item, sizeof(item), "%s%s reset due / awaiting snapshot", resets[0] ? "\n" : "", dur);
-            else { const uint64_t minutes = (w.resetEpoch - epoch + 59) / 60;
-                std::snprintf(item, sizeof(item), "%s%s reset in %lluh %llum", resets[0] ? "\n" : "", dur, static_cast<unsigned long long>(minutes / 60), static_cast<unsigned long long>(minutes % 60)); }
-            std::strncat(resets, item, sizeof(resets) - std::strlen(resets) - 1);
+            for (auto* obj : {value, _windowBars[i][j], _quotaIcons[i][j], _hourglassIcons[i][j], _resetTimes[i][j], _resetBars[i][j]}) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+            const int iconSize = validWindows == 1 ? 32 : 28;
+            const int textOffset = validWindows == 1 ? 40 : 38;
+            const int textWidth = width - textOffset;
+            const int pitch = validWindows == 1 ? 8 : 4;
+            place(_quotaIcons[i][j], x, 62); lv_obj_set_size(_quotaIcons[i][j], iconSize, iconSize);
+            setIcon(_quotaIcons[i][j], Icon::Quota, Green);
+            place(value, x + textOffset, 48); lv_obj_set_width(value, textWidth); setTextPitch(value, pitch);
+            percent(w.remainingBasisPoints, buf, sizeof(buf)); setText(value, buf, Green);
+            place(_windowBars[i][j], x, 110); lv_obj_set_width(_windowBars[i][j], width); setMeter(_windowBars[i][j], w.remainingBasisPoints, true, Green);
+            place(_hourglassIcons[i][j], x, 174); lv_obj_set_size(_hourglassIcons[i][j], iconSize, iconSize);
+            place(_resetTimes[i][j], x + textOffset, 160); lv_obj_set_width(_resetTimes[i][j], textWidth); setTextPitch(_resetTimes[i][j], pitch);
+            const bool resetKnown = w.resetEpoch && _quota->capturedEpoch;
+            const uint64_t seconds = resetKnown && w.resetEpoch > epoch ? w.resetEpoch - epoch : 0;
+            if (!resetKnown) std::snprintf(buf, sizeof(buf), "--");
+            else { const uint64_t minutes = (seconds + 59) / 60;
+                if (minutes >= 1440) std::snprintf(buf, sizeof(buf), "%llud%lluh", static_cast<unsigned long long>(minutes / 1440), static_cast<unsigned long long>((minutes % 1440) / 60));
+                else if (minutes >= 60) std::snprintf(buf, sizeof(buf), "%lluh%llum", static_cast<unsigned long long>(minutes / 60), static_cast<unsigned long long>(minutes % 60));
+                else std::snprintf(buf, sizeof(buf), "%llum", static_cast<unsigned long long>(minutes));
+            }
+            setText(_resetTimes[i][j], buf, resetKnown ? Gold : Gray);
+            setIcon(_hourglassIcons[i][j], Icon::Hourglass, resetKnown ? Gold : Gray);
+            place(_resetBars[i][j], x, 222); lv_obj_set_width(_resetBars[i][j], width);
+            const uint64_t durationSeconds = static_cast<uint64_t>(w.durationMinutes) * 60;
+            const uint16_t timeBp = durationSeconds ? static_cast<uint16_t>(std::min<uint64_t>(10000, seconds * 10000 / durationSeconds)) : 0;
+            setMeter(_resetBars[i][j], timeBp, resetKnown && durationSeconds, Gold);
         }
-
-        std::snprintf(buf, sizeof(buf), "%s%s%s%s%s%s", resets, bucket.creditsKnown ? "\nCredits: " : "", bucket.creditsKnown ? (bucket.creditsUnlimited ? "unlimited" : (bucket.creditBalance[0] ? bucket.creditBalance : "unknown")) : "", bucket.reached[0] ? "\n" : "", bucket.reached, "");
-        lv_label_set_text(_cardMeta[i], buf);
+        if (bucket.creditsKnown) {
+            lv_obj_remove_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN);
+            std::snprintf(buf, sizeof(buf), "%s Points", bucket.creditsUnlimited ? "inf" : (bucket.creditBalance[0] ? bucket.creditBalance : "--"));
+            lv_label_set_text(_creditValues[i], buf);
+        } else { lv_obj_add_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN); }
+        lv_label_set_text(_cardMeta[i], bucket.reached);
     }
-    std::snprintf(buf, sizeof(buf), "%s | Age %us%s%s", GetNetworkQuota().connected() ? "Wi-Fi online" : "Wi-Fi offline", static_cast<unsigned>(_quota->ageSeconds), _quota->stale ? " STALE" : "", _locked ? " CACHED" : "");
-
-    if (_quota->truncated) std::strncat(buf, " | first 8 buckets", sizeof(buf) - std::strlen(buf) - 1);
-    lv_label_set_text(_footer, buf);
-    char lockText[128] = "Quota unknown";
+    const bool haveSnapshot = _quotaRevision != UINT32_MAX;
+    setIcon(_clockIcon, Icon::Clock, _quota->stale ? Orange : Gray);
+    if (haveSnapshot) std::snprintf(buf, sizeof(buf), "%um", static_cast<unsigned>(_quota->ageSeconds / 60)); else std::snprintf(buf, sizeof(buf), "?");
+    setText(_footer, buf, _quota->stale ? Orange : Gray);
+    if (_quota->truncated && _page == Page::Command) {
+        std::snprintf(buf, sizeof(buf), "%u/%lu", _quota->bucketCount,
+                      static_cast<unsigned long>(_quota->totalBuckets));
+        lv_label_set_text(_bucketCount, buf);
+        lv_obj_remove_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN);
+    } else lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN);
+    char lockText[64] = "--";
     if (_quota->available && _quota->bucketCount) {
-        const auto& b = _quota->buckets[0]; char a[24] = "--", z[24] = "--";
+        const auto& b = _quota->buckets[0]; char a[24] = "", z[24] = "";
         if (b.windows[0].available) percent(b.windows[0].remainingBasisPoints, a, sizeof(a));
         if (b.windows[1].available) percent(b.windows[1].remainingBasisPoints, z, sizeof(z));
-        if (b.windows[0].available && b.windows[1].available)
-            std::snprintf(lockText, sizeof(lockText), "%s   %s", a, z);
-        else if (b.windows[0].available || b.windows[1].available)
-            std::snprintf(lockText, sizeof(lockText), "%s", b.windows[0].available ? a : z);
+        if (a[0] && z[0]) std::snprintf(lockText, sizeof(lockText), "%s %s", a, z);
+        else if (a[0] || z[0]) std::snprintf(lockText, sizeof(lockText), "%s", a[0] ? a : z);
     }
-    lv_label_set_text(_lockQuota, lockText);
+    setText(_lockQuota, lockText);
+
 }
 void CodexMicroView::refreshHistory() {
     if (_historyRevision == TokenHistoryRevision()) { updateHistoryHeader(); return; }
     if (CopyTokenHistory(*_history)) { _historyRevision = _history->revision; renderHistory(); }
 }
 void CodexMicroView::updateHistoryHeader(bool force) {
-    if (!_history->available) {
-        if (force) lv_label_set_text(_range, "History unavailable");
-        return;
-    }
-    const uint64_t age = static_cast<uint64_t>(_history->ageSecondsAtReceipt) +
-                         (GetHAL().millis() - _history->receivedAtMs) / 1000U;
+    if (!_history->available) { if (force) { lv_label_set_text(_range, "--"); setText(_historyAge, "?", Gray); } return; }
+    const uint64_t age = static_cast<uint64_t>(_history->ageSecondsAtReceipt) + (GetHAL().millis() - _history->receivedAtMs) / 1000U;
     const bool stale = age > 600;
-    const uint32_t key = static_cast<uint32_t>(std::min<uint64_t>(age / 60, 0x7FFFFFFF)) |
-                         (stale ? 0x80000000U : 0U);
+    const uint32_t key = static_cast<uint32_t>(std::min<uint64_t>(age / 60, 0x7FFFFFFF)) | (stale ? 0x80000000U : 0U);
     if (!force && key == _historyAgeKey) return;
     _historyAgeKey = key;
-    const auto* cells = _hourly ? _history->hours.data() : _history->days.data();
-    const size_t count = _hourly ? 24 : 30;
-    char text[128];
-    std::snprintf(text, sizeof(text), "%s - %s | %s%llum", cells[0].label,
-                  cells[count - 1].label, stale ? "STALE " : "cache ",
-                  static_cast<unsigned long long>(age / 60));
-    lv_label_set_text(_range, text);
+    const auto* cells = _hourly ? _history->hours.data() : _history->days.data(); const size_t count = _hourly ? 24 : 30;
+    char text[128]; std::snprintf(text, sizeof(text), "%s - %s", cells[0].label, cells[count - 1].label); lv_label_set_text(_range, text);
+    std::snprintf(text, sizeof(text), "%llum", static_cast<unsigned long long>(age / 60));
+    setText(_historyAge, text, stale ? Orange : Gray); setIcon(_historyClock, Icon::Clock, stale ? Orange : Gray);
 }
 void CodexMicroView::renderHistory() {
     const size_t count = _hourly ? 24 : 30;
@@ -307,7 +345,6 @@ void CodexMicroView::renderHistory() {
         lv_obj_set_style_border_color(_modeButtons[i], lv_color_hex(selected ? 0xE9EDF2 : Gray), 0);
         lv_obj_set_style_border_width(_modeButtons[i], selected ? 2 : 0, 0);
     }
-    lv_label_set_text(_legend, _hourly ? "UTC+8 API delta, may lag; not consumption\nGap:purple Correction:orange Unknown:gray White:new day" : "Daily API timezone unknown\nGap:purple Correction:orange Unknown:gray White:new month");
     uint64_t maximum = 0;
     for (size_t i = 0; i < count; ++i) if (cells[i].valid) maximum = std::max(maximum, cells[i].tokens);
     for (size_t i = 0; i < 30; ++i) {
@@ -328,7 +365,9 @@ void CodexMicroView::renderHistory() {
         const size_t len = std::strlen(c.label); char time[3] = "--";
         const size_t offset = _hourly ? 11 : 8;
         if (len >= offset + 2) { time[0] = c.label[offset]; time[1] = c.label[offset + 1]; }
-        char amount[24] = "--"; if (c.valid) compact(c.tokens, amount, sizeof(amount));
+        char amount[24] = "?"; if (c.valid) compact(c.tokens, amount, sizeof(amount));
+        else if (c.quality == TokenHistoryQuality::Gap) std::snprintf(amount, sizeof(amount), "+");
+        else if (c.quality == TokenHistoryQuality::Correction) std::snprintf(amount, sizeof(amount), "-");
         std::snprintf(buf, sizeof(buf), "%s\n%s", time, amount); lv_label_set_text(_cellLabels[i], buf);
         const bool boundary = i > 0 && std::strncmp(c.label, cells[i - 1].label, _hourly ? 10 : 7) != 0;
         lv_obj_set_style_border_color(_cells[i], lv_color_hex(boundary ? 0xDCE4F2 : (c.quality == TokenHistoryQuality::Partial ? Purple : Gray)), 0);
@@ -347,23 +386,24 @@ void CodexMicroView::historyDetails(char* out, size_t capacity) const {
     else std::snprintf(out, capacity, "%s: %s", c->label[0] ? c->label : "Unavailable", quality(c->quality));
 }
 void CodexMicroView::renderSelection() {
-    char buf[256] = "Select a time slot";
-    const auto* c = selectedCell();
-    if (c && c->valid) {
-        char amount[24]; compact(c->tokens, amount, sizeof(amount));
-        std::snprintf(buf, sizeof(buf), "%s\n%llu tokens (%s)\n%s", c->label,
-                      static_cast<unsigned long long>(c->tokens), amount,
-                      _hourly ? "API reported / may lag; not consumption time" : "API day / timezone unknown");
-    } else if (c && (c->quality == TokenHistoryQuality::Gap || c->quality == TokenHistoryQuality::Correction)) {
-        std::snprintf(buf, sizeof(buf), "%s\n%s: %+lld\nNot hourly consumption", c->label,
-                      c->quality == TokenHistoryQuality::Gap ? "Unallocated gap delta" : "API correction",
-                      static_cast<long long>(c->quality == TokenHistoryQuality::Gap ? c->gapDelta : c->correctionDelta));
-    } else if (c) std::snprintf(buf, sizeof(buf), "%s\n%s", c->label[0] ? c->label : "Unavailable", quality(c->quality));
+    char buf[160] = ""; const auto* c = selectedCell();
+    if (c && c->valid) std::snprintf(buf, sizeof(buf), "%s\n%llu tokens", c->label, static_cast<unsigned long long>(c->tokens));
+    else if (c) std::snprintf(buf, sizeof(buf), "%s", c->label);
     lv_label_set_text(_details, buf);
+    if (c && (c->quality == TokenHistoryQuality::Gap || c->quality == TokenHistoryQuality::Correction)) {
+        const bool gap = c->quality == TokenHistoryQuality::Gap;
+        setIcon(_qualityIcon, gap ? Icon::Gap : Icon::Correction, gap ? Purple : Orange);
+        std::snprintf(buf, sizeof(buf), "%+lld", static_cast<long long>(gap ? c->gapDelta : c->correctionDelta));
+        setText(_qualityValue, buf, gap ? Purple : Orange);
+        lv_obj_remove_flag(_qualityIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_qualityValue, LV_OBJ_FLAG_HIDDEN);
+    } else if (!c || !c->valid || c->quality == TokenHistoryQuality::Partial || c->quality == TokenHistoryQuality::Local) {
+        setIcon(_qualityIcon, Icon::Unknown, c && c->quality == TokenHistoryQuality::Partial ? Purple : Gray);
+        lv_obj_remove_flag(_qualityIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_qualityValue, LV_OBJ_FLAG_HIDDEN);
+    } else { lv_obj_add_flag(_qualityIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_qualityValue, LV_OBJ_FLAG_HIDDEN); }
     for (size_t i = 0; i < 30; ++i) { lv_obj_set_style_outline_color(_cells[i], lv_color_hex(Green), 0); lv_obj_set_style_outline_width(_cells[i], i == _selected ? 2 : 0, 0); }
 }
 bool CodexMicroView::selectHistory(size_t index) {
-    if (!_history || index >= (_hourly ? 24U : 30U)) return false;
+    if (!ready() || !_history || index >= (_hourly ? 24U : 30U)) return false;
     _selected = index; _activity = lv_tick_get(); renderSelection(); return true;
 }
 bool CodexMicroView::showHistory(bool hourly) {
@@ -374,8 +414,9 @@ bool CodexMicroView::showHistory(bool hourly) {
 bool CodexMicroView::setPageForDebug(Page page) {
     if (!ready() || page == Page::Agent) return false;
     _page = page; _activity = lv_tick_get();
-    if (page == Page::Command) { lv_obj_remove_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_footer, LV_OBJ_FLAG_HIDDEN); }
-    else { refreshHistory(); lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_footer, LV_OBJ_FLAG_HIDDEN); }
+    if (page == Page::Command) { lv_obj_remove_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); }
+    else { refreshHistory(); lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN); }
+    if (page == Page::Command && _quota->truncated) lv_obj_remove_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN);
     return true;
 }
 void CodexMicroView::togglePage() {
@@ -384,6 +425,7 @@ void CodexMicroView::togglePage() {
     setPageForDebug(_page == Page::Command ? Page::History : Page::Command);
 }
 void CodexMicroView::wakeDisplay() {
+    if (!ready()) return;
     GetNetworkQuota().setLocked(false); _activity = lv_tick_get(); _locked = false;
     if (_overlay) lv_obj_add_flag(_overlay, LV_OBJ_FLAG_HIDDEN);
     if (_lockPanel) lv_obj_add_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN);
