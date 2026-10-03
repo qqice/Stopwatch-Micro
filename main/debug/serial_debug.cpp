@@ -10,6 +10,9 @@
 #include <hal/ble/codex_micro_ble.h>
 #include <hal/hal.h>
 #include <host/host_bridge.h>
+#ifdef MOSAICO_BOARD
+#include <host/quota_monitor.h>
+#endif
 #include <host/network_quota.h>
 #include <host/tailscale_transport.h>
 #include <host/token_history.h>
@@ -237,6 +240,36 @@ void SerialDebug::handleLine(char* line)
         result("network", "PASS", details);
         return;
     }
+#ifdef MOSAICO_BOARD
+    if (std::strcmp(command, "quota-selftest") == 0) {
+        result("quota-selftest", QuotaMonitorRejectionSelfTest() ? "PASS" : "FAIL",
+               "known_unknown_windows=1 malformed_depth_size_rejected=1 nonmutating=1");
+        return;
+    }
+    if (std::strcmp(command, "quota") == 0) {
+        std::unique_ptr<QuotaMonitorSnapshot> quota(new (std::nothrow) QuotaMonitorSnapshot());
+        if (!quota || !CopyQuotaMonitor(*quota, GetHAL().millis())) {
+            result("quota", "SKIP", "reason=no_snapshot");
+            return;
+        }
+        for (std::size_t i = 0; i < quota->bucketCount; ++i) {
+            const auto& bucket = quota->buckets[i];
+            std::printf("DBG QUOTA bucket=%s plan=%s credits_known=%d balance=%s unlimited=%d\r\n",
+                        bucket.id, bucket.plan, bucket.creditsKnown, bucket.creditBalance, bucket.creditsUnlimited);
+            for (std::size_t w = 0; w < 2; ++w)
+                if (bucket.windows[w].available) std::printf("DBG QUOTA window=%u remaining_bp=%u duration_minutes=%lu reset_epoch=%lu\r\n",
+                    static_cast<unsigned>(w), bucket.windows[w].remainingBasisPoints,
+                    static_cast<unsigned long>(bucket.windows[w].durationMinutes),
+                    static_cast<unsigned long>(bucket.windows[w].resetEpoch));
+        }
+        char details[128]{};
+        std::snprintf(details, sizeof(details), "buckets=%u available=%d stale=%d age_seconds=%lu reset_known=%d resets=%u",
+            quota->bucketCount, quota->available, quota->stale, static_cast<unsigned long>(quota->ageSeconds),
+            quota->resetCreditsKnown, quota->resetCredits);
+        result("quota", quota->available ? "PASS" : "SKIP", details);
+        return;
+    }
+#endif
     if (std::strcmp(command, "tailscale-config") == 0) {
         const bool running = GetTailnetQuota().enabled();
         const bool ok      = GetTailnetQuota().configure(::strtok_r(nullptr, " \t", &save));
@@ -364,7 +397,11 @@ void SerialDebug::handleLine(char* line)
         return;
     }
     if (std::strcmp(command, "controls") == 0) {
+#ifdef MOSAICO_BOARD
+        result("controls", "SKIP", "monitor_only_no_host_controls=1");
+#else
         printControls();
+#endif
         return;
     }
     if (std::strcmp(command, "protocol") == 0) {
@@ -439,7 +476,11 @@ void SerialDebug::handleLine(char* line)
             return;
         }
         AppCodexMicro::DebugScreen target;
+#ifdef MOSAICO_BOARD
+        if (std::strcmp(screen, "quota") == 0) {
+#else
         if (std::strcmp(screen, "command") == 0) {
+#endif
             target = AppCodexMicro::DebugScreen::Command;
         } else if (std::strcmp(screen, "agent") == 0) {
             target = AppCodexMicro::DebugScreen::Agent;
@@ -661,7 +702,11 @@ void SerialDebug::runSelfTest()
     char ble_details[80]               = {};
     std::snprintf(ble_details, sizeof(ble_details), "ready=%s connected=%s advertising=%s", onOff(state.ready),
                   onOff(state.connected), onOff(ble.advertising));
+#ifdef MOSAICO_BOARD
+    check("ble.disabled", !ble.initialized && !ble.advertising && !state.connected, "monitor_only=1");
+#else
     check("ble.service", ble.initialized && ble.hidReady && state.ready, ble_details);
+#endif
     char protocol_details[176] = {};
     std::snprintf(protocol_details, sizeof(protocol_details),
                   "controls=13 encoder=3 rpc_buffer=4096 dropped=%lu tx_failures=%lu rpc_errors=%lu "
@@ -819,6 +864,15 @@ void SerialDebug::updateUiCycle(uint32_t now)
     }
     bool ok              = false;
     const char* expected = nullptr;
+#ifdef MOSAICO_BOARD
+    if (_ui_cycle_stage < 2) {
+        expected = "history";
+        ok = _app.debugShowHistory(_ui_cycle_stage == 1);
+    } else {
+        expected = "quota";
+        ok = _app.debugSetScreen(AppCodexMicro::DebugScreen::Command);
+    }
+#else
     if (_ui_cycle_stage == 0) {
         expected = "agent";
         ok       = _app.debugSetScreen(AppCodexMicro::DebugScreen::Agent);
@@ -829,6 +883,7 @@ void SerialDebug::updateUiCycle(uint32_t now)
         expected = "command";
         ok       = _app.debugSetScreen(AppCodexMicro::DebugScreen::Command);
     }
+#endif
     ok = ok && std::strcmp(_app.debugScreenName(), expected) == 0;
     std::printf("DBG UI stage=%u expected=%s actual=%s status=%s\r\n", static_cast<unsigned>(_ui_cycle_stage + 1),
                 expected, _app.debugScreenName(), ok ? "PASS" : "FAIL");

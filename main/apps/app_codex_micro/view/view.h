@@ -3,6 +3,10 @@
  */
 #pragma once
 
+#ifdef MOSAICO_BOARD
+#include "view_mosaico.h"
+#else
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -230,3 +234,5 @@ private:
 };
 
 }  // namespace view
+
+#endif  // MOSAICO_BOARD

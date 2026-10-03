@@ -2,7 +2,11 @@
 #include "host_bridge.h"
 #include "tailscale_transport.h"
 #include "token_history.h"
+#ifdef MOSAICO_BOARD
+#include "quota_monitor.h"
+#endif
 #include <memory>
+#include <algorithm>
 #include <new>
 #include <cJSON.h>
 #include <cmath>
@@ -150,6 +154,9 @@ bool NetworkQuota::configure(const char* encoded)
 void NetworkQuota::begin()
 {
     InitTokenHistory();
+#ifdef MOSAICO_BOARD
+    InitQuotaMonitor();
+#endif
     GetTailnetQuota().load();
     nvs_handle_t handle;
     if (nvs_open("quota_net", NVS_READONLY, &handle) != ESP_OK) return;
@@ -378,6 +385,31 @@ bool NetworkQuota::fetchHistory()
 }
 bool NetworkQuota::fetch()
 {
+#ifdef MOSAICO_BOARD
+    std::unique_ptr<char[]> body(new (std::nothrow) char[8193]);
+    int used = 0;
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    if (!body || !requestJson("/v2/status", body.get(), 8193, used) ||
+        !ApplyQuotaMonitor(body.get(), used, now)) return false;
+    // Keep legacy diagnostics populated from the canonical bucket, without
+    // collapsing the independently stored monitor's buckets/windows.
+    std::unique_ptr<QuotaMonitorSnapshot> snapshot(new (std::nothrow) QuotaMonitorSnapshot());
+    if (!snapshot || !CopyQuotaMonitor(*snapshot, now)) return false;
+    for (std::size_t i = 0; i < snapshot->bucketCount; ++i) {
+        const auto& bucket = snapshot->buckets[i];
+        if (std::strcmp(bucket.id, "codex")) continue;
+        const QuotaMonitorWindow* selected = nullptr;
+        for (const auto& window : bucket.windows)
+            if (window.available && (!selected || window.remainingBasisPoints < selected->remainingBasisPoints ||
+                (window.remainingBasisPoints == selected->remainingBasisPoints && window.durationMinutes > selected->durationMinutes)))
+                selected = &window;
+        if (selected) GetHostBridge().applyNetworkUsage(selected->remainingBasisPoints, selected->resetEpoch,
+            snapshot->capturedEpoch, static_cast<uint8_t>(std::min<uint16_t>(snapshot->resetCredits, 99)),
+            now - snapshot->ageSecondsAtReceipt * 1000U);
+        break;
+    }
+    return true;
+#else
     char body[2048]{};
     int used = 0;
     if (!requestJson(nullptr, body, sizeof(body), used) || !JsonNestingValid(body, used)) return false;
@@ -392,4 +424,5 @@ bool NetworkQuota::fetch()
     if (!ok) return false;
     return GetHostBridge().applyNetworkUsage(remaining, reset, captured, credits,
                                              static_cast<uint32_t>(esp_timer_get_time() / 1000) - age * 1000);
+#endif
 }

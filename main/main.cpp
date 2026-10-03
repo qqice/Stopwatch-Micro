@@ -37,6 +37,8 @@ extern "C" void app_main(void)
     GetHAL().init();
     BootTraceStage(6);
 
+    // The standalone Mosaico monitor has no remote-control or pairing surface.
+#ifndef MOSAICO_BOARD
     // BLE is a system service and remains available for the device lifetime.
     if (!GetCodexMicroBle().begin()) {
         mclog::tagError("Codex Micro", "BLE initialization failed; restarting");
@@ -46,8 +48,11 @@ extern "C" void app_main(void)
     }
     const auto battery = GetHAL().getBatteryLevel();
     if (GetHAL().isBatteryLevelValid()) GetCodexMicroBle().setBattery(battery, GetHAL().isBatteryCharging());
+#endif
     GetNetworkQuota().begin();
+#ifndef MOSAICO_BOARD
     uint32_t last_codex_battery_update = GetHAL().millis();
+#endif
 
     // Setup ui hal
     ui_hal::on_delay([](uint32_t ms) { GetHAL().delay(ms); });
@@ -70,6 +75,7 @@ extern "C" void app_main(void)
     while (true) {
         GetHAL().feedTheDog();
         GetMooncake().update();
+#ifndef MOSAICO_BOARD
         GetCodexMicroBle().poll();
         const uint32_t now = GetHAL().millis();
         if (now - last_codex_battery_update >= 30000) {
@@ -77,6 +83,7 @@ extern "C" void app_main(void)
             const auto battery = GetHAL().getBatteryLevel();
             if (GetHAL().isBatteryLevelValid()) GetCodexMicroBle().setBattery(battery, GetHAL().isBatteryCharging());
         }
+#endif
         // main_task, Bluedroid, and the HID TX worker share CPU0. Yield one
         // tick so transport activity cannot reduce touch/UI scheduling time.
         vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 1));

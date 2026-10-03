@@ -17,10 +17,9 @@ with `--preview` for S31. Do not select ESP32-S3 as a substitute.
 - Audio, microphone meter and vibration are not implemented in this profile.
   Their HAL tests explicitly SKIP, not PASS. The software tone format remains
  44100 for compatibility, but no PCM is sent to hardware.
-- BLE HID protocol remains available. Mosaico status RPC provides
-  battery_valid/battery_approx; invalid battery and charging are null. Standard
-  BAS has no unknown representation and can retain the SDK's initial/stale
-  percentage; do not use BAS alone as authoritative battery telemetry.
+- This profile is a standalone **quota-only monitor**. BLE is not initialized,
+  advertised or paired; there are no agent, approval, microphone, HID or encoder
+  controls. StopWatch retains its original BLE control UI and v1 status contract.
 - Wi-Fi monitoring, separate MicroLink node `mosaico-micro`, quota, 24h observed
   increments and30 API dates reuse the shared application/service. No OpenAI
   credentials enter firmware. See [history semantics](history.md).
@@ -59,6 +58,47 @@ physical USB reconnect afterward to recover a descriptor failure. Prefer the
 board's physical BOOT procedure for deployment. Stop/resume of the LVGL port
 also stops touch sampling; normal idle lock only dims the display and retains
 sampling for wake. It does not call the port-stop API.
+
+## Square-screen monitor UI
+
+The first page is an independent 480x480 dashboard, not the old circular control
+page with buttons removed. Each quota bucket has a large remaining-percentage
+card, up to two window progress bars, actual duration, reset countdown and optional
+plan/credits/limit-state metadata. Multiple buckets can be scrolled; at most eight
+are retained, with overflow explicitly marked. Snapshot reset credits are read-only.
+All-zero decimal fractions are omitted. A single returned window fills the card;
+missing windows are hidden, never shown as a fabricated five-hour allowance or
+an empty second column. No window at all shows "Quota unknown". Credits are
+separate from Token history. Static screens have no scrollbars or horizontal
+scrolling; only multiple actual buckets enable vertical scrolling. Metadata uses
+larger 20px text and history cells/details use 16px text.
+
+History uses 6x4 (24h) or 6x5 (30d) full-width grids. Each rounded tile has a 73x44
+touch slot, displays an hour or day and compact amount, and opens a separate exact
+value panel from RAM. Mode buttons are 216x48 and highlight the current mode.
+Hourly amounts use blue levels; daily amounts use green levels. White borders
+mark day/month changes, purple marks gaps/partial data, orange marks corrections,
+and gray marks unavailable values. Header dates and details disambiguate boundaries
+without repeating month/today/yesterday in every tile. Ordinary amounts use K/M;
+B/T/P keep very large API integers bounded, while details retain exact counts.
+
+The 24h page remains **official reported increments at observation time**, not
+measured consumption time. API reporting can lag, sampling gaps are unallocated,
+negative corrections are separate, and daily API timezone is unknown. No device
+token logs or quota-percent-to-token estimates are used.
+
+New quota revisions update the active page promptly; clicks and mode switches do
+not perform HTTP. Offline age/stale state is explicit, with quota values hidden
+after ten minutes without a usable update. Idle locking retains the previous
+radio-off/80MHz policy, uses a separate quota/battery-only panel, refreshes once
+per minute and shifts pixels. Long presses and scrolling prevent idle lock; the
+first wake gesture is consumed. The full-redraw-before-brightness mitigation is
+retained. User observations after that mitigation found no repeat of large-area
+corruption across multiple long sleeps; the original root cause is still unproven.
+
+This profile reads the authenticated `/v2/status` endpoint described in
+[macOS service deployment](macos-service.md). It uses no OpenAI login credentials
+on the device and does not initiate quota resets, purchases or computer controls.
 
 ## Build and app-only deployment
 

@@ -87,6 +87,7 @@ void AppCodexMicro::onRunning()
     }
 
     bool mic_view_changed = false;
+#ifndef MOSAICO_BOARD
     if (input::hasKeyEvent(event, input::KeyEvent::MicPress) && state.connected) {
         _mic_host_active = GetCodexMicroBle().sendKey(CodexMicroControl::Mic, CodexMicroKeyAction::Press);
         mic_view_changed = true;
@@ -98,6 +99,7 @@ void AppCodexMicro::onRunning()
         _mic_host_active = false;
         mic_view_changed = true;
     }
+#endif
     // The physical blue B button is a local page control. It must never emit a
     // host Send HID report, including the release half of a short tap.
     const bool toggle_page =
@@ -179,7 +181,11 @@ const char* AppCodexMicro::debugScreenName()
     }
     switch (_view->currentPage()) {
         case view::CodexMicroView::Page::Command:
+#ifdef MOSAICO_BOARD
+            return "quota";
+#else
             return "command";
+#endif
         case view::CodexMicroView::Page::History:
             return "history";
         case view::CodexMicroView::Page::Agent:
