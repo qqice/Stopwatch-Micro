@@ -87,7 +87,20 @@ SerialDebug::SerialDebug(AppCodexMicro& app) : _app(app)
 
 bool SerialDebug::begin()
 {
-#if !CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#ifdef MOSAICO_BOARD
+    // TinyUSB console/VFS is initialized before board bring-up in app_main.
+    setvbuf(stdin, nullptr, _IONBF, 0);
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    const int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if (flags < 0 || fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) < 0) {
+        result("init", "FAIL", "reason=nonblocking_cdc_stdin");
+        return false;
+    }
+    _active = true;
+    std::printf("DBG READY version=%s transport=tinyusb-cdc mode=nonblocking\r\n", system_config::FirmwareVersion);
+    std::fflush(stdout);
+    return true;
+#elif !CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
     result("init", "FAIL", "reason=usb_serial_jtag_not_primary");
     return false;
 #else
@@ -284,13 +297,18 @@ void SerialDebug::handleLine(char* line)
         }
         const auto state = GetNetworkQuota().powerStats();
         const auto ble   = GetCodexMicroBle().diagnostics();
+#if CONFIG_IDF_TARGET_ESP32S31
+        const int controller_sleeping = -1;
+#else
+        const int controller_sleeping = esp_bt_controller_is_sleeping();
+#endif
         char details[256]{};
         std::snprintf(
             details, sizeof(details),
             "locked=%d profile=%u phase=%u wifi_running=%d wifi_connected=%d bt_connected=%d "
             "bt_advertising=%d bt_sleeping=%d cpu_mhz=%lu off_ms=%llu cycles=%lu clock_error=%d audio_suspended=%d",
             state.locked, state.profile, state.phase, state.wifiRunning, GetNetworkQuota().connected(),
-            GetCodexMicroBle().connected(), ble.advertising, esp_bt_controller_is_sleeping(),
+            GetCodexMicroBle().connected(), ble.advertising, controller_sleeping,
             static_cast<unsigned long>(state.cpuMHz), static_cast<unsigned long long>(state.offMs),
             static_cast<unsigned long>(state.cycles), state.clockError, GetHAL().audioSuspended());
         result("power", "PASS", details);
@@ -568,6 +586,7 @@ void SerialDebug::runSelfTest()
     }
     unsigned passed  = 0;
     unsigned failed  = 0;
+    unsigned skipped = 0;
     const auto check = [&passed, &failed](const char* name, bool ok, const char* details = nullptr) {
         if (ok) {
             ++passed;
@@ -580,11 +599,26 @@ void SerialDebug::runSelfTest()
     const Hal::Diagnostics hal = GetHAL().diagnostics();
     check("hal.i2c", hal.i2c);
     check("hal.pmic", hal.pmic);
+#ifdef MOSAICO_BOARD
+    ++skipped;
+    result("hal.io_expander", "SKIP", "unsupported_board_peripheral");
+#else
     check("hal.io_expander", hal.ioExpander);
+#endif
     check("hal.display", hal.display);
     check("hal.touch", hal.touch);
+#ifdef MOSAICO_BOARD
+    ++skipped;
+    result("hal.audio", "SKIP", "unsupported_board_peripheral");
+#else
     check("hal.audio", hal.audio);
+#endif
+#ifdef MOSAICO_BOARD
+    ++skipped;
+    result("hal.vibrator", "SKIP", "unsupported_board_peripheral");
+#else
     check("hal.vibrator", hal.vibrator);
+#endif
     check("hal.buttons", hal.buttons);
 
     const bool heap_ok              = heap_caps_check_integrity_all(false);
@@ -607,15 +641,20 @@ void SerialDebug::runSelfTest()
     char battery_details[64] = {};
     std::snprintf(battery_details, sizeof(battery_details), "level=%u charging=%s", static_cast<unsigned>(battery),
                   onOff(GetHAL().isBatteryCharging()));
-    check("power.telemetry", battery <= 100, battery_details);
+    check("power.telemetry", GetHAL().isBatteryLevelValid() && battery <= 100, battery_details);
 
     char audio_details[64] = {};
     std::snprintf(audio_details, sizeof(audio_details), "sample_rate=%d volume=%d", GetHAL().getAudioSampleRate(),
                   GetHAL().getSpeakerVolume());
+#ifdef MOSAICO_BOARD
+    ++skipped;
+    result("audio.configuration", "SKIP", "audio_not_implemented");
+#else
     check("audio.configuration",
           GetHAL().getAudioSampleRate() == 44100 && GetHAL().getSpeakerVolume() >= 0 &&
               GetHAL().getSpeakerVolume() <= 100,
           audio_details);
+#endif
 
     const CodexMicroState state        = GetCodexMicroBle().snapshot();
     const CodexMicroBleDiagnostics ble = GetCodexMicroBle().diagnostics();
@@ -634,7 +673,11 @@ void SerialDebug::runSelfTest()
           GetCodexMicroBle().protocolSelfTest() && ble.inputDropped == 0 && ble.txFailures == 0 && ble.rpcErrors == 0,
           protocol_details);
     check("ui.objects", _app.debugUiReady(), _app.debugScreenName());
+#ifdef MOSAICO_BOARD
+    check("serial.transport", true, "primary=tinyusb-cdc nonblocking=1");
+#else
     check("serial.transport", true, "primary=usb-serial-jtag nonblocking=1");
+#endif
     const HostBridgeSnapshot host = GetHostBridge().snapshot(GetHAL().millis());
     char host_details[96]         = {};
     std::snprintf(host_details, sizeof(host_details), "online=%s available=%s stale=%s remaining_bp=%u",
@@ -643,7 +686,7 @@ void SerialDebug::runSelfTest()
     check("host.bridge", host.remainingBasisPoints <= 10000, host_details);
 
     char summary[64] = {};
-    std::snprintf(summary, sizeof(summary), "passed=%u failed=%u", passed, failed);
+    std::snprintf(summary, sizeof(summary), "passed=%u failed=%u skipped=%u", passed, failed, skipped);
     result("selftest", failed == 0 ? "PASS" : "FAIL", summary);
 }
 

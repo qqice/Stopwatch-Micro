@@ -69,3 +69,6 @@ obj/
 
 sdkconfig
 sdkconfig.old
+
+# Mosaico uses a separate component-manager lock; never commit downloaded sources.
+boards/mosaico/managed_components/

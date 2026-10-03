@@ -132,7 +132,7 @@ index 9126a53..7073671 100644
  typedef struct {
      const char *auth_key;       /* Tailscale auth key (tskey-auth-...) */
 diff --git a/components/microlink/include/microlink_internal.h b/components/microlink/include/microlink_internal.h
-index add69c7..7f1ac01 100644
+index add69c7..9f48b8c 100644
 --- a/components/microlink/include/microlink_internal.h
 +++ b/components/microlink/include/microlink_internal.h
 @@ -24,8 +24,6 @@
@@ -164,7 +164,7 @@ index add69c7..7f1ac01 100644
      char ipv4[16];
      char ipv6[46];
      uint16_t stun_port;     /* 0 = default 3478 */
-@@ -324,8 +328,7 @@ typedef struct {
+@@ -324,9 +328,11 @@ typedef struct {
      int sockfd;                     /* Raw TCP socket */
      mbedtls_ssl_context ssl;        /* TLS context (owned exclusively by DERP I/O task) */
      mbedtls_ssl_config ssl_conf;
@@ -172,9 +172,13 @@ index add69c7..7f1ac01 100644
 -    mbedtls_ctr_drbg_context ctr_drbg;
 +    uint8_t cert_pin[32];
      bool connected;
++    uint16_t connected_region;      /* DERP owner writes; 0 when disconnected.
++                                    * Actual map region, or ML_DERP_REGION for
++                                    * the built-in default-host fallback. */
      uint64_t last_recv_ms;          /* For keepalive watchdog */
  } ml_derp_conn_t;
-@@ -350,6 +353,7 @@ struct microlink_s {
+ 
+@@ -350,6 +356,7 @@ struct microlink_s {
      TaskHandle_t derp_tx_task;
      TaskHandle_t coord_task;
      TaskHandle_t wg_mgr_task;
@@ -182,8 +186,22 @@ index add69c7..7f1ac01 100644
  
      /* Queues */
      QueueHandle_t derp_tx_queue;        /* -> derp_tx task */
-@@ -414,6 +418,13 @@ struct microlink_s {
+@@ -367,8 +374,7 @@ struct microlink_s {
+     uint8_t disco_private_key[32];      /* DISCO key */
+     uint8_t disco_public_key[32];
+ 
+-    /* DERP connection (owned exclusively by DERP I/O task after connect) */
+-    /* Connection setup by coord task, then handed to DERP I/O task */
++    /* DERP connection and setup owned exclusively by DERP I/O task. */
+     ml_derp_conn_t derp;
+ 
+     /* Sockets for net_io select() loop */
+@@ -412,8 +418,17 @@ struct microlink_s {
+     bool nat_mapping_varies;        /* true = symmetric NAT (direct won't work) */
+ 
      /* DERP map (parsed from MapResponse, owned by coord task) */
++    SemaphoreHandle_t derp_map_lock; /* Protect map publication/selection and
++                                     * priority/home region; never held for I/O. */
      ml_derp_region_t derp_regions[ML_MAX_DERP_REGIONS];
      uint8_t derp_region_count;
 +    uint32_t derp_map_hash;
@@ -196,7 +214,7 @@ index add69c7..7f1ac01 100644
      uint16_t derp_home_region;      /* Our PreferredDERP region */
  
      /* Key expiry (parsed from MapResponse self-node) */
-@@ -526,7 +537,7 @@ esp_err_t ml_peer_nvs_clear(void);
+@@ -526,7 +541,7 @@ esp_err_t ml_peer_nvs_clear(void);
  #ifdef CONFIG_ML_ZERO_COPY_WG
  /* ml_zerocopy.c */
  esp_err_t ml_zerocopy_init(microlink_t *ml);
@@ -206,21 +224,26 @@ index add69c7..7f1ac01 100644
                              uint32_t dest_ip, uint16_t dest_port);
  #endif
 diff --git a/components/microlink/src/microlink.c b/components/microlink/src/microlink.c
-index 237f039..0c47bab 100644
+index 237f039..fd5379a 100644
 --- a/components/microlink/src/microlink.c
 +++ b/components/microlink/src/microlink.c
-@@ -15,6 +15,7 @@
+@@ -14,7 +14,8 @@
+ #include "esp_wifi.h"
  #include "nvs_flash.h"
  #include "nvs.h"
- #include "cJSON.h"
+-#include "cJSON.h"
++#include "cJSON.h"
 +#include "psa/crypto.h"
  #include <string.h>
  #include <stdio.h>
  #include <fcntl.h>
-@@ -26,6 +27,23 @@
+@@ -24,7 +25,24 @@
+ #include "ml_cellular.h"
+ #endif
  
- static const char *TAG = "microlink";
- 
+-static const char *TAG = "microlink";
++static const char *TAG = "microlink";
++
 +#define ML_STOP_TIMEOUT_MS 15000
 +
 +static void drain_packet_queue(QueueHandle_t queue) {
@@ -237,14 +260,21 @@ index 237f039..0c47bab 100644
 +    ml_derp_tx_item_t item;
 +    while (queue && xQueueReceive(queue, &item, 0) == pdTRUE) free(item.data);
 +}
-+
+ 
  /* NVS keys */
  #define NVS_NAMESPACE       "microlink"
- #define NVS_KEY_MACHINE_PRI "machine_pri"
-@@ -156,6 +174,10 @@ microlink_t *microlink_init(const microlink_config_t *config) {
+@@ -151,11 +169,15 @@ esp_err_t microlink_factory_reset(void) {
+  * Public API
+  * ========================================================================== */
+ 
+-microlink_t *microlink_init(const microlink_config_t *config) {
++microlink_t *microlink_init(const microlink_config_t *config) {
+     if (!config || !config->auth_key) {
          ESP_LOGE(TAG, "Invalid config: auth_key required");
-         return NULL;
-     }
+-        return NULL;
+-    }
++        return NULL;
++    }
 +    if (psa_crypto_init() != PSA_SUCCESS) {
 +        ESP_LOGE(TAG, "PSA crypto initialization failed");
 +        return NULL;
@@ -252,12 +282,36 @@ index 237f039..0c47bab 100644
  
      /* Route cJSON to PSRAM */
      cJSON_Hooks hooks = {
-@@ -304,6 +326,16 @@ esp_err_t microlink_start(microlink_t *ml) {
+@@ -285,10 +307,11 @@ microlink_t *microlink_init(const microlink_config_t *config) {
+     ml->stun_rx_queue = xQueueCreate(ML_STUN_RX_QUEUE_DEPTH, sizeof(ml_rx_packet_t));
+     ml->coord_cmd_queue = xQueueCreate(ML_COORD_CMD_QUEUE_DEPTH, sizeof(ml_coord_cmd_t));
+     ml->peer_update_queue = xQueueCreate(ML_PEER_UPDATE_QUEUE_DEPTH, sizeof(ml_peer_update_t *));
++    ml->derp_map_lock = xSemaphoreCreateMutex();
+ 
+     if (!ml->derp_tx_queue || !ml->disco_rx_queue || !ml->wg_rx_queue ||
+-        !ml->stun_rx_queue || !ml->coord_cmd_queue || !ml->peer_update_queue) {
+-        ESP_LOGE(TAG, "Failed to create queues");
++        !ml->stun_rx_queue || !ml->coord_cmd_queue || !ml->peer_update_queue || !ml->derp_map_lock) {
++        ESP_LOGE(TAG, "Failed to create queues/map mutex");
+         microlink_destroy(ml);
+         return NULL;
+     }
+@@ -297,14 +320,25 @@ microlink_t *microlink_init(const microlink_config_t *config) {
+     return ml;
+ }
+ 
+-esp_err_t microlink_start(microlink_t *ml) {
++esp_err_t microlink_start(microlink_t *ml) {
+     if (!ml) return ESP_ERR_INVALID_ARG;
+     if (ml->state != ML_STATE_IDLE) {
+         ESP_LOGW(TAG, "Already started (state=%d)", ml->state);
          return ESP_ERR_INVALID_STATE;
      }
  
+-    ml->state = ML_STATE_WIFI_WAIT;
 +    xEventGroupClearBits(ml->events, ML_EVT_SHUTDOWN_REQUEST | ML_EVT_TASK_EXITED_MASK |
-+                                         ML_EVT_COORD_REGISTERED | ML_EVT_DERP_CONNECTED | ML_EVT_WG_READY);
++                                         ML_EVT_COORD_REGISTERED | ML_EVT_DERP_CONNECTED | ML_EVT_WG_READY |
++                                         ML_EVT_DERP_CONNECT_REQ | ML_EVT_DERP_RECONNECT);
 +    ml->lifecycle_expected = 0;
 +    drain_derp_queue(ml->derp_tx_queue);
 +    drain_packet_queue(ml->disco_rx_queue);
@@ -266,51 +320,70 @@ index 237f039..0c47bab 100644
 +    drain_peer_queue(ml->peer_update_queue);
 +    ml_coord_cmd_t stale_cmd;
 +    while (xQueueReceive(ml->coord_cmd_queue, &stale_cmd, 0) == pdTRUE) {}
-     ml->state = ML_STATE_WIFI_WAIT;
++    ml->state = ML_STATE_WIFI_WAIT;
  
      /* Set WiFi TX power if configured */
-@@ -374,29 +406,33 @@ skip_bsd_socket:
+     if (ml->config.wifi_tx_power_dbm > 0) {
+@@ -372,31 +406,35 @@ skip_bsd_socket:
+ 
+     ret = xTaskCreatePinnedToCore(ml_net_io_task, "ml_net_io", ML_TASK_NET_IO_STACK,
                                     ml, ML_TASK_NET_IO_PRIO, &ml->net_io_task, ML_TASK_NET_IO_CORE);
-     if (ret != pdPASS) {
-         ESP_LOGE(TAG, "Failed to create net_io task");
+-    if (ret != pdPASS) {
+-        ESP_LOGE(TAG, "Failed to create net_io task");
 -        return ESP_FAIL;
+-    }
++    if (ret != pdPASS) {
++        ESP_LOGE(TAG, "Failed to create net_io task");
 +        goto start_failure;
-     }
++    }
 +    ml->lifecycle_expected |= ML_EVT_NET_IO_EXITED;
  
      ret = xTaskCreatePinnedToCore(ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK,
                                     ml, ML_TASK_DERP_TX_PRIO, &ml->derp_tx_task, ML_TASK_DERP_TX_CORE);
-     if (ret != pdPASS) {
-         ESP_LOGE(TAG, "Failed to create derp_tx task");
+-    if (ret != pdPASS) {
+-        ESP_LOGE(TAG, "Failed to create derp_tx task");
 -        return ESP_FAIL;
+-    }
++    if (ret != pdPASS) {
++        ESP_LOGE(TAG, "Failed to create derp_tx task");
 +        goto start_failure;
-     }
++    }
 +    ml->lifecycle_expected |= ML_EVT_DERP_TX_EXITED;
  
      ret = xTaskCreatePinnedToCore(ml_coord_task, "ml_coord", ML_TASK_COORD_STACK,
                                     ml, ML_TASK_COORD_PRIO, &ml->coord_task, ML_TASK_COORD_CORE);
-     if (ret != pdPASS) {
-         ESP_LOGE(TAG, "Failed to create coord task");
+-    if (ret != pdPASS) {
+-        ESP_LOGE(TAG, "Failed to create coord task");
 -        return ESP_FAIL;
+-    }
++    if (ret != pdPASS) {
++        ESP_LOGE(TAG, "Failed to create coord task");
 +        goto start_failure;
-     }
++    }
 +    ml->lifecycle_expected |= ML_EVT_COORD_EXITED;
  
      ret = xTaskCreatePinnedToCore(ml_wg_mgr_task, "ml_wg_mgr", ML_TASK_WG_MGR_STACK,
                                     ml, ML_TASK_WG_MGR_PRIO, &ml->wg_mgr_task, ML_TASK_WG_MGR_CORE);
-     if (ret != pdPASS) {
-         ESP_LOGE(TAG, "Failed to create wg_mgr task");
+-    if (ret != pdPASS) {
+-        ESP_LOGE(TAG, "Failed to create wg_mgr task");
 -        return ESP_FAIL;
+-    }
++    if (ret != pdPASS) {
++        ESP_LOGE(TAG, "Failed to create wg_mgr task");
 +        goto start_failure;
-     }
++    }
 +    ml->lifecycle_expected |= ML_EVT_WG_MGR_EXITED;
  
      /* WiFi is expected to be connected before microlink_start() is called.
       * Signal the event so coord/wg_mgr tasks proceed immediately. */
-@@ -413,6 +449,10 @@ skip_bsd_socket:
+@@ -411,8 +449,12 @@ skip_bsd_socket:
+         ml_config_httpd_start(ml->config_httpd, ml);
+     }
  
-     ESP_LOGI(TAG, "All tasks started");
-     return ESP_OK;
+-    ESP_LOGI(TAG, "All tasks started");
+-    return ESP_OK;
++    ESP_LOGI(TAG, "All tasks started");
++    return ESP_OK;
 +
 +start_failure:
 +    microlink_stop(ml);
@@ -318,7 +391,7 @@ index 237f039..0c47bab 100644
  }
  
  esp_err_t microlink_rebind(microlink_t *ml) {
-@@ -463,7 +503,7 @@ esp_err_t microlink_rebind(microlink_t *ml) {
+@@ -463,7 +505,7 @@ esp_err_t microlink_rebind(microlink_t *ml) {
  
      /* Step 5: Recreate DISCO UDP socket on the new interface */
  #ifdef CONFIG_ML_ZERO_COPY_WG
@@ -327,14 +400,29 @@ index 237f039..0c47bab 100644
      if (ml_zerocopy_init(ml) == ESP_OK) {
          ESP_LOGI(TAG, "Rebind: zero-copy DISCO PCB recreated");
          goto rebind_wg_update;
-@@ -508,15 +548,24 @@ rebind_wg_update:
- esp_err_t microlink_stop(microlink_t *ml) {
-     if (!ml) return ESP_ERR_INVALID_ARG;
+@@ -505,18 +547,27 @@ rebind_wg_update:
+     return ESP_OK;
+ }
  
+-esp_err_t microlink_stop(microlink_t *ml) {
+-    if (!ml) return ESP_ERR_INVALID_ARG;
+-
+-    ESP_LOGI(TAG, "Stopping...");
+-    xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
+-
+-    /* Wait for tasks to exit (they check ML_EVT_SHUTDOWN_REQUEST).
+-     * Tasks call vTaskDelete(NULL) to self-delete, so we must NOT call
+-     * vTaskDelete() on them again — that causes a crash in uxListRemove
+-     * because the task's list node is already invalid. Just wait and
+-     * NULL the handles. */
+-    vTaskDelay(pdMS_TO_TICKS(3000));
++esp_err_t microlink_stop(microlink_t *ml) {
++    if (!ml) return ESP_ERR_INVALID_ARG;
++
 +    if (ml->state == ML_STATE_IDLE && ml->lifecycle_expected == 0) return ESP_OK;
 +
-     ESP_LOGI(TAG, "Stopping...");
-     xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
++    ESP_LOGI(TAG, "Stopping...");
++    xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
 +    ml_coord_cmd_t disconnect = ML_CMD_DISCONNECT;
 +    if (ml->coord_cmd_queue) xQueueSend(ml->coord_cmd_queue, &disconnect, 0);
 +    if (ml->coord_sock >= 0) shutdown(ml->coord_sock, SHUT_RDWR);
@@ -342,13 +430,7 @@ index 237f039..0c47bab 100644
 +    if (ml->disco_sock4 >= 0) shutdown(ml->disco_sock4, SHUT_RDWR);
 +    if (ml->stun_sock >= 0) shutdown(ml->stun_sock, SHUT_RDWR);
 +    if (ml->stun_sock6 >= 0) shutdown(ml->stun_sock6, SHUT_RDWR);
- 
--    /* Wait for tasks to exit (they check ML_EVT_SHUTDOWN_REQUEST).
--     * Tasks call vTaskDelete(NULL) to self-delete, so we must NOT call
--     * vTaskDelete() on them again — that causes a crash in uxListRemove
--     * because the task's list node is already invalid. Just wait and
--     * NULL the handles. */
--    vTaskDelay(pdMS_TO_TICKS(3000));
++
 +    const EventBits_t exited = xEventGroupWaitBits(ml->events, ml->lifecycle_expected,
 +                                                     pdFALSE, pdTRUE, pdMS_TO_TICKS(ML_STOP_TIMEOUT_MS));
 +    if ((exited & ml->lifecycle_expected) != ml->lifecycle_expected) {
@@ -358,7 +440,14 @@ index 237f039..0c47bab 100644
  
      ml->net_io_task = NULL;
      ml->derp_tx_task = NULL;
-@@ -530,7 +579,7 @@ esp_err_t microlink_stop(microlink_t *ml) {
+@@ -524,21 +575,28 @@ esp_err_t microlink_stop(microlink_t *ml) {
+     ml->wg_mgr_task = NULL;
+ 
+     /* Stop HTTP config server */
+-    if (ml->config_httpd) {
++    if (ml->config_httpd) {
+         ml_config_httpd_stop(ml->config_httpd);
+     }
  
      /* Clean up zero-copy PCB if active */
  #ifdef CONFIG_ML_ZERO_COPY_WG
@@ -367,10 +456,13 @@ index 237f039..0c47bab 100644
  #endif
  
      /* Close sockets */
-@@ -538,6 +587,13 @@ esp_err_t microlink_stop(microlink_t *ml) {
+     if (ml->disco_sock4 >= 0) { ml_close_sock(ml->disco_sock4); ml->disco_sock4 = -1; }
      if (ml->stun_sock >= 0) { ml_close_sock(ml->stun_sock); ml->stun_sock = -1; }
-     if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
- 
+-    if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
+-
+-    ml->state = ML_STATE_IDLE;
++    if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
++
 +    drain_derp_queue(ml->derp_tx_queue);
 +    drain_packet_queue(ml->disco_rx_queue);
 +    drain_packet_queue(ml->wg_rx_queue);
@@ -378,10 +470,11 @@ index 237f039..0c47bab 100644
 +    drain_peer_queue(ml->peer_update_queue);
 +    ml->lifecycle_expected = 0;
 +
-     ml->state = ML_STATE_IDLE;
++    ml->state = ML_STATE_IDLE;
      ESP_LOGI(TAG, "Stopped");
      return ESP_OK;
-@@ -546,7 +602,10 @@ esp_err_t microlink_stop(microlink_t *ml) {
+ }
+@@ -546,7 +604,10 @@ esp_err_t microlink_stop(microlink_t *ml) {
  void microlink_destroy(microlink_t *ml) {
      if (!ml) return;
  
@@ -393,8 +486,17 @@ index 237f039..0c47bab 100644
  
      /* Deinitialize peer NVS */
      ml_peer_nvs_deinit();
+@@ -564,6 +625,8 @@ void microlink_destroy(microlink_t *ml) {
+     if (ml->stun_rx_queue) vQueueDelete(ml->stun_rx_queue);
+     if (ml->coord_cmd_queue) vQueueDelete(ml->coord_cmd_queue);
+     if (ml->peer_update_queue) vQueueDelete(ml->peer_update_queue);
++    /* stop() above confirmed every owner task exited before deleting this. */
++    if (ml->derp_map_lock) vSemaphoreDelete(ml->derp_map_lock);
+ 
+     /* Delete event group */
+     if (ml->events) vEventGroupDelete(ml->events);
 diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_coord.c
-index 8da8d4d..eb54eb8 100644
+index 8da8d4d..e399b07 100644
 --- a/components/microlink/src/ml_coord.c
 +++ b/components/microlink/src/ml_coord.c
 @@ -723,7 +723,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
@@ -418,7 +520,7 @@ index 8da8d4d..eb54eb8 100644
          }
      }
  
-@@ -1009,6 +1006,16 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1009,6 +1006,25 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
   * State: FETCH_PEERS - Send MapRequest, parse MapResponse
   * ========================================================================== */
  
@@ -432,10 +534,19 @@ index 8da8d4d..eb54eb8 100644
 +    return hash;
 +}
 +
++/* The coordinator owns updates; DERP snapshots share this short publication lock.
++ * NULL is permitted only for the isolated parser selftest's single-thread fixture. */
++static void set_derp_region(microlink_t *ml, bool priority, uint16_t value) {
++    if (ml->derp_map_lock) xSemaphoreTake(ml->derp_map_lock, portMAX_DELAY);
++    if (priority) ml->priority_peer_derp_region = value;
++    else ml->derp_home_region = value;
++    if (ml->derp_map_lock) xSemaphoreGive(ml->derp_map_lock);
++}
++
  static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
      /* Try all field names used by Tailscale (copied from v1 lines 3176-3184):
       *   "Peers"        - Full peer list (initial Stream=false response)
-@@ -1094,6 +1101,13 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
+@@ -1094,6 +1110,13 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
              }
          }
  
@@ -443,13 +554,13 @@ index 8da8d4d..eb54eb8 100644
 +            cJSON *id = cJSON_GetObjectItem(peer, "ID");
 +            if (cJSON_IsNumber(id)) ml->priority_peer_node_id = (uint64_t)id->valuedouble;
 +            memcpy(ml->priority_peer_key, update->public_key, 32);
-+            if (update->derp_region) ml->priority_peer_derp_region = update->derp_region;
++            if (update->derp_region) set_derp_region(ml, true, update->derp_region);
 +        }
 +
          /* Endpoints */
          cJSON *endpoints = cJSON_GetObjectItem(peer, "Endpoints");
          if (endpoints) {
-@@ -1160,6 +1174,18 @@ check_removed:
+@@ -1160,6 +1183,18 @@ check_removed:
  
      /* Handle PeersChangedPatch — lightweight endpoint-only updates */
      cJSON *patches = cJSON_GetObjectItem(root, "PeersChangedPatch");
@@ -462,23 +573,23 @@ index 8da8d4d..eb54eb8 100644
 +            if (cJSON_IsNumber(id) && ml->priority_peer_node_id &&
 +                (uint64_t)id->valuedouble == ml->priority_peer_node_id &&
 +                cJSON_IsNumber(region) && region->valueint > 0 && region->valueint <= UINT16_MAX)
-+                ml->priority_peer_derp_region = (uint16_t)region->valueint;
++                set_derp_region(ml, true, (uint16_t)region->valueint);
 +        }
 +    }
      if (patches && cJSON_IsObject(patches)) {
          ESP_LOGI(TAG, "PeersChangedPatch: processing lightweight updates");
          cJSON *patch = patches->child;
-@@ -1189,6 +1215,9 @@ check_removed:
+@@ -1189,6 +1224,9 @@ check_removed:
                          }
                      }
  
 +                    if (update->derp_region && memcmp(update->public_key, ml->priority_peer_key, 32) == 0)
-+                        ml->priority_peer_derp_region = update->derp_region;
++                        set_derp_region(ml, true, update->derp_region);
 +
                      /* Parse endpoints if present */
                      cJSON *endpoints = cJSON_GetObjectItem(patch, "Endpoints");
                      if (endpoints) {
-@@ -1339,7 +1368,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1339,7 +1377,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
       * to populate Node.HomeDERP for other peers. */
      cJSON *netinfo = cJSON_CreateObject();
      if (netinfo) {
@@ -487,20 +598,54 @@ index 8da8d4d..eb54eb8 100644
          if (ml->stun_nat_checked) {
              cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
          }
-@@ -1584,6 +1613,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1579,11 +1617,21 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+ 
+     if (!map_json) {
+         const char *err = cJSON_GetErrorPtr();
+-        ESP_LOGE(TAG, "MapResponse JSON parse failed near: %.50s", err ? err : "unknown");
++        ESP_LOGE(TAG, "MapResponse parse failed h2=%u/%u json=%u/%u end_stream=%d offset=%ld",
++                 (unsigned)h2_total, (unsigned)ML_H2_BUFFER_SIZE,
++                 (unsigned)json_total, (unsigned)ML_JSON_BUFFER_SIZE, got_end_stream,
++                 err && err >= parse_start && err <= parse_start + parse_len ? (long)(err - parse_start) : -1L);
+         free(resp_buf);
          return -1;
      }
  
-+    ESP_LOGI("Quota-Map", "snapshot node=%d peers=%d derp=%d keepalive=%d",
++    ESP_LOGI("Quota-Map", "snapshot node=%d peers=%d derp=%d keepalive=%d h2_bytes=%u json_bytes=%u cap=%u",
 +             cJSON_IsObject(cJSON_GetObjectItem(map_json, "Node")),
 +             cJSON_GetArraySize(cJSON_GetObjectItem(map_json, "Peers")),
 +             cJSON_IsObject(cJSON_GetObjectItem(map_json, "DERPMap")),
-+             cJSON_IsTrue(cJSON_GetObjectItem(map_json, "KeepAlive")));
++             cJSON_IsTrue(cJSON_GetObjectItem(map_json, "KeepAlive")),
++             (unsigned)h2_total, (unsigned)json_total, (unsigned)ML_JSON_BUFFER_SIZE);
 +
      /* Debug: log all top-level fields in MapResponse (from v1 lines 3053-3072) */
      {
          ESP_LOGI(TAG, "MapResponse top-level fields:");
-@@ -1653,10 +1688,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1630,7 +1678,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+              * then fall back to legacy DERP string (format: "127.3.3.40:REGION") */
+             cJSON *home_derp = cJSON_GetObjectItem(node, "HomeDERP");
+             if (home_derp && cJSON_IsNumber(home_derp) && home_derp->valueint > 0) {
+-                ml->derp_home_region = (uint16_t)home_derp->valueint;
++                set_derp_region(ml, false, (uint16_t)home_derp->valueint);
+                 ESP_LOGI(TAG, "Home DERP region: %d (from server, HomeDERP)", ml->derp_home_region);
+             } else {
+                 cJSON *self_derp = cJSON_GetObjectItem(node, "DERP");
+@@ -1640,7 +1688,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+                     if (colon) {
+                         int region = atoi(colon + 1);
+                         if (region > 0) {
+-                            ml->derp_home_region = (uint16_t)region;
++                            set_derp_region(ml, false, (uint16_t)region);
+                             ESP_LOGI(TAG, "Home DERP region: %d (from server, legacy DERP)", region);
+                         }
+                     }
+@@ -1648,15 +1696,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+             }
+             /* Fallback: if server didn't assign a DERP region, use our configured default */
+             if (ml->derp_home_region == 0) {
+-                ml->derp_home_region = ML_DERP_REGION;
++                set_derp_region(ml, false, ML_DERP_REGION);
+                 ESP_LOGI(TAG, "Home DERP region: %d (default)", ML_DERP_REGION);
              }
              cJSON *self_key = cJSON_GetObjectItem(node, "Key");
              if (self_key && self_key->valuestring) {
@@ -512,15 +657,20 @@ index 8da8d4d..eb54eb8 100644
              }
  
              /* Parse KeyExpiry (ISO 8601: "YYYY-MM-DDTHH:MM:SSZ") */
-@@ -1702,6 +1734,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1702,6 +1747,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
      if (derp_map) {
          cJSON *regions = cJSON_GetObjectItem(derp_map, "Regions");
          if (regions) {
++            if (!ml->derp_map_lock || xSemaphoreTake(ml->derp_map_lock, pdMS_TO_TICKS(500)) != pdTRUE) {
++                cJSON_Delete(map_json);
++                free(resp_buf);
++                return -1;
++            }
 +            ml->derp_map_hash = derp_map_hash(regions);
              ml->derp_region_count = 0;
              cJSON *region_obj;
              cJSON_ArrayForEach(region_obj, regions) {
-@@ -1734,6 +1767,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1734,6 +1785,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
                              strncpy(n->hostname, hn->valuestring, sizeof(n->hostname) - 1);
                          }
  
@@ -533,7 +683,12 @@ index 8da8d4d..eb54eb8 100644
                          cJSON *ip4 = cJSON_GetObjectItem(node_obj, "IPv4");
                          if (ip4 && ip4->valuestring) {
                              strncpy(n->ipv4, ip4->valuestring, sizeof(n->ipv4) - 1);
-@@ -1776,6 +1815,10 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1772,10 +1829,15 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+ 
+                 ml->derp_region_count++;
+             }
++            xSemaphoreGive(ml->derp_map_lock);
+             ESP_LOGI(TAG, "DERPMap: parsed %d regions", ml->derp_region_count);
          }
      }
  
@@ -544,7 +699,7 @@ index 8da8d4d..eb54eb8 100644
      cJSON_Delete(map_json);
      free(resp_buf);
  
-@@ -1825,7 +1868,7 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1825,7 +1887,7 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
       * to populate Node.HomeDERP for other peers. */
      cJSON *netinfo = cJSON_CreateObject();
      if (netinfo) {
@@ -553,7 +708,7 @@ index 8da8d4d..eb54eb8 100644
          if (ml->stun_nat_checked) {
              cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
          }
-@@ -1888,10 +1931,6 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1888,10 +1950,6 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
   * Uses H2 stream 7. Response body is discarded (only HTTP status matters).
   * Returns 0 on success, -1 on send failure. */
  static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
@@ -564,7 +719,7 @@ index 8da8d4d..eb54eb8 100644
  
      cJSON *root = cJSON_CreateObject();
      if (!root) return -1;
-@@ -1926,7 +1965,7 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1926,7 +1984,7 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
  
          cJSON *netinfo = cJSON_CreateObject();
          if (netinfo) {
@@ -573,7 +728,7 @@ index 8da8d4d..eb54eb8 100644
              if (ml->stun_nat_checked) {
                  cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
              }
-@@ -1978,6 +2017,7 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1978,6 +2036,7 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
      }
      free(h2_buf);
  
@@ -581,7 +736,7 @@ index 8da8d4d..eb54eb8 100644
      ESP_LOGI(TAG, "Endpoint update sent on H2 stream %lu", (unsigned long)sid);
      /* Response body is discarded — server may send empty response or
       * we'll consume it in the next poll_map_update() iteration.
-@@ -2117,6 +2157,13 @@ static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -2117,6 +2176,13 @@ static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
              }
          }
  
@@ -595,7 +750,7 @@ index 8da8d4d..eb54eb8 100644
          /* Parse peer updates */
          parse_peers_from_map_response(ml, update_json);
          cJSON_Delete(update_json);
-@@ -2150,8 +2197,7 @@ void ml_coord_task(void *arg) {
+@@ -2150,8 +2216,7 @@ void ml_coord_task(void *arg) {
                               pdFALSE, pdFALSE, portMAX_DELAY);
          if (wb & ML_EVT_SHUTDOWN_REQUEST) {
              ESP_LOGI(TAG, "Shutdown requested before WiFi, exiting");
@@ -605,7 +760,31 @@ index 8da8d4d..eb54eb8 100644
          }
      }
  
-@@ -2294,11 +2340,9 @@ void ml_coord_task(void *arg) {
+@@ -2166,6 +2231,7 @@ void ml_coord_task(void *arg) {
+                 }
+                 break;
+             case ML_CMD_DISCONNECT:
++                xEventGroupClearBits(ml->events, ML_EVT_COORD_REGISTERED);
+                 if (ml->coord_sock >= 0) {
+                     ml_close_sock(ml->coord_sock);
+                     ml->coord_sock = -1;
+@@ -2174,6 +2240,7 @@ void ml_coord_task(void *arg) {
+                 ml->state = ML_STATE_IDLE;
+                 break;
+             case ML_CMD_FORCE_RECONNECT:
++                xEventGroupClearBits(ml->events, ML_EVT_COORD_REGISTERED);
+                 state = COORD_RECONNECTING;
+                 break;
+             case ML_CMD_UPDATE_ENDPOINTS:
+@@ -2269,6 +2336,7 @@ void ml_coord_task(void *arg) {
+             break;
+ 
+         case COORD_FETCH_PEERS:
++                xEventGroupClearBits(ml->events, ML_EVT_COORD_REGISTERED);
+             ESP_LOGI(TAG, "Fetching peers...");
+             if (do_fetch_peers(ml, &noise) < 0) {
+                 ESP_LOGW(TAG, "MapRequest failed, will retry");
+@@ -2294,11 +2362,9 @@ void ml_coord_task(void *arg) {
                  ESP_LOGW(TAG, "Failed to start long-poll (non-fatal)");
              }
  
@@ -620,7 +799,7 @@ index 8da8d4d..eb54eb8 100644
  
              /* Send initial HTTP/2 PING immediately to keep connection active
               * before the periodic 5s timer kicks in (server has ~20s idle timeout) */
-@@ -2328,6 +2372,20 @@ void ml_coord_task(void *arg) {
+@@ -2328,6 +2394,20 @@ void ml_coord_task(void *arg) {
              {
                  uint64_t now = ml_get_time_ms();
  
@@ -641,15 +820,24 @@ index 8da8d4d..eb54eb8 100644
                  /* Check control plane watchdog (120s) */
                  if (now - last_activity_ms > ml->t_ctrl_watchdog_ms) {
                      ESP_LOGW(TAG, "Control plane watchdog timeout");
-@@ -2581,6 +2639,7 @@ void ml_coord_task(void *arg) {
+@@ -2545,6 +2625,7 @@ void ml_coord_task(void *arg) {
+             break;
+ 
+         case COORD_RECONNECTING:
++                xEventGroupClearBits(ml->events, ML_EVT_COORD_REGISTERED);
+             {
+                 uint32_t backoff_ms = 1000 << (reconnect_attempts > 4 ? 4 : reconnect_attempts);
+                 if (backoff_ms > ML_CTRL_BACKOFF_MAX_MS) backoff_ms = ML_CTRL_BACKOFF_MAX_MS;
+@@ -2581,6 +2662,8 @@ void ml_coord_task(void *arg) {
          }
      }
  
 +cleanup:
++    xEventGroupClearBits(ml->events, ML_EVT_COORD_REGISTERED);
      /* Cleanup */
      if (ml->coord_sock >= 0) {
          ml_close_sock(ml->coord_sock);
-@@ -2588,6 +2647,33 @@ void ml_coord_task(void *arg) {
+@@ -2588,6 +2671,33 @@ void ml_coord_task(void *arg) {
      }
      memset(&noise, 0, sizeof(noise));
  
@@ -684,7 +872,7 @@ index 8da8d4d..eb54eb8 100644
 +    return ok ? ESP_OK : ESP_FAIL;
 +}
 diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_derp.c
-index c57fd0f..3dbf06c 100644
+index c57fd0f..a6f8218 100644
 --- a/components/microlink/src/ml_derp.c
 +++ b/components/microlink/src/ml_derp.c
 @@ -21,6 +21,7 @@
@@ -703,19 +891,174 @@ index c57fd0f..3dbf06c 100644
  #include <errno.h>
  #include <fcntl.h>
  
-@@ -568,6 +570,11 @@ void ml_derp_tx_task(void *arg) {
+@@ -481,6 +483,51 @@ esp_err_t ml_derp_queue_send(microlink_t *ml, const uint8_t *dest_key,
+  * Unified DERP I/O Task
+  * ========================================================================== */
+ 
++/* A registration alone is insufficient: relay selection must come from a
++ * successfully authenticated MapResponse. Keep request bits pending while
++ * these prerequisites are absent, including during coordinator recovery. */
++/* Caller holds derp_map_lock, including the count check. */
++static bool derp_coord_ready_locked(microlink_t *ml) {
++    EventBits_t bits = xEventGroupGetBits(ml->events);
++    return (bits & ML_EVT_COORD_REGISTERED) && !(bits & ML_EVT_SHUTDOWN_REQUEST) &&
++           ml->derp_region_count > 0;
++}
++
++static bool derp_coord_ready(microlink_t *ml) {
++    /* Missing mutex in partial-init/selftest fixtures is fail-closed. */
++    if (!ml->derp_map_lock || !ml->events) return false;
++    if (xSemaphoreTake(ml->derp_map_lock, portMAX_DELAY) != pdTRUE) return false;
++    bool ready = derp_coord_ready_locked(ml);
++    xSemaphoreGive(ml->derp_map_lock);
++    return ready;
++}
++
++static uint16_t derp_desired_region_locked(microlink_t *ml) {
++    uint16_t requested = ml->priority_peer_derp_region ?
++                         ml->priority_peer_derp_region : ml->derp_home_region;
++    for (int i = 0; requested && i < ml->derp_region_count; ++i) {
++        const ml_derp_region_t *region = &ml->derp_regions[i];
++        if (region->region_id != requested) continue;
++        for (int n = 0; n < region->node_count; ++n) {
++            if (!region->nodes[n].stun_only && region->nodes[n].hostname[0]) return requested;
++        }
++        break;
++    }
++    /* Priority-peer selection remains fail-closed if missing from the map.
++     * For a missing/unspecified home region, the existing default-host path
++     * really connects to ML_DERP_REGION, not the unavailable requested ID. */
++    return ml->priority_peer_derp_region ? requested : ML_DERP_REGION;
++}
++
++static bool derp_desired_region(microlink_t *ml, uint16_t *desired) {
++    if (!ml->derp_map_lock || !ml->events) return false;
++    if (xSemaphoreTake(ml->derp_map_lock, portMAX_DELAY) != pdTRUE) return false;
++    bool ready = derp_coord_ready_locked(ml);
++    if (ready) *desired = derp_desired_region_locked(ml);
++    xSemaphoreGive(ml->derp_map_lock);
++    return ready;
++}
++
+ void ml_derp_tx_task(void *arg) {
+     microlink_t *ml = (microlink_t *)arg;
+     ESP_LOGI(TAG, "DERP I/O task started (Core %d)", xPortGetCoreID());
+@@ -492,6 +539,7 @@ void ml_derp_tx_task(void *arg) {
+     uint64_t last_heartbeat_ms = 0;
+     uint64_t connected_since_ms = 0;
+     bool verbose_phase = false;  /* verbose logging for first 15s after connect */
++    ml->derp.connected_region = 0;
+ 
+     while (!(xEventGroupGetBits(ml->events) & ML_EVT_SHUTDOWN_REQUEST)) {
+         loop_count++;
+@@ -518,11 +566,31 @@ void ml_derp_tx_task(void *arg) {
+             }
+         }
+ 
+-        /* ---- Handle DERP connect request from coord task ---- */
++        /* Only this owner may switch physical relay connections. A late
++         * priority-peer/home update must not leave the old relay connected. */
++        uint16_t desired_region = 0;
++        if (ml->derp.connected && derp_desired_region(ml, &desired_region) &&
++            ml->derp.connected_region != desired_region) {
++            ESP_LOGI(TAG, "DERP region change: connected=%u desired=%u",
++                     ml->derp.connected_region, desired_region);
++            ml->derp_node_cursor = 0;
++            xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
++        }
++
++        /* ---- Handle pending connect/reconnect only after authenticated map ---- */
+         {
+             EventBits_t bits = xEventGroupGetBits(ml->events);
+-            if ((bits & ML_EVT_DERP_CONNECT_REQ) && !ml->derp.connected) {
+-                xEventGroupClearBits(ml->events, ML_EVT_DERP_CONNECT_REQ);
++            EventBits_t requests = bits & (ML_EVT_DERP_CONNECT_REQ | ML_EVT_DERP_RECONNECT);
++            if (requests && derp_coord_ready(ml) &&
++                ((requests & ML_EVT_DERP_RECONNECT) || !ml->derp.connected)) {
++                xEventGroupClearBits(ml->events, requests);
++                if (requests & ML_EVT_DERP_RECONNECT) {
++                    ESP_LOGW(TAG, "DERP reconnect requested (was %s)",
++                             ml->derp.connected ? "connected" : "disconnected");
++                    ml_derp_disconnect(ml);
++                    verbose_phase = false;
++                    vTaskDelay(pdMS_TO_TICKS(1000));
++                }
+                 /* Retry up to 3 times with 2s backoff */
+                 for (int attempt = 0; attempt < 3 && !ml->derp.connected; attempt++) {
+                     if (attempt > 0) {
+@@ -531,34 +599,21 @@ void ml_derp_tx_task(void *arg) {
+                     } else {
+                         ESP_LOGI(TAG, "DERP connect requested, connecting from I/O task");
+                     }
+-                    if (ml_derp_connect(ml) == ESP_OK) {
+-                        connected_since_ms = ml_get_time_ms();
+-                        verbose_phase = true;
++                    if (!derp_coord_ready(ml)) {
++                        xEventGroupSetBits(ml->events, requests);
+                         break;
+                     }
+-                    ESP_LOGW(TAG, "DERP connect attempt %d failed", attempt + 1);
+-                }
+-            }
+-            if (bits & ML_EVT_DERP_RECONNECT) {
+-                xEventGroupClearBits(ml->events, ML_EVT_DERP_RECONNECT);
+-                ESP_LOGW(TAG, "DERP reconnect requested (was %s)",
+-                         ml->derp.connected ? "connected" : "disconnected");
+-                ml_derp_disconnect(ml);
+-                verbose_phase = false;
+-                /* Auto-reconnect after disconnect */
+-                vTaskDelay(pdMS_TO_TICKS(1000));
+-                for (int attempt = 0; attempt < 3 && !ml->derp.connected; attempt++) {
+-                    if (attempt > 0) {
+-                        ESP_LOGW(TAG, "DERP reconnect retry %d/3 in 2s...", attempt + 1);
+-                        vTaskDelay(pdMS_TO_TICKS(2000));
+-                    }
+                     if (ml_derp_connect(ml) == ESP_OK) {
+                         connected_since_ms = ml_get_time_ms();
+                         verbose_phase = true;
+                         break;
+                     }
+-                    ESP_LOGW(TAG, "DERP reconnect attempt %d failed", attempt + 1);
++                    ESP_LOGW(TAG, "DERP connect attempt %d failed", attempt + 1);
+                 }
++                /* Readiness can disappear during the final TLS attempt too.
++                 * Do not lose a request just because the coordinator is
++                 * recovering when that attempt returns. */
++                if (!derp_coord_ready(ml)) xEventGroupSetBits(ml->events, requests);
+             }
+         }
+ 
+@@ -568,6 +623,11 @@ void ml_derp_tx_task(void *arg) {
          }
  
          if (!ml->derp.connected) {
 +            /* Recover after a transient DNS/TCP/TLS outage; owner task only. */
-+            if (ml_get_time_ms() - connected_since_ms > 30000) {
++            if (derp_coord_ready(ml) && ml_get_time_ms() - connected_since_ms > 30000) {
 +                connected_since_ms = ml_get_time_ms();
 +                xEventGroupSetBits(ml->events, ML_EVT_DERP_CONNECT_REQ);
 +            }
              /* Not connected - just wait and check again */
              vTaskDelay(pdMS_TO_TICKS(100));
              continue;
-@@ -630,6 +637,9 @@ void ml_derp_tx_task(void *arg) {
+@@ -596,7 +656,7 @@ void ml_derp_tx_task(void *arg) {
+                 }
+                 if (ret < 0) {
+                     ESP_LOGW(TAG, "DERP write failed");
+-                    ml->derp.connected = false;
++                    ml_derp_disconnect(ml);
+                     xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
+                 } else {
+                     frames_tx++;
+@@ -619,7 +679,7 @@ void ml_derp_tx_task(void *arg) {
+                     break;  /* No more data / timeout */
+                 } else {
+                     ESP_LOGW(TAG, "DERP read error: %d", ret);
+-                    ml->derp.connected = false;
++                    ml_derp_disconnect(ml);
+                     xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
+                     break;
+                 }
+@@ -630,33 +690,75 @@ void ml_derp_tx_task(void *arg) {
          vTaskDelay(pdMS_TO_TICKS(1));
      }
  
@@ -725,8 +1068,10 @@ index c57fd0f..3dbf06c 100644
      ESP_LOGI(TAG, "DERP I/O task exiting");
      vTaskDelete(NULL);
  }
-@@ -638,25 +648,57 @@ void ml_derp_tx_task(void *arg) {
-  * DERP Connection Management (called from coord task)
+ 
+ /* ============================================================================
+- * DERP Connection Management (called from coord task)
++ * DERP Connection Management (called from DERP owner task)
   * ========================================================================== */
  
 -esp_err_t ml_derp_connect(microlink_t *ml) {
@@ -766,6 +1111,13 @@ index c57fd0f..3dbf06c 100644
      const char *derp_host = ML_DERP_HOST;
      int derp_port = ML_DERP_PORT;
 +    const ml_derp_node_t *selected_node = NULL;
++    ml_derp_node_t selected_snapshot;
++    if (!ml->derp_map_lock || !ml->events ||
++        xSemaphoreTake(ml->derp_map_lock, portMAX_DELAY) != pdTRUE) return ESP_ERR_INVALID_STATE;
++    if (!derp_coord_ready_locked(ml)) {
++        xSemaphoreGive(ml->derp_map_lock);
++        return ESP_ERR_INVALID_STATE;
++    }
 +    uint16_t region = ml->priority_peer_derp_region ? ml->priority_peer_derp_region : ml->derp_home_region;
  
 -    if (ml->derp_region_count > 0 && ml->derp_home_region > 0) {
@@ -791,7 +1143,7 @@ index c57fd0f..3dbf06c 100644
                          }
                          break;
                      }
-@@ -666,44 +708,63 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+@@ -666,44 +768,75 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
          }
      }
  
@@ -808,9 +1160,15 @@ index c57fd0f..3dbf06c 100644
 -
 -    if (ml_getaddrinfo(derp_host, port_str, &hints, &res) != 0 || !res) {
 -        ESP_LOGE(TAG, "DNS resolve failed for %s", derp_host);
-+    if (ml->priority_peer_derp_region && !selected_node) {
-+        ESP_LOGE(TAG, "Priority peer relay absent from authenticated DERPMap");
-         return ESP_FAIL;
+-        return ESP_FAIL;
++    bool priority_missing = ml->priority_peer_derp_region && !selected_node;
++    const uint16_t actual_region = selected_node ? region : ML_DERP_REGION;
++    if (selected_node) {
++        /* TLS/DNS may block while coord receives another MapResponse. Do not
++         * keep hostname/certificate/address pointers into its mutable map. */
++        selected_snapshot = *selected_node;
++        selected_node = &selected_snapshot;
++        derp_host = selected_node->hostname;
      }
 -
 -    int64_t t_derp_dns = esp_timer_get_time();
@@ -820,7 +1178,13 @@ index c57fd0f..3dbf06c 100644
 -    int sock = ml_socket(res->ai_family, SOCK_STREAM, 0);
 -    if (sock < 0) {
 -        ml_freeaddrinfo(res);
--        return ESP_FAIL;
++    xSemaphoreGive(ml->derp_map_lock);
++    if (priority_missing) {
++        ESP_LOGE(TAG, "Priority peer relay absent from authenticated DERPMap");
+         return ESP_FAIL;
+     }
++    /* All subsequent hostname/certificate/address reads are from the local
++     * snapshot; never hold the publication mutex across DNS, TCP or TLS. */
 +    const char *cert_name = selected_node && selected_node->cert_name[0] ? selected_node->cert_name : derp_host;
 +    bool pinned = strncmp(cert_name, "sha256-raw:", 11) == 0;
 +    if (pinned) {
@@ -830,8 +1194,8 @@ index c57fd0f..3dbf06c 100644
 +            char byte[3] = {hex[2*i], hex[2*i+1], 0};
 +            ml->derp.cert_pin[i] = (uint8_t)strtoul(byte, NULL, 16);
 +        }
-     }
-+    ESP_LOGI("Quota-Relay", "region=%u certificate_pin=%d", region, pinned);
++    }
++    ESP_LOGI("Quota-Relay", "region=%u certificate_pin=%d", actual_region, pinned);
 +    int64_t t_derp_start = esp_timer_get_time();
  
 -    /* Set connect timeout */
@@ -843,7 +1207,7 @@ index c57fd0f..3dbf06c 100644
 -        ESP_LOGE(TAG, "TCP connect failed: %d", errno);
 -        ml_close_sock(sock);
 +    ESP_LOGI(TAG, "Connecting to DERP %s:%d (region %d)",
-+             derp_host, derp_port, region ? region : ML_DERP_REGION);
++             derp_host, derp_port, actual_region);
 +
 +    /* Dial explicit map addresses first; HostName/CertName remain TLS identity.
 +     * An explicit family value (including "none") disables DNS for that family. */
@@ -886,7 +1250,7 @@ index c57fd0f..3dbf06c 100644
  
      int64_t t_derp_tcp = esp_timer_get_time();
      ESP_LOGI(TAG, "[TIMING] DERP TCP connect: %lld ms", (t_derp_tcp - t_derp_dns) / 1000);
-@@ -711,22 +772,28 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+@@ -711,22 +844,28 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
      /* TLS setup */
      mbedtls_ssl_init(&ml->derp.ssl);
      mbedtls_ssl_config_init(&ml->derp.ssl_conf);
@@ -929,7 +1293,7 @@ index c57fd0f..3dbf06c 100644
      /* Store socket fd BEFORE setting bio.
       * Use custom BIO callbacks that route through ml_read_sock/ml_write_sock,
       * which transparently support both lwIP and AT socket backends.
-@@ -736,7 +803,6 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+@@ -736,7 +875,6 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
                           ml_derp_bio_send, NULL, ml_derp_bio_recv_timeout);
  
      /* TLS handshake - socket has 10s SO_RCVTIMEO from connect phase. */
@@ -937,7 +1301,16 @@ index c57fd0f..3dbf06c 100644
      while ((ret = mbedtls_ssl_handshake(&ml->derp.ssl)) != 0) {
          if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
              continue;
-@@ -955,11 +1021,7 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+@@ -754,7 +892,7 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+     ESP_LOGI(TAG, "TLS connected to DERP");
+ 
+     /* HTTP Upgrade: GET /derp with Upgrade: DERP header */
+-    char upgrade_req[256];
++    char upgrade_req[512];
+     snprintf(upgrade_req, sizeof(upgrade_req),
+              "GET /derp HTTP/1.1\r\n"
+              "Host: %s\r\n"
+@@ -955,11 +1093,7 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
          memcpy(ci_payload + 32 + NACL_BOX_NONCEBYTES, ciphertext, ciphertext_len);
          free(ciphertext);
  
@@ -950,7 +1323,21 @@ index c57fd0f..3dbf06c 100644
  
          /* Send ClientInfo frame */
          if (derp_write_frame(ml, DERP_FRAME_CLIENT_INFO, ci_payload, ci_payload_len) < 0) {
-@@ -1027,14 +1089,14 @@ void ml_derp_disconnect(microlink_t *ml) {
+@@ -1006,6 +1140,8 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+         mbedtls_ssl_conf_read_timeout(&ml->derp.ssl_conf, 200);
+     }
+ 
++    if (!derp_coord_ready(ml)) return ESP_ERR_INVALID_STATE;
++    ml->derp.connected_region = actual_region;
+     ml->derp.connected = true;
+     ml->derp.last_recv_ms = ml_get_time_ms();
+     xEventGroupSetBits(ml->events, ML_EVT_DERP_CONNECTED);
+@@ -1023,18 +1159,19 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
+ 
+ void ml_derp_disconnect(microlink_t *ml) {
+     ml->derp.connected = false;
++    ml->derp.connected_region = 0;
+     xEventGroupClearBits(ml->events, ML_EVT_DERP_CONNECTED);
  
      if (ml->derp.sockfd >= 0) {
          mbedtls_ssl_close_notify(&ml->derp.ssl);
@@ -969,13 +1356,14 @@ index c57fd0f..3dbf06c 100644
      /* Drain TX queue */
      ml_derp_tx_item_t item;
      while (xQueueReceive(ml->derp_tx_queue, &item, 0) == pdTRUE) {
-@@ -1043,3 +1105,13 @@ void ml_derp_disconnect(microlink_t *ml) {
+@@ -1043,3 +1180,14 @@ void ml_derp_disconnect(microlink_t *ml) {
  
      ESP_LOGI(TAG, "DERP disconnected");
  }
 +
 +/* Rotate within the selected region after failures; never disable TLS to fail over. */
 +esp_err_t ml_derp_connect(microlink_t *ml) {
++    if (!derp_coord_ready(ml)) return ESP_ERR_INVALID_STATE;
 +    esp_err_t result = derp_connect_once(ml);
 +    if (result != ESP_OK) {
 +        ml_derp_disconnect(ml);
@@ -1292,7 +1680,7 @@ index e65d72d..d64d23c 100644
  
              setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_wg_mgr.c
-index ed40942..378b626 100644
+index ed40942..aa00fb6 100644
 --- a/components/microlink/src/ml_wg_mgr.c
 +++ b/components/microlink/src/ml_wg_mgr.c
 @@ -24,6 +24,7 @@
@@ -1482,7 +1870,31 @@ index ed40942..378b626 100644
  
      /* Extract sender's disco public key */
      const uint8_t *sender_disco_key = pkt->data + 6;
-@@ -1372,13 +1394,10 @@ bool ml_wg_mgr_peer_is_up(microlink_t *ml, uint32_t vpn_ip) {
+@@ -1331,14 +1353,16 @@ esp_err_t ml_wg_mgr_trigger_handshake(microlink_t *ml, uint32_t dest_vpn_ip) {
+     err_t is_up = wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index, NULL, NULL);
+     if (is_up == ERR_OK) return ESP_OK;
+ 
+-    /* Path 1: DERP (reliable fallback) */
+-    wireguardif_connect_derp(netif, (u8_t)p->wg_peer_index);
+-    ESP_LOGI(TAG, "WG handshake triggered (DERP) to %s", p->hostname);
++    /* WireGuard stores one pending initiation per peer. Starting DERP and
++     * direct handshakes back-to-back replaces the first sender index before
++     * its valid response arrives. Use one path per attempt; retain existing
++     * sessions above, and allow direct fallback when no relay is connected. */
++    if (ml->derp.connected) {
++        wireguardif_connect_derp(netif, (u8_t)p->wg_peer_index);
++        ESP_LOGI(TAG, "WG handshake triggered (DERP only) to %s", p->hostname);
++        return ESP_OK;
++    }
+ 
+-    /* Path 2: Direct UDP (if DISCO has a known endpoint).
+-     * This wakes the peer's magicsock via receiveIPv4 → noteRecvActivity.
+-     * Set connect_ip first, then call wireguardif_connect which copies
+-     * connect_ip → ip and starts a second handshake to the direct endpoint. */
+     if (p->best_ip != 0 && p->best_port != 0) {
+         ip_addr_t ep_ip;
+         IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
+@@ -1372,13 +1396,10 @@ bool ml_wg_mgr_peer_is_up(microlink_t *ml, uint32_t vpn_ip) {
          if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
              struct wireguard_peer *wp = &dev->peers[p->wg_peer_index];
              bool key_match = (memcmp(wp->public_key, p->public_key, 32) == 0);
@@ -1498,7 +1910,7 @@ index ed40942..378b626 100644
          }
      }
      return up;
-@@ -1518,8 +1537,7 @@ void ml_wg_mgr_task(void *arg) {
+@@ -1518,8 +1539,7 @@ void ml_wg_mgr_task(void *arg) {
  
      if (wait_bits & ML_EVT_SHUTDOWN_REQUEST) {
          ESP_LOGI(TAG, "Shutdown requested before registration, exiting");
@@ -1508,7 +1920,7 @@ index ed40942..378b626 100644
      }
  
      ESP_LOGI(TAG, "Coord registered, initializing WireGuard...");
-@@ -1530,6 +1548,7 @@ void ml_wg_mgr_task(void *arg) {
+@@ -1530,6 +1550,7 @@ void ml_wg_mgr_task(void *arg) {
      } else {
          /* Update VPN IP if coord already set it */
          wg_update_vpn_ip(ml);
@@ -1516,7 +1928,7 @@ index ed40942..378b626 100644
          xEventGroupSetBits(ml->events, ML_EVT_WG_READY);
      }
  
-@@ -1639,18 +1658,33 @@ void ml_wg_mgr_task(void *arg) {
+@@ -1639,18 +1660,33 @@ void ml_wg_mgr_task(void *arg) {
          vTaskDelay(pdMS_TO_TICKS(10));
      }
  

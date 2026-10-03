@@ -13,7 +13,12 @@
 #include <smooth_ui_toolkit.hpp>
 #include <uitk/short_namespace.hpp>
 #include <smooth_lvgl.hpp>
+#ifdef MOSAICO_BOARD
+#include <driver/i2c_master.h>
+using i2c_bus_handle_t = i2c_master_bus_handle_t;
+#else
 #include <i2c_bus.h>
+#endif
 #include <string_view>
 #include <array>
 #include <vector>
@@ -94,6 +99,11 @@ public:
 
     /* ---------------------------------- Power --------------------------------- */
     uint8_t getBatteryLevel();
+#ifdef MOSAICO_BOARD
+    bool isBatteryLevelValid() const;
+#else
+    bool isBatteryLevelValid() const { return pmic_ready(); }
+#endif
     bool isBatteryCharging(bool strict = false);
 
     /* --------------------------------- Display -------------------------------- */

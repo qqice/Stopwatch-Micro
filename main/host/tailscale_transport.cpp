@@ -107,7 +107,11 @@ void TailnetQuota::start()
     }
     microlink_config_t config{};
     config.auth_key         = _key;
+#ifdef MOSAICO_BOARD
+    config.device_name      = "mosaico-micro";
+#else
     config.device_name      = "stopwatch-micro";
+#endif
     config.enable_derp      = true;
     config.enable_stun      = true;
     config.enable_disco     = true;

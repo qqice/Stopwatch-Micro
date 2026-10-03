@@ -172,7 +172,7 @@ void NetworkQuota::task(void* arg)
 }
 void NetworkQuota::run()
 {
-    setCpu(240);
+    setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
     if (esp_netif_init() != ESP_OK) {
         ++_failures;
         return;
@@ -191,6 +191,10 @@ void NetworkQuota::run()
     init.static_tx_buf_num = 4;
     init.cache_tx_buf_num  = 8;
     wifi_config_t config{};
+#ifdef MOSAICO_BOARD
+    config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    config.sta.pmf_cfg.capable = true;
+#endif
     std::memcpy(config.sta.ssid, _ssid, std::strlen(_ssid));
     std::memcpy(config.sta.password, _password, std::strlen(_password));
     if (esp_wifi_init(&init) != ESP_OK || esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK ||
@@ -248,13 +252,13 @@ void NetworkQuota::run()
                 wait(100);
                 continue;
             }
-            setCpu(_power_profile == 2 ? 80 : 240);
+            setCpu(_power_profile == 2 ? 80 : CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
             setPhase(2);
             const int64_t remaining = (nextRefresh - esp_timer_get_time()) / 1000;
             wait(static_cast<uint32_t>(remaining > 0 ? remaining : 1));
             continue;
         }
-        setCpu(240);
+        setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
         if (!_wifi_running) {
             if (esp_wifi_start() != ESP_OK) {
                 setPhase(4);

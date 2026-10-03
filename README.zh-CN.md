@@ -1,5 +1,7 @@
 # Stopwatch Micro
 
+**ESP-Mosaico / ESP32-S31：** 新增独立原生板级适配，构建、功能边界与仅应用分区部署见 [Mosaico 文档](docs/mosaico.md)，原 StopWatch 构建保留。
+
 [English](README.md) | **简体中文**
 
 [![Firmware build](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/firmware-build.yml/badge.svg?branch=main)](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/firmware-build.yml)

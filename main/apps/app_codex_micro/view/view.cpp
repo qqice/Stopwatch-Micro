@@ -1283,8 +1283,14 @@ void CodexMicroView::updateLockedScreen(const CodexMicroState& state, uint32_t t
                       static_cast<unsigned>(host.remainingBasisPoints / 100U));
         setLabelText(_lock_quota_label, text);
     }
+#ifdef MOSAICO_BOARD
+    const auto mosaico_battery = GetHAL().getBatteryLevel();
+    if (GetHAL().isBatteryLevelValid()) std::snprintf(text, sizeof(text), "Battery ~%u%%", mosaico_battery);
+    else std::strcpy(text, "Battery unknown");
+#else
     std::snprintf(text, sizeof(text), "%s %u%%%s", batterySymbol(state.battery), static_cast<unsigned>(state.battery),
                   state.charging ? " +" : "");
+#endif
     setLabelText(_lock_battery_label, text);
     if (_lock_screen != nullptr) {
         const uint8_t shift = static_cast<uint8_t>(_lock_refresh_count % PixelShiftOffsets.size());
@@ -1427,14 +1433,21 @@ void CodexMicroView::updateCommandLighting(const CodexMicroState& state)
 
 void CodexMicroView::updateCenterStatus(const CodexMicroState& state)
 {
+#ifdef MOSAICO_BOARD
+    const auto raw_battery = GetHAL().getBatteryLevel();
+    const uint8_t batteryStatus = GetHAL().isBatteryLevelValid() ? raw_battery : UINT8_MAX;
+#else
+    const uint8_t batteryStatus = state.battery;
+#endif
+
     const uint32_t now            = GetHAL().millis();
     const HostBridgeSnapshot host = GetHostBridge().snapshot(now);
-    if (!_page_dirty && host.revision == _last_host_bridge_revision && state.battery == _last_status_battery &&
+    if (!_page_dirty && host.revision == _last_host_bridge_revision && batteryStatus == _last_status_battery &&
         state.charging == _last_status_charging && now - _center_status_last_update_tick < 1000U) {
         return;
     }
     _last_host_bridge_revision      = host.revision;
-    _last_status_battery            = state.battery;
+    _last_status_battery            = batteryStatus;
     _last_status_charging           = state.charging;
     _center_status_last_update_tick = now;
     char text[48]                   = {};
@@ -1468,6 +1481,11 @@ void CodexMicroView::updateCenterStatus(const CodexMicroState& state)
         }
     }
 
+#ifdef MOSAICO_BOARD
+    const auto mosaico_battery = GetHAL().getBatteryLevel();
+    if (GetHAL().isBatteryLevelValid()) std::snprintf(text, sizeof(text), "Battery ~%u%%", mosaico_battery);
+    else std::strcpy(text, "Battery unknown");
+#else
     if (state.charging) {
         std::snprintf(text, sizeof(text), "%s %u%% %s", batterySymbol(state.battery),
                       static_cast<unsigned>(state.battery), LV_SYMBOL_CHARGE);
@@ -1475,6 +1493,7 @@ void CodexMicroView::updateCenterStatus(const CodexMicroState& state)
         std::snprintf(text, sizeof(text), "%s %u%%", batterySymbol(state.battery),
                       static_cast<unsigned>(state.battery));
     }
+#endif
     setLabelText(_battery_label, text);
     if (_battery_label != nullptr) {
         const uint32_t battery_color = state.charging ? Green : (state.battery < 15 ? BatteryLow : Text);
@@ -1591,14 +1610,22 @@ void CodexMicroView::update(const CodexMicroState& state)
         if (tick - _offline_update_tick >= 1000 || !_offline_update_tick) {
             const auto quota = GetHostBridge().snapshot(GetHAL().millis());
             char text[160]{};
+            char battery_text[24]{};
+            const auto battery = GetHAL().getBatteryLevel();
+#ifdef MOSAICO_BOARD
+            if (GetHAL().isBatteryLevelValid()) std::snprintf(battery_text, sizeof(battery_text), "~%u%%", battery);
+            else std::strcpy(battery_text, "unknown");
+#else
+            std::snprintf(battery_text, sizeof(battery_text), "%u%%", battery);
+#endif
             if (quota.usageAvailable)
-                std::snprintf(text, sizeof(text), "CODEX QUOTA\n\n%u%% remaining\n%s\n\nBattery %u%%",
+                std::snprintf(text, sizeof(text), "CODEX QUOTA\n\n%u%% remaining\n%s\n\nBattery %s",
                               quota.remainingBasisPoints / 100, quota.usageStale ? "Stale" : "Wi-Fi",
-                              GetHAL().getBatteryLevel());
+                              battery_text);
             else
-                std::snprintf(text, sizeof(text), "CODEX QUOTA\n\n%s\n\nBattery %u%%",
+                std::snprintf(text, sizeof(text), "CODEX QUOTA\n\n%s\n\nBattery %s",
                               GetNetworkQuota().connected() ? "Waiting for server" : "Connecting Wi-Fi",
-                              GetHAL().getBatteryLevel());
+                              battery_text);
             setLabelText(_offline_label, text);
             _offline_update_tick = tick;
         }

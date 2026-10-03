@@ -1,0 +1,8 @@
+# ESP-Mosaico attached unit: MD5-validated live table at0x9000.
+# Only application flashing is permitted; preserve all other regions.
+nvs,data,nvs,0xa000,0x6000,
+otadata,data,ota,0x10000,0x2000,
+phy_init,data,phy,0x12000,0x1000,
+factory,app,factory,0x20000,0x7d0000,
+ui_apps,data,0x41,0x7f0000,0x320000,
+system,data,0x83,0xb10000,0x2ee000,

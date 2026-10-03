@@ -29,7 +29,13 @@ void Hal::init()
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+#ifdef MOSAICO_BOARD
+        // A foreign board's NVS may contain factory/application data. Fail
+        // visibly rather than erase it as part of a monitoring-app migration.
+        ESP_ERROR_CHECK(ret);
+#else
         ESP_ERROR_CHECK(nvs_flash_erase());
+#endif
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
@@ -108,6 +114,10 @@ void Hal::reboot()
 
 void Hal::factoryReset()
 {
+#ifdef MOSAICO_BOARD
+    mclog::tagError(_tag, "factory-wide NVS erase is disabled on Mosaico");
+    return;
+#endif
     mclog::tagInfo(_tag, "start factory reset");
     ESP_ERROR_CHECK(nvs_flash_erase());
     reboot();
@@ -116,6 +126,7 @@ void Hal::factoryReset()
 /* -------------------------------------------------------------------------- */
 /*                                     I2C                                    */
 /* -------------------------------------------------------------------------- */
+#ifndef MOSAICO_BOARD
 #include <i2c_bus.h>
 
 #define I2C_SCL_PIN (gpio_num_t)48
@@ -179,3 +190,5 @@ void Hal::i2c_detect()
         printf("\r\n");
     }
 }
+
+#endif // MOSAICO_BOARD

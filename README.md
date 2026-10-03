@@ -1,5 +1,7 @@
 # Stopwatch Micro
 
+**ESP-Mosaico / ESP32-S31:** a separate native board profile is available; see [build, capabilities and app-only deployment](docs/mosaico.md). The original StopWatch build is preserved.
+
 **English** | [简体中文](README.zh-CN.md)
 
 [![Firmware build](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/firmware-build.yml/badge.svg?branch=main)](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/firmware-build.yml)

@@ -20,8 +20,14 @@
 using namespace mooncake;
 using namespace smooth_ui_toolkit;
 
+#ifdef MOSAICO_BOARD
+extern "C" void mosaico_console_init(void);
+#endif
 extern "C" void app_main(void)
 {
+#ifdef MOSAICO_BOARD
+    mosaico_console_init();
+#endif
     BootTraceBegin();
     // Setup logger
     mclog::set_level(mclog::level_info);
@@ -38,7 +44,8 @@ extern "C" void app_main(void)
         GetHAL().reboot();
         return;
     }
-    GetCodexMicroBle().setBattery(GetHAL().getBatteryLevel(), GetHAL().isBatteryCharging());
+    const auto battery = GetHAL().getBatteryLevel();
+    if (GetHAL().isBatteryLevelValid()) GetCodexMicroBle().setBattery(battery, GetHAL().isBatteryCharging());
     GetNetworkQuota().begin();
     uint32_t last_codex_battery_update = GetHAL().millis();
 
@@ -67,7 +74,8 @@ extern "C" void app_main(void)
         const uint32_t now = GetHAL().millis();
         if (now - last_codex_battery_update >= 30000) {
             last_codex_battery_update = now;
-            GetCodexMicroBle().setBattery(GetHAL().getBatteryLevel(), GetHAL().isBatteryCharging());
+            const auto battery = GetHAL().getBatteryLevel();
+            if (GetHAL().isBatteryLevelValid()) GetCodexMicroBle().setBattery(battery, GetHAL().isBatteryCharging());
         }
         // main_task, Bluedroid, and the HID TX worker share CPU0. Yield one
         // tick so transport activity cannot reduce touch/UI scheduling time.

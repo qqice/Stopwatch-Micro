@@ -11,6 +11,11 @@ set(APP_SRCS
     "host/token_history.cpp"
 )
 
+if(MOSAICO_BOARD)
+    set(PLATFORM_SRCS "hal/hal.cpp" "hal/mosaico/hal_mosaico.cpp" "hal/mosaico/bt_config.c" "hal/mosaico/usb_console.c"
+        "hal/ble/codex_micro_ble.cpp" "hal/ble/hid_gatt_compat.cpp"
+        "hal/utils/button/Button_Class.cpp" "hal/utils/settings/settings.cc")
+else()
 set(PLATFORM_SRCS
     "hal/hal.cpp"
     "hal/hal_audio.cpp"
@@ -25,13 +30,18 @@ set(PLATFORM_SRCS
     "hal/utils/settings/settings.cc"
 )
 
+endif()
+
 set(MY_INCS
-    "."
+    "${CMAKE_CURRENT_LIST_DIR}"
 )
 
+# The board-specific project includes this list from a separate main component.
+list(TRANSFORM APP_SRCS PREPEND "${CMAKE_CURRENT_LIST_DIR}/")
+list(TRANSFORM PLATFORM_SRCS PREPEND "${CMAKE_CURRENT_LIST_DIR}/")
 idf_component_register(
     SRCS 
-        "main.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/main.cpp"
         ${APP_SRCS}
         ${PLATFORM_SRCS}
     INCLUDE_DIRS 
@@ -41,6 +51,10 @@ idf_component_register(
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     "STOPWATCH_MICRO_VERSION=\"${PROJECT_VER}\""
 )
+
+if(MOSAICO_BOARD)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC MOSAICO_BOARD=1)
+endif()
 
 # ESP-IDF 5.5.4 sizes BLE HID Output Report characteristics from the report body.
 # Codex's node-hid bridge includes Report ID 6 in its 64-byte SetReport buffer,

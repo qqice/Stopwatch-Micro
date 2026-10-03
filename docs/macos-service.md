@@ -6,7 +6,7 @@ Codex App Server. No Windows account tokens need to be copied.
 Deploy `tools/quota_service.py`, `tools/stopwatch_bridge.py` and
 `tools/history_store.py` under a private user-owned directory. Supply
 `--codex-path` explicitly (for a ChatGPT app installation this may be
-`/Applications/ChatGPT.app/Contents/Resources/codex`).
+`/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`).
 
 Use a mode-0600 config containing `server_host` (the Mac Tailscale IPv4),
 `server_port: 8765`, `device_token` (same as the watch), and

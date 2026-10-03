@@ -5,6 +5,9 @@
  * Copyright (c) 2026 imliubo.
  */
 #include "codex_micro_ble.h"
+#ifdef MOSAICO_BOARD
+#include <hal/hal.h>
+#endif
 
 #include <host/host_bridge.h>
 
@@ -33,6 +36,11 @@ extern "C" void codex_micro_hid_gatt_compat_snapshot_bonds();
 extern "C" void codex_micro_hid_gatt_compat_gatts_event(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                                                         esp_ble_gatts_cb_param_t* param);
 extern "C" void codex_micro_hid_gatt_compat_authenticated(const uint8_t* address);
+
+#ifdef MOSAICO_BOARD
+extern "C" esp_bt_controller_config_t mosaico_bt_controller_config(void);
+extern "C" esp_bluedroid_config_t mosaico_bluedroid_config(void);
+#endif
 
 namespace {
 
@@ -387,21 +395,34 @@ bool CodexMicroBle::initializeController()
         return false;
     }
 
+#ifdef MOSAICO_BOARD
+    esp_bt_controller_config_t config = mosaico_bt_controller_config();
+#else
     esp_bt_controller_config_t config = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+#endif
     if (logStepError("esp_bt_controller_init", esp_bt_controller_init(&config))) {
         return false;
     }
     if (logStepError("esp_bt_controller_enable", esp_bt_controller_enable(ESP_BT_MODE_BLE))) {
         return false;
     }
+#if !CONFIG_IDF_TARGET_ESP32S31
     const esp_err_t sleep_error = esp_bt_sleep_enable();
     if (sleep_error == ESP_ERR_NOT_SUPPORTED) {
         ESP_LOGW(Tag, "BT modem sleep is not supported by this controller configuration");
     } else if (logStepError("esp_bt_sleep_enable", sleep_error)) {
         return false;
     }
+#else
+    // S31's controller init config owns sleep policy; S3's runtime API is absent.
+    ESP_LOGI(Tag, "S31 controller sleep policy comes from init config");
+#endif
 
+#ifdef MOSAICO_BOARD
+    esp_bluedroid_config_t bluedroid_config = mosaico_bluedroid_config();
+#else
     esp_bluedroid_config_t bluedroid_config = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
+#endif
     bluedroid_config.ssp_en                 = false;
     if (logStepError("esp_bluedroid_init", esp_bluedroid_init_with_cfg(&bluedroid_config))) {
         return false;
@@ -1577,8 +1598,22 @@ void CodexMicroBle::handleRpc(const cJSON* request, uint32_t generation)
         cJSON_AddStringToObject(result, "version", FirmwareVersion);
         cJSON_AddNumberToObject(result, "profile_index", 0);
         cJSON_AddNumberToObject(result, "layer_index", 1);
+#ifdef MOSAICO_BOARD
+        const auto battery = GetHAL().getBatteryLevel();
+        const bool valid = GetHAL().isBatteryLevelValid();
+        cJSON_AddBoolToObject(result, "battery_valid", valid);
+        cJSON_AddBoolToObject(result, "battery_approx", true);
+        if (valid) {
+            cJSON_AddNumberToObject(result, "battery", battery);
+            cJSON_AddBoolToObject(result, "is_charging", GetHAL().isBatteryCharging());
+        } else {
+            cJSON_AddNullToObject(result, "battery");
+            cJSON_AddNullToObject(result, "is_charging");
+        }
+#else
         cJSON_AddNumberToObject(result, "battery", state.battery);
         cJSON_AddBoolToObject(result, "is_charging", state.charging);
+#endif
         if (sendResult(id, result, generation)) {
             markProtocolReady(generation);
         }
