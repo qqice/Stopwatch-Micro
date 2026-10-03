@@ -15,6 +15,8 @@ struct State {
     bool known = false, valid = true;
     Icon icon = Icon::Unknown;
     uint8_t level = 100;
+    uint16_t phase = 0;
+    bool motion = false;
 };
 // Hand-authored nine-column masks, leftmost bit = 0x100.
 constexpr uint16_t masks[][9] = {
@@ -44,6 +46,22 @@ constexpr bool iconPatternsTest() {
     return distinct;
 }
 static_assert(iconPatternsTest(), "dot icon dimensions and bit bounds");
+struct Motion { int scale = 1000, highlight = -1, pulse = 0; };
+Motion motion(const State& s, int w, int h, uint16_t phase, bool enabled) {
+    Motion m;
+    if (!enabled) return m;
+    if (s.kind == Kind::Meter)
+        m.highlight = detail::highlightColumn(detail::meterLayout(w, h, s.rows), s.bp, s.known, phase, true);
+    else if (s.kind == Kind::Icon && detail::min(w / 9, h / 9) >= 2) {
+        if (s.icon == Icon::Coin || s.icon == Icon::ResetCard) {
+            m.scale = detail::flipScale(phase);
+            // Both faces of the symmetric coin are visually identical.
+            if (s.icon == Icon::Coin && m.scale < 0) m.scale = -m.scale;
+        } else if (s.icon == Icon::Battery && s.valid && detail::filledDots(5, s.level * 100))
+            m.pulse = detail::pulse(phase);
+    }
+    return m;
+}
 void dot(lv_layer_t* layer, lv_draw_rect_dsc_t& dsc, int x, int y, int d) {
     const lv_area_t area = {x, y, x + d - 1, y + d - 1};
     lv_draw_rect(layer, &dsc, &area);
@@ -61,6 +79,7 @@ void event(lv_event_t* e) {
     lv_area_t a;
     lv_obj_get_content_coords(obj, &a);
     const int w = lv_area_get_width(&a), h = lv_area_get_height(&a);
+    const auto m = motion(*s, w, h, s->phase, s->motion);
     auto* layer = lv_event_get_layer(e);
     lv_draw_rect_dsc_t dsc;
     lv_draw_rect_dsc_init(&dsc);
@@ -88,6 +107,8 @@ void event(lv_event_t* e) {
         for (int x = 0; x < g.columns; ++x) for (int y = 0; y < g.rows; ++y) {
             const bool lit = detail::meterLit(x, y, g, s->bp, s->known);
             dsc.bg_color = lv_color_hex(lit ? (s->known ? s->color : 0x69716D) : 0x283642);
+            if (lit && s->known && x == m.highlight)
+                dsc.bg_color = lv_color_mix(lv_color_hex(0xFFFFFF), dsc.bg_color, 24);
             dot(layer, dsc, a.x1 + g.x + x * g.pitch, a.y1 + g.y + y * g.pitch, g.diameter);
         }
     } else {
@@ -111,7 +132,10 @@ void event(lv_event_t* e) {
                     lit = x - 2 < detail::filledDots(5, s->level * 100);
                 }
             }
-            if (lit) dot(layer, dsc, ox + x * p, oy + y * p, d);
+            dsc.bg_color = lv_color_hex(s->color);
+            if (lit && s->icon == Icon::Battery && x >= 2 && x <= 6 && y >= 3 && y <= 5 && m.pulse)
+                dsc.bg_color = lv_color_mix(lv_color_hex(0xFFFFFF), dsc.bg_color, static_cast<uint8_t>(m.pulse));
+            if (lit) dot(layer, dsc, ox + detail::projectedX(x, p, m.scale), oy + y * p, d);
         }
     }
 }
@@ -133,7 +157,7 @@ State* state(lv_obj_t* obj, Kind kind) {
     return s && s->kind == kind ? s : nullptr;
 }
 }
-bool selfTest() { return detail::algorithmTest() && iconPatternsTest(); }
+bool selfTest() { return detail::algorithmTest() && detail::motionTest() && iconPatternsTest(); }
 lv_obj_t* createText(lv_obj_t* parent, int w, int h, int pitch, uint32_t color) {
     auto* obj = create(parent, w, h, Kind::Text);
     if (auto* s = state(obj, Kind::Text)) { s->pitch = detail::max(2, pitch); s->color = color; }
@@ -146,6 +170,32 @@ void setTextPitch(lv_obj_t* obj, int pitch) {
     if (s->pitch == pitch) return;
     s->pitch = pitch;
     lv_obj_invalidate(obj);
+}
+void setMotion(lv_obj_t* obj, uint16_t phase, bool enabled) {
+    auto* s = obj ? static_cast<State*>(lv_obj_get_user_data(obj)) : nullptr;
+    if (!s) return;
+    phase %= 360;
+    if (s->phase == phase && s->motion == enabled) return;
+    const int w = lv_obj_get_content_width(obj), h = lv_obj_get_content_height(obj);
+    const auto old = motion(*s, w, h, s->phase, s->motion);
+    const auto next = motion(*s, w, h, phase, enabled);
+    s->phase = phase; s->motion = enabled;
+    // Stopping for a hidden/locked/stale widget never causes a wake-up redraw.
+    // The next otherwise-required draw will use its static appearance.
+    if (!enabled) return;
+    const auto base = lv_color_hex(s->color), white = lv_color_hex(0xFFFFFF);
+    bool changed = old.highlight != next.highlight && !lv_color_eq(base, lv_color_mix(white, base, 24));
+    if (old.pulse != next.pulse && !lv_color_eq(lv_color_mix(white, base, static_cast<uint8_t>(old.pulse)),
+                                              lv_color_mix(white, base, static_cast<uint8_t>(next.pulse)))) changed = true;
+    const int p = detail::min(w / 9, h / 9);
+    if (old.scale != next.scale) {
+        uint16_t occupied = 0;
+        for (auto row : masks[static_cast<int>(s->icon)]) occupied |= row;
+        for (int x = 0; x < 9; ++x)
+            if ((occupied & (1 << (8 - x))) &&
+                detail::projectedX(x, p, old.scale) != detail::projectedX(x, p, next.scale)) changed = true;
+    }
+    if (changed) lv_obj_invalidate(obj);
 }
 void setText(lv_obj_t* obj, const char* text, uint32_t color) {
     auto* s = state(obj, Kind::Text);

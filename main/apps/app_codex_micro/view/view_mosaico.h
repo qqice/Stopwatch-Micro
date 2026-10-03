@@ -38,6 +38,9 @@ private:
     static void modeEvent(lv_event_t* event);
     void refreshQuota(uint32_t now);
     void refreshHistory();
+    void refreshBattery(uint32_t now);
+    void updateAnimations(uint32_t tick);
+    void stopAnimations();
     void updateHistoryHeader(bool force = false);
     void renderHistory();
     void renderSelection();
@@ -52,6 +55,7 @@ private:
     lv_obj_t* _lockBattery = nullptr;
     lv_obj_t* _battery = nullptr;
     lv_obj_t* _batteryIcon = nullptr;
+    lv_obj_t* _batteryCapacity = nullptr;
     lv_obj_t* _wifiIcon = nullptr;
     lv_obj_t* _boltIcon = nullptr;
     lv_obj_t* _clockIcon = nullptr;
@@ -84,6 +88,8 @@ private:
     uint32_t _activity = 0, _refresh = 0, _lockRefreshCount = 0;
     uint32_t _quotaRevision = UINT32_MAX, _historyRevision = UINT32_MAX;
     uint32_t _historyAgeKey = UINT32_MAX;
+    uint32_t _motionEpoch = 0, _motionTick = 0, _batteryReadTick = 0;
+    bool _batterySeen = false, _batteryValid = false, _batteryCharging = false, _capacityKnown = false;
     int _brightness = 80;
 };
 }

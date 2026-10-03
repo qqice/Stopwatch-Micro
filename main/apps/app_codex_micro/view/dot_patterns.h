@@ -6,6 +6,24 @@ namespace mosaico_dot { namespace detail {
 constexpr int patternsMaxTextLength = 32;
 constexpr int min(int a, int b) { return a < b ? a : b; }
 constexpr int max(int a, int b) { return a > b ? a : b; }
+// Integer cosine, linearly interpolated at ten-degree steps; no runtime trig.
+constexpr int flipScale(uint16_t rawPhase) {
+    int phase = rawPhase % 360;
+    const int sign = phase >= 90 && phase <= 270 ? -1 : 1;
+    if (phase > 180) phase = 360 - phase;
+    if (phase > 90) phase = 180 - phase;
+    constexpr int cosine[] = {1000,985,940,866,766,643,500,342,174,0};
+    const int index = phase / 10, fraction = phase % 10;
+    const int value = index == 9 ? 0 : cosine[index] + (cosine[index + 1] - cosine[index]) * fraction / 10;
+    return sign * value;
+}
+constexpr int projectedX(int x, int pitch, int scale) {
+    return 4 * pitch + (x - 4) * pitch * scale / 1000;
+}
+constexpr int pulse(uint16_t phase) {
+    const int p = phase % 180;
+    return (p <= 90 ? p : 180 - p) * 24 / 90;
+}
 struct Layout { int pitch, diameter, width, height, x, y; };
 // Normal numeric percentages retain gaps. Dense detail text may use one-pixel
 // dots; callers should prefer their ordinary text style for long exact values.
@@ -34,6 +52,31 @@ constexpr bool meterLit(int column, int row, Grid g, uint16_t bp, bool known) {
     return known ? column * g.rows + row < filledDots(g.columns * g.rows, bp)
                  : (column + row) % 2 == 0;
 }
+constexpr int highlightColumn(Grid g, uint16_t bp, bool known, uint16_t phase, bool enabled) {
+    const int filled = known ? filledDots(g.columns * g.rows, bp) : 0;
+    const int columns = filled ? (filled + g.rows - 1) / g.rows : 0;
+    return enabled && columns ? (phase % 360) * columns / 360 : -1;
+}
+constexpr bool motionTest() {
+    for (int phase = 0; phase < 360; ++phase) {
+        const int scale = flipScale(static_cast<uint16_t>(phase));
+        if (scale < -1000 || scale > 1000 || pulse(phase) < 0 || pulse(phase) > 24) return false;
+        for (int pitch : {2, 3, 4}) for (int x = 0; x < 9; ++x) {
+            const int pos = projectedX(x, pitch, scale);
+            if (pos < 0 || pos > 8 * pitch) return false;
+        }
+        const auto g = meterLayout(198, 28, 3);
+        for (int bp : {0, 1, 1500, 9999, 10000}) {
+            const int col = highlightColumn(g, bp, true, phase, true);
+            if (bp == 0 && col != -1) return false;
+            if (col >= 0 && !meterLit(col, 0, g, bp, true)) return false;
+            if (highlightColumn(g, bp, false, phase, true) != -1 || highlightColumn(g, bp, true, phase, false) != -1)
+                return false;
+        }
+    }
+    return flipScale(0) == 1000 && flipScale(90) == 0 && flipScale(180) == -1000;
+}
+static_assert(motionTest(), "motion stays within icon bounds and actual meter fill");
 struct Glyph { char key; uint8_t rows[7]; };
 // Original compact five-column glyphs; MSB is the leftmost dot.
 constexpr Glyph glyphs[] = {

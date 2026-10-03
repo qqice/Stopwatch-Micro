@@ -15,7 +15,10 @@ static_assert(SlotWidth >= 60 && Margin + Columns * SlotWidth <= 480 - Margin);
 static_assert(128 + 5 * CellHeight <= 348 && 380 + 80 <= 480 - Margin);
 using namespace mosaico_dot;
 constexpr uint32_t Green = 0x67E7AE, Gray = 0x343A40, Purple = 0x9868CD, Orange = 0xD18C37;
-constexpr uint32_t ResetPurple = 0xB399F7, Gold = 0xE9C46A, Blue = 0x65B6F0;
+constexpr uint32_t ResetPurple = 0xB399F7, Gold = 0xE9C46A, Blue = 0x65B6F0, Cyan = 0x68C9D6;
+uint32_t levelColor(uint16_t bp) {
+    return bp <= 2000 ? 0xE87575 : (bp <= 5000 ? 0xD6B46A : Green);
+}
 void place(lv_obj_t* obj, int x, int y) { if (obj) lv_obj_set_pos(obj, x, y); }
 void panel(lv_obj_t* obj, int x, int y, int w, int h, uint32_t color = 0x15191F) {
     lv_obj_set_pos(obj, x, y); lv_obj_set_size(obj, w, h);
@@ -97,8 +100,8 @@ void CodexMicroView::init(lv_obj_t* parent) {
             const int x = 14 + j * 212;
             _windowBars[i][j] = createMeter(_cards[i], 198, 24, 3); place(_windowBars[i][j], x, 110);
             _quotaIcons[i][j] = createIcon(_cards[i], Icon::Quota, 28, Green); place(_quotaIcons[i][j], x, 62);
-            _hourglassIcons[i][j] = createIcon(_cards[i], Icon::Hourglass, 28, Gold); place(_hourglassIcons[i][j], x, 174);
-            _resetTimes[i][j] = createText(_cards[i], 160, 56, 4, Gold); place(_resetTimes[i][j], x + 38, 160);
+            _hourglassIcons[i][j] = createIcon(_cards[i], Icon::Hourglass, 28, Cyan); place(_hourglassIcons[i][j], x, 174);
+            _resetTimes[i][j] = createText(_cards[i], 160, 56, 4, Cyan); place(_resetTimes[i][j], x + 38, 160);
             _resetBars[i][j] = createMeter(_cards[i], 198, 24, 3); place(_resetBars[i][j], x, 222);
         }
         _creditIcons[i] = createIcon(_cards[i], Icon::Coin, 28, Gold); place(_creditIcons[i], 14, 278);
@@ -111,6 +114,9 @@ void CodexMicroView::init(lv_obj_t* parent) {
     }
     _clockIcon = createIcon(_root, Icon::Clock, 20, Gray); place(_clockIcon, 20, 440);
     _footer = createText(_root, 180, 22, 3); place(_footer, 44, 438);
+    _batteryCapacity = label(_root, 220, 440, 240, "", &lv_font_montserrat_14);
+    lv_obj_set_height(_batteryCapacity, 18); lv_label_set_long_mode(_batteryCapacity, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_style_text_align(_batteryCapacity, LV_TEXT_ALIGN_RIGHT, 0);
     _bucketCount = label(_root, 290, 440, 170, "", &lv_font_montserrat_14);
     lv_obj_set_style_text_align(_bucketCount, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN);
@@ -179,7 +185,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
         for (size_t j = 0; j < 2; ++j) widgetsReady = widgetsReady && _windowBars[i][j] && _quotaIcons[i][j] && _hourglassIcons[i][j] && _resetTimes[i][j] && _resetBars[i][j];
     }
     if (!widgetsReady) { lv_obj_delete(_root); _root = nullptr; return; }
-    _activity = lv_tick_get(); _refresh = _activity; refreshQuota(GetHAL().millis()); refreshHistory();
+    _activity = lv_tick_get(); _motionEpoch = _activity; _refresh = _activity; refreshQuota(GetHAL().millis()); refreshHistory();
 }
 void CodexMicroView::touchEvent(lv_event_t* e) {
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(e));
@@ -205,6 +211,67 @@ void CodexMicroView::modeEvent(lv_event_t* e) {
     auto* hit = static_cast<Hit*>(lv_event_get_user_data(e));
     if (!hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_wakeGesture) hit->owner->showHistory(hit->index == 1);
 }
+void CodexMicroView::refreshBattery(uint32_t now) {
+    const auto telemetry = GetHAL().batteryTelemetry(false);
+    _batteryReadTick = now; _batterySeen = true; _batteryValid = telemetry.valid;
+    _batteryCharging = telemetry.valid && telemetry.currentMa > 3 && GetHAL().isBatteryCharging();
+    _capacityKnown = telemetry.valid && telemetry.capacityValid && telemetry.nominalConfigured;
+    char text[80];
+    if (telemetry.valid) std::snprintf(text, sizeof(text), "%u%%%s", static_cast<unsigned>(telemetry.reportedSoc), telemetry.nominalConfigured ? "" : "?");
+    else std::snprintf(text, sizeof(text), "?");
+    const uint32_t color = telemetry.valid ? levelColor(static_cast<uint16_t>(telemetry.reportedSoc) * 100) : Gray;
+    if (_locked) {
+        lv_label_set_text(_lockBattery, text);
+        lv_obj_set_style_text_color(_lockBattery, lv_color_hex(color), 0);
+        setIcon(_lockBatteryIcon, Icon::Battery, color, telemetry.reportedSoc, telemetry.valid);
+    } else {
+        lv_label_set_text(_battery, text);
+        lv_obj_set_style_text_color(_battery, lv_color_hex(color), 0);
+        setIcon(_batteryIcon, Icon::Battery, color, telemetry.reportedSoc, telemetry.valid);
+        if (_batteryCharging) lv_obj_remove_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
+        if (_capacityKnown && _page == Page::Command && !_quota->truncated) {
+            std::snprintf(text, sizeof(text), "%u/%u mAh", static_cast<unsigned>(telemetry.remainingMah), static_cast<unsigned>(telemetry.fullMah));
+            lv_label_set_text(_batteryCapacity, text); lv_obj_remove_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN);
+        } else lv_obj_add_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN);
+    }
+
+}
+void CodexMicroView::stopAnimations() {
+    setMotion(_batteryIcon, 0, false);
+    for (auto* icon : _resetIcons) setMotion(icon, 0, false);
+    for (size_t i = 0; i < _cards.size(); ++i) {
+        setMotion(_creditIcons[i], 0, false);
+        for (size_t j = 0; j < 2; ++j) { setMotion(_windowBars[i][j], 0, false); setMotion(_resetBars[i][j], 0, false); }
+    }
+}
+void CodexMicroView::updateAnimations(uint32_t tick) {
+    if (_locked) return;
+    if (tick - _motionTick < 250) return;
+    _motionTick = tick;
+    const uint16_t phase = static_cast<uint16_t>(((tick - _motionEpoch) % 40000U) * 360U / 40000U);
+    setMotion(_batteryIcon, phase, _batteryValid && _batteryCharging);
+    const uint32_t now = GetHAL().millis();
+    const uint64_t age = static_cast<uint64_t>(_quota->ageSecondsAtReceipt) + (now - _quota->receivedAtMs) / 1000U;
+    const bool quotaActive = _page == Page::Command && _quotaRevision != UINT32_MAX && _quota->available && !_quota->stale && age <= 130 && GetNetworkQuota().connected();
+    for (size_t i = 0; i < _resetIcons.size(); ++i) {
+        const bool active = quotaActive && _quota->resetCreditsKnown && _quota->resetCredits && !lv_obj_has_flag(_resetIcons[i], LV_OBJ_FLAG_HIDDEN);
+        setMotion(_resetIcons[i], phase, active);
+    }
+    const int scrollY = lv_obj_get_scroll_y(_quotaPage);
+    const uint64_t epoch = static_cast<uint64_t>(_quota->capturedEpoch) + age;
+    for (size_t i = 0; i < _cards.size(); ++i) {
+        const int top = lv_obj_get_y(_cards[i]) - scrollY;
+        const bool visible = quotaActive && i < _quota->bucketCount && !lv_obj_has_flag(_cards[i], LV_OBJ_FLAG_HIDDEN) && top < 370 && top + 350 > 0;
+        const auto& bucket = _quota->buckets[i];
+        setMotion(_creditIcons[i], phase, visible && top + 278 < 370 && top + 306 > 0 && bucket.creditsKnown && !lv_obj_has_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN));
+        for (size_t j = 0; j < 2; ++j) {
+            const auto& window = bucket.windows[j];
+            setMotion(_windowBars[i][j], phase, visible && top + 110 < 370 && top + 134 > 0 && window.available && window.remainingBasisPoints > 0);
+            const bool knownTime = window.available && window.resetEpoch && _quota->capturedEpoch && window.durationMinutes && window.resetEpoch > epoch;
+            setMotion(_resetBars[i][j], phase, visible && top + 222 < 370 && top + 246 > 0 && knownTime);
+        }
+    }
+}
 void CodexMicroView::refreshQuota(uint32_t now) {
     if (CopyQuotaMonitor(*_quota, now)) {
         _quotaRevision = _quota->revision;
@@ -216,14 +283,7 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         _quota->available = age <= 600;
     }
     char buf[128];
-    const auto battery = GetHAL().getBatteryLevel();
-    const bool batteryValid = GetHAL().isBatteryLevelValid();
-    if (batteryValid) std::snprintf(buf, sizeof(buf), "~%u%%", battery); else std::snprintf(buf, sizeof(buf), "?");
-    lv_label_set_text(_battery, buf); lv_label_set_text(_lockBattery, buf);
-    setIcon(_batteryIcon, Icon::Battery, batteryValid ? Green : Gray, battery, batteryValid);
-    setIcon(_lockBatteryIcon, Icon::Battery, batteryValid ? Green : Gray, battery, batteryValid);
-    if (batteryValid && GetHAL().isBatteryCharging()) lv_obj_remove_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
+    if (!_batterySeen || _locked || now - _batteryReadTick >= 5000) refreshBattery(now);
     const bool online = GetNetworkQuota().connected();
     setIcon(_wifiIcon, online ? Icon::Wifi : Icon::WifiOff, online ? Blue : Orange);
     const unsigned cards = _quota->resetCreditsKnown ? std::min<unsigned>(3, _quota->resetCredits) : 1;
@@ -269,10 +329,11 @@ void CodexMicroView::refreshQuota(uint32_t now) {
             const int textWidth = width - textOffset;
             const int pitch = validWindows == 1 ? 8 : 4;
             place(_quotaIcons[i][j], x, 62); lv_obj_set_size(_quotaIcons[i][j], iconSize, iconSize);
-            setIcon(_quotaIcons[i][j], Icon::Quota, Green);
+            const uint32_t quotaColor = _quota->stale ? Gray : levelColor(w.remainingBasisPoints);
+            setIcon(_quotaIcons[i][j], Icon::Quota, quotaColor);
             place(value, x + textOffset, 48); lv_obj_set_width(value, textWidth); setTextPitch(value, pitch);
-            percent(w.remainingBasisPoints, buf, sizeof(buf)); setText(value, buf, Green);
-            place(_windowBars[i][j], x, 110); lv_obj_set_width(_windowBars[i][j], width); setMeter(_windowBars[i][j], w.remainingBasisPoints, true, Green);
+            percent(w.remainingBasisPoints, buf, sizeof(buf)); setText(value, buf, quotaColor);
+            place(_windowBars[i][j], x, 110); lv_obj_set_width(_windowBars[i][j], width); setMeter(_windowBars[i][j], w.remainingBasisPoints, true, quotaColor);
             place(_hourglassIcons[i][j], x, 174); lv_obj_set_size(_hourglassIcons[i][j], iconSize, iconSize);
             place(_resetTimes[i][j], x + textOffset, 160); lv_obj_set_width(_resetTimes[i][j], textWidth); setTextPitch(_resetTimes[i][j], pitch);
             const bool resetKnown = w.resetEpoch && _quota->capturedEpoch;
@@ -283,12 +344,12 @@ void CodexMicroView::refreshQuota(uint32_t now) {
                 else if (minutes >= 60) std::snprintf(buf, sizeof(buf), "%lluh%llum", static_cast<unsigned long long>(minutes / 60), static_cast<unsigned long long>(minutes % 60));
                 else std::snprintf(buf, sizeof(buf), "%llum", static_cast<unsigned long long>(minutes));
             }
-            setText(_resetTimes[i][j], buf, resetKnown ? Gold : Gray);
-            setIcon(_hourglassIcons[i][j], Icon::Hourglass, resetKnown ? Gold : Gray);
+            setText(_resetTimes[i][j], buf, resetKnown ? Cyan : Gray);
+            setIcon(_hourglassIcons[i][j], Icon::Hourglass, resetKnown ? Cyan : Gray);
             place(_resetBars[i][j], x, 222); lv_obj_set_width(_resetBars[i][j], width);
             const uint64_t durationSeconds = static_cast<uint64_t>(w.durationMinutes) * 60;
             const uint16_t timeBp = durationSeconds ? static_cast<uint16_t>(std::min<uint64_t>(10000, seconds * 10000 / durationSeconds)) : 0;
-            setMeter(_resetBars[i][j], timeBp, resetKnown && durationSeconds, Gold);
+            setMeter(_resetBars[i][j], timeBp, resetKnown && durationSeconds, Cyan);
         }
         if (bucket.creditsKnown) {
             lv_obj_remove_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN);
@@ -297,6 +358,8 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         } else { lv_obj_add_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN); }
         lv_label_set_text(_cardMeta[i], bucket.reached);
     }
+    if (_capacityKnown && _page == Page::Command && !_quota->truncated) lv_obj_remove_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN);
     const bool haveSnapshot = _quotaRevision != UINT32_MAX;
     setIcon(_clockIcon, Icon::Clock, _quota->stale ? Orange : Gray);
     if (haveSnapshot) std::snprintf(buf, sizeof(buf), "%um", static_cast<unsigned>(_quota->ageSeconds / 60)); else std::snprintf(buf, sizeof(buf), "?");
@@ -315,7 +378,9 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         if (a[0] && z[0]) std::snprintf(lockText, sizeof(lockText), "%s %s", a, z);
         else if (a[0] || z[0]) std::snprintf(lockText, sizeof(lockText), "%s", a[0] ? a : z);
     }
-    setText(_lockQuota, lockText);
+    const auto& firstWindow = _quota->buckets[0].windows;
+    const uint16_t lockBp = firstWindow[0].available ? firstWindow[0].remainingBasisPoints : firstWindow[1].remainingBasisPoints;
+    setText(_lockQuota, lockText, _quota->available && !_quota->stale ? levelColor(lockBp) : Gray);
 
 }
 void CodexMicroView::refreshHistory() {
@@ -413,6 +478,8 @@ bool CodexMicroView::showHistory(bool hourly) {
 }
 bool CodexMicroView::setPageForDebug(Page page) {
     if (!ready() || page == Page::Agent) return false;
+    if (page != Page::Command) { stopAnimations(); lv_obj_add_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN); }
+    else if (_capacityKnown && !_quota->truncated) lv_obj_remove_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN);
     _page = page; _activity = lv_tick_get();
     if (page == Page::Command) { lv_obj_remove_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); }
     else { refreshHistory(); lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN); }
@@ -433,6 +500,7 @@ void CodexMicroView::wakeDisplay() {
 }
 void CodexMicroView::lockDisplay() {
     if (_locked || !ready()) return;
+    stopAnimations();
     _locked = true; GetNetworkQuota().setLocked(true);
     lv_obj_remove_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_lockPanel);
     lv_obj_remove_flag(_overlay, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_overlay);
@@ -459,5 +527,7 @@ void CodexMicroView::update(const CodexMicroState&) {
         if (_quotaRevision != QuotaMonitorRevision()) refreshQuota(GetHAL().millis());
         if (_page == Page::History) refreshHistory();
     }
+    if (!_locked && GetHAL().millis() - _batteryReadTick >= 5000) refreshBattery(GetHAL().millis());
+    updateAnimations(tick);
 }
 }

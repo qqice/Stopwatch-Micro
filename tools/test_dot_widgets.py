@@ -78,6 +78,36 @@ class DotWidgetsTests(unittest.TestCase):
                 self.assertTrue(any((col + row) % 2 == 0
                                     for col in range(columns) for row in range(rows)))
 
+    def test_motion_reference_and_source_bounds(self):
+        # Supplementary reference using the actual source cosine table; C++
+        # motionTest static_assert exercises actual functions in the syntax test.
+        table = list(map(int, re.search(r"cosine\[\] = \{([\d,]+)\}", HEADER).group(1).split(",")))
+        self.assertEqual(len(table), 10)
+        for phase in range(360):
+            sign = -1 if 90 <= phase <= 270 else 1
+            folded = 360 - phase if phase > 180 else phase
+            folded = 180 - folded if folded > 90 else folded
+            index, fraction = divmod(folded, 10)
+            scale = 0 if index == 9 else sign * (table[index] + int((table[index + 1] - table[index]) * fraction / 10))
+            self.assertLessEqual(abs(scale), 1000)
+            for pitch in (2, 3, 4):
+                for x in range(9):
+                    projected = 4 * pitch + int((x - 4) * pitch * scale / 1000)
+                    self.assertTrue(0 <= projected <= 8 * pitch)
+            for rows in range(1, 5):
+                total = rows * (200 // rows)
+                for bp in (0, 1, 1500, 9999, 10000):
+                    filled = (total * bp + 5000) // 10000
+                    columns = (filled + rows - 1) // rows if filled else 0
+                    highlight = phase * columns // 360 if columns else -1
+                    # Color-only overlay has no dots outside the actual fill.
+                    highlighted = [i for i in range(filled) if i // rows == highlight]
+                    self.assertTrue(all(i < filled for i in highlighted))
+                    self.assertEqual(len(range(filled)), filled)
+                    if not filled:
+                        self.assertEqual(highlight, -1)
+        self.assertNotRegex(SOURCE, r"\blv_(timer_create|anim_start|obj_create)\s*\(.*(?:phase|motion)")
+
     def test_actual_cpp_syntax_and_static_assert(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
         if not compiler:
