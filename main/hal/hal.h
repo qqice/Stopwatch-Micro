@@ -22,6 +22,8 @@ using i2c_bus_handle_t = i2c_master_bus_handle_t;
 #include <string_view>
 #include <array>
 #include <vector>
+#include <cstddef>
+#include <cstdio>
 /** Startup screen shown while the system UI is being created. */
 class BootLogo {
 public:
@@ -105,6 +107,60 @@ public:
     bool isBatteryLevelValid() const { return pmic_ready(); }
 #endif
     bool isBatteryCharging(bool strict = false);
+
+    /** Raw standard BQ27220 measurements; no virtual-capacity scaling.
+     * nominalConfigured is a consistency check, not capacity calibration or
+     * evidence that a qualified discharge/FCC learning cycle has occurred. */
+    struct BatteryTelemetry {
+        bool valid = false;
+        bool capacityValid = false;
+        bool nominalConfigured = false;
+        uint8_t reportedSoc = 0;
+        uint16_t voltageMv = 0;
+        int16_t currentMa = 0;
+        int16_t averageCurrentMa = 0;
+        uint16_t remainingMah = 0;
+        uint16_t fullMah = 0;
+        uint16_t designMah = 0;
+        uint16_t operationStatus = 0;
+        uint16_t batteryStatus = 0;
+        uint16_t stateOfHealth = 0;
+        uint16_t cycleCount = 0;
+    };
+
+    struct MosaicoClockDiagnostics {
+        uint32_t cpuHz = 0;
+        uint32_t sysHz = 0;
+        uint32_t apbHz = 0;
+        uint32_t memBusDerivedHz = 0; // CPU/MEM divider, NOT physical PSRAM clock.
+        int32_t clockErrors[3] = {-1, -1, -1}; // CPU/SYS/APB esp_err_t values.
+        bool directDmaTrue = false;
+    };
+#ifdef MOSAICO_BOARD
+    BatteryTelemetry batteryTelemetry(bool refresh = false);
+    // Explicit RAM nominal setup/restore only. For APPLY expectedOld must match
+    // current standard + DM design capacity. For RESTORE it must match current
+    // authenticated DM_DC, since standard mirrors may lag during interrupted
+    // CFGUPDATE; mismatch reason reports observed DM_DC and standard DC.
+    // true is NOT learned FCC/cell calibration. reason uses blocked_/critical_ IDs.
+    bool gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool restore,
+                                 char* reason, size_t reasonSize);
+    // Pure safety-model checks; no I2C/NVS writes or hardware operations.
+    bool gaugeSafetySelfTest() const;
+    MosaicoClockDiagnostics displayClockDiagnostics() const;
+    // Caller must exclude concurrent flash/NVS operations (esp_cache_msync rule).
+    bool displayRamProbe(uint32_t& errors);
+#else
+    BatteryTelemetry batteryTelemetry(bool = false) { return {}; }
+    bool gaugeSetNominalCapacity(uint16_t, uint16_t, bool, char* reason, size_t reasonSize)
+    {
+        if (reason && reasonSize) std::snprintf(reason, reasonSize, "unsupported: not Mosaico");
+        return false;
+    }
+    MosaicoClockDiagnostics displayClockDiagnostics() const { return {}; }
+    bool gaugeSafetySelfTest() const { return false; }
+    bool displayRamProbe(uint32_t& errors) { errors = 0; return false; }
+#endif
 
     /* --------------------------------- Display -------------------------------- */
     void setBackLightBrightness(int brightness, bool saveToSettings = false);

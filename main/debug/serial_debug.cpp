@@ -242,6 +242,82 @@ void SerialDebug::handleLine(char* line)
         return;
     }
 #ifdef MOSAICO_BOARD
+    if (std::strcmp(command, "display-clocks") == 0) {
+        const auto clocks = GetHAL().displayClockDiagnostics();
+        char details[260]{};
+        std::snprintf(details, sizeof(details),
+            "cpu_hz=%lu sys_hz=%lu apb_hz=%lu mem_bus_hz_derived=%lu direct_psram_dma=%d spi_config_hz=40000000 diagnostic_low_clock=%d errors=%ld,%ld,%ld",
+            static_cast<unsigned long>(clocks.cpuHz), static_cast<unsigned long>(clocks.sysHz),
+            static_cast<unsigned long>(clocks.apbHz), static_cast<unsigned long>(clocks.memBusDerivedHz),
+            clocks.directDmaTrue, GetNetworkQuota().lowClockDiagnosticEnabled(),
+            static_cast<long>(clocks.clockErrors[0]), static_cast<long>(clocks.clockErrors[1]),
+            static_cast<long>(clocks.clockErrors[2]));
+        result("display-clocks", clocks.cpuHz && !clocks.clockErrors[0] && !clocks.clockErrors[1] && !clocks.clockErrors[2] ? "PASS" : "FAIL", details);
+        return;
+    }
+    if (std::strcmp(command, "display-ram-probe") == 0) {
+        const auto power = GetNetworkQuota().powerStats();
+        if (!power.locked || power.phase != 2 || power.wifiRunning) {
+            result("display-ram-probe", "SKIP", "reason=requires_locked_radio_off_no_flash_writers");
+            return;
+        }
+        uint32_t errors = 0;
+        const bool ok = GetHAL().displayRamProbe(errors);
+        char details[100]{};
+        std::snprintf(details, sizeof(details), "independent_psram_bytes=4096 mismatches=%lu live_buffer_touched=0",
+                      static_cast<unsigned long>(errors));
+        result("display-ram-probe", ok ? "PASS" : "FAIL", details);
+        return;
+    }
+    if (std::strcmp(command, "display-low-clock") == 0) {
+        const char* mode = ::strtok_r(nullptr, " \t", &save);
+        if (!mode || (std::strcmp(mode, "on") && std::strcmp(mode, "off")) || ::strtok_r(nullptr, " \t", &save)) {
+            result("display-low-clock", "FAIL", "expected=on_or_off explicit_test_only=1");
+            return;
+        }
+        GetNetworkQuota().setLowClockDiagnostic(!std::strcmp(mode, "on"));
+        result("display-low-clock", "PASS", "ram_only=1 reset_restores_guard=1 applied_by_network_owner=1");
+        return;
+    }
+    if (std::strcmp(command, "gauge") == 0) {
+        const auto battery = GetHAL().batteryTelemetry(true);
+        char details[260]{};
+        std::snprintf(details, sizeof(details),
+            "valid=%d soc=%u mv=%u current_ma=%d avg_ma=%d rm_mah=%u fcc_mah=%u design_mah=%u capacity_valid=%d nominal_consistent=%d op_status=%04x battery_status=%04x soh=%u cycles=%u",
+            battery.valid, battery.reportedSoc, battery.voltageMv, battery.currentMa,
+            battery.averageCurrentMa, battery.remainingMah, battery.fullMah, battery.designMah,
+            battery.capacityValid, battery.nominalConfigured, battery.operationStatus, battery.batteryStatus,
+            battery.stateOfHealth, battery.cycleCount);
+        result("gauge", battery.valid ? "PASS" : "FAIL", details);
+        return;
+    }
+    if (std::strcmp(command, "gauge-selftest") == 0) {
+        result("gauge-selftest", GetHAL().gaugeSafetySelfTest() ? "PASS" : "FAIL",
+               "nominal_only=1 mac_crc_journal_unit_binding=1 quiet_temperature_guards=1 no_device_writes=1");
+        return;
+    }
+    if (std::strcmp(command, "gauge-nominal") == 0) {
+        const char* mode = ::strtok_r(nullptr, " \t", &save);
+        uint32_t expected = 0;
+        const char* old = ::strtok_r(nullptr, " \t", &save);
+        if (!mode || (std::strcmp(mode, "apply") && std::strcmp(mode, "restore")) ||
+            !parseUnsignedStrict(old, 1, 32767, expected) || ::strtok_r(nullptr, " \t", &save)) {
+            result("gauge-nominal", "FAIL", "expected=apply_or_restore_and_expected_current_design nominal_only_not_learned_calibration=1");
+            return;
+        }
+        char reason[160]{};
+        const auto power = GetNetworkQuota().powerStats();
+        if (!power.locked || power.phase != 2 || power.wifiRunning) {
+            result("gauge-nominal", "SKIP", "requires_locked_radio_off=1 no_changes=1");
+            return;
+        }
+        const bool ok = GetHAL().gaugeSetNominalCapacity(static_cast<uint16_t>(expected), 65,
+                          !std::strcmp(mode, "restore"), reason, sizeof(reason));
+        // Only precondition refusals are SKIP. A transaction/rollback/exit
+        // failure must never masquerade as a harmless no-write refusal.
+        result("gauge-nominal", ok ? "PASS" : (!std::strncmp(reason, "blocked_", 8) ? "SKIP" : "FAIL"), reason);
+        return;
+    }
     if (std::strcmp(command, "dot-selftest") == 0) {
         result("dot-selftest", mosaico_dot::selfTest() ? "PASS" : "FAIL",
                "layout_font_meter_bounds=1 known_unknown_distinct=1 endpoints_monotonic=1");

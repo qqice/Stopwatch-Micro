@@ -25,6 +25,12 @@ public:
     void setPowerProfile(uint8_t profile);
     void refreshWhileLocked();
     IdlePowerStats powerStats() const;
+#ifdef MOSAICO_BOARD
+    // Explicit serial diagnostics only; RAM state resets to the protective
+    // fixed-frequency default on every boot. Never persist this in NVS.
+    void setLowClockDiagnostic(bool enabled);
+    bool lowClockDiagnosticEnabled() const { return _diagnostic_low_clock.load(); }
+#endif
     bool configured() const
     {
         return _configured;
@@ -63,6 +69,9 @@ private:
     TaskHandle_t _task_handle = nullptr;
     std::atomic<bool> _locked{false}, _wifi_running{false}, _force_refresh{false};
     std::atomic<uint8_t> _power_profile{2}, _power_phase{0};
+#ifdef MOSAICO_BOARD
+    std::atomic<bool> _diagnostic_low_clock{false};
+#endif
     std::atomic<uint32_t> _power_cycles{0};
     std::atomic<int> _clock_error{0};
     uint32_t _cpu_target       = 0;

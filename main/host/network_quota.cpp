@@ -78,6 +78,12 @@ void NetworkQuota::wait(uint32_t milliseconds)
 }
 void NetworkQuota::setCpu(uint32_t mhz)
 {
+#ifdef MOSAICO_BOARD
+    // Repeated corruption is correlated with the 80MHz standby/transition
+    // configuration. Keep CPU/SYS/MEM clock domains stable as a conservative
+    // guard, NOT a proven display root-cause fix. Radio duty cycling is retained.
+    if (!_diagnostic_low_clock.load()) mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+#endif
     if (_cpu_target == mhz) return;
     esp_pm_config_t config{};
     config.max_freq_mhz       = mhz;
@@ -87,6 +93,15 @@ void NetworkQuota::setCpu(uint32_t mhz)
     _clock_error              = result;
     if (result == ESP_OK) _cpu_target = mhz;
 }
+#ifdef MOSAICO_BOARD
+void NetworkQuota::setLowClockDiagnostic(bool enabled)
+{
+    _diagnostic_low_clock = enabled;
+    ESP_LOGW("DisplayClock", "diagnostic_low_clock=%d protection=%s", enabled,
+             enabled ? "DISABLED_BY_EXPLICIT_TEST" : "fixed-default-frequency");
+    if (_task_handle) xTaskNotifyGive(_task_handle);
+}
+#endif
 void NetworkQuota::recordWifiRunning(bool running)
 {
     const uint64_t now = esp_timer_get_time();
