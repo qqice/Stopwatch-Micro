@@ -22,8 +22,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
-from stopwatch_bridge import AppServerClient, BridgeError, UsageSnapshot, locate_codex
+from stopwatch_bridge import AppServerClient, BridgeError, UsageSnapshot, locate_codex, normalize_rate_limits
 from history_store import HistoryStore, unavailable_response
+from quota_dashboard import DashboardStore, normalize_quota_dashboard
 
 
 POLL_SECONDS = 60.0
@@ -143,10 +144,11 @@ class SnapshotStore:
 class QuotaCollector:
     """Poll App Server independently from HTTP clients and retain only quota data."""
 
-    def __init__(self, client_factory: Callable[[], AppServerClient], store: SnapshotStore, history: HistoryStore) -> None:
+    def __init__(self, client_factory: Callable[[], AppServerClient], store: SnapshotStore, history: HistoryStore, dashboard: DashboardStore | None = None) -> None:
         self._client_factory = client_factory
         self._store = store
         self._history = history
+        self._dashboard = dashboard if dashboard is not None else DashboardStore()
         self._client: AppServerClient | None = None
 
     def poll_once(self) -> None:
@@ -155,7 +157,14 @@ class QuotaCollector:
             self._client.start()
         quota_error = None
         try:
-            self._store.save(self._client.read_usage())
+            raw = self._client._request("account/rateLimits/read")
+            captured = int(time.time())
+            # A v2 projection failure cannot affect canonical v1 collection.
+            try:
+                self._dashboard.save(normalize_quota_dashboard(raw, captured))
+            except (ValueError, TypeError, OverflowError):
+                print("QUOTA DASHBOARD ERROR invalid quota metadata", file=sys.stderr)
+            self._store.save(normalize_rate_limits(raw, captured_epoch=captured))
         except BridgeError as exc:
             quota_error = exc
         try:
@@ -194,7 +203,8 @@ def is_authorized(authorization: str, device_token: str) -> bool:
     return hmac.compare_digest(supplied, f"Bearer {device_token}".encode("ascii"))
 
 
-def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore | None = None) -> type[BaseHTTPRequestHandler]:
+def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore | None = None, dashboard: DashboardStore | None = None) -> type[BaseHTTPRequestHandler]:
+    dashboard = dashboard if dashboard is not None else DashboardStore()
     class QuotaHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -207,7 +217,7 @@ def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore 
             return
 
         def do_GET(self) -> None:  # noqa: N802 - required BaseHTTPRequestHandler name
-            if self.path not in {"/v1/status", "/v1/history"}:
+            if self.path not in {"/v1/status", "/v1/history", "/v2/status"}:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             authorization = self.headers.get("Authorization", "")
@@ -217,10 +227,12 @@ def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore 
             if self.path == "/v1/history":
                 body = history.response() if history is not None else unavailable_response(int(time.time()))
                 available = True
+            elif self.path == "/v2/status":
+                body, available = dashboard.status()
             else:
                 body, available = store.status()
-            payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
-            if len(payload) > 32768:
+            payload = json.dumps(body, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            if len(payload) > (8192 if self.path == "/v2/status" else 32768):
                 self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
             self.send_response(HTTPStatus.OK if available else HTTPStatus.SERVICE_UNAVAILABLE)
@@ -252,7 +264,7 @@ def run(args: argparse.Namespace) -> int:
         stop = threading.Event()
         worker = threading.Thread(target=run_collector, args=(collector, stop), daemon=True)
         for host in (config.server_host,)+config.additional_hosts:
-            servers.append(ThreadingHTTPServer((host, config.server_port), make_handler(collector._store, config.device_token, history)))
+            servers.append(ThreadingHTTPServer((host, config.server_port), make_handler(collector._store, config.device_token, history, collector._dashboard)))
     except (BridgeError, OSError) as exc:
         for server in servers: server.server_close()
         print(f"QUOTA SERVICE ERROR {exc}", file=sys.stderr)

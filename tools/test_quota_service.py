@@ -8,6 +8,7 @@ import sys
 import threading
 import unittest
 import tempfile
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -17,6 +18,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 import quota_service  # noqa: E402
 from history_store import HistoryStore  # noqa: E402
+from quota_dashboard import DashboardStore, normalize_quota_dashboard  # noqa: E402
 from stopwatch_bridge import UsageSnapshot, normalize_rate_limits  # noqa: E402
 
 
@@ -24,6 +26,7 @@ class FakeClient:
     def __init__(self, snapshot: UsageSnapshot) -> None:
         self.snapshot = snapshot
         self.started = False
+        self.methods = []
 
     def start(self) -> None:
         self.started = True
@@ -33,6 +36,12 @@ class FakeClient:
 
     def _request(self, method: str) -> dict[str, object]:
         self.assert_method = method
+        self.methods.append(method)
+        if method == "account/rateLimits/read":
+            return {"rateLimitsByLimitId": {"codex": {"primary": {
+                "usedPercent": 100 - self.snapshot.remaining_basis_points / 100,
+                "windowDurationMins": 300, "resetsAt": self.snapshot.reset_epoch}}},
+                "rateLimitResetCredits": {"availableCount": self.snapshot.reset_credits}}
         return {"summary": {"lifetimeTokens": 1}, "dailyUsageBuckets": []}
 
     def close(self) -> None:
@@ -59,9 +68,11 @@ class QuotaServiceTests(unittest.TestCase):
             wall_now=lambda: self.wall_now,
             monotonic_now=lambda: self.monotonic_now,
         )
+        self.dashboard = DashboardStore(wall_now=lambda: self.wall_now,
+                                        monotonic_now=lambda: self.monotonic_now)
         self.history_dir = tempfile.TemporaryDirectory()
         self.history = HistoryStore(Path(self.history_dir.name) / "history.sqlite3", now=lambda: self.wall_now)
-        self.server = quota_service.ThreadingHTTPServer(("127.0.0.1", 0), quota_service.make_handler(self.store, self.token, self.history))
+        self.server = quota_service.ThreadingHTTPServer(("127.0.0.1", 0), quota_service.make_handler(self.store, self.token, self.history, self.dashboard))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_port}/v1/status"
@@ -133,7 +144,9 @@ class QuotaServiceTests(unittest.TestCase):
 
     def test_failed_quota_does_not_skip_official_history(self):
         class FailedQuota(FakeClient):
-            def read_usage(self):
+            def _request(self, method):
+                if method == "account/usage/read":
+                    return super()._request(method)
                 raise quota_service.BridgeError('quota unavailable')
         client = FailedQuota(None)
         collector = quota_service.QuotaCollector(lambda: client, self.store, self.history)
@@ -146,13 +159,55 @@ class QuotaServiceTests(unittest.TestCase):
         self.history.record_usage({'summary': {'lifetimeTokens': 10}}, 1999)
         class FailedHistory(FakeClient):
             def _request(self, method):
-                raise quota_service.BridgeError('history unavailable')
+                if method == 'account/usage/read':
+                    raise quota_service.BridgeError('history unavailable')
+                return super()._request(method)
         client = FailedHistory(UsageSnapshot(9000, 3000, 1999, 0))
         collector = quota_service.QuotaCollector(lambda: client, self.store, self.history)
         collector.poll_once()
         self.assertEqual(self.history.response()['captured_epoch'], 1999)
         self.assertIsNone(collector._client)
         self.assertEqual(self.request(self.token)[0], 200)
+
+    def test_v2_http_auth_aging_and_get_only(self):
+        url = self.url.replace("/v1/status", "/v2/status")
+        self.assertEqual(self.request(path=url)[0], 401)
+        self.assertEqual(self.request(self.token, url)[0], 503)
+        self.assertEqual(self.request(self.token, url + "?x=1")[0], 404)
+        self.dashboard.save(normalize_quota_dashboard({"rateLimits": {"limitId": "codex"}}, 2000))
+        code, body = self.request(self.token, url)
+        self.assertEqual((code, body["version"]), (200, 2))
+        self.monotonic_now += 121
+        self.wall_now -= 1000
+        code, body = self.request(self.token, url)
+        self.assertEqual((code, body["age_seconds"]), (503, 121))
+        request = urllib.request.Request(url, method="POST", headers={"Authorization": f"Bearer {self.token}"})
+        with self.assertRaises(urllib.error.HTTPError) as result:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(result.exception.code, 501)
+
+    def test_v2_survives_legacy_normalizer_failure_and_single_read(self):
+        class OtherBucket(FakeClient):
+            def _request(self, method):
+                if method == "account/rateLimits/read":
+                    self.methods.append(method)
+                    return {"rateLimitsByLimitId": {"review": {"limitId": "review"}}}
+                return super()._request(method)
+        client = OtherBucket(None)
+        collector = quota_service.QuotaCollector(lambda: client, self.store, self.history, self.dashboard)
+        with self.assertRaises(quota_service.BridgeError):
+            collector.poll_once()
+        self.assertEqual(client.methods, ["account/rateLimits/read", "account/usage/read"])
+        self.assertEqual(self.dashboard.status()[0]["buckets"][0]["id"], "review")
+        self.assertTrue(self.history.response()["available"])
+
+    def test_v2_failure_does_not_change_v1(self):
+        client = FakeClient(UsageSnapshot(9000, 3000, 1999, 0))
+        collector = quota_service.QuotaCollector(lambda: client, self.store, self.history, self.dashboard)
+        with patch.object(quota_service, "normalize_quota_dashboard", side_effect=ValueError("bad")):
+            collector.poll_once()
+        self.assertEqual(self.store.status()[0]["remaining_bp"], 9000)
+        self.assertFalse(self.dashboard.status()[1])
 
     def test_rate_limit_parser_preserves_canonical_codex_window(self) -> None:
         snapshot = normalize_rate_limits(
