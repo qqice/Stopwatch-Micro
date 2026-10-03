@@ -42,6 +42,62 @@ server on8765. A one-time Mac ping was used as a diagnosis only; no background
 reverse-activation or periodic ping is installed. Device-initiated requests and
 radio-off/reconnect tests are the acceptance criteria after ACL updates.
 
+## Standby display investigation and guard
+
+The owner's later photograph showed horizontal corruption in the lock-screen
+percentage/battery dirty regions, while most black background remained intact.
+The pre-update serial sample showed about 35 minutes radio-off standby at 80MHz,
+five successful refresh cycles, continued once-per-minute redraws and no new
+reset or heap-integrity failure. This is not proof of a physical row-scan defect.
+Candidate stages remain software rendering, PSRAM/cache, DMA/QSPI and GRAM writes.
+
+S31's 80/320MHz transition also changes SYS/MEM/APB domains. The retained QSPI
+source is BBPLL and SPI already owns PM/source references, so an unmeasured SCLK
+change cannot be asserted. Mosaico now defaults to fixed 320MHz even while locked
+as a **conservative isolation guard**, retaining radio duty cycling, 8% brightness,
+once-per-minute lock updates and pixel shifts. This trades some CPU power savings
+for stability; it is not a demonstrated root-cause fix or measured energy result.
+Do not simultaneously change PSRAM DMA, SPI source, buffer geometry or the SDK.
+
+`debug display-clocks` reports cached public CPU/SYS/APB frequencies in Hz and a
+MEM-bus value derived from its divider, not the physical 200MHz PSRAM frequency.
+`debug display-ram-probe` performs a bounded 4KiB cache writeback/invalidate check
+on a separate allocation only while locked/radio-off, never live pixel buffers.
+A passing probe does not prove LCD DMA/QSPI correctness. Explicit
+`debug display-low-clock on` temporarily disables the guard for diagnostics;
+`off` restores it. The flag is RAM-only, defaults off on boot and is never enabled
+automatically. Long optical standby acceptance still requires user observation.
+
+## Battery telemetry and guarded nominal configuration
+
+The [official V1.0 guide](https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s31/esp-mosaico/user_guide_v1.0.html)
+specifies a 3.7V/65mAh pack and BQ27220 gauge. Read-only standard commands now expose
+SOC, voltage, instantaneous/average current, RM, FCC, Design Capacity, status, SOH
+and cycles. Their capacity/current units are physical mAh/mA: no inferred virtual
+scale or voltage-to-SOC conversion is applied. `debug gauge` reads these fields.
+
+`debug gauge-selftest` tests pure policies/CRC without hardware writes.
+`debug gauge-nominal apply <expected-current-design>` is an explicit, closed
+nominal-configuration operation, not measured ADC/cell calibration. It allows
+only Design Capacity at 0x929F and, only for the unambiguous factory 3000/3000mAh
+default, initial FCC at 0x929D. A plausible learned FCC is preserved. Target is
+fixed at documented nominal65. No gain, EDV, offset, charger, security key or OTP
+write exists; no seal/unseal/access escalation or automatic startup write exists.
+
+Writing requires existing FULL_ACCESS, gauge ID0x0220, initialized/quiet near-full
+conditions and safe temperature. Typed expected values, authenticated MAC
+length/checksum, standard/DM consistency and a durable readback-verified journal
+bound to chip MAC, gauge type, units and CRC precede CFG. Failure gets a bounded
+rollback and safe CFG exit; critical failures remain explicit, never PASS.
+`restore` requires this same unit's valid journal and only restores recorded values.
+If access, readback or physical conditions do not match, the operation refuses
+without parameter writes. The journal is in its own `gaugecal` NVS namespace.
+
+Even successful nominal configuration does not characterize the physical cell.
+Real FCC accuracy needs the [TI qualified learning cycle](https://www.ti.com/lit/ug/sluubd4a/sluubd4a.pdf)
+and current/voltage calibration requires suitable independent measurements. Do
+not force a deep discharge or label a nominal65 initialization as a measured65.
+
 ## Important boot contract
 
 The attached unit has a preserved bootloader which loads executable/rodata into
@@ -78,19 +134,31 @@ Wi-Fi and cache age use status glyphs. These icons are read-only, not reset or
 purchase controls. The reset-time meter shows time remaining within the returned
 window duration, separately from quota remaining; neither estimates token usage.
 The charge glyph represents observed positive gauge current, not mere USB
-presence. The battery calibration approximation marker is retained.
+presence. Battery percentage is the gauge's directly reported SOC, not voltage
+interpolation. A `?` marker indicates that capacity configuration has not passed
+the nominal consistency checks; absence of this marker is not proof of physical
+cell accuracy or a completed learning cycle.
 
 The reset-card count is capped visually at three cards plus the remaining count,
 not silently clipped. Large percentages and countdowns use a 5x7 original dot
 alphabet with gaps; very long exact history values remain available in details.
 There are no per-dot LVGL objects, animation timers or additional network polls.
 
+When awake, fresh visible meters can highlight only their already-filled region.
+Coins and reset cards turn slowly about their vertical axis; the capacity icon
+pulses only during measured charging. One UI scheduler runs at most four motion
+steps per second, with no per-widget timer. Hidden, stale, unknown, offline and
+locked states stop motion. The meter fill and capacity never change just for
+animation. Time uses restrained cyan; quota and battery use red/amber/mint
+according to their actual percentages.
+
 The visual inspiration is the compact dot-graph language of
 [btop](https://github.com/aristocratos/btop); glyph patterns and drawing code are
 original and do not copy btop assets or require a terminal/font dependency.
 
-Use restrained functional accents: mint for quota, amber/gold for time and the
-credit coin, cool blue for Wi-Fi and muted violet for earned-reset cards; other
+Use restrained functional accents: percentage-dependent mint/amber/red for quota
+and battery, cyan for time, gold for the credit coin, cool blue for Wi-Fi and
+muted violet for earned-reset cards; other
 chrome remains black/gray/white. Quota and time rows use identical text, icon and
 meter dimensions. The full window length stays an internal timer denominator,
 not an extra standalone label. `Pro200` is the owner's requested local badge for
