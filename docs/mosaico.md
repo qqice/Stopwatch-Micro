@@ -12,8 +12,10 @@ with `--preview` for S31. Do not select ESP32-S3 as a substitute.
   touch with IRQ6. Driver packages pinned in this profile's manifest/lock.
 - GPIO7 Function Button maps to B: local page switching. A/power-button inputs
   are not fabricated. Touch actions and hourly/daily selections stay in RAM.
-- BQ27220 at0x55 is read-only. Display `~` marks unverified gauge calibration;
-  failed samples show unknown. No 65mAh RAM correction or charger writes.
+- BQ27220 at0x55 is normally read-only. Its reported SOC is shown directly;
+  `?` marks unverified nominal-capacity consistency and failed samples are unknown.
+  Only the explicitly requested, guarded nominal transaction below can modify
+  capacity parameters. No charger, gain, offset or OTP write exists.
 - Audio, microphone meter and vibration are not implemented in this profile.
   Their HAL tests explicitly SKIP, not PASS. The software tone format remains
  44100 for compatibility, but no PCM is sent to hardware.
@@ -195,7 +197,8 @@ token logs or quota-percent-to-token estimates are used.
 New quota revisions update the active page promptly; clicks and mode switches do
 not perform HTTP. Offline age/stale state is explicit, with quota values hidden
 after ten minutes without a usable update. Idle locking retains the previous
-radio-off/80MHz policy, uses a separate quota/battery-only panel, refreshes once
+radio-off policy with the protective fixed-320MHz guard described above, uses a
+separate quota/battery-only panel, refreshes once
 per minute and shifts pixels. Long presses and scrolling prevent idle lock; the
 first wake gesture is consumed. The full-redraw-before-brightness mitigation is
 retained. User observations after that mitigation found no repeat of large-area
