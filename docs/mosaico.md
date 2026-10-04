@@ -347,3 +347,19 @@ recharge promptly at a low-battery warning. This is an observation cycle, not
 proof of qualified FCC learning. Capture SOC/RM/FCC/current/voltage and gauge
 qualification flags at endpoints. Offset/gain calibration requires independently
 known zero/load/voltage; no such reference is currently available.
+
+### Reset retention boundary discovered during wave deployment
+
+After the owner entered BOOT and the APP-only wave image was written, two live
+standard readbacks showed DC/FCC/RM3000mAh, whereas the immediately preceding
+runtime capture showed65mAh. SEC3/CFG0 remained protected. The wave change did
+not call gauge access/configuration APIs; the exact reset/power path causing
+reinitialization was not captured. TI TRM3.1 and Appendix7/8 explicitly describe
+RAM parameters reloaded from ROM on power-up and host RAM reprogramming after
+power loss. The earlier65mAh endpoint verification was valid but does NOT prove
+retention across reset/power loss. No OTP was programmed.
+
+Do not begin a claimed calibration/learning cycle until reset-aware, qualified
+RAM-profile loading is implemented and tested. The UI correctly restores the
+unknown-nominal marker for the present3000mAh profile; SOC100 is not calibrated.
+No automatic access or profile write was added by this UI deployment.
