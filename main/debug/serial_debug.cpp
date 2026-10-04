@@ -275,8 +275,23 @@ void SerialDebug::handleLine(char* line)
             result("display-low-clock", "FAIL", "expected=on_or_off explicit_test_only=1");
             return;
         }
-        GetNetworkQuota().setLowClockDiagnostic(!std::strcmp(mode, "on"));
+        GetNetworkQuota().setDiagnosticIdleFrequency(!std::strcmp(mode, "on") ? 80 : 320);
         result("display-low-clock", "PASS", "ram_only=1 reset_restores_guard=1 applied_by_network_owner=1");
+        return;
+    }
+    if (std::strcmp(command, "display-test-frequency") == 0) {
+        uint32_t mhz = 0;
+        const char* value = ::strtok_r(nullptr, " \t", &save);
+        if (!parseUnsignedStrict(value, 80, 320, mhz) || (mhz != 80 && mhz != 160 && mhz != 320) ||
+            ::strtok_r(nullptr, " \t", &save)) {
+            result("display-test-frequency", "FAIL", "expected=80_160_320 explicit_idle_test_only=1");
+            return;
+        }
+        GetNetworkQuota().setDiagnosticIdleFrequency(mhz);
+        char details[100]{};
+        std::snprintf(details, sizeof(details), "requested_idle_mhz=%lu ram_only=1 active_cpu320=1 default_guard_restored=%d",
+                      static_cast<unsigned long>(mhz), mhz == 320);
+        result("display-test-frequency", "PASS", details);
         return;
     }
     if (std::strcmp(command, "gauge") == 0) {
@@ -294,6 +309,39 @@ void SerialDebug::handleLine(char* line)
     if (std::strcmp(command, "gauge-selftest") == 0) {
         result("gauge-selftest", GetHAL().gaugeSafetySelfTest() ? "PASS" : "FAIL",
                "nominal_only=1 mac_crc_journal_unit_binding=1 quiet_temperature_guards=1 no_device_writes=1");
+        return;
+    }
+    if (std::strcmp(command, "gauge-access") == 0) {
+        const char* mode = ::strtok_r(nullptr, " \t", &save);
+        if (!mode || (std::strcmp(mode, "open") && std::strcmp(mode, "restore")) ||
+            ::strtok_r(nullptr, " \t", &save)) {
+            result("gauge-access", "FAIL", "expected=open_or_restore explicit_authorized_action=1");
+            return;
+        }
+        const auto power = GetNetworkQuota().powerStats();
+        if (!power.locked || power.phase != 2 || power.wifiRunning) {
+            result("gauge-access", "SKIP", "blocked_requires_locked_radio_off no_changes=1");
+            return;
+        }
+        char reason[160]{};
+        const bool ok = GetHAL().gaugeAccess(!std::strcmp(mode, "open") ? Hal::GaugeAccessAction::Open : Hal::GaugeAccessAction::Restore,
+                                             reason, sizeof(reason));
+        result("gauge-access", ok ? "PASS" : (!std::strncmp(reason, "blocked_", 8) ? "SKIP" : "FAIL"), reason);
+        return;
+    }
+    if (std::strcmp(command, "gauge-reconcile") == 0) {
+        if (::strtok_r(nullptr, " \t", &save)) {
+            result("gauge-reconcile", "FAIL", "expected=no_arguments");
+            return;
+        }
+        const auto power = GetNetworkQuota().powerStats();
+        if (!power.locked || power.phase != 2 || power.wifiRunning) {
+            result("gauge-reconcile", "SKIP", "blocked_requires_locked_radio_off no_changes=1");
+            return;
+        }
+        char reason[160]{};
+        const bool ok = GetHAL().gaugeReconcileNominal(reason, sizeof(reason));
+        result("gauge-reconcile", ok ? "PASS" : (!std::strncmp(reason, "blocked_", 8) ? "SKIP" : "FAIL"), reason);
         return;
     }
     if (std::strcmp(command, "gauge-nominal") == 0) {

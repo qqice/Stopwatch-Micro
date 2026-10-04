@@ -83,6 +83,7 @@ void NetworkQuota::setCpu(uint32_t mhz)
     // configuration. Keep CPU/SYS/MEM clock domains stable as a conservative
     // guard, NOT a proven display root-cause fix. Radio duty cycling is retained.
     if (!_diagnostic_low_clock.load()) mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+    else if (idleLocked() && mhz == 80) mhz = _diagnostic_idle_mhz.load();
 #endif
     if (_cpu_target == mhz) return;
     esp_pm_config_t config{};
@@ -100,6 +101,12 @@ void NetworkQuota::setLowClockDiagnostic(bool enabled)
     ESP_LOGW("DisplayClock", "diagnostic_low_clock=%d protection=%s", enabled,
              enabled ? "DISABLED_BY_EXPLICIT_TEST" : "fixed-default-frequency");
     if (_task_handle) xTaskNotifyGive(_task_handle);
+}
+void NetworkQuota::setDiagnosticIdleFrequency(uint32_t mhz)
+{
+    if (mhz != 80 && mhz != 160 && mhz != CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ) return;
+    _diagnostic_idle_mhz = mhz;
+    setLowClockDiagnostic(mhz != CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
 }
 #endif
 void NetworkQuota::recordWifiRunning(bool running)

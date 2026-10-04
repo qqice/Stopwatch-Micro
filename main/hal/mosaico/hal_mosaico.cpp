@@ -327,8 +327,14 @@ bool gauge_wait_config(bool enter)
     for (unsigned attempt = 0; attempt < 10; ++attempt) {
         uint16_t operation = 0;
         if (gauge_word(0x3A, operation)) {
-            if (((operation >> 1) & 3) != 1 || (operation & 1)) return false;
-            if (!!(operation & 0x0400) == enter) return true;
+            if (operation & 1) return false;
+            if (enter) {
+                if (((operation >> 1) & 3) != 1) return false;
+                if (operation & 0x0400) return true;
+            } else {
+                if ((operation & 0x0400) && ((operation >> 1) & 3) != 1) return false;
+                if (mosaico_gauge::configExitAccepted(operation)) return true;
+            }
         }
         gauge_delay_ms(100);
     }
@@ -338,8 +344,10 @@ bool gauge_wait_config(bool enter)
 bool gauge_exit_config()
 {
     uint16_t operation = 0;
-    if (!gauge_word(0x3A, operation) || ((operation >> 1) & 3) != 1 || (operation & 1)) return false;
-    if (!(operation & 0x0400)) return true;
+    if (!gauge_word(0x3A, operation) || (operation & 1)) return false;
+    if (!(operation & 0x0400))
+        return mosaico_gauge::configExitAccepted(operation) || gauge_wait_config(false);
+    if (((operation >> 1) & 3) != 1) return false; // CFG writes/recovery STILL require existing FA.
     // Reinitialize the nominal capacity registers using the documented CFG
     // exit command; do not reset hardware, change security, or program OTP.
     const bool sent = gauge_control(GaugeCommand::ExitReinit);
@@ -370,9 +378,22 @@ bool gauge_write_field(const mosaico_gauge::Journal& journal, mosaico_gauge::Fie
     return true;
 }
 
+bool gauge_sealed_prior_verified();
+
 bool gauge_verify_pair(const GaugePair& desired, bool standard)
 {
     for (unsigned i = 0; i < 2; ++i) {
+        if (standard) {
+            uint16_t operation = 0;
+            if (!gauge_word(0x3A, operation) || !mosaico_gauge::configExitAccepted(operation)) return false;
+            if (((operation >> 1) & 3) == 3) {
+                // Sealed MAC DM may be inaccessible/stale. Completed FA-phase
+                // MAC readbacks + expected prior3 access ledger permit standard
+                // terminal pair verification without reopening or rewriting.
+                if (!gauge_sealed_prior_verified() || !gauge_identity() || !gauge_standard_matches(desired)) return false;
+                continue;
+            }
+        }
         GaugePair actual;
         if (!gauge_pair(actual) || !same_pair(actual, desired) || (standard && !gauge_standard_matches(desired)))
             return false;
@@ -416,7 +437,212 @@ bool gauge_rollback(const mosaico_gauge::Journal& journal, const GaugePair& befo
     if (touchedFcc) ok &= gauge_write_field(journal, mosaico_gauge::Field::InitialFcc, before.fcc);
     return ok && gauge_verify_pair(before, false);
 }
+
+// TI SLUUBD4A 6.1 public default access sequence, with the word split into
+// separately addressed bytes as verified by the local board reference. These
+// are Control inputs, not key-memory writes. Never log or journal word values.
+enum class AccessWord : uint16_t { UnsealFirst = 0x0414, UnsealSecond = 0x3672, Full = 0xFFFF, Seal = 0x0030 };
+
+bool gauge_access_word(AccessWord word)
+{
+    if (word != AccessWord::UnsealFirst && word != AccessWord::UnsealSecond &&
+        word != AccessWord::Full && word != AccessWord::Seal) return false;
+    const uint16_t value = static_cast<uint16_t>(word);
+    const uint8_t low[] = {0x00, static_cast<uint8_t>(value)};
+    const uint8_t high[] = {0x01, static_cast<uint8_t>(value >> 8)};
+    gauge_feed();
+    if (i2c_master_transmit(gauge, low, sizeof(low), 20) != ESP_OK) return false;
+    gauge_delay_ms(1);
+    if (i2c_master_transmit(gauge, high, sizeof(high), 20) != ESP_OK) return false;
+    gauge_delay_ms(100);
+    return true;
+}
+
+bool gauge_wait_security(uint8_t expected)
+{
+    for (unsigned i = 0; i < 20; ++i) {
+        uint16_t operation = 0;
+        if (gauge_word(0x3A, operation)) {
+            if (operation & 0x0401) return false;
+            if (((operation >> 1) & 3) == expected) return true;
+        }
+        gauge_delay_ms(100);
+    }
+    return false;
+}
+
+esp_err_t gauge_load_access(mosaico_gauge::AccessJournal& journal, const uint8_t mac[6])
+{
+    nvs_handle_t handle = 0;
+    esp_err_t result = nvs_open("gaugeacc", NVS_READONLY, &handle);
+    if (result != ESP_OK) return result;
+    size_t size = sizeof(journal);
+    result = nvs_get_blob(handle, "access_v1", &journal, &size);
+    nvs_close(handle);
+    if (result == ESP_OK && (size != sizeof(journal) || !mosaico_gauge::validAccessJournal(journal, mac))) return ESP_FAIL;
+    return result;
+}
+
+bool gauge_sealed_prior_verified()
+{
+    uint8_t mac[6]{};
+    if (esp_efuse_mac_get_default(mac) != ESP_OK) return false;
+    mosaico_gauge::AccessJournal access{};
+    return gauge_load_access(access, mac) == ESP_OK && access.priorSecurity == 3 &&
+           access.unsealVerified && access.fullVerified && !mosaico_gauge::failedDefaultAttempt(access) &&
+           (access.state == static_cast<uint8_t>(mosaico_gauge::AccessState::Opened) ||
+            access.state == static_cast<uint8_t>(mosaico_gauge::AccessState::Restored));
+}
+
+bool gauge_store_access(mosaico_gauge::AccessJournal& journal, const uint8_t mac[6])
+{
+    mosaico_gauge::seal(journal);
+    if (!mosaico_gauge::validAccessJournal(journal, mac)) return false;
+    gauge_feed();
+    nvs_handle_t handle = 0;
+    if (nvs_open("gaugeacc", NVS_READWRITE, &handle) != ESP_OK) return false;
+    esp_err_t result = nvs_set_blob(handle, "access_v1", &journal, sizeof(journal));
+    if (result == ESP_OK) result = nvs_commit(handle);
+    nvs_close(handle);
+    gauge_feed();
+    mosaico_gauge::AccessJournal readback{};
+    return result == ESP_OK && gauge_load_access(readback, mac) == ESP_OK &&
+           std::memcmp(&journal, &readback, sizeof(journal)) == 0;
+}
+
+bool gauge_access_preflight(uint16_t& operation, GaugePair& profile)
+{
+    uint16_t soc = 0, mv = 0, temperature = 0, current = 0, average = 0, remaining = 0;
+    bool ok = gauge_word(0x3A, operation);
+    ok &= gauge_word(0x2C, soc); ok &= gauge_word(0x08, mv); ok &= gauge_word(0x06, temperature);
+    ok &= gauge_word(0x0C, current); ok &= gauge_word(0x14, average);
+    ok &= gauge_word(0x3C, profile.design); ok &= gauge_word(0x12, profile.fcc); ok &= gauge_word(0x10, remaining);
+    return ok && profile.fcc && remaining <= profile.fcc &&
+           mosaico_gauge::quietAccess(operation, soc, mv, temperature,
+                                      static_cast<int16_t>(current), static_cast<int16_t>(average));
+}
+
+uint8_t gauge_observed_security()
+{
+    uint16_t operation = 0;
+    return gauge_word(0x3A, operation) ? static_cast<uint8_t>((operation >> 1) & 3) : 0;
+}
+
+bool gauge_return_access(const mosaico_gauge::AccessJournal& journal)
+{
+    uint16_t operation = 0;
+    if (!gauge_word(0x3A, operation) || (operation & 1) || ((operation >> 1) & 3) == 0) return false;
+    // Protective cleanup first. Do not seal a still-active or unknown CFG.
+    if ((operation & 0x0400) && !gauge_exit_config()) return false;
+    if (!gauge_word(0x3A, operation) || (operation & 0x0401)) return false;
+    const uint8_t current = static_cast<uint8_t>((operation >> 1) & 3);
+    if (current == journal.priorSecurity) return gauge_wait_security(journal.priorSecurity);
+    // Never self-seal an originally unknown-key UNSEALED/FULL_ACCESS unit.
+    // Prior2 OPEN is deliberately refused; prior1 RESTORE can only be a no-op.
+    if (journal.priorSecurity != 3) return false;
+    gauge_delay_ms(5000); // let any incomplete access-key state machine expire.
+    if (!gauge_word(0x3A, operation) || (operation & 0x0401)) return false;
+    gauge_access_word(AccessWord::Seal); // one attempt; readback determines actual protection.
+    return gauge_wait_security(3);
+}
 } // namespace
+
+bool Hal::gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize)
+{
+    using namespace mosaico_gauge;
+    std::lock_guard<std::mutex> lock(battery_mutex);
+    const auto report = [&](bool success, const char* why) {
+        if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
+        sample_battery_locked(true);
+        return success;
+    };
+    if (action != GaugeAccessAction::Open && action != GaugeAccessAction::Restore)
+        return report(false, "blocked_access_action");
+    if (!gauge || !selftest()) return report(false, "blocked_access_gauge_or_model");
+    const auto mac = getFactoryMac();
+    AccessJournal journal{};
+    const esp_err_t loaded = gauge_load_access(journal, mac.data());
+    const bool saved = loaded == ESP_OK;
+    if (loaded != ESP_OK && loaded != ESP_ERR_NVS_NOT_FOUND)
+        return report(false, "blocked_access_journal_crc_unit");
+    if (action == GaugeAccessAction::Restore) {
+        if (!saved) return report(false, "blocked_access_no_journal");
+        if (!gauge_identity()) return report(false, "critical_access_restore_identity");
+        // Closing prior SEALED is protective cleanup, not a capacity write:
+        // it must remain reachable after nominal reinit changes SOC/mirrors.
+        const bool restored = gauge_return_access(journal);
+        journal.lastSecurity = gauge_observed_security();
+        journal.state = static_cast<uint8_t>(restored ? AccessState::Restored : AccessState::Failed);
+        const bool recorded = gauge_store_access(journal, mac.data());
+        if (!restored) return report(false, "critical_access_exit_or_prior_security");
+        if (!recorded) return report(false, "critical_access_restore_journal");
+        return report(true, journal.priorSecurity == 3 ? "access_restored_sealed" : "access_restored_prior_noop");
+    }
+    uint16_t operation = 0;
+    GaugePair profile;
+    if (!gauge_access_preflight(operation, profile)) return report(false, "blocked_access_quiet_full_temperature");
+    if (!gauge_identity()) return report(false, "blocked_identity_0220");
+    bool candidate = capacityPolicy(profile.design, profile.fcc);
+    if (!candidate) {
+        Journal nominal{};
+        candidate = gauge_load_journal(nominal, mac.data()) == ESP_OK &&
+                    restorePairAllowed(nominal, profile.design, profile.fcc);
+    }
+    if (!candidate) return report(false, "blocked_access_capacity_candidate");
+    const uint8_t prior = static_cast<uint8_t>((operation >> 1) & 3);
+    if (saved && journal.state != static_cast<uint8_t>(AccessState::Restored)) {
+        if (journal.state == static_cast<uint8_t>(AccessState::Opened) && prior == 1 &&
+            (journal.priorSecurity == 1 || (journal.unsealVerified && journal.fullVerified)))
+            return report(true, "access_already_open_verified");
+        return report(false, "blocked_access_pending_restore_first");
+    }
+    if (saved && failedDefaultAttempt(journal)) return report(false, "blocked_default_attempt_already_failed");
+    if (prior == 2) return report(false, "blocked_prior2_unknown_return_path");
+    journal = {};
+    journal.magic = 0x47414331U; journal.version = 1; journal.deviceType = DeviceType; journal.unitMah = 1;
+    journal.state = static_cast<uint8_t>(AccessState::Pending); journal.priorSecurity = prior;
+    journal.lastSecurity = prior; journal.baseDesign = profile.design; journal.baseFcc = profile.fcc;
+    journal.operationBefore = operation;
+    std::memcpy(journal.mac, mac.data(), sizeof(journal.mac));
+    if (!gauge_store_access(journal, mac.data())) return report(false, "blocked_access_journal_prepare");
+    GaugePair recheck;
+    uint16_t recheckOperation = 0;
+    if (!gauge_access_preflight(recheckOperation, recheck) || !same_pair(profile, recheck) ||
+        ((recheckOperation >> 1) & 3) != prior) return report(false, "blocked_access_preflight_changed_pending");
+    const auto abort = [&]() {
+        // Same bounded protective restore as the explicit RESTORE command;
+        // no guessed/retried unseal or full-access words in the abort path.
+        const bool restored = gauge_return_access(journal);
+        journal.lastSecurity = gauge_observed_security();
+        journal.state = static_cast<uint8_t>(restored ? AccessState::Restored : AccessState::Failed);
+        const bool recorded = gauge_store_access(journal, mac.data());
+        return report(false, restored && recorded ? "failed_access_prior_restored" : "critical_access_prior_restore");
+    };
+    if (prior == 3) {
+        // Attempt flags are durable BEFORE words; a crash never permits replay.
+        journal.unsealAttempted = 1;
+        if (!gauge_store_access(journal, mac.data())) return abort();
+        gauge_delay_ms(5000);
+        if (!gauge_access_preflight(recheckOperation, recheck) || ((recheckOperation >> 1) & 3) != 3 ||
+            !same_pair(profile, recheck)) return abort();
+        const bool sent = gauge_access_word(AccessWord::UnsealFirst) && gauge_access_word(AccessWord::UnsealSecond);
+        const bool observed = gauge_wait_security(2);
+        if (!sent || !observed) return abort();
+        journal.unsealVerified = 1; journal.lastSecurity = 2;
+        journal.fullAttempted = 1;
+        if (!gauge_store_access(journal, mac.data())) return abort();
+        gauge_delay_ms(5000);
+        if (!gauge_access_preflight(recheckOperation, recheck) || ((recheckOperation >> 1) & 3) != 2 ||
+            !same_pair(profile, recheck)) return abort();
+        const bool fullSent = gauge_access_word(AccessWord::Full) && gauge_access_word(AccessWord::Full);
+        const bool fullObserved = gauge_wait_security(1);
+        if (!fullSent || !fullObserved) return abort();
+        journal.fullVerified = 1; journal.lastSecurity = 1;
+    }
+    journal.state = static_cast<uint8_t>(AccessState::Opened);
+    if (!gauge_store_access(journal, mac.data())) return abort();
+    return report(true, prior == 3 ? "access_opened_default_verified" : "access_already_full_prior_recorded");
+}
 
 void Hal::i2c_init()
 {
@@ -599,6 +825,11 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
         restored = restored && exited && gauge_verify_pair(desired, true);
         journal.state = static_cast<uint8_t>(!exited ? State::ExitFailed : restored ? State::Restored : State::RollbackFailed);
         if (restored) { journal.lastDesign = desired.design; journal.lastFcc = desired.fcc; }
+        if (restored) {
+            uint16_t finalOperation = 0;
+            if (gauge_word(0x3A, finalOperation) && ((finalOperation >> 1) & 3) == 3)
+                journal.state = static_cast<uint8_t>(State::VerifiedSealedPrior3);
+        }
         const bool recorded = gauge_store_journal(journal, mac.data());
         sample_battery_locked(true);
         if (!exited) return report(false, "critical_cfg_exit_or_security");
@@ -681,6 +912,16 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
         return report(false, "critical_cfg_exit_or_security");
     }
     if (forward && !gauge_verify_pair(desired, true)) {
+        uint16_t finalOperation = 0;
+        if (!gauge_word(0x3A, finalOperation) || !configExitAccepted(finalOperation) ||
+            ((finalOperation >> 1) & 3) != 1) {
+            // A real terminal readback/security failure while sealed must not
+            // launch a futile/unapproved CFG rollback or replay access words.
+            journal.state = static_cast<uint8_t>(State::ExitFailed);
+            gauge_store_journal(journal, mac.data());
+            sample_battery_locked(true);
+            return report(false, "critical_unknown_terminal_security");
+        }
         // Final live standard-register readback disagrees: one rollback phase,
         // not another apply attempt. Reenter only for that explicit rollback.
         const bool rollbackEnterSent = gauge_control(GaugeCommand::EnterConfig);
@@ -698,6 +939,9 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
     if (forward || rolledBack) {
         const GaugePair final = forward ? desired : before;
         journal.lastDesign = final.design; journal.lastFcc = final.fcc;
+        uint16_t finalOperation = 0;
+        if (gauge_word(0x3A, finalOperation) && ((finalOperation >> 1) & 3) == 3)
+            journal.state = static_cast<uint8_t>(State::VerifiedSealedPrior3);
     }
     const bool recorded = gauge_store_journal(journal, mac.data());
     sample_battery_locked(true);
@@ -709,6 +953,56 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
 }
 
 bool Hal::gaugeSafetySelfTest() const { return mosaico_gauge::selftest(); }
+
+bool Hal::gaugeReconcileNominal(char* reason, size_t reasonSize)
+{
+    using namespace mosaico_gauge;
+    std::lock_guard<std::mutex> lock(battery_mutex);
+    const auto report = [&](bool ok, const char* why) {
+        if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
+        return ok;
+    };
+    if (!gauge || !selftest()) return report(false, "blocked_reconcile_gauge_or_model");
+    const auto mac = getFactoryMac();
+    Journal nominal{};
+    AccessJournal access{};
+    if (gauge_load_journal(nominal, mac.data()) != ESP_OK || nominal.action != 1 || nominal.targetDesign != NominalMah)
+        return report(false, "blocked_reconcile_nominal_journal");
+    // Only an interrupted forward operation (or this audit's idempotent
+    // terminal state) may be reconciled. Never relabel a completed restore,
+    // rollback or successful apply using later coincidental target readings.
+    if (nominal.state != static_cast<uint8_t>(State::Pending) &&
+        nominal.state != static_cast<uint8_t>(State::ExitFailed) &&
+        nominal.state != static_cast<uint8_t>(State::VerifiedSealedPrior3))
+        return report(false, "blocked_reconcile_not_pending_forward");
+    if (nominal.state == static_cast<uint8_t>(State::VerifiedSealedPrior3) &&
+        (nominal.lastDesign != nominal.targetDesign || nominal.lastFcc != nominal.targetFcc))
+        return report(false, "blocked_reconcile_not_target_terminal");
+    if (gauge_load_access(access, mac.data()) != ESP_OK || access.priorSecurity != 3 ||
+        access.state != static_cast<uint8_t>(AccessState::Restored) || access.lastSecurity != 3 ||
+        !access.unsealVerified || !access.fullVerified || failedDefaultAttempt(access))
+        return report(false, "blocked_reconcile_prior3_access_evidence");
+    // Current endpoint audit, NOT a rewrite of the historical failed script.
+    // Sealed standard commands and the harmless identity selector are sufficient;
+    // no DM selector, CFG command, access words or parameter writes are issued.
+    for (unsigned read = 0; read < 2; ++read) {
+        if (!gauge_identity()) return report(false, "blocked_identity_0220");
+        sample_battery_locked(true);
+        const auto& sample = battery_telemetry;
+        if (!sample.valid || !sample.capacityValid || !configExitAccepted(sample.operationStatus) ||
+            ((sample.operationStatus >> 1) & 3) != 3 || sample.designMah != nominal.targetDesign ||
+            sample.fullMah != nominal.targetFcc || sample.remainingMah > sample.fullMah)
+            return report(false, "blocked_reconcile_observed_pair_or_state");
+    }
+    // State 7 encodes CRC-bound OBSERVED FINAL SEC3 + expected priorSEC3 and
+    // retains the legacy 36-byte backup format. It does not assert that 0091
+    // universally auto-seals, or that the original transaction returned PASS.
+    nominal.state = static_cast<uint8_t>(State::VerifiedSealedPrior3);
+    nominal.lastDesign = battery_telemetry.designMah;
+    nominal.lastFcc = battery_telemetry.fullMah;
+    if (!gauge_store_journal(nominal, mac.data())) return report(false, "critical_reconcile_journal_readback");
+    return report(true, "reconciled_std_target_observed_sec3_expected_prior3");
+}
 
 Hal::MosaicoClockDiagnostics Hal::displayClockDiagnostics() const
 {

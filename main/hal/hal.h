@@ -136,6 +136,7 @@ public:
         int32_t clockErrors[3] = {-1, -1, -1}; // CPU/SYS/APB esp_err_t values.
         bool directDmaTrue = false;
     };
+    enum class GaugeAccessAction { Open, Restore };
 #ifdef MOSAICO_BOARD
     BatteryTelemetry batteryTelemetry(bool refresh = false);
     // Explicit RAM nominal setup/restore only. For APPLY expectedOld must match
@@ -147,6 +148,14 @@ public:
                                  char* reason, size_t reasonSize);
     // Pure safety-model checks; no I2C/NVS writes or hardware operations.
     bool gaugeSafetySelfTest() const;
+    // Explicit access-mode transaction only, never an automatic boot action.
+    // OPEN supports SEALED->verified default-key->FULL_ACCESS or a no-op prior
+    // FULL_ACCESS. Unknown-key prior UNSEALED is refused to preserve a return path.
+    // RESTORE uses a separate unit/CRC-bound prior-security journal.
+    bool gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize);
+    // Explicit read-only gauge audit + NVS-only journal reconciliation. Never
+    // sends access keys, CFG controls or capacity/configuration data.
+    bool gaugeReconcileNominal(char* reason, size_t reasonSize);
     MosaicoClockDiagnostics displayClockDiagnostics() const;
     // Caller must exclude concurrent flash/NVS operations (esp_cache_msync rule).
     bool displayRamProbe(uint32_t& errors);
@@ -159,6 +168,16 @@ public:
     }
     MosaicoClockDiagnostics displayClockDiagnostics() const { return {}; }
     bool gaugeSafetySelfTest() const { return false; }
+    bool gaugeAccess(GaugeAccessAction, char* reason, size_t reasonSize)
+    {
+        if (reason && reasonSize) std::snprintf(reason, reasonSize, "unsupported: not Mosaico");
+        return false;
+    }
+    bool gaugeReconcileNominal(char* reason, size_t reasonSize)
+    {
+        if (reason && reasonSize) std::snprintf(reason, reasonSize, "unsupported: not Mosaico");
+        return false;
+    }
     bool displayRamProbe(uint32_t& errors) { errors = 0; return false; }
 #endif
 

@@ -29,6 +29,8 @@ public:
     // Explicit serial diagnostics only; RAM state resets to the protective
     // fixed-frequency default on every boot. Never persist this in NVS.
     void setLowClockDiagnostic(bool enabled);
+    void setDiagnosticIdleFrequency(uint32_t mhz);
+    uint32_t diagnosticIdleFrequency() const { return _diagnostic_idle_mhz.load(); }
     bool lowClockDiagnosticEnabled() const { return _diagnostic_low_clock.load(); }
 #endif
     bool configured() const
@@ -71,6 +73,7 @@ private:
     std::atomic<uint8_t> _power_profile{2}, _power_phase{0};
 #ifdef MOSAICO_BOARD
     std::atomic<bool> _diagnostic_low_clock{false};
+    std::atomic<uint32_t> _diagnostic_idle_mhz{80};
 #endif
     std::atomic<uint32_t> _power_cycles{0};
     std::atomic<int> _clock_error{0};
