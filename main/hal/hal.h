@@ -217,10 +217,11 @@ public:
     void stopLvglUpdate();
     struct TouchPollingInfo {
         bool idle = false;
-        uint32_t periodMs = 0;
+        uint32_t periodMs = 0; // Mosaico idle: paused (0), awake: 10 ms.
         bool unusedGatesOff = false; // Output setup succeeded, NOT measured voltage/current.
     };
 #ifdef MOSAICO_BOARD
+    // idle=true pauses touch reads; wake is Function/explicit caller only.
     void setTouchIdlePolling(bool idle);
     TouchPollingInfo touchPollingInfo() const;
 #else

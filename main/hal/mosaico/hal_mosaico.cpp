@@ -67,6 +67,7 @@ esp_lcd_touch_handle_t touch = nullptr;
 lv_display_t* display = nullptr;
 bool port_ready = false;
 std::atomic<bool> touch_idle_polling{false};
+bool touch_wait_for_release = false; // LVGL mutex owned; blocks pre-wake held fingers in cache too.
 std::atomic<bool> unused_gates_off{false};
 // Serialized by the LVGL port mutex once it exists. Keep physical brightness
 // separate from the requested setting while a wake redraw is pending.
@@ -139,6 +140,12 @@ void observe_flush(lv_event_t* event)
 
 void read_touch(lv_indev_t*, lv_indev_data_t* data)
 {
+    if (touch_idle_polling.load(std::memory_order_relaxed)) {
+        // Also protects against a forced/event-driven indev read while its
+        // timer is paused. Software RELEASE only: no driver I2C or read count.
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
     const int64_t now = esp_timer_get_time();
     const int64_t previous = touch_last_us.exchange(now, std::memory_order_relaxed);
     touch_reads.fetch_add(1, std::memory_order_relaxed);
@@ -146,11 +153,13 @@ void read_touch(lv_indev_t*, lv_indev_data_t* data)
     Hal::TouchPoint point;
     uint16_t x = 0, y = 0;
     uint8_t count = 0;
-    if (touch && esp_lcd_touch_read_data(touch) == ESP_OK &&
-        esp_lcd_touch_get_coordinates(touch, &x, &y, nullptr, &count, 1) && count &&
-        x < Resolution && y < Resolution) {
+    const bool sample_valid = touch && esp_lcd_touch_read_data(touch) == ESP_OK;
+    const bool contact = sample_valid && esp_lcd_touch_get_coordinates(touch, &x, &y, nullptr, &count, 1) && count;
+    if (contact && x < Resolution && y < Resolution) {
         point = {1, static_cast<int>(x), static_cast<int>(y)};
     }
+    touch_wait_for_release = mosaico_touch_power::waitForPhysicalRelease(touch_wait_for_release, sample_valid, contact);
+    if (touch_wait_for_release) point = {}; // No cached or LVGL phantom press before a proven release.
     portENTER_CRITICAL(&touch_mux);
     cached_touch = point;
     portEXIT_CRITICAL(&touch_mux);
@@ -1349,8 +1358,13 @@ void Hal::lvgl_init()
     lv_indev_set_type(lvTouchpad, LV_INDEV_TYPE_POINTER);
     lv_indev_set_display(lvTouchpad, display);
     lv_indev_set_read_cb(lvTouchpad, read_touch);
-    lv_timer_set_period(lv_indev_get_read_timer(lvTouchpad),
-                        mosaico_touch_power::pollingPeriodMs(touch_idle_polling.load(std::memory_order_relaxed)));
+    lv_timer_t* touchTimer = lv_indev_get_read_timer(lvTouchpad);
+    lv_timer_set_period(touchTimer, mosaico_touch_power::AwakePeriodMs); // NEVER period 0.
+    if (touch_idle_polling.load(std::memory_order_relaxed)) {
+        lv_timer_pause(touchTimer); // Includes an idle request made before port initialization.
+        lv_indev_reset(lvTouchpad, nullptr);
+        lv_indev_read(lvTouchpad); // idleguard publishes software RELEASE without touching the driver.
+    }
     lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), LV_PART_MAIN);
     bootLogo = std::make_unique<BootLogo>();
     lvglUnlock();
@@ -1365,6 +1379,9 @@ void Hal::setTouchIdlePolling(bool idle)
     if (!port_ready) {
         // Preserve a startup request; lvgl_init applies it to the new timer.
         touch_idle_polling.store(idle, std::memory_order_relaxed);
+        portENTER_CRITICAL(&touch_mux);
+        cached_touch = TouchPoint{};
+        portEXIT_CRITICAL(&touch_mux);
         return;
     }
     if (!lvglLock()) return;
@@ -1373,12 +1390,23 @@ void Hal::setTouchIdlePolling(bool idle)
         return; // No reset, task wake or invalidation on repeated requests.
     }
     touch_idle_polling.store(idle, std::memory_order_relaxed);
+    portENTER_CRITICAL(&touch_mux);
+    cached_touch = TouchPoint{};
+    portEXIT_CRITICAL(&touch_mux);
     if (lvTouchpad) {
         lv_timer_t* timer = lv_indev_get_read_timer(lvTouchpad);
         if (timer) {
-            lv_timer_set_period(timer, mosaico_touch_power::pollingPeriodMs(idle));
-            lv_timer_reset(timer);
-            if (!idle) {
+            lv_indev_reset(lvTouchpad, nullptr); // Cancel old object/drag/long-press state.
+            if (idle) {
+                lv_timer_pause(timer);
+                touch_wait_for_release = false;
+                lv_indev_read(lvTouchpad); // Forces indev state RELEASED via the no-I2C idle callback.
+            } else {
+                touch_wait_for_release = true;
+                lv_indev_wait_release(lvTouchpad);
+                lv_timer_set_period(timer, mosaico_touch_power::AwakePeriodMs);
+                lv_timer_resume(timer);
+                lv_timer_reset(timer);
                 lv_timer_ready(timer);
                 // Wake the existing port task, not a new task/timer, so an
                 // external button-driven wake gets a fresh sample promptly.

@@ -15,7 +15,7 @@ class PowerOptTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d)/'policy.cpp'
    p.write_text('#include "'+(R/'main/hal/mosaico/mosaico_touch_power_model.h').as_posix()+'"\n'
-    'using namespace mosaico_touch_power; constexpr bool check(){ unsigned n=0; for(unsigned p=0;p<64;++p){ if(unusedGate(p))++n; if(bool(UnusedGateMask&(1ULL<<p))!=unusedGate(p))return false; }return n==3;} static_assert(check()); static_assert(pollingPeriodMs(true)==50 && pollingPeriodMs(false)==10 && LvglTickPeriodMs==10);',encoding='utf8')
+    'using namespace mosaico_touch_power; constexpr bool check(){ unsigned n=0; for(unsigned p=0;p<64;++p){ if(unusedGate(p))++n; if(bool(UnusedGateMask&(1ULL<<p))!=unusedGate(p))return false; }return n==3;} static_assert(check()); static_assert(pollingPeriodMs(true)==0 && pollingPeriodMs(false)==10 && LvglTickPeriodMs==10);',encoding='utf8')
    q=subprocess.run([comp,'-std=c++17','-fsyntax-only',str(p)],capture_output=True,text=True)
    self.assertEqual(q.returncode,0,q.stdout+q.stderr)
  def test_gates_are_latched_low_before_output(self):
@@ -38,7 +38,7 @@ class PowerOptTests(unittest.TestCase):
   self.assertIn('setTouchIdlePolling(true)',lock); self.assertIn('setTouchIdlePolling(false)',wake)
   self.assertLess(wake.index('setLocked(false)'),wake.index('lv_obj_add_flag(_overlay'))
   main=(R/'main/main.cpp').read_text(encoding='utf8')
-  self.assertIn('idleLocked() ? 100 : 10',main)
+  self.assertIn('idleLocked() ? 20 : 10',main)
   self.assertIn('idleLocked() ? 100 : 1',main)
  def test_optin_is_bounded_and_committed(self):
   setter=NET.split('bool NetworkQuota::setIdleCpuFrequency(',1)[1].split('#endif',1)[0]

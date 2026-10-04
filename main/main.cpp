@@ -87,7 +87,9 @@ extern "C" void app_main(void)
 #ifdef MOSAICO_BOARD
         // The monitor has no low-latency remote-control path. Keep its 10Hz
         // motion/100Hz touch responsive without a 1kHz application update loop.
-        vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 10));
+        // Function is now the sole wake input: 20ms GPIO sampling avoids the
+        // former 100ms window swallowing short presses. This is not touch I2C.
+        vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 20 : 10));
 #else
         // Preserve StopWatch HID/control latency and scheduling.
         vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 1));
