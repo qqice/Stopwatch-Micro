@@ -1,8 +1,8 @@
 # Mosaico safe dual-slot OTA migration plan
 
-Status: dual-slot migration performed; unattended OTA hardware acceptance pending.
-Signed manual network updates succeeded, but subsequent transfer/startup panics
-required diagnostics. Do not treat the automatic candidate as accepted yet.
+Status: unattended signed OTA accepted on hardware (2026-10-05).
+Device-initiated update to0.6.1, failing-candidate rollback and persistent failed-hash
+suppression were observed using read-only USB diagnostics, with no update/wake trigger.
 Factory build/layout remains separate from the new rollback-enabled OTA build.
 
 ## Exact S31 layout
@@ -85,7 +85,7 @@ auth keys. Prefer signed manifests/images over authenticated tailnet transport;
 keep signing keys outside Git. Current Secure Boot is disabled, so application
 signature checks are not an immutable physical-attacker-resistant boot chain.
 Do not label an OTA implementation finished until inactive-slot update and real
-boot/rollback acceptance have run. Endpoints/client/protocol are implemented; physical update/rollback acceptance is still pending.
+boot/rollback acceptance have run. Endpoints/client/protocol are implemented and the bounded hardware update/rollback acceptance passed.
 
 ## Runtime USB fallback
 
@@ -191,7 +191,7 @@ A Mosaico-local compatibility wrapper now retains the TinyUSB static ops table i
 internal RAM, without patching SDK/managed code. This is a targeted cache-safety
 mitigation, not a proven comprehensive explanation of that startup exception.
 RTC capture/query, wrapper ABI/link layout and builds have been checked, but the
-new candidate still needs physical startup and unattended upgrade/rollback proof.
+new candidate passed physical startup and bounded unattended upgrade/rollback tests.
 A guarded1200baud request still fails Windows ROM re-enumeration; initial recovery
 uses physical BOOT. This is separate from network OTA and is not an accepted
 unattended update transport.
@@ -199,5 +199,31 @@ unattended update transport.
 Do not claim unattended OTA complete until a read-only observer verifies that
 publishing a signed new release, WITHOUT a USB update/wake command, produces a
 VALID alternate-slot boot, and that a controlled failing candidate returns to
-its healthy predecessor and is not repeatedly reinstalled. Current root/source
-status and private exact-sector backups retain the unfinished hardware boundary.
+its healthy predecessor and is not repeatedly reinstalled. The accepted0.6.1 release is restored on the Mac after the controlled failure test.
+Long-term reliability and all possible power-loss points are not implied by this test.
+## Hardware acceptance, 2026-10-05
+
+1. Exact-sector-only app1 and selection stage verified, including untouched-region
+   hashes; no full NOR dump, bootloader/table rewrite, NAND or eFuse operation.
+2. Device independently checked the already-online window, verified/downloaded
+   the signed0.6.1 release and booted ota0.20sec health confirmation became VALID.
+   The observer issued only ping/status/ota-status/boot/panic, not update/wake.
+3. A signed controlled failure candidate was published after the new boot. The
+   device independently downloaded it; two software-reset boots returned to the
+   healthy0.6.1 ota0. The candidate never became accepted. Its exact same hash
+   was reported already_attempted after reboot and remained suppressed for95sec.
+4. Latest four boot records were stage7 with reset reasons1/3/3/3 (no new PANIC),
+   retained panic query returned no_saved_panic. The failed release was withdrawn;
+   the Mac now offers the healthy0.6.1 signed release again.
+
+The brief fault marker was not captured by the USB reconnecting observer; the
+acceptance uses complete authenticated transfer, software boot records, healthy
+predecessor/version return and post-reboot persisted-hash suppression. A partial
+USB diagnostic line caused an observer-only early exit; required-field parsing
+was used for the resumed verification. No extra firmware trigger was sent.
+
+Signing key stays private on the Windows workstation, never in Git or on the Mac.
+Preserve `.artifacts/private/mosaico/ota-signing/signing-key.pem`; future releases
+must be signed with its matching key. Build using the dedicated rollback-enabled
+OTA sdkconfig, not the legacy factory profile; its signature is approval to run
+that complete firmware. Manual ROM recovery remains distinct from unattended OTA.
