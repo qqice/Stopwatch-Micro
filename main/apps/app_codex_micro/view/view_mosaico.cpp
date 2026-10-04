@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "view_mosaico.h"
 #include "dot_widgets.h"
+#include "reset_countdown.h"
 #include <hal/hal.h>
 #include <host/network_quota.h>
 #include <algorithm>
@@ -73,6 +74,19 @@ void percent(uint16_t bp, char* out, size_t size) {
     if (bp % 100 == 0) std::snprintf(out, size, "%u%%", bp / 100);
     else if (bp % 10 == 0) std::snprintf(out, size, "%u.%u%%", bp / 100, (bp % 100) / 10);
     else std::snprintf(out, size, "%u.%02u%%", bp / 100, bp % 100);
+}
+void formatCountdown(mosaico_time::Countdown time, char* out, size_t size, bool minutePrecision = true) {
+    if (!time.known) std::snprintf(out, size, "--");
+    else if (time.minutes >= 1440) {
+        if (minutePrecision) std::snprintf(out, size, "%llud%lluh%llum",
+            static_cast<unsigned long long>(time.minutes / 1440), static_cast<unsigned long long>((time.minutes % 1440) / 60),
+            static_cast<unsigned long long>(time.minutes % 60));
+        else std::snprintf(out, size, "%llud%lluh",
+            static_cast<unsigned long long>(time.minutes / 1440), static_cast<unsigned long long>((time.minutes % 1440) / 60));
+    }
+    else if (time.minutes >= 60) std::snprintf(out, size, "%lluh%llum",
+        static_cast<unsigned long long>(time.minutes / 60), static_cast<unsigned long long>(time.minutes % 60));
+    else std::snprintf(out, size, "%llum", static_cast<unsigned long long>(time.minutes));
 }
 }
 namespace view {
@@ -183,15 +197,17 @@ void CodexMicroView::init(lv_obj_t* parent) {
     _qualityIcon = createIcon(detail, Icon::Unknown, 28, Gray); place(_qualityIcon, 12, 76);
     _qualityValue = createText(detail, 370, 36, 4); place(_qualityValue, 52, 68);
     _lockPanel = lv_obj_create(_root); panel(_lockPanel, 0, 0, 480, 480, 0);
-    _lockQuota = createText(_lockPanel, 400, 90, 12); place(_lockQuota, 40, 172);
-    _lockBatteryIcon = createIcon(_lockPanel, Icon::Battery, 36); place(_lockBatteryIcon, 152, 306);
-    _lockBattery = label(_lockPanel, 204, 310, 200, "?", &lv_font_montserrat_20);
+    _lockQuota = createText(_lockPanel, 400, 90, 12); place(_lockQuota, 40, 148);
+    _lockResetIcon = createIcon(_lockPanel, Icon::Hourglass, 28, Cyan);
+    _lockResetTime = createText(_lockPanel, 340, 48, 6, Cyan);
+    _lockBatteryIcon = createIcon(_lockPanel, Icon::Battery, 36); place(_lockBatteryIcon, 152, 334);
+    _lockBattery = label(_lockPanel, 204, 338, 200, "?", &lv_font_montserrat_20);
     lv_obj_add_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN);
     _overlay = lv_obj_create(_root); panel(_overlay, 0, 0, 480, 480, 0);
     lv_obj_set_style_bg_opa(_overlay, LV_OPA_TRANSP, 0);
-    lv_obj_add_flag(_overlay, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN));
-    lv_obj_add_event_cb(_overlay, wakeEvent, LV_EVENT_ALL, this);
-    bool widgetsReady = _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _qualityIcon && _qualityValue && _lockQuota && _lockBatteryIcon;
+    lv_obj_add_flag(_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(_overlay, LV_OBJ_FLAG_CLICKABLE); // Function-only wake; no touch handler.
+    bool widgetsReady = _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _qualityIcon && _qualityValue && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
         widgetsReady = widgetsReady && _cardBadges[i] && _cardValues[i] && _secondValues[i] && _creditIcons[i];
@@ -204,25 +220,13 @@ void CodexMicroView::touchEvent(lv_event_t* e) {
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(e));
     if (!self->_locked) self->_activity = lv_tick_get();
 }
-void CodexMicroView::wakeEvent(lv_event_t* e) {
-    auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(e));
-    if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
-        self->_wakeGesture = true;
-        // Hide before changing brightness so HAL can invalidate the full screen.
-        self->wakeDisplay();
-        // Still target this overlay until release: do not activate underlying cells.
-        lv_obj_remove_flag(self->_overlay, LV_OBJ_FLAG_HIDDEN);
-    } else if (self->_wakeGesture && (lv_event_get_code(e) == LV_EVENT_RELEASED || lv_event_get_code(e) == LV_EVENT_PRESS_LOST)) {
-        self->_wakeGesture = false; lv_obj_add_flag(self->_overlay, LV_OBJ_FLAG_HIDDEN);
-    }
-}
 void CodexMicroView::cellEvent(lv_event_t* e) {
     auto* hit = static_cast<Hit*>(lv_event_get_user_data(e));
-    if (!hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_wakeGesture) hit->owner->selectHistory(hit->index);
+    if (!hit->owner->_suppressed && !hit->owner->_locked) hit->owner->selectHistory(hit->index);
 }
 void CodexMicroView::modeEvent(lv_event_t* e) {
     auto* hit = static_cast<Hit*>(lv_event_get_user_data(e));
-    if (!hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_wakeGesture) hit->owner->showHistory(hit->index == 1);
+    if (!hit->owner->_suppressed && !hit->owner->_locked) hit->owner->showHistory(hit->index == 1);
 }
 void CodexMicroView::refreshBattery(uint32_t now) {
     const auto telemetry = GetHAL().batteryTelemetry(false);
@@ -352,12 +356,7 @@ void CodexMicroView::refreshQuota(uint32_t now) {
             place(_resetTimes[i][j], x + textOffset, 160); lv_obj_set_width(_resetTimes[i][j], textWidth); setTextPitch(_resetTimes[i][j], pitch);
             const bool resetKnown = w.resetEpoch && _quota->capturedEpoch;
             const uint64_t seconds = resetKnown && w.resetEpoch > epoch ? w.resetEpoch - epoch : 0;
-            if (!resetKnown) std::snprintf(buf, sizeof(buf), "--");
-            else { const uint64_t minutes = (seconds + 59) / 60;
-                if (minutes >= 1440) std::snprintf(buf, sizeof(buf), "%llud%lluh", static_cast<unsigned long long>(minutes / 1440), static_cast<unsigned long long>((minutes % 1440) / 60));
-                else if (minutes >= 60) std::snprintf(buf, sizeof(buf), "%lluh%llum", static_cast<unsigned long long>(minutes / 60), static_cast<unsigned long long>(minutes % 60));
-                else std::snprintf(buf, sizeof(buf), "%llum", static_cast<unsigned long long>(minutes));
-            }
+            formatCountdown(mosaico_time::countdown(w.available, _quota->capturedEpoch, w.resetEpoch, epoch), buf, sizeof(buf));
             setText(_resetTimes[i][j], buf, resetKnown ? Cyan : Gray);
             setIcon(_hourglassIcons[i][j], Icon::Hourglass, resetKnown ? Cyan : Gray);
             place(_resetBars[i][j], x, 222); lv_obj_set_width(_resetBars[i][j], width);
@@ -397,7 +396,24 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     const bool lockKnown = _quota->available && _quota->bucketCount &&
                            (firstWindow[0].available || firstWindow[1].available);
     setText(_lockQuota, lockText, lockKnown ? quotaLevelColor(lockBp, _quota->stale) : Gray);
-
+    char lockReset[64] = "--", leftReset[32]{}, rightReset[32]{};
+    const auto leftTime = mosaico_time::countdown(lockKnown && firstWindow[0].available,
+        _quota->capturedEpoch, firstWindow[0].resetEpoch, epoch);
+    const auto rightTime = mosaico_time::countdown(lockKnown && firstWindow[1].available,
+        _quota->capturedEpoch, firstWindow[1].resetEpoch, epoch);
+    if (lockKnown && firstWindow[0].available) formatCountdown(leftTime, leftReset, sizeof(leftReset), true);
+    if (lockKnown && firstWindow[1].available) formatCountdown(rightTime, rightReset, sizeof(rightReset), true);
+    if (leftReset[0] && rightReset[0]) std::snprintf(lockReset, sizeof(lockReset), "%s %s", leftReset, rightReset);
+    else if (leftReset[0] || rightReset[0]) std::snprintf(lockReset, sizeof(lockReset), "%s", leftReset[0] ? leftReset : rightReset);
+    const int glyphs = static_cast<int>(std::min<size_t>(std::strlen(lockReset), 32));
+    const int columns = std::max(1, glyphs * 6 - 1);
+    const int textWidth = columns * std::max(1, std::min(6, 360 / columns));
+    const int rowLeft = (480 - (28 + 12 + textWidth)) / 2;
+    place(_lockResetIcon, rowLeft, 262); place(_lockResetTime, rowLeft + 40, 252);
+    lv_obj_set_width(_lockResetTime, textWidth);
+    const bool lockResetKnown = leftTime.known || rightTime.known;
+    const uint32_t timeColor = lockResetKnown ? (_quota->stale ? dimCachedColor(Cyan) : Cyan) : Gray;
+    setIcon(_lockResetIcon, Icon::Hourglass, timeColor); setText(_lockResetTime, lockReset, timeColor);
 }
 void CodexMicroView::refreshHistory() {
     if (_historyRevision == TokenHistoryRevision()) { updateHistoryHeader(); return; }

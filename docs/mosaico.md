@@ -458,3 +458,52 @@ state; active/network-update phases remain320. The160MHz trial is not a proven
 root-cause fix. Poll/callback reductions are software activity changes, not a
 measured percentage reduction in battery energy. No genuine light/deep sleep or
 whole-board rail cutoff is enabled in this iteration.
+
+## Function-only lock and reset countdown
+
+The lock screen now pauses the touch read timer completely. Diagnostic period0
+means PAUSED, never a zero-duration active timer. Even forced input reads return
+software RELEASE without I2C. Function wakes; active touch resumes at10ms and a
+physical-release latch prevents a finger held during wake from selecting a tile.
+Mosaico's sole wake button is sampled every20ms; StopWatch remains unchanged.
+Countdown uses the official reset epoch plus receipt-age elapsed time, rounded
+up to minutes and updated locally once/minute; unknown stays--. It now has minute
+precision in both awake and lock views. No extra network requests are added.
+
+The first physical validation was intentionally prepared on the history page.
+That produced a wake into history by restoring the prior page, not evidence of
+an unwanted Function page toggle. A second controlled test explicitly locked
+from quota; the owner confirmed Function returned to quota. The existing wake
+key consumption logic is retained, not rewritten based on a test-setup artifact.
+Owner confirmed the countdown readable, touch cannot wake, and held-finger wake
+followed by release/new tap does not misselect or stick. On-device70sec lock
+observed0 additional touch reads and1 screen refresh; explicit wake restored10ms.
+The final awake minute-format refinement remains a candidate until deployed.
+
+## LP-core feasibility boundary
+
+IDF6.1 S31 supports LP Core/LP SPI, but the installed LP SPI initializer requires
+`rtc_gpio_is_valid_gpio` for clock/data/CS; S31 has LP GPIO0..7. The fixed CO5300
+QSPI wiring uses9/35/36/44/50/51 with reset42, and the current driver uses HP SPI2.
+Thus no direct migration of this display path to the standard LP driver is
+available on this PCB. This is not an absolute proof against undocumented HP-bus
+access, but that would be a separate low-level research project, not a safe toggle.
+
+A more practical goal is preserved panel image plus HP light-sleep, minute timer
+wake/redraw and Function wake, with scheduled Wi-Fi updates. Pending validation:
+PSRAM-XIP retention, completed SPI queues, GPIO60 rail state, stopped GUI wake
+sources and coherent elapsed time. Current tickless idle/LP firmware are disabled;
+this iteration does not enable actual sleep. Do not promise an energy reduction
+or call main CPUs asleep merely because the screen is locked.
+See [LP Core](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s31/api-reference/system/ulp-lp-core.html).
+
+## New battery evidence
+
+After the owner's full-to-reported5% discharge/recharge, standard reads showed
+CycleCount1 (previously0) and live FCC100mAh versus Design65. This records a cycle,
+not reliable65mAh calibration. No script forced the learned FCC back to65; UI
+keeps the unknown-nominal qualification. Current charge sample12%,3855mV,+69mA
+cannot reconstruct the earlier low-battery network failure. There is no SOC10%
+network cutoff in this code; locked phase2 intentionally has Wi-Fi/tailnet off.
+Low-voltage TX instability and cache/network delays remain hypotheses, not fixes.
+Future diagnostics must capture battery voltage and link/fetch failure concurrently.

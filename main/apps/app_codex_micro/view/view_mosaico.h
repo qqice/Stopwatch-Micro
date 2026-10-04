@@ -33,7 +33,6 @@ public:
 private:
     struct Hit { CodexMicroView* owner = nullptr; std::size_t index = 0; };
     static void touchEvent(lv_event_t* event);
-    static void wakeEvent(lv_event_t* event);
     static void cellEvent(lv_event_t* event);
     static void modeEvent(lv_event_t* event);
     void refreshQuota(uint32_t now);
@@ -52,6 +51,8 @@ private:
     lv_obj_t* _overlay = nullptr;
     lv_obj_t* _lockPanel = nullptr;
     lv_obj_t* _lockQuota = nullptr;
+    lv_obj_t* _lockResetTime = nullptr;
+    lv_obj_t* _lockResetIcon = nullptr;
     lv_obj_t* _lockBattery = nullptr;
     lv_obj_t* _battery = nullptr;
     lv_obj_t* _batteryIcon = nullptr;
@@ -83,7 +84,7 @@ private:
     std::unique_ptr<QuotaMonitorSnapshot> _quota;
     std::unique_ptr<TokenHistorySnapshot> _history;
     Page _page = Page::Command;
-    bool _hourly = false, _locked = false, _suppressed = false, _wakeGesture = false;
+    bool _hourly = false, _locked = false, _suppressed = false;
     std::size_t _selected = SIZE_MAX;
     uint32_t _activity = 0, _refresh = 0, _lockRefreshCount = 0;
     uint32_t _quotaRevision = UINT32_MAX, _historyRevision = UINT32_MAX;
