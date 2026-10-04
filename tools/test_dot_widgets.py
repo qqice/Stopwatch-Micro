@@ -99,7 +99,7 @@ class DotWidgetsTests(unittest.TestCase):
                 for bp in (0, 1, 1500, 9999, 10000):
                     filled = (total * bp + 5000) // 10000
                     columns = (filled + rows - 1) // rows if filled else 0
-                    highlight = phase * columns // 360 if columns else -1
+                    highlight = columns - 1 - phase * columns // 360 if columns else -1
                     # Color-only overlay has no dots outside the actual fill.
                     highlighted = [i for i in range(filled) if i // rows == highlight]
                     self.assertTrue(all(i < filled for i in highlighted))
@@ -115,7 +115,9 @@ class DotWidgetsTests(unittest.TestCase):
                             p = phase % 180
                             return 40 + ((p if p <= 90 else 180 - p) * 80 // 90) // 2
                         circumference = columns * 256
-                        position = phase * circumference // 360
+                        position = (columns - 1) * 256 - phase * circumference // 360
+                        if position < 0:
+                            position += circumference
                         distance = abs(column * 256 - position)
                         distance = min(distance, circumference - distance)
                         return (384 - distance) * 80 // 384 if distance < 384 else 0
@@ -127,6 +129,49 @@ class DotWidgetsTests(unittest.TestCase):
         self.assertIn("dsc.bg_color = lit ? foreground : lv_color_hex(0x283642);", SOURCE)
         self.assertIn("s->icon == Icon::Battery && s->valid && m.pulse", SOURCE)
         self.assertNotRegex(SOURCE, r"\blv_(timer_create|anim_start|obj_create)\s*\(.*(?:phase|motion)")
+
+    def test_right_to_left_lift_geometry(self):
+        # Actual C++ waveLift/bounds/direction are also gated by motionTest.
+        def position(columns, phase):
+            circumference = columns * 256
+            pos = (columns - 1) * 256 - phase * circumference // 360
+            return pos + circumference if pos < 0 else pos
+        self.assertGreater(position(4, 0), position(4, 90))
+        self.assertGreater(position(4, 90), position(4, 180))
+        self.assertGreater(position(4, 180), position(4, 270))
+        for height in range(1, 33):
+            for rows in range(1, 5):
+                pitch = min(8, height // rows)
+                columns = min(200 // rows, 198 // pitch) if pitch >= 2 else 0
+                diameter = max(1, pitch * 7 // 10) if columns else 0
+                drawn_h = (rows - 1) * pitch + diameter if columns else 0
+                y = max((height - drawn_h) // 2, min(3, height - drawn_h))
+                for strength in range(81):
+                    lift = (strength * min(3, y) + 40) // 80
+                    self.assertTrue(0 <= lift <= 3)
+                    self.assertGreaterEqual(y - lift, 0)
+                    self.assertLessEqual(y + drawn_h, height)
+                if height == 24 and rows == 3:
+                    self.assertEqual((pitch, columns, diameter, y), (8, 24, 5, 3))
+        self.assertIn("- (lit ? lift : 0)", SOURCE)
+        self.assertIn("if (liftA != liftB", SOURCE)
+
+    def test_cached_quota_hue_and_animation_gates_source(self):
+        # A source-only integration guard, not a GUI/hardware or frequency test.
+        view = (VIEW / "view_mosaico.cpp").read_text(encoding="utf-8")
+        self.assertIn("const uint32_t color = levelColor(bp);", view)
+        self.assertIn("return stale ? dimCachedColor(color) : color;", view)
+        self.assertIn("static_assert(dimCachedColor(Green) == 0x52B88B", view)
+        self.assertIn("const uint32_t quotaColor = quotaLevelColor(w.remainingBasisPoints, _quota->stale);", view)
+        self.assertIn("setText(value, buf, quotaColor);", view)
+        self.assertIn("setText(_lockQuota, lockText, lockKnown ? quotaLevelColor(lockBp, _quota->stale) : Gray);", view)
+        self.assertNotRegex(view, r"quotaColor\s*=\s*[^;]*stale\s*\?\s*Gray")
+        animation = view.split("void CodexMicroView::updateAnimations(", 1)[1].split("void CodexMicroView::refreshQuota(", 1)[0]
+        for gate in ("if (_locked) return;", "_page == Page::Command", "!_quota->stale", "age <= 130", "GetNetworkQuota().connected()",
+                     "!lv_obj_has_flag(_cards[i], LV_OBJ_FLAG_HIDDEN)", "window.available && window.remainingBasisPoints > 0"):
+            self.assertIn(gate, animation)
+        lock = view.split("void CodexMicroView::lockDisplay()", 1)[1].split("void CodexMicroView::", 1)[0]
+        self.assertIn("stopAnimations();", lock)
 
     def test_actual_cpp_syntax_and_static_assert(self):
         compiler = shutil.which("g++") or shutil.which("clang++")

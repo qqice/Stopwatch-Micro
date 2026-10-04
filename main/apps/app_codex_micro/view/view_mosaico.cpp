@@ -19,6 +19,18 @@ constexpr uint32_t ResetPurple = 0xB399F7, Gold = 0xE9C46A, Blue = 0x65B6F0, Cya
 uint32_t levelColor(uint16_t bp) {
     return bp <= 2000 ? 0xE87575 : (bp <= 5000 ? 0xD6B46A : Green);
 }
+constexpr uint32_t dimCachedColor(uint32_t color) {
+    // Keep percentage/alarm hue readable on the dim lock screen. The amber
+    // age indicator distinguishes cached data; gray is reserved for unknown.
+    return (((color >> 16) & 255U) * 4U / 5U << 16) |
+           (((color >> 8) & 255U) * 4U / 5U << 8) |
+           ((color & 255U) * 4U / 5U);
+}
+uint32_t quotaLevelColor(uint16_t bp, bool stale) {
+    const uint32_t color = levelColor(bp);
+    return stale ? dimCachedColor(color) : color;
+}
+static_assert(dimCachedColor(Green) == 0x52B88B, "cached green remains readable");
 void place(lv_obj_t* obj, int x, int y) { if (obj) lv_obj_set_pos(obj, x, y); }
 void panel(lv_obj_t* obj, int x, int y, int w, int h, uint32_t color = 0x15191F) {
     lv_obj_set_pos(obj, x, y); lv_obj_set_size(obj, w, h);
@@ -330,7 +342,7 @@ void CodexMicroView::refreshQuota(uint32_t now) {
             const int textWidth = width - textOffset;
             const int pitch = validWindows == 1 ? 8 : 4;
             place(_quotaIcons[i][j], x, 62); lv_obj_set_size(_quotaIcons[i][j], iconSize, iconSize);
-            const uint32_t quotaColor = _quota->stale ? Gray : levelColor(w.remainingBasisPoints);
+            const uint32_t quotaColor = quotaLevelColor(w.remainingBasisPoints, _quota->stale);
             setIcon(_quotaIcons[i][j], Icon::Quota, quotaColor);
             place(value, x + textOffset, 48); lv_obj_set_width(value, textWidth); setTextPitch(value, pitch);
             percent(w.remainingBasisPoints, buf, sizeof(buf)); setText(value, buf, quotaColor);
@@ -381,7 +393,9 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     }
     const auto& firstWindow = _quota->buckets[0].windows;
     const uint16_t lockBp = firstWindow[0].available ? firstWindow[0].remainingBasisPoints : firstWindow[1].remainingBasisPoints;
-    setText(_lockQuota, lockText, _quota->available && !_quota->stale ? levelColor(lockBp) : Gray);
+    const bool lockKnown = _quota->available && _quota->bucketCount &&
+                           (firstWindow[0].available || firstWindow[1].available);
+    setText(_lockQuota, lockText, lockKnown ? quotaLevelColor(lockBp, _quota->stale) : Gray);
 
 }
 void CodexMicroView::refreshHistory() {

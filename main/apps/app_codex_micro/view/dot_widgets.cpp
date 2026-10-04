@@ -108,12 +108,13 @@ void event(lv_event_t* e) {
         const auto g = detail::meterLayout(w, h, s->rows);
         for (int x = 0; x < g.columns; ++x) {
             const int mix = detail::waveMix(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, m.wavePhase)), m.wavePhase >= 0, x);
+            const int lift = detail::waveLift(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, m.wavePhase)), m.wavePhase >= 0, x);
             const auto foreground = mix ? lv_color_mix(lv_color_hex(0xFFFFFF), lv_color_hex(s->color), static_cast<uint8_t>(mix))
                                         : lv_color_hex(s->known ? s->color : 0x69716D);
             for (int y = 0; y < g.rows; ++y) {
                 const bool lit = detail::meterLit(x, y, g, s->bp, s->known);
                 dsc.bg_color = lit ? foreground : lv_color_hex(0x283642);
-                dot(layer, dsc, a.x1 + g.x + x * g.pitch, a.y1 + g.y + y * g.pitch, g.diameter);
+                dot(layer, dsc, a.x1 + g.x + x * g.pitch, a.y1 + g.y + y * g.pitch - (lit ? lift : 0), g.diameter);
             }
         }
     } else {
@@ -198,7 +199,9 @@ void setMotion(lv_obj_t* obj, uint16_t phase, bool enabled) {
         for (int x = 0; x * g.rows < filled; ++x) {
             const int a = detail::waveMix(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, old.wavePhase)), old.wavePhase >= 0, x);
             const int b = detail::waveMix(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, next.wavePhase)), next.wavePhase >= 0, x);
-            if (!lv_color_eq(lv_color_mix(white, base, static_cast<uint8_t>(a)), lv_color_mix(white, base, static_cast<uint8_t>(b)))) {
+            const int liftA = detail::waveLift(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, old.wavePhase)), old.wavePhase >= 0, x);
+            const int liftB = detail::waveLift(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, next.wavePhase)), next.wavePhase >= 0, x);
+            if (liftA != liftB || !lv_color_eq(lv_color_mix(white, base, static_cast<uint8_t>(a)), lv_color_mix(white, base, static_cast<uint8_t>(b)))) {
                 changed = true;
                 break;
             }

@@ -321,3 +321,29 @@ It performs no access-key or capacity writes and does not retroactively turn
 the original failed experiment into PASS. Nominal correction is not a completed
 learning cycle, calibrated cell capacity, or characterized accuracy below TI's
 recommended100mAh range.
+
+### Visible wave and cached-data readability
+
+Filled meter columns now travel right-to-left through a bounded upward wave;
+reflection and vertical motion do not alter the recorded percentage. Unknown,
+zero, stale, offline, hidden and locked meters remain still. Coin/card rotation
+is unchanged. Stale known quota uses80% of its normal hue/brightness on both
+awake and lock views, retaining red/amber low-quota warnings. Gray means unknown;
+the amber clock/age continues to distinguish cached readings from fresh ones.
+
+The owner reported no artifact at160MHz, but the immediately following live
+capture showed CPU320/diagnostic0 after18min radio-off. The earlier scripted160
+probe was short, not a long optical trial. Do not label160 long-standby accepted
+without concurrent actual-frequency and duration evidence.
+
+### Safe next battery steps
+
+Changing DC/FCC is not cell learning or current/voltage calibration. Before a
+qualified discharge, audit the remaining charge/discharge/taper/near-full and
+EDV profile: TI default thresholds may be inappropriate for a65mAh pack. Do not
+request repeated forced deep discharges or change gain from guessed scaling.
+For now charge normally, then use on battery without intermittent USB charging;
+recharge promptly at a low-battery warning. This is an observation cycle, not
+proof of qualified FCC learning. Capture SOC/RM/FCC/current/voltage and gauge
+qualification flags at endpoints. Offset/gain calibration requires independently
+known zero/load/voltage; no such reference is currently available.
