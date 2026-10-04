@@ -13,8 +13,11 @@ set(APP_SRCS
 
 if(MOSAICO_BOARD)
     list(REMOVE_ITEM APP_SRCS "apps/app_codex_micro/view/view.cpp")
+    if(CONFIG_IDF_TARGET_ESP32S31 AND CONFIG_IDF_TARGET_ARCH_RISCV)
+        list(APPEND APP_SRCS "ota/panic_capture.cpp" "hal/mosaico/vfs_internal_ops.c")
+    endif()
     list(APPEND APP_SRCS "apps/app_codex_micro/view/view_mosaico.cpp"
-        "apps/app_codex_micro/view/dot_widgets.cpp" "host/quota_monitor.cpp")
+        "apps/app_codex_micro/view/dot_widgets.cpp" "host/quota_monitor.cpp" "ota/mosaico_ota.cpp")
     set(PLATFORM_SRCS "hal/hal.cpp" "hal/mosaico/hal_mosaico.cpp" "hal/mosaico/bt_config.c" "hal/mosaico/usb_console.c"
         "hal/ble/codex_micro_ble.cpp" "hal/ble/hid_gatt_compat.cpp"
         "hal/utils/button/Button_Class.cpp" "hal/utils/settings/settings.cc")
@@ -57,6 +60,13 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
 
 if(MOSAICO_BOARD)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC MOSAICO_BOARD=1)
+    if(CONFIG_IDF_TARGET_ESP32S31 AND CONFIG_IDF_TARGET_ARCH_RISCV)
+        target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler"
+            "-Wl,--wrap=esp_vfs_register_fs")
+    endif()
+    if(MOSAICO_OTA_HEALTH_TEST_FAIL)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE MOSAICO_OTA_HEALTH_TEST_FAIL=1)
+    endif()
 endif()
 
 # ESP-IDF 5.5.4 sizes BLE HID Output Report characteristics from the report body.

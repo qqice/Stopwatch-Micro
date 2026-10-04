@@ -12,6 +12,8 @@
 #include <host/host_bridge.h>
 #ifdef MOSAICO_BOARD
 #include <host/quota_monitor.h>
+#include <ota/mosaico_ota.h>
+#include <ota/panic_capture.h>
 #include <apps/app_codex_micro/view/dot_widgets.h>
 #endif
 #include <host/network_quota.h>
@@ -212,6 +214,51 @@ void SerialDebug::handleLine(char* line)
     }
 
     char* command = ::strtok_r(nullptr, " \t", &save);
+#ifdef MOSAICO_BOARD
+    if (command && std::strcmp(command, "ota-status") == 0) {
+        char details[256]{};
+        MosaicoOta::status(details, sizeof(details));
+        result("ota-status", "PASS", details);
+        return;
+    }
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
+    if (command && std::strcmp(command, "panic") == 0) {
+        char details[256];
+        const bool saved = MosaicoPanicStatus(details, sizeof(details));
+        result("panic", saved ? "PASS" : "SKIP", details);
+        return;
+    }
+#endif
+    if (MosaicoOta::busy() && (!command || (std::strcmp(command, "ping") && std::strcmp(command, "status")))) {
+        result(command ? command : "parse", "FAIL", "reason=ota_busy no_changes=1");
+        return;
+    }
+    if (command && std::strcmp(command, "ota-update") == 0) {
+        const char* confirm = ::strtok_r(nullptr, " \t", &save);
+        if (!confirm || std::strcmp(confirm, "CONFIRM_EXTERNAL_POWER") || ::strtok_r(nullptr, " \t", &save)) {
+            result("ota-update", "FAIL", "expected=CONFIRM_EXTERNAL_POWER manual_USB_external_power_confirmation_required=1");
+            return;
+        }
+        if (_async_test != AsyncTest::None) {
+            result("ota-update", "FAIL", "reason=async_diagnostic_active cancel_first=1");
+            return;
+        }
+        const bool ok = MosaicoOta::request();
+        if (ok) GetNetworkQuota().wakeForFirmwareUpdate();
+        result("ota-update", ok ? "PASS" : "FAIL", "external_power=human_confirmed_not_measured SOC_not_used=1");
+        return;
+    }
+    if (command && std::strcmp(command, "ota-rollback-test") == 0) {
+        const char* confirm = ::strtok_r(nullptr, " \t", &save);
+        if (!confirm || std::strcmp(confirm, "CONFIRM") || ::strtok_r(nullptr, " \t", &save)) {
+            result("ota-rollback-test", "FAIL", "expected=CONFIRM");
+            return;
+        }
+        result("ota-rollback-test", "RUNNING", "explicit_reboot_test=1");
+        if (!MosaicoOta::rollbackTest()) result("ota-rollback-test", "FAIL", "reason=unsafe_or_no_bootable_rollback_image");
+        return;
+    }
+#endif
     if (command == nullptr || std::strcmp(command, "help") == 0) {
         printHelp();
         return;
@@ -767,6 +814,9 @@ void SerialDebug::handleLine(char* line)
 void SerialDebug::printHelp()
 {
     std::printf("DBG HELP commands=ping,status,selftest,controls,protocol\r\n");
+#ifdef MOSAICO_BOARD
+    std::printf("DBG HELP ota=ota-status,ota-update_CONFIRM_EXTERNAL_POWER,ota-rollback-test_CONFIRM\r\n");
+#endif
     std::printf(
         "DBG HELP commands=ui_[command|agent|mic|cycle],transport,perf_[ms],trace_[ms],mic_[ms],inputs_[ms]\r\n");
     std::printf("DBG HELP commands=tone_[hz]_[ms],vibrate_[ms]_[strength],backlight_[10-100],cancel\r\n");

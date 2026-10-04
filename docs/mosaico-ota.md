@@ -1,8 +1,9 @@
 # Mosaico safe dual-slot OTA migration plan
 
-Status: proposal only. The active build still selects the preserved factory
-partition table. No bootloader, table, otadata or OTA slot migration has been
-performed. Firmware work and backup verification must precede write approval.
+Status: dual-slot migration performed; unattended OTA hardware acceptance pending.
+Signed manual network updates succeeded, but subsequent transfer/startup panics
+required diagnostics. Do not treat the automatic candidate as accepted yet.
+Factory build/layout remains separate from the new rollback-enabled OTA build.
 
 ## Exact S31 layout
 
@@ -84,7 +85,7 @@ auth keys. Prefer signed manifests/images over authenticated tailnet transport;
 keep signing keys outside Git. Current Secure Boot is disabled, so application
 signature checks are not an immutable physical-attacker-resistant boot chain.
 Do not label an OTA implementation finished until inactive-slot update and real
-boot/rollback acceptance have run. Endpoints/client/protocol are not implemented yet.
+boot/rollback acceptance have run. Endpoints/client/protocol are implemented; physical update/rollback acceptance is still pending.
 
 ## Runtime USB fallback
 
@@ -113,3 +114,90 @@ only queries ROM MD5 per range; it does not stream-read, upload a stub, erase,
 reset or write flash. All requested hashes must match before exclusive file
 exports; the resulting manifest records exact rollback offsets and hashes.
 Do not run it until final write artifacts define the actual sector ranges.
+
+## Implemented update protocol
+
+The existing authenticated quota service serves `/v1/ota/manifest` and 4096-byte
+JSON/base64 chunks bound to the release SHA256. A loaded release is immutable
+until service restart. Firmware verifies the compiled P-256 public key against
+canonical metadata before `esp_ota_begin`, then enforces sequential offsets,
+size, final SHA256, SDK image validation and the exact alternate-slot layout.
+Only the network owner transfers data, so Wi-Fi/tailnet pause, CPU downclock and
+deferred gauge work cannot race OTA. Unsigned network content is never booted.
+No Secure Boot/anti-rollback eFuses are enabled; signed old releases remain usable.
+
+An explicit runtime command `debug ota-update CONFIRM_EXTERNAL_POWER` triggers
+network OTA; the human confirms USB/external power, not an unreliable SOC value.
+No1200baud touch or physical BOOT is needed after the initial migration.
+`tools/mosaico_ota_update.py --port COM12 --confirm-external-power` waits through
+normal CDC re-enumeration and accepts only the opposite slot in VALID state.
+Automatic signed checks are implemented; no private signing keys are placed on the Mac server.
+
+Startup health requires real app view/key manager/serial initialization plus
+completed UI execution, board I2C/display/touch/buttons, a submitted frame and
+healthy internal/PSRAM heaps. A20sec continuous healthy window marks VALID; a
+90sec independent timer rejects a stuck candidate. Health outcomes share a lock.
+Server availability, Wi-Fi connectivity and battery percentage are not required
+for startup acceptance. Pending health suppresses idle downclock/radio pause.
+
+## Bounded initial migration and recovery
+
+`tools/mosaico_ota_migrate.py` freezes images and an exact plan into a restricted
+private bundle. It checks chip/project/checksum/digest/PSRAM-XIP, rollback loader
+config, preserved partition locations and a known-running baseline. Candidate is
+staged at0x400000; the existing0x20000 app is left untouched. Loader/table/selection
+follow only after the candidate verifies. Initial selection is ota0 seq1 VALID
+and ota1 seq2 NEW; the loader performs the NEW-to-PENDING transition on first boot.
+
+Before writes, only their actual erase sectors are saved with live ROM MD5 and
+local SHA256. The subsequent same-candidate OTA acceptance test writes app0, so
+its exact erase span is also backed up now and bound to candidate SHA/length.
+A larger test image requires its actual sector coverage; no blanket full-slot
+backup or erase is used. The source is the already verified private prefix;
+no further bulk dump is read. All flash regions outside the initial write sectors
+have before/after MD5 protection, including the original working app0.
+
+Esptool high-level write retries are disabled to prevent an implicit reset during
+partial migration. Any failed write/hash check stops before the next image and
+retains ROM recovery. Private rollback files record exact offsets, lengths and
+restore ordering; recovery writes require separately confirmed physical identity.
+## Automatic policy and current acceptance boundary
+
+The device checks a signed release once per hour using an already-online quota
+window (including the first eligible window after a VALID boot). It does not
+wake radios solely for OTA. Default installation policy is conservative: sealed
+valid gauge, CFG/CAL off, measured cell voltage at least3900mV, plus enumerated
+USB or positive charging current over3mA. This is not a precise VBUS/SOC meter;
+pure-battery operation defers automatic installation. Manual confirmation remains
+available as an explicit maintenance override.
+
+The complete current image (including the appended digest) is hashed once per
+boot. Identical releases are skipped. An independent `mosaico_ota/attempt` NVS
+record is committed before boot selection; rollback suppresses that same hash
+on the next boot, preventing a repeated failure/reinstall loop. It records only
+the most recent attempt, not a permanent historical blacklist. Power failure
+between journal commit and selection can conservatively suppress an unstarted
+release; an explicit manual retry is permitted. Existing network credentials are
+not changed by this separate namespace.
+
+A real transfer panic was captured in retained36-byte RTC state and mapped to
+lwIP `tcp_output` NULL+0x0c. WireGuard decrypted RX bypassed its configured
+`tcpip_input` callback with a direct `ip_input`; the project patch now dispatches
+through `netif->input` with success-only ownership transfer. SDK/TLS/source-IP/
+replay rules are unchanged. Fresh dependency replay and host ownership checks pass.
+
+The first automatic candidate then failed in startup VFS operations-table access.
+A Mosaico-local compatibility wrapper now retains the TinyUSB static ops table in
+internal RAM, without patching SDK/managed code. This is a targeted cache-safety
+mitigation, not a proven comprehensive explanation of that startup exception.
+RTC capture/query, wrapper ABI/link layout and builds have been checked, but the
+new candidate still needs physical startup and unattended upgrade/rollback proof.
+A guarded1200baud request still fails Windows ROM re-enumeration; initial recovery
+uses physical BOOT. This is separate from network OTA and is not an accepted
+unattended update transport.
+
+Do not claim unattended OTA complete until a read-only observer verifies that
+publishing a signed new release, WITHOUT a USB update/wake command, produces a
+VALID alternate-slot boot, and that a controlled failing candidate returns to
+its healthy predecessor and is not repeatedly reinstalled. Current root/source
+status and private exact-sector backups retain the unfinished hardware boundary.

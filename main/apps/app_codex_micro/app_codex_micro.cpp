@@ -4,6 +4,7 @@
 #include "app_codex_micro.h"
 
 #include <debug/serial_debug.h>
+#include <ota/ota_readiness.h>
 #include <hal/ble/codex_micro_ble.h>
 #include <hal/hal.h>
 #include <mooncake_log.h>
@@ -30,6 +31,7 @@ void AppCodexMicro::onCreate()
 void AppCodexMicro::onOpen()
 {
     mclog::tagInfo(getAppInfo().name, "on open");
+    _ota_completed_loops = 0;
     std::unique_ptr<input::KeyManager> key_manager(new (std::nothrow) input::KeyManager());
     std::unique_ptr<view::CodexMicroView> app_view(new (std::nothrow) view::CodexMicroView());
     if (key_manager == nullptr || app_view == nullptr) {
@@ -124,11 +126,13 @@ void AppCodexMicro::onRunning()
         _view->togglePage();
     }
     _last_ui_update_ms = now;
+    if (_view->ready() && _ota_completed_loops != UINT32_MAX) ++_ota_completed_loops;
 }
 
 void AppCodexMicro::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
+    _ota_completed_loops = 0;
     if (_mic_host_active) {
         GetCodexMicroBle().sendKey(CodexMicroControl::Mic, CodexMicroKeyAction::Release);
         _mic_host_active = false;
@@ -144,6 +148,13 @@ void AppCodexMicro::onClose()
 
     LvglLockGuard lock;
     _view.reset();
+}
+
+bool AppCodexMicro::otaReady()
+{
+    LvglLockGuard lock;
+    return MosaicoOta::appReady(_view != nullptr && _view->ready(), _key_manager != nullptr,
+                              _serial_debug != nullptr, _ota_completed_loops);
 }
 
 bool AppCodexMicro::debugUiReady()

@@ -21,12 +21,20 @@ using namespace mooncake;
 using namespace smooth_ui_toolkit;
 
 #ifdef MOSAICO_BOARD
+#include <ota/mosaico_ota.h>
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
+#include <ota/panic_capture.h>
+#endif
 extern "C" void mosaico_console_init(void);
 #endif
 extern "C" void app_main(void)
 {
 #ifdef MOSAICO_BOARD
+    MosaicoOta::healthPoll(false);
     mosaico_console_init();
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
+    MosaicoPanicReport();
+#endif
 #endif
     BootTraceBegin();
     // Setup logger
@@ -64,6 +72,9 @@ extern "C" void app_main(void)
         mclog::tagError("Codex Micro", "failed to allocate system app");
         return;
     }
+#ifdef MOSAICO_BOARD
+    AppCodexMicro* const ota_app = system_app.get(); // Mooncake owns it for the installed app lifetime.
+#endif
     const int app_id = GetMooncake().installApp(std::move(system_app));
     if (app_id < 0 || !GetMooncake().openApp(app_id)) {
         mclog::tagError("Codex Micro", "failed to start system app");
@@ -85,6 +96,7 @@ extern "C" void app_main(void)
         }
 #endif
 #ifdef MOSAICO_BOARD
+        MosaicoOta::healthPoll(ota_app->otaReady());
         // The monitor has no low-latency remote-control path. Keep its 10Hz
         // motion/100Hz touch responsive without a 1kHz application update loop.
         // Function is now the sole wake input: 20ms GPIO sampling avoids the

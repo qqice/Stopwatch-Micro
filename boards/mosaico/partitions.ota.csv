@@ -1,4 +1,4 @@
-# Proposed S31 dual-slot layout. NOT selected by the current build.
+# Opt-in S31 dual-slot layout, selected by the dedicated rollback-enabled OTA build.
 # Preserve NVS/PHY/ui_apps/system; replace only the former factory app region.
 nvs,data,nvs,0xa000,0x6000,
 otadata,data,ota,0x10000,0x2000,

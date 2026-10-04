@@ -12,6 +12,7 @@
 #include <cJSON.h>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 #include <esp_crt_bundle.h>
 #include <esp_event.h>
 #include <esp_http_client.h>
@@ -285,8 +286,13 @@ void NetworkQuota::run()
     constexpr int64_t UpdateWindowUs    = 90LL * 1000000;
 #ifdef MOSAICO_BOARD
     int64_t nextGaugeCheckUs = 0;
+
 #endif
     while (true) {
+#ifdef MOSAICO_BOARD
+        if (MosaicoOta::busy() && MosaicoOta::requestAgeMs() > 120000)
+            MosaicoOta::fail("network_ready_timeout");
+#endif
         const bool locked = idleLocked();
         const int64_t now = esp_timer_get_time();
         GetCodexMicroBle().requestRadioIdle(locked);
@@ -387,6 +393,20 @@ void NetworkQuota::run()
             wait(5000);
             continue;
         }
+#ifdef MOSAICO_BOARD
+        // Reuse an already-online quota window. Do not wake radios just for OTA.
+        if (MosaicoOta::automaticCheckDue()) {
+            std::unique_ptr<char[]> manifest(new (std::nothrow) char[2048]);
+            int manifestSize = 0;
+            if (manifest && requestJson("/v1/ota/manifest", manifest.get(), 2048, manifestSize))
+                MosaicoOta::requestAutomatic(manifest.get());
+        }
+        if (MosaicoOta::takeRequest()) {
+            updateFirmware();
+
+            continue;
+        }
+#endif
         const bool quotaOk = fetch();
         if (quotaOk)
             ++_accepted;
@@ -511,3 +531,71 @@ bool NetworkQuota::fetch()
                                              static_cast<uint32_t>(esp_timer_get_time() / 1000) - age * 1000);
 #endif
 }
+
+#ifdef MOSAICO_BOARD
+void NetworkQuota::updateFirmware()
+{
+    // Only the network owner runs this path: no parallel quota HTTP, tailnet
+    // pause, idle downclock or deferred gauge reload can race the transfer.
+    constexpr size_t BodyCapacity = 8192, ChunkCapacity = 4096;
+    std::unique_ptr<char[]> body(new (std::nothrow) char[BodyCapacity]);
+    std::unique_ptr<uint8_t[]> chunk(new (std::nothrow) uint8_t[ChunkCapacity]);
+    if (!body || !chunk) { MosaicoOta::fail("ota_buffer_allocation"); return; }
+    int used = 0;
+    if (!requestJson("/v1/ota/manifest", body.get(), BodyCapacity, used)) {
+        MosaicoOta::fail("manifest_download"); return;
+    }
+    cJSON* manifest = cJSON_ParseWithLength(body.get(), static_cast<size_t>(used));
+    const cJSON* sizeValue = manifest ? cJSON_GetObjectItemCaseSensitive(manifest, "size") : nullptr;
+    char imageHash[65]{};
+    const bool fieldsOk = manifest && cJSON_IsNumber(sizeValue) &&
+        sizeValue->valuedouble > 0 && sizeValue->valuedouble <= 0x3E0000 &&
+        std::floor(sizeValue->valuedouble) == sizeValue->valuedouble &&
+        copyString(manifest, "sha256", imageHash, sizeof(imageHash));
+    const uint32_t size = fieldsOk ? static_cast<uint32_t>(sizeValue->valuedouble) : 0;
+    cJSON_Delete(manifest);
+    if (!fieldsOk) { MosaicoOta::fail("manifest_metadata"); return; }
+    if (!MosaicoOta::beginManifest(body.get())) return;
+    const int64_t deadline = esp_timer_get_time() + 600LL * 1000000;
+    for (uint32_t offset = 0; offset < size;) {
+        if (esp_timer_get_time() >= deadline) { MosaicoOta::fail("download_timeout"); return; }
+        char path[160]{};
+        const int n = std::snprintf(path, sizeof(path), "/v1/ota/chunk?sha256=%s&offset=%lu",
+                                  imageHash, static_cast<unsigned long>(offset));
+        if (n <= 0 || n >= static_cast<int>(sizeof(path))) {
+            MosaicoOta::fail("chunk_path"); return;
+        }
+        bool downloaded = false;
+        // A failed HTTP read never advances offset or writes bytes. Retrying
+        // this hash-bound chunk cannot mix releases or duplicate flash writes.
+        for (unsigned attempt = 0; attempt < 3 && esp_timer_get_time() < deadline; ++attempt) {
+            if (requestJson(path, body.get(), BodyCapacity, used)) { downloaded = true; break; }
+            if (attempt < 2) vTaskDelay(pdMS_TO_TICKS(300U << attempt));
+        }
+        if (!downloaded) { MosaicoOta::fail("chunk_download"); return; }
+        cJSON* root = cJSON_ParseWithLength(body.get(), static_cast<size_t>(used));
+        const cJSON* position = root ? cJSON_GetObjectItemCaseSensitive(root, "offset") : nullptr;
+        const cJSON* data = root ? cJSON_GetObjectItemCaseSensitive(root, "data") : nullptr;
+        size_t count = 0;
+        const bool ok = cJSON_IsNumber(position) && position->valuedouble == offset &&
+            cJSON_IsString(data) && data->valuestring &&
+            mbedtls_base64_decode(chunk.get(), ChunkCapacity, &count,
+                reinterpret_cast<const unsigned char*>(data->valuestring),
+                std::strlen(data->valuestring)) == 0 &&
+            count == std::min<uint32_t>(ChunkCapacity, size - offset);
+        cJSON_Delete(root);
+        if (!ok) { MosaicoOta::fail("chunk_format"); return; }
+        if (!MosaicoOta::writeChunk(offset, chunk.get(), count)) return;
+        offset += static_cast<uint32_t>(count);
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    MosaicoOta::finish();
+}
+#endif
+#ifdef MOSAICO_BOARD
+void NetworkQuota::wakeForFirmwareUpdate()
+{
+    setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+    if (_task_handle) xTaskNotifyGive(_task_handle);
+}
+#endif

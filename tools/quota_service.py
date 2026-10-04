@@ -25,6 +25,7 @@ from typing import Any, Callable
 from stopwatch_bridge import AppServerClient, BridgeError, UsageSnapshot, locate_codex, normalize_rate_limits
 from history_store import HistoryStore, unavailable_response
 from quota_dashboard import DashboardStore, normalize_quota_dashboard
+from ota_release import ImmutableReleaseStore
 
 
 POLL_SECONDS = 60.0
@@ -203,7 +204,7 @@ def is_authorized(authorization: str, device_token: str) -> bool:
     return hmac.compare_digest(supplied, f"Bearer {device_token}".encode("ascii"))
 
 
-def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore | None = None, dashboard: DashboardStore | None = None) -> type[BaseHTTPRequestHandler]:
+def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore | None = None, dashboard: DashboardStore | None = None, release_store: ImmutableReleaseStore | None = None) -> type[BaseHTTPRequestHandler]:
     dashboard = dashboard if dashboard is not None else DashboardStore()
     class QuotaHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -217,6 +218,28 @@ def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore 
             return
 
         def do_GET(self) -> None:  # noqa: N802 - required BaseHTTPRequestHandler name
+            if self.path.startswith("/v1/ota/"):
+                if not is_authorized(self.headers.get("Authorization", ""), device_token):
+                    self.send_error(HTTPStatus.UNAUTHORIZED)
+                    return
+                if release_store is None:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                try:
+                    payload = release_store.response(self.path)
+                except ValueError:
+                    self.send_error(HTTPStatus.BAD_REQUEST)
+                    return
+                except LookupError:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             if self.path not in {"/v1/status", "/v1/history", "/v2/status"}:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -259,13 +282,15 @@ def run(args: argparse.Namespace) -> int:
     servers=[]
     try:
         config = load_config(args.config)
+        release_dir = args.config.parent / "ota-release"
+        release_store = ImmutableReleaseStore(release_dir) if release_dir.exists() else None
         history = HistoryStore(config.history_db if config.history_db is not None else args.config.parent / "private" / "history.sqlite3")
         collector = QuotaCollector(lambda: AppServerClient(locate_codex(args.codex_path)), SnapshotStore(), history)
         stop = threading.Event()
         worker = threading.Thread(target=run_collector, args=(collector, stop), daemon=True)
         for host in (config.server_host,)+config.additional_hosts:
-            servers.append(ThreadingHTTPServer((host, config.server_port), make_handler(collector._store, config.device_token, history, collector._dashboard)))
-    except (BridgeError, OSError) as exc:
+            servers.append(ThreadingHTTPServer((host, config.server_port), make_handler(collector._store, config.device_token, history, collector._dashboard, release_store)))
+    except (BridgeError, OSError, ValueError) as exc:
         for server in servers: server.server_close()
         print(f"QUOTA SERVICE ERROR {exc}", file=sys.stderr)
         return 2

@@ -35,6 +35,7 @@ public:
     void onRunning() override;
     void onClose() override;
 
+    bool otaReady();
     bool debugUiReady();
     bool debugSetScreen(DebugScreen screen);
     const char* debugScreenName();
@@ -54,6 +55,7 @@ private:
     std::unique_ptr<input::KeyManager> _key_manager;
     std::unique_ptr<view::CodexMicroView> _view;
     std::unique_ptr<SerialDebug> _serial_debug;
+    uint32_t _ota_completed_loops = 0;
     uint32_t _last_ui_update_ms = 0;
     bool _mic_host_active       = false;
     bool _debug_input_capture   = false;

@@ -4,6 +4,7 @@
 #include <cstdint>
 #ifdef MOSAICO_BOARD
 #include <mutex>
+#include <ota/mosaico_ota.h>
 #endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -23,10 +24,17 @@ public:
     void setLocked(bool locked);
     bool idleLocked() const
     {
-        return _locked.load() && _power_profile.load() != 0;
+        return _locked.load() && _power_profile.load() != 0
+#ifdef MOSAICO_BOARD
+               && !MosaicoOta::busy() && !MosaicoOta::healthPending()
+#endif
+               ;
     }
     void setPowerProfile(uint8_t profile);
     void refreshWhileLocked();
+#ifdef MOSAICO_BOARD
+    void wakeForFirmwareUpdate();
+#endif
     IdlePowerStats powerStats() const;
 #ifdef MOSAICO_BOARD
     // Explicit serial diagnostics only; RAM state resets to the protective
@@ -71,6 +79,9 @@ private:
     bool fetch();
     bool requestJson(const char* path, char* body, size_t capacity, int& used);
     bool fetchHistory();
+#ifdef MOSAICO_BOARD
+    void updateFirmware();
+#endif
     void wait(uint32_t milliseconds);
     void setCpu(uint32_t mhz);
     void recordWifiRunning(bool running);
