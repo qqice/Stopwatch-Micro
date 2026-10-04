@@ -399,7 +399,7 @@ void NetworkQuota::run()
             std::unique_ptr<char[]> manifest(new (std::nothrow) char[2048]);
             int manifestSize = 0;
             if (manifest && requestJson("/v1/ota/manifest", manifest.get(), 2048, manifestSize))
-                MosaicoOta::requestAutomatic(manifest.get());
+                MosaicoOta::discoverManifest(manifest.get());
         }
         if (MosaicoOta::takeRequest()) {
             updateFirmware();
@@ -589,7 +589,15 @@ void NetworkQuota::updateFirmware()
         offset += static_cast<uint32_t>(count);
         vTaskDelay(pdMS_TO_TICKS(1));
     }
-    MosaicoOta::finish();
+    if (!MosaicoOta::finishDownload()) return;
+    // A truthful verified-image page is visible before boot selection. All
+    // delays are in the network owner; LVGL/input remain responsive.
+    const int64_t installDeadline = esp_timer_get_time() + 6000000;
+    while (MosaicoOta::busy() && esp_timer_get_time() < installDeadline) {
+        MosaicoOta::installVerified();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (MosaicoOta::busy()) MosaicoOta::fail("install_stage_timeout");
 }
 #endif
 #ifdef MOSAICO_BOARD

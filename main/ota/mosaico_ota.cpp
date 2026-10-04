@@ -3,6 +3,7 @@
 #include <hal/hal.h>
 #include <cJSON.h>
 #include <esp_ota_ops.h>
+#include <esp_app_desc.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_timer.h>
@@ -17,16 +18,22 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
-#ifdef MOSAICO_OTA_HEALTH_TEST_FAIL
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#endif
 
 namespace MosaicoOta {
 namespace {
 constexpr uint32_t MaxImage = 0x3e0000;
 std::mutex lock;
 std::mutex healthLock;
+std::mutex snapshotLock; // Never held over flash, crypto, NVS, or telemetry calls.
+UiSnapshot ui{0, 0, 0, UiStage::Idle, "", "-", "", "", "", -1, -1, false, false, false, 0};
+std::atomic<bool> approvedRequest{false}, autoInstall{false};
+std::atomic<bool> preferenceLoaded{false};
+bool imageReady = false, signedVersion = false;
+int64_t readySince = 0, installSince = 0;
+char approvedHash[65]{};
+struct Descriptor { bool versionSigned; uint32_t size; uint8_t hash[32]; char sha[65], version[32], fingerprint[17]; };
 std::atomic<bool> active{false};
 std::atomic<uint32_t> requestedAtMs{0};
 std::atomic<bool> pending{false};
@@ -34,7 +41,7 @@ bool writing = false, hashLive = false, automaticMode = false;
 int64_t nextAutomaticCheck = 0;
 std::atomic<const char*> autoState{"idle"};
 bool currentHashChecked = false, currentHashValid = false;
-char currentHash[65]{}, automaticHash[65]{};
+char currentHash[65]{};
 esp_ota_handle_t handle = 0;
 const esp_partition_t* target = nullptr;
 std::atomic<uint32_t> expectedSize{0}, received{0};
@@ -68,6 +75,16 @@ bool exactSlot(const esp_partition_t* p)
         ((p->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0 && p->address == 0x20000 && p->size == 0x3e0000) ||
          (p->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1 && p->address == 0x400000 && p->size == 0x3f0000));
 }
+int8_t slot(const esp_partition_t* p) { return exactSlot(p) ? static_cast<int8_t>(p->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0) : -1; }
+void publish(UiStage stage, const char* error = "")
+{
+    std::lock_guard<std::mutex> guard(snapshotLock);
+    if (stage == UiStage::Failed || stage == UiStage::WaitingPower) approvedRequest.store(false);
+    ui.stage = stage; ui.size = expectedSize.load(); ui.received = received.load();
+    ui.automaticInstall = autoInstall.load();
+    ui.progressBasisPoints = ui.size ? static_cast<uint16_t>(static_cast<uint64_t>(ui.received) * 10000 / ui.size) : 0;
+    std::snprintf(ui.error, sizeof(ui.error), "%s", error); ++ui.revision;
+}
 bool exactData(uint8_t subtype, uint32_t address, uint32_t size)
 {
     const auto* p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, static_cast<esp_partition_subtype_t>(subtype), nullptr);
@@ -100,6 +117,8 @@ void failLocked(const char* message)
     pending = false;
     target = nullptr;
     std::snprintf(reason, sizeof(reason), "%s", message ? message : "failed");
+    imageReady = false;
+    publish(UiStage::Failed, message ? message : "failed");
     active.store(false);
 }
 bool reject(const char* message) { failLocked(message); return false; }
@@ -174,13 +193,19 @@ bool recordAttempt()
     hashHex(expectedHash, attempted);
     nvs_handle_t handle;
     if (nvs_open("mosaico_ota", NVS_READWRITE, &handle) != ESP_OK) return false;
-    const bool ok = nvs_set_str(handle, "attempt", attempted) == ESP_OK && nvs_commit(handle) == ESP_OK;
+    char candidateVersion[32], fingerprint[17]; int8_t candidateSlot;
+    { std::lock_guard<std::mutex> uiGuard(snapshotLock); std::memcpy(candidateVersion, ui.targetVersion, 32); std::memcpy(fingerprint, ui.signatureShort, 17); candidateSlot = ui.targetSlot; }
+    const bool ok = nvs_set_str(handle, "attempt", attempted) == ESP_OK &&
+        nvs_set_str(handle, "candidate_ver", candidateVersion) == ESP_OK &&
+        nvs_set_str(handle, "candidate_sig", fingerprint) == ESP_OK &&
+        nvs_set_str(handle, "candidate_hash", attempted) == ESP_OK &&
+        nvs_set_i8(handle, "candidate_slot", candidateSlot) == ESP_OK && nvs_commit(handle) == ESP_OK;
     nvs_close(handle);
     return ok;
 }
-bool requestLocked(bool automatic)
+bool requestLocked(bool automatic, bool preserveAge = false)
 {
-    if (active.load()) return false;
+    if (active.load() || approvedRequest.load()) return false;
     if (!currentReady()) return reject("running_or_layout_not_ready");
     if (!(automatic ? automaticPowerSafe() : gaugeSafe())) return reject("gauge_not_valid_sealed_cfg0_cal0");
     automaticMode = automatic;
@@ -188,8 +213,84 @@ bool requestLocked(bool automatic)
     pending = true;
     std::snprintf(reason, sizeof(reason), "requested");
     cachedRunning.store(esp_ota_get_running_partition());
-    requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
+    if (!preserveAge) requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
     active.store(true);
+    return true;
+}
+bool validateDescriptor(const char* json, Descriptor& out, const char*& error)
+{
+    const auto invalid = [&](const char* why) { error = why; return false; };
+    if (psa_crypto_init() != PSA_SUCCESS) return invalid("crypto_init");
+    if (!json || std::strlen(json) > 2048) return invalid("manifest_length");
+    const char* end = nullptr;
+    cJSON* m = cJSON_ParseWithOpts(json, &end, true);
+    if (!m) return invalid("manifest_json");
+    // Reject duplicate/unknown fields: one interpretation for signed metadata.
+    const char* names[] = {"schema", "board", "chip", "project", "layout", "size", "sha256", "signature", "version"};
+    bool fields = cJSON_IsObject(m);
+    unsigned seen = 0;
+    for (const cJSON* v = m->child; v; v = v->next) {
+        unsigned bit = 0;
+        for (unsigned i = 0; i < 9; ++i) if (v->string && !std::strcmp(v->string, names[i])) bit = 1U << i;
+        if (!bit || (seen & bit)) fields = false;
+        seen |= bit;
+    }
+    const auto* schema = cJSON_GetObjectItemCaseSensitive(m, "schema");
+    const auto* size = cJSON_GetObjectItemCaseSensitive(m, "size");
+    const auto* sha = cJSON_GetObjectItemCaseSensitive(m, "sha256");
+    const auto* sig = cJSON_GetObjectItemCaseSensitive(m, "signature");
+    const auto* version = cJSON_GetObjectItemCaseSensitive(m, "version");
+    const bool v2 = cJSON_IsNumber(schema) && schema->valuedouble == 2;
+    out.versionSigned = v2;
+    bool versionValid = cJSON_IsString(version) && version->valuestring && std::strlen(version->valuestring) >= 1 && std::strlen(version->valuestring) <= 31;
+    if (versionValid) for (const char* c = version->valuestring; *c; ++c) if (*c < 33 || *c > 126) versionValid = false;
+    bool valid = fields && seen == (v2 ? 511U : 255U) && cJSON_IsNumber(schema) &&
+        (schema->valuedouble == 1 || (v2 && versionValid)) &&
+        textEquals(m, "board", "esp-mosaico") && textEquals(m, "chip", "esp32s31") &&
+        textEquals(m, "project", "Stopwatch-Mosaico") && textEquals(m, "layout", "mosaico-dual-v1") &&
+        cJSON_IsNumber(size) && std::isfinite(size->valuedouble) && size->valuedouble >= 1 &&
+        size->valuedouble <= MaxImage && std::floor(size->valuedouble) == size->valuedouble &&
+        cJSON_IsString(sha) && sha->valuestring && std::strlen(sha->valuestring) == 64 &&
+        cJSON_IsString(sig) && sig->valuestring && std::strlen(sig->valuestring) <= 104;
+    if (valid) {
+        for (unsigned i = 0; i < 64; ++i) {
+            const char ch = sha->valuestring[i];
+            if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) { valid = false; break; }
+            const uint8_t nibble = ch <= '9' ? ch - '0' : ch - 'a' + 10;
+            if (!(i & 1)) out.hash[i / 2] = nibble << 4;
+            else out.hash[i / 2] |= nibble;
+        }
+    }
+    uint8_t signature[80]{}, digest[32]{};
+    size_t signatureSize = 0, digestSize = 0;
+    char canonical[256]{};
+    if (valid) {
+        out.size = static_cast<uint32_t>(size->valuedouble);
+        std::snprintf(out.version, sizeof(out.version), "%s", v2 ? version->valuestring : "-");
+        std::snprintf(out.sha, sizeof(out.sha), "%s", sha->valuestring);
+        if (v2) std::snprintf(canonical, sizeof(canonical),
+            "MOSAICO-OTA-v2\nStopwatch-Mosaico\nesp32s31\nmosaico-dual-v1\n%s\n%lu\n%s\n",
+            out.version, static_cast<unsigned long>(out.size), out.sha);
+        else std::snprintf(canonical, sizeof(canonical),
+            "MOSAICO-OTA-v1\nStopwatch-Mosaico\nesp32s31\nmosaico-dual-v1\n%lu\n%s\n",
+            static_cast<unsigned long>(out.size), out.sha);
+        valid = mbedtls_base64_decode(signature, sizeof(signature), &signatureSize,
+            reinterpret_cast<const unsigned char*>(sig->valuestring), std::strlen(sig->valuestring)) == 0 &&
+            signatureSize >= 8 && signatureSize <= 72 &&
+            psa_hash_compute(PSA_ALG_SHA_256, reinterpret_cast<const unsigned char*>(canonical), std::strlen(canonical), digest, sizeof(digest), &digestSize) == PSA_SUCCESS;
+    }
+    cJSON_Delete(m);
+    if (!valid) return invalid("manifest_fields_or_encoding");
+    mbedtls_pk_context key;
+    mbedtls_pk_init(&key);
+    int rc = mbedtls_pk_parse_public_key(&key, reinterpret_cast<const unsigned char*>(MosaicoOtaPublicKey),
+                                       sizeof(MosaicoOtaPublicKey));
+    if (rc == 0 && (!mbedtls_pk_can_do_psa(&key, MBEDTLS_PK_ALG_ECDSA(PSA_ALG_SHA_256), PSA_KEY_USAGE_VERIFY_HASH) || mbedtls_pk_get_bitlen(&key) != 256)) rc = -1;
+    if (rc == 0) rc = mbedtls_pk_verify(&key, MBEDTLS_MD_SHA256, digest, sizeof(digest), signature, signatureSize);
+    mbedtls_pk_free(&key);
+    if (rc != 0) return invalid("signature_invalid");
+    if (psa_hash_compute(PSA_ALG_SHA_256, signature, signatureSize, digest, sizeof(digest), &digestSize) != PSA_SUCCESS) return invalid("signature_fingerprint");
+    char hex[65]; hashHex(digest, hex); std::memcpy(out.fingerprint, hex, 16); out.fingerprint[16] = 0;
     return true;
 }
 void healthTimeout(void*)
@@ -202,55 +303,99 @@ void healthTimeout(void*)
 }
 }
 
-bool busy() { return active.load(); }
+bool busy() { return active.load() || approvedRequest.load(); }
 bool healthPending() { return bootPending.load(); }
 uint32_t requestAgeMs()
 {
-    return active.load() ? static_cast<uint32_t>(esp_timer_get_time() / 1000) - requestedAtMs.load() : 0;
+    return busy() ? static_cast<uint32_t>(esp_timer_get_time() / 1000) - requestedAtMs.load() : 0;
 }
 bool request()
 {
     std::lock_guard<std::mutex> guard(lock);
-    return requestLocked(false); // Explicit manual confirmation may retry an attempted hash.
+    { std::lock_guard<std::mutex> uiGuard(snapshotLock);
+      if (active.load() || approvedRequest.load()) return false;
+      if (ui.signatureVerified && ui.sha256[0] &&
+          (ui.stage == UiStage::Available || ui.stage == UiStage::WaitingPower)) std::memcpy(approvedHash, ui.sha256, 65);
+      else approvedHash[0] = 0; }
+    return requestLocked(false); // Explicit external-power-confirmed USB bypass.
 }
 bool automaticCheckDue()
 {
     std::lock_guard<std::mutex> guard(lock);
     const int64_t now = esp_timer_get_time();
-    if (active.load() || now < nextAutomaticCheck) return false;
+    if (busy() || now < nextAutomaticCheck) return false;
     if (!currentReady()) { autoState.store("not_valid"); return false; }
-    if (!automaticPowerSafe()) { autoState.store("power_deferred"); return false; }
     nextAutomaticCheck = now + 3600000000LL;
     autoState.store("checking");
     return true;
 }
-bool requestAutomatic(const char* json)
+bool discoverManifest(const char* json)
 {
     std::lock_guard<std::mutex> guard(lock);
-    if (active.load()) return false;
-    if (!json || std::strlen(json) > 2048) { autoState.store("manifest_invalid"); return false; }
-    cJSON* m = cJSON_ParseWithOpts(json, nullptr, true);
-    const auto* value = m ? cJSON_GetObjectItemCaseSensitive(m, "sha256") : nullptr;
-    unsigned count = 0;
-    if (m) for (const cJSON* v = m->child; v; v = v->next)
-        if (v->string && !std::strcmp(v->string, "sha256")) ++count;
-    const bool valid = cJSON_IsObject(m) && count == 1 && cJSON_IsString(value) && lowerHex(value->valuestring);
-    if (valid) std::memcpy(automaticHash, value->valuestring, sizeof(automaticHash));
-    cJSON_Delete(m);
-    if (!valid) { autoState.store("manifest_invalid"); return false; }
-    if (!currentReady() || !automaticPowerSafe()) { autoState.store("power_or_state_deferred"); return false; }
-    if (!currentImageHash()) { autoState.store("current_hash_failed"); return false; }
-    if (!std::strcmp(automaticHash, currentHash)) { autoState.store("same_image"); return false; }
+    if (active.load() || approvedRequest.load()) return false;
+    Descriptor d{}; const char* error = "manifest_invalid";
+    if (!validateDescriptor(json, d, error)) { publish(UiStage::Failed, error); return false; }
+    if (!currentReady()) return false;
+    if (!currentImageHash()) { publish(UiStage::Failed, "current_hash_failed"); return false; }
     char attempted[65];
-    if (!readAttempt(attempted)) { autoState.store("attempt_read_failed"); return false; }
-    if (!std::strcmp(automaticHash, attempted)) { autoState.store("already_attempted"); return false; }
-    const bool ok = requestLocked(true); // Full signature verification remains in beginManifest.
-    autoState.store(ok ? "requested" : "request_deferred");
+    if (!readAttempt(attempted)) { publish(UiStage::Failed, "attempt_read_failed"); return false; }
+    if (!std::strcmp(d.sha, currentHash) || !std::strcmp(d.sha, attempted)) return false;
+    expectedSize = d.size; received = 0;
+    const int8_t nextSlot = slot(esp_ota_get_next_update_partition(nullptr));
+    { std::lock_guard<std::mutex> uiGuard(snapshotLock);
+      std::snprintf(ui.targetVersion, sizeof(ui.targetVersion), "%s", d.version);
+      std::memcpy(ui.sha256, d.sha, 65); std::memcpy(ui.signatureShort, d.fingerprint, 17);
+      ui.signatureVerified = true; ui.imageVerified = false;
+      ui.targetSlot = nextSlot; }
+    publish(UiStage::Available);
+    if (autoInstall.load()) approveUpdate(d.sha);
+    return true;
+}
+bool requestAutomatic(const char* json) { return discoverManifest(json); }
+bool copyUiSnapshot(UiSnapshot& out)
+{
+    std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
+    if (!guard.owns_lock()) return false;
+    out = ui; return true;
+}
+bool approveUpdate(const char* expectedSha)
+{
+    std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
+    if (!guard.owns_lock() || active.load() || approvedRequest.load() || !lowerHex(expectedSha) ||
+        std::strcmp(expectedSha, ui.sha256) || !ui.signatureVerified ||
+        (ui.stage != UiStage::Available && ui.stage != UiStage::WaitingPower)) return false;
+    // Only a short in-memory copy and atomic queue; network owner performs all work.
+    std::memcpy(approvedHash, ui.sha256, 65);
+    requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
+    approvedRequest.store(true); return true;
+}
+void deferUpdate()
+{
+    std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
+    if (!guard.owns_lock() || active.load()) return;
+    approvedRequest.store(false); ui.stage = UiStage::Idle; ++ui.revision;
+}
+bool automaticInstall() { return autoInstall.load(); }
+bool setAutomaticInstall(bool enabled)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    nvs_handle_t h;
+    if (nvs_open("mosaico_ota", NVS_READWRITE, &h) != ESP_OK) return false;
+    bool ok = nvs_set_u8(h, "autoinstall", enabled ? 1 : 0) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    if (ok) { autoInstall.store(enabled); preferenceLoaded = true;
+        std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.automaticInstall = enabled; ++ui.revision; }
     return ok;
 }
 bool takeRequest()
 {
     std::lock_guard<std::mutex> guard(lock);
+    if (!active.load() && approvedRequest.load() && requestAgeMs() >= 120000) return reject("request_timeout");
+    if (!active.load() && approvedRequest.exchange(false)) {
+        if (!currentReady()) { publish(UiStage::Failed, "running_not_ready"); return false; }
+        if (!automaticPowerSafe()) { publish(UiStage::WaitingPower); return false; }
+        if (!requestLocked(true, true)) return false;
+    }
     const bool result = pending && active.load();
     pending = false;
     return result;
@@ -263,70 +408,15 @@ void fail(const char* message)
 bool beginManifest(const char* json)
 {
     std::lock_guard<std::mutex> guard(lock);
-    if (psa_crypto_init() != PSA_SUCCESS) return reject("crypto_init");
-    if (!active.load() || pending || writing) return reject("manifest_out_of_sequence");
-    if (!json || std::strlen(json) > 2048) return reject("manifest_length");
-    const char* end = nullptr;
-    cJSON* m = cJSON_ParseWithOpts(json, &end, true);
-    if (!m) return reject("manifest_json");
-    // Reject duplicate/unknown fields: one interpretation for signed metadata.
-    const char* names[] = {"schema", "board", "chip", "project", "layout", "size", "sha256", "signature"};
-    bool fields = cJSON_IsObject(m);
-    unsigned seen = 0;
-    for (const cJSON* v = m->child; v; v = v->next) {
-        unsigned bit = 0;
-        for (unsigned i = 0; i < 8; ++i) if (v->string && !std::strcmp(v->string, names[i])) bit = 1U << i;
-        if (!bit || (seen & bit)) fields = false;
-        seen |= bit;
-    }
-    const auto* schema = cJSON_GetObjectItemCaseSensitive(m, "schema");
-    const auto* size = cJSON_GetObjectItemCaseSensitive(m, "size");
-    const auto* sha = cJSON_GetObjectItemCaseSensitive(m, "sha256");
-    const auto* sig = cJSON_GetObjectItemCaseSensitive(m, "signature");
-    bool valid = fields && seen == 255 && cJSON_IsNumber(schema) && schema->valuedouble == 1 &&
-        textEquals(m, "board", "esp-mosaico") && textEquals(m, "chip", "esp32s31") &&
-        textEquals(m, "project", "Stopwatch-Mosaico") && textEquals(m, "layout", "mosaico-dual-v1") &&
-        cJSON_IsNumber(size) && std::isfinite(size->valuedouble) && size->valuedouble >= 1 &&
-        size->valuedouble <= MaxImage && std::floor(size->valuedouble) == size->valuedouble &&
-        cJSON_IsString(sha) && sha->valuestring && std::strlen(sha->valuestring) == 64 &&
-        cJSON_IsString(sig) && sig->valuestring && std::strlen(sig->valuestring) <= 104;
-    if (valid) {
-        for (unsigned i = 0; i < 64; ++i) {
-            const char ch = sha->valuestring[i];
-            if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) { valid = false; break; }
-            const uint8_t nibble = ch <= '9' ? ch - '0' : ch - 'a' + 10;
-            if (!(i & 1)) expectedHash[i / 2] = nibble << 4;
-            else expectedHash[i / 2] |= nibble;
-        }
-    }
-    uint8_t signature[80]{}, digest[32]{};
-    size_t signatureSize = 0, digestSize = 0;
-    char canonical[192]{};
-    if (valid) {
-        expectedSize = static_cast<uint32_t>(size->valuedouble);
-        std::snprintf(canonical, sizeof(canonical),
-            "MOSAICO-OTA-v1\nStopwatch-Mosaico\nesp32s31\nmosaico-dual-v1\n%lu\n%s\n",
-            static_cast<unsigned long>(expectedSize), sha->valuestring);
-        valid = mbedtls_base64_decode(signature, sizeof(signature), &signatureSize,
-            reinterpret_cast<const unsigned char*>(sig->valuestring), std::strlen(sig->valuestring)) == 0 &&
-            signatureSize >= 8 && signatureSize <= 72 &&
-            psa_hash_compute(PSA_ALG_SHA_256, reinterpret_cast<const unsigned char*>(canonical), std::strlen(canonical), digest, sizeof(digest), &digestSize) == PSA_SUCCESS;
-    }
-    cJSON_Delete(m);
-    if (!valid) return reject("manifest_fields_or_encoding");
-    mbedtls_pk_context key;
-    mbedtls_pk_init(&key);
-    int rc = mbedtls_pk_parse_public_key(&key, reinterpret_cast<const unsigned char*>(MosaicoOtaPublicKey),
-                                       sizeof(MosaicoOtaPublicKey));
-    if (rc == 0 && (!mbedtls_pk_can_do_psa(&key, MBEDTLS_PK_ALG_ECDSA(PSA_ALG_SHA_256), PSA_KEY_USAGE_VERIFY_HASH) || mbedtls_pk_get_bitlen(&key) != 256)) rc = -1;
-    if (rc == 0) rc = mbedtls_pk_verify(&key, MBEDTLS_MD_SHA256, digest, sizeof(digest), signature, signatureSize);
-    mbedtls_pk_free(&key);
-    if (rc != 0) return reject("signature_invalid");
-    if (automaticMode) {
-        char verified[65];
-        hashHex(expectedHash, verified);
-        if (std::strcmp(verified, automaticHash)) return reject("automatic_manifest_changed");
-    }
+    if (!active.load() || pending || writing || imageReady) return reject("manifest_out_of_sequence");
+    Descriptor d{}; const char* error = "manifest_invalid";
+    if (!validateDescriptor(json, d, error)) return reject(error);
+    if (approvedHash[0] && std::strcmp(d.sha, approvedHash)) return reject("approved_manifest_changed");
+    expectedSize = d.size; signedVersion = d.versionSigned; std::memcpy(expectedHash, d.hash, 32);
+    { std::lock_guard<std::mutex> uiGuard(snapshotLock);
+      std::snprintf(ui.targetVersion, sizeof(ui.targetVersion), "%s", d.version);
+      std::memcpy(ui.sha256, d.sha, 65); std::memcpy(ui.signatureShort, d.fingerprint, 17);
+      ui.signatureVerified = true; ui.imageVerified = false; }
     if (!currentReady() || !(automaticMode ? automaticPowerSafe() : gaugeSafe())) return reject("prewrite_safety");
     const auto* running = esp_ota_get_running_partition();
     target = esp_ota_get_next_update_partition(nullptr);
@@ -338,6 +428,8 @@ bool beginManifest(const char* json)
     if (esp_ota_begin(target, expectedSize, &handle) != ESP_OK) return reject("ota_begin");
     writing = true;
     received = 0;
+    { std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.targetSlot = slot(target); }
+    publish(UiStage::Downloading);
     std::snprintf(reason, sizeof(reason), "writing");
     return true;
 }
@@ -349,12 +441,14 @@ bool writeChunk(uint32_t offset, const uint8_t* data, size_t length)
     if (esp_ota_write(handle, data, length) != ESP_OK) return reject("ota_write");
     if (psa_hash_update(&hash, data, length)) return reject("hash_update");
     received += length;
+    publish(UiStage::Downloading);
     return true;
 }
-bool finish()
+bool finishDownload()
 {
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !writing || received != expectedSize) return reject("incomplete_image");
+    publish(UiStage::Verifying);
     uint8_t digest[32];
     size_t digestSize = 0;
     if (psa_hash_finish(&hash, digest, sizeof(digest), &digestSize) || std::memcmp(digest, expectedHash, 32)) return reject("image_hash");
@@ -364,7 +458,26 @@ bool finish()
     writing = false;
     handle = 0;
     if (endResult != ESP_OK) return reject("image_validation");
+    esp_app_desc_t downloaded{};
+    char verifiedVersion[32];
+    { std::lock_guard<std::mutex> uiGuard(snapshotLock); std::memcpy(verifiedVersion, ui.targetVersion, 32); }
+    if (esp_ota_get_partition_description(target, &downloaded) != ESP_OK ||
+        (signedVersion && std::strcmp(verifiedVersion, downloaded.version))) return reject("image_version_mismatch");
+    imageReady = true; readySince = esp_timer_get_time(); installSince = 0;
+    { std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.imageVerified = true; }
+    publish(UiStage::ReadyInstall);
+    return true;
+}
+bool installVerified()
+{
+    std::lock_guard<std::mutex> guard(lock);
+    if (!active.load() || !imageReady || esp_timer_get_time() - readySince < 1500000) return false;
     if (!currentReady() || !(automaticMode ? automaticPowerSafe() : gaugeSafe())) return reject("prereboot_safety");
+    if (!installSince) {
+        installSince = esp_timer_get_time(); publish(UiStage::Installing); return false;
+    }
+    if (esp_timer_get_time() - installSince < 500000) return false;
+    if (!currentReady() || !(automaticMode ? automaticPowerSafe() : gaugeSafe())) return reject("commit_safety");
     if (!recordAttempt()) return reject("attempt_commit_failed");
     if (esp_ota_set_boot_partition(target) != ESP_OK) return reject("set_boot_partition");
     std::snprintf(reason, sizeof(reason), "verified_restarting");
@@ -372,6 +485,7 @@ bool finish()
     esp_restart();
     return true;
 }
+bool finish() { return finishDownload(); } // Compatibility: caller must now explicitly installVerified().
 void status(char* out, size_t length)
 {
     if (!out || !length) return;
@@ -400,10 +514,44 @@ void healthPoll(bool appLoopReady)
     const int64_t now = esp_timer_get_time();
     if (!healthInitialized) {
         healthInitialized = true;
+        const auto* descriptor = esp_app_get_description();
+        const auto* current = esp_ota_get_running_partition();
+        { std::lock_guard<std::mutex> uiGuard(snapshotLock);
+          std::snprintf(ui.currentVersion, sizeof(ui.currentVersion), "%s", descriptor->version);
+          ui.currentSlot = slot(current); ++ui.revision; }
+        nvs_handle_t h;
+        if (nvs_open("mosaico_ota", NVS_READONLY, &h) == ESP_OK) {
+            uint8_t mode = 0;
+            if (!preferenceLoaded && nvs_get_u8(h, "autoinstall", &mode) == ESP_OK) autoInstall.store(mode == 1);
+            nvs_close(h);
+        }
+        preferenceLoaded = true;
+        { std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.automaticInstall = autoInstall.load(); ++ui.revision; }
         esp_ota_img_states_t state;
         const auto* running = esp_ota_get_running_partition();
         if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) return;
         bootPending.store(true);
+        char ver[32] = "-", sha[65]{}, fingerprint[17]{}; int8_t candidate = -1;
+        if (nvs_open("mosaico_ota", NVS_READONLY, &h) == ESP_OK) {
+            size_t vl = sizeof(ver), sl = sizeof(sha);
+            const bool ok = nvs_get_str(h, "candidate_ver", ver, &vl) == ESP_OK &&
+                nvs_get_str(h, "candidate_hash", sha, &sl) == ESP_OK && lowerHex(sha) &&
+                nvs_get_i8(h, "candidate_slot", &candidate) == ESP_OK && candidate == slot(current) &&
+                (!std::strcmp(ver, "-") || !std::strcmp(ver, descriptor->version));
+            if (!ok) { std::strcpy(ver, "-"); sha[0] = 0; candidate = -1; }
+            size_t fl = sizeof(fingerprint);
+            if (ok) nvs_get_str(h, "candidate_sig", fingerprint, &fl);
+            nvs_close(h);
+        }
+        if (!sha[0]) { // Legacy bootstrap has no signed candidate journal: display SDK facts only.
+            std::snprintf(ver, sizeof(ver), "%s", descriptor->version); candidate = slot(current);
+            fingerprint[0] = 0;
+        }
+        { std::lock_guard<std::mutex> uiGuard(snapshotLock);
+          std::memcpy(ui.signatureShort, fingerprint, sizeof(fingerprint));
+          std::memcpy(ui.targetVersion, ver, sizeof(ver)); std::memcpy(ui.sha256, sha, sizeof(sha));
+          ui.targetSlot = candidate; ui.signatureVerified = sha[0]; ui.imageVerified = sha[0]; }
+        publish(UiStage::BootChecking);
 
         esp_timer_create_args_t args{};
         args.callback = healthTimeout;
@@ -425,7 +573,8 @@ void healthPoll(bool appLoopReady)
         esp_restart(); // Leave PENDING_VERIFY; loader must reject on next boot.
     }
 #endif
-    if (!appLoopReady || (lastLoop && now - lastLoop > 1500000)) { healthySince = 0; healthyLoops = 0; }
+    if (!appLoopReady || (lastLoop && now - lastLoop > 1500000)) { healthySince = 0; healthyLoops = 0;
+        std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.progressBasisPoints = 0; ++ui.revision; }
     if (!appLoopReady) return;
     lastLoop = now;
     ++healthyLoops;
@@ -435,12 +584,17 @@ void healthPoll(bool appLoopReady)
     const bool healthy = d.i2c && d.display && d.buttons && d.touch && GetDisplayFrameCount() > 0 &&
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) > 32768 &&
         heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 && heap_caps_check_integrity_all(false);
-    if (!healthy) { healthySince = 0; healthyLoops = 0; return; }
+    if (!healthy) { healthySince = 0; healthyLoops = 0;
+        std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.progressBasisPoints = 0; ++ui.revision; return; }
     if (!healthySince) healthySince = now;
+    { std::lock_guard<std::mutex> uiGuard(snapshotLock);
+      ui.progressBasisPoints = static_cast<uint16_t>((now - healthySince >= 20000000) ? 10000 : (now - healthySince) / 2000); ++ui.revision; }
     if (now - healthySince >= 20000000 && healthyLoops >= 20) {
         if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
             bootPending.store(false);
             esp_timer_stop(deadlineTimer);
+            publish(UiStage::Complete);
+            { std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.progressBasisPoints = 10000; }
         }
     }
 }

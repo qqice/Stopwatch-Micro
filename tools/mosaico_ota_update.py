@@ -6,7 +6,7 @@ from serial_debug_test import DebugClient
 
 def fields(result):return dict(p.split('=',1) for p in result.details.split() if '=' in p)
 def main():
- p=argparse.ArgumentParser(description=__doc__);p.add_argument('--port',required=True);p.add_argument('--confirm-external-power',action='store_true');p.add_argument('--timeout',type=int,default=900);p.add_argument('--initial-observation-delay',type=int,default=0)
+ p=argparse.ArgumentParser(description=__doc__);p.add_argument('--port',required=True);p.add_argument('--confirm-external-power',action='store_true');p.add_argument('--timeout',type=int,default=900);p.add_argument('--initial-observation-delay',type=int,default=0);p.add_argument('--bypass',action='store_true',help='Use the 0.7+ USB screen-confirmation bypass; safety checks remain enforced')
  args=p.parse_args()
  if not args.confirm_external_power:raise SystemExit('Confirm USB/external power with --confirm-external-power; not inferred from SOC')
  if not 60<=args.timeout<=1800:raise SystemExit('timeout must be60..1800 seconds')
@@ -24,7 +24,8 @@ def main():
    if stat.status!='PASS' or old.get('state')!='2' or old.get('running') not in ('ota_0','ota_1') or old.get('busy')!='0':raise SystemExit('OTA runtime is not valid/idle')
    target='ota_1' if old['running']=='ota_0' else 'ota_0'
    if client.command('debug display-wake','display-wake').status!='PASS':raise SystemExit('Wake refused')
-   ready=client.command('debug ota-update CONFIRM_EXTERNAL_POWER','ota-update',10)
+   command='ota-bypass' if args.bypass else 'ota-update'
+   ready=client.command('debug '+command+' CONFIRM_EXTERNAL_POWER',command,10)
    if ready.status!='PASS':raise SystemExit('OTA request refused; inspect ota-status')
   print('SIGNED_NETWORK_OTA_REQUESTED target='+target+' no_ROM_touch=1',flush=True)
   deadline=time.monotonic()+args.timeout

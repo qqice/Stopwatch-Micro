@@ -32,11 +32,16 @@ constexpr uint16_t masks[][9] = {
     {0,0,0,0,455,0,0,0,0}, // Gap
     {4,12,28,60,124,60,28,12,4}, // Correction
     {56,68,146,257,273,281,130,254,0}, // Quota gauge: ticks, needle, flat baseline
-    {56,68,130,313,273,313,130,68,56} // Coin: round rim and short internal stripes
+    {56,68,130,313,273,313,130,68,56}, // Coin: round rim and short internal stripes
+    {16,16,16,16,84,56,16,0,254}, // Download
+    {0,0,1,2,132,72,48,0,0}, // Check
+    {0,84,254,130,171,130,254,84,0}, // Chip
+    {0,16,8,4,510,4,8,16,0}, // Arrow
+    {56,68,130,258,262,128,130,68,56} // Refresh
 };
 constexpr int maskCount = static_cast<int>(sizeof(masks) / sizeof(masks[0]));
 constexpr bool iconPatternsTest() {
-    if (maskCount != static_cast<int>(Icon::Coin) + 1 || sizeof(masks[0]) / sizeof(masks[0][0]) != 9)
+    if (maskCount != static_cast<int>(Icon::Refresh) + 1 || sizeof(masks[0]) / sizeof(masks[0][0]) != 9)
         return false;
     for (const auto& mask : masks) for (auto row : mask) if (row > 511) return false;
     bool distinct = false;
@@ -46,6 +51,13 @@ constexpr bool iconPatternsTest() {
     return distinct;
 }
 static_assert(iconPatternsTest(), "dot icon dimensions and bit bounds");
+constexpr detail::Glyph otaGlyphs[] = {
+    {'O',{14,17,17,17,17,17,14}}, {'T',{31,4,4,4,4,4,4}}, {'A',{14,17,17,31,17,17,17}}
+};
+const detail::Glyph& uiGlyph(char c) {
+    for (const auto& g : otaGlyphs) if (g.key == c) return g;
+    return detail::glyph(c);
+}
 struct Motion { int scale = 1000, wavePhase = -1, pulse = 0; };
 Motion motion(const State& s, int w, int h, uint16_t phase, bool enabled) {
     Motion m;
@@ -59,7 +71,9 @@ Motion motion(const State& s, int w, int h, uint16_t phase, bool enabled) {
             m.scale = detail::flipScale(phase);
             // Both faces of the symmetric coin are visually identical.
             if (s.icon == Icon::Coin && m.scale < 0) m.scale = -m.scale;
-        } else if (s.icon == Icon::Battery && s.valid)
+        } else if (s.icon == Icon::Arrow || s.icon == Icon::Download || s.icon == Icon::Chip || s.icon == Icon::Refresh)
+            m.pulse = detail::pulse(phase);
+        else if (s.icon == Icon::Battery && s.valid)
             m.pulse = detail::pulse(phase);
     }
     return m;
@@ -98,7 +112,7 @@ void event(lv_event_t* e) {
         }
         if (!l.diameter) return;
         for (int i = 0; i < count; ++i) {
-            const auto& glyph = detail::glyph(cannotFit ? '?' : s->text[i]);
+            const auto& glyph = uiGlyph(cannotFit ? '?' : s->text[i]);
             for (int y = 0; y < 7; ++y) for (int x = 0; x < 5; ++x)
                 if (glyph.rows[y] & (1 << (4 - x)))
                     dot(layer, dsc, a.x1 + l.x + (i * 6 + x) * l.pitch,
@@ -141,7 +155,8 @@ void event(lv_event_t* e) {
             dsc.bg_color = lv_color_hex(s->color);
             // Only existing mask/fill dots pulse; zero capacity still has an
             // honest outline that can indicate actual charging.
-            if (lit && s->icon == Icon::Battery && s->valid && m.pulse)
+            if (lit && ((s->icon == Icon::Battery && s->valid && m.pulse) ||
+                ((s->icon == Icon::Arrow || s->icon == Icon::Download || s->icon == Icon::Chip || s->icon == Icon::Refresh) && m.pulse)))
                 dsc.bg_color = lv_color_mix(lv_color_hex(0xFFFFFF), dsc.bg_color, static_cast<uint8_t>(m.pulse));
             if (lit) dot(layer, dsc, ox + detail::projectedX(x, p, m.scale), oy + y * p, d);
         }
@@ -225,7 +240,7 @@ void setText(lv_obj_t* obj, const char* text, uint32_t color) {
     char value[detail::patternsMaxTextLength + 1]{};
     int i = 0;
     if (text) {
-        for (; i < detail::patternsMaxTextLength && text[i]; ++i) value[i] = detail::glyph(text[i]).key;
+        for (; i < detail::patternsMaxTextLength && text[i]; ++i) value[i] = uiGlyph(text[i]).key;
         if (i == detail::patternsMaxTextLength && text[i]) value[i - 1] = '?';
     }
     if (s->color == color && std::strcmp(s->text, value) == 0) return;

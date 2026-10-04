@@ -163,6 +163,38 @@ retains ROM recovery. Private rollback files record exact offsets, lengths and
 restore ordering; recovery writes require separately confirmed physical identity.
 ## Automatic policy and current acceptance boundary
 
+### Confirmation UI (0.7.0 and later)
+
+The default is now automatic **discovery**, not automatic installation. A verified
+offer displays current/target versions, abbreviated SHA256/signature fingerprints
+and the active/target OTA slots. LATER dismisses the offer; UPGRADE approves only
+the displayed image hash. A changed offer must be approved again.
+
+The next page shows actual downloaded bytes/percentage. Full-image SHA256,
+SDK image validation and the signed version check complete before the verified
+installation page appears. Installation has an activity animation, not a made-up
+flash percentage. After reboot, health-check progress covers the real acceptance
+window; failure retains the existing rollback behavior. Download already writes
+the inactive slot, so the installation phase selects and boots the verified image.
+
+For authorized USB maintenance, `debug ota-bypass CONFIRM_EXTERNAL_POWER`
+queues the same update pipeline without touching the screen. The existing
+`debug ota-update CONFIRM_EXTERNAL_POWER` remains compatible. Neither command
+bypasses power/gauge checks, signature validation, image validation or rollback.
+Normal OTA needs no ROM/BOOT transition. Fully automatic approval remains an
+opt-in NVS policy; it is not enabled by default.
+
+The host observer can issue that command and verify the alternate slot becomes
+VALID: `python tools/mosaico_ota_update.py --port COM12
+--confirm-external-power --bypass`. Use the actual runtime CDC port; this does
+not reset the board into ROM or touch the bootloader/partition table.
+
+Schema2 signs the version from the actual SDK application descriptor together
+with image size/hash and fixed board/layout identity. The firmware/server still
+accept schema1 for bootstrapping older devices (`--schema1` on the signing tool).
+Schema1 does not authenticate a version before download: the UI does not invent
+one. Private signing keys remain local and must never be copied to the server.
+
 The device checks a signed release once per hour using an already-online quota
 window (including the first eligible window after a VALID boot). It does not
 wake radios solely for OTA. Default installation policy is conservative: sealed
@@ -227,3 +259,18 @@ Preserve `.artifacts/private/mosaico/ota-signing/signing-key.pem`; future releas
 must be signed with its matching key. Build using the dedicated rollback-enabled
 OTA sdkconfig, not the legacy factory profile; its signature is approval to run
 that complete firmware. Manual ROM recovery remains distinct from unattended OTA.
+
+### Confirmation UI deployment, 2026-10-05
+
+0.7.0 bootstrapped from 0.6.1 using a schema1 signed release over network OTA,
+then 0.7.1 exercised schema2 and `ota-bypass` over runtime CDC. Both alternate
+slots reached VALID without ROM/BOOT operations. Before the bypass, the new
+offer remained idle with zero bytes downloaded across two observations 30s
+apart. Final 0.7.1 runs in ota0; no saved panic, quota data fresh, server status
+and authenticated OTA endpoints HTTP200, unauthenticated OTA HTTP401.
+
+Both S31 builds/image validations and S3 syntax regression passed; 129 host
+tests (one skipped) and seven automatic OTA source tests passed. These do not
+establish on-screen visual quality or physical UPGRADE/LATER touch acceptance;
+those require the user's observation. The network/USB bypass flow is hardware
+verified, and the screen callback/hash binding is covered by source review/tests.

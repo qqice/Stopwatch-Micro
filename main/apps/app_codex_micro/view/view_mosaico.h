@@ -7,11 +7,12 @@
 #include <host/quota_monitor.h>
 #include <host/token_history.h>
 #include <lvgl.h>
+#include <ota/mosaico_ota.h>
 
 namespace view {
 class CodexMicroView {
 public:
-    enum class Page : uint8_t { Command = 0, History, Agent };
+    enum class Page : uint8_t { Command = 0, History, Agent, OTA };
     ~CodexMicroView();
     void init(lv_obj_t* parent);
     void update(const CodexMicroState& state);
@@ -24,6 +25,7 @@ public:
     bool setPageForDebug(Page page);
     void setInputSuppressed(bool suppressed) { _suppressed = suppressed; }
     void wakeDisplay();
+    bool otaBusy() const;
     bool locked() const { return _locked; }
     bool lockForDebug();
     uint32_t lockRefreshCount() const { return _lockRefreshCount; }
@@ -35,6 +37,10 @@ private:
     static void touchEvent(lv_event_t* event);
     static void cellEvent(lv_event_t* event);
     static void modeEvent(lv_event_t* event);
+    static void otaEvent(lv_event_t* event);
+    void initOta();
+    void refreshOta(uint32_t tick);
+    void renderOta();
     void refreshQuota(uint32_t now);
     void refreshHistory();
     void refreshBattery(uint32_t now);
@@ -45,6 +51,25 @@ private:
     void renderSelection();
     void lockDisplay();
     const TokenHistoryCell* selectedCell() const;
+    MosaicoOta::UiSnapshot _ota{};
+    bool _otaSeen = false, _otaPending = false, _otaApproved = false;
+    Page _otaReturn = Page::Command;
+    lv_obj_t* _otaPage = nullptr;
+    lv_obj_t* _otaTitle = nullptr;
+    lv_obj_t* _otaCurrent = nullptr;
+    lv_obj_t* _otaTarget = nullptr;
+    lv_obj_t* _otaPhase = nullptr;
+    lv_obj_t* _otaStageIcon = nullptr;
+    lv_obj_t* _otaPercent = nullptr;
+    lv_obj_t* _otaMeter = nullptr;
+    lv_obj_t* _otaBytes = nullptr;
+    lv_obj_t* _otaHash = nullptr;
+    lv_obj_t* _otaSignature = nullptr;
+    lv_obj_t* _otaImageIcon = nullptr;
+    lv_obj_t* _otaSignatureIcon = nullptr;
+    lv_obj_t* _otaArrow = nullptr;
+    std::array<lv_obj_t*, 2> _otaSlots{}, _otaSlotNames{}, _otaSlotNumbers{}, _otaButtons{}, _otaButtonLabels{}, _otaChips{};
+    std::array<Hit, 2> _otaHits{};
     lv_obj_t* _root = nullptr;
     lv_obj_t* _quotaPage = nullptr;
     lv_obj_t* _historyPage = nullptr;

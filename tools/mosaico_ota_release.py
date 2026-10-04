@@ -12,7 +12,7 @@ import sys
 import tempfile
 import json
 
-from ota_release import MAX_IMAGE_SIZE, METADATA, canonical_message
+from ota_release import MAX_IMAGE_SIZE, METADATA, canonical_message, valid_version
 
 
 def validate_image(image: bytes) -> None:
@@ -37,7 +37,7 @@ def validate_image(image: bytes) -> None:
         raise ValueError("PSRAM-XIP mapping missing")
 
 
-def sign_release(image_path: Path, key_path: Path, output_dir: Path) -> dict:
+def sign_release(image_path: Path, key_path: Path, output_dir: Path, *, schema1: bool = False) -> dict:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
     with image_path.open("rb") as source:
@@ -46,10 +46,15 @@ def sign_release(image_path: Path, key_path: Path, output_dir: Path) -> dict:
     key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
     if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
         raise ValueError("signing key must be ECDSA P-256")
+    version = image[48:80].split(b"\0", 1)[0].decode("ascii")
+    if not valid_version(version):
+        raise ValueError("invalid app descriptor version")
     sha = hashlib.sha256(image).hexdigest()
-    signature = key.sign(canonical_message(len(image), sha), ec.ECDSA(hashes.SHA256()))
+    signature = key.sign(canonical_message(len(image), sha, None if schema1 else version), ec.ECDSA(hashes.SHA256()))
     manifest = dict(METADATA, size=len(image), sha256=sha,
                     signature=base64.b64encode(signature).decode("ascii"))
+    if not schema1:
+        manifest.update(schema=2, version=version)
     output_dir = Path(output_dir)
     try:
         output_dir.mkdir(parents=True, exist_ok=False)
@@ -85,9 +90,10 @@ def main() -> int:
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--key", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--schema1", action="store_true", help="legacy bootstrap manifest without signed version")
     args = parser.parse_args()
     try:
-        manifest = sign_release(args.image, args.key, args.output_dir)
+        manifest = sign_release(args.image, args.key, args.output_dir, schema1=args.schema1)
     except Exception:
         # Do not echo exception contents: third-party parsers may include sensitive input.
         print("OTA RELEASE ERROR validation or exclusive publication failed", file=sys.stderr)

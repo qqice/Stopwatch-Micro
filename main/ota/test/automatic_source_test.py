@@ -30,11 +30,10 @@ class AutomaticOtaSourceTests(unittest.TestCase):
         self.assertIn('GaugeBootReloadStatus::Critical', power)
         self.assertNotIn('reportedSoc', power)
 
-    def test_due_only_valid_power_and_hour_cadence(self):
+    def test_due_valid_and_hour_cadence_without_power_gate(self):
         due = body('bool automaticCheckDue()', 'bool requestAutomatic(')
         self.assertLess(due.index('now < nextAutomaticCheck'), due.index('currentReady()'))
-        self.assertLess(due.index('currentReady()'), due.index('automaticPowerSafe()'))
-        self.assertLess(due.index('automaticPowerSafe()'), due.index('nextAutomaticCheck ='))
+        self.assertNotIn('automaticPowerSafe()', due)
         self.assertIn('nextAutomaticCheck = now + 3600000000LL;', due)
         self.assertNotRegex(due, r'wake|wifi_|nvs_set|nvs_commit')
 
@@ -61,36 +60,91 @@ class AutomaticOtaSourceTests(unittest.TestCase):
         self.assertIn('if (currentHashChecked) return currentHashValid;', actual)
         self.assertNotIn('metadata.image_digest', actual.split('// Hash the ENTIRE release .bin', 1)[0])
 
-    def test_readonly_dedup_and_manual_override(self):
-        automatic = body('bool requestAutomatic(', 'bool takeRequest()')
-        self.assertIn('std::strcmp(automaticHash, currentHash)', automatic)
-        self.assertIn('std::strcmp(automaticHash, attempted)', automatic)
-        self.assertLess(automatic.index('currentImageHash()'), automatic.index('requestLocked(true)'))
-        self.assertLess(automatic.index('readAttempt(attempted)'), automatic.index('requestLocked(true)'))
-        read = body('bool readAttempt(', 'bool recordAttempt()')
-        self.assertIn('nvs_open("mosaico_ota", NVS_READONLY', read)
-        self.assertIn('length == 65 && lowerHex(attempt)', read)
-        self.assertNotRegex(read + automatic, r'nvs_set|nvs_commit|esp_ota_begin')
-        manual = body('bool request()', 'bool automaticCheckDue()')
-        self.assertIn('requestLocked(false)', manual)
-        self.assertNotIn('readAttempt', manual)
-
-    def test_signature_bound_power_gates_and_attempt_commit_before_selector(self):
+    def test_discovery_verified_before_dedup_and_never_erases(self):
+        discovery = body('bool discoverManifest(', 'bool requestAutomatic(')
+        self.assertLess(discovery.index('validateDescriptor('), discovery.index('currentImageHash()'))
+        self.assertIn('std::strcmp(d.sha, currentHash)', discovery)
+        self.assertIn('std::strcmp(d.sha, attempted)', discovery)
+        self.assertNotIn('currentVersion', discovery)  # Same version, distinct hash is allowed.
+        self.assertNotRegex(discovery, r'esp_ota_begin|nvs_set|nvs_commit')
+        self.assertIn('publish(UiStage::Available)', discovery)
         begin = body('bool beginManifest(', 'bool writeChunk(')
-        self.assertLess(begin.index('if (rc != 0)'), begin.index('automatic_manifest_changed'))
-        self.assertIn('std::strcmp(verified, automaticHash)', begin)
-        self.assertLess(begin.index('automaticPowerSafe()'), begin.index('esp_ota_begin('))
-        finish = body('bool finish()', 'void status(')
-        self.assertLess(finish.index('automaticPowerSafe()'), finish.index('recordAttempt()'))
-        self.assertLess(finish.index('recordAttempt()'), finish.index('esp_ota_set_boot_partition('))
-        self.assertIn('return reject("attempt_commit_failed")', finish)
-        write = body('bool recordAttempt()', 'bool requestLocked(')
-        self.assertIn('hashHex(expectedHash, attempted)', write)
-        self.assertIn('nvs_set_str(handle, "attempt", attempted) == ESP_OK && nvs_commit(handle) == ESP_OK', write)
-        self.assertNotRegex(write, r'nvs_erase|gauge|wifi|tail')
-        busy = body('const auto progress = [&]() {', '    };')
-        self.assertIn('auto_state=%s', busy)
-        self.assertNotRegex(busy, r'esp_\w+\(|nvs_|automaticPowerSafe|currentImageHash')
+        self.assertLess(begin.index('validateDescriptor('), begin.index('approved_manifest_changed'))
+        self.assertLess(begin.index('approved_manifest_changed'), begin.index('esp_ota_begin('))
+        validator = body('bool validateDescriptor(', 'void healthTimeout(')
+        self.assertIn('MOSAICO-OTA-v2', validator)
+        self.assertIn('MOSAICO-OTA-v1', validator)
+        self.assertIn('seen == (v2 ? 511U : 255U)', validator)
+        self.assertIn('mbedtls_pk_verify', validator)
+        self.assertNotRegex(validator, r'esp_ota_begin|nvs_set|nvs_commit')
+
+    def test_ui_nonblocking_queue_and_real_verification_split(self):
+        copy = body('bool copyUiSnapshot(', 'bool approveUpdate(')
+        self.assertIn('snapshotLock, std::try_to_lock', copy)
+        self.assertNotRegex(copy, r'esp_|nvs_|guard\(lock')
+        approve = body('bool approveUpdate(', 'void deferUpdate(')
+        self.assertIn('approvedRequest.store(true)', approve)
+        self.assertNotRegex(approve, r'esp_ota_|nvs_|requestLocked')
+        take = body('bool takeRequest()', 'void fail(')
+        self.assertIn('automaticPowerSafe()', take)
+        self.assertIn('publish(UiStage::WaitingPower)', take)
+        finish = body('bool finishDownload()', 'bool installVerified()')
+        self.assertLess(finish.index('psa_hash_finish'), finish.index('esp_ota_end'))
+        self.assertIn('image_version_mismatch', finish)
+        self.assertIn('publish(UiStage::ReadyInstall)', finish)
+        self.assertNotIn('esp_ota_set_boot_partition', finish)
+        install = body('bool installVerified()', 'bool finish()')
+        self.assertIn('readySince < 1500000', install)
+        self.assertLess(install.index('recordAttempt()'), install.index('esp_ota_set_boot_partition('))
+        self.assertIn('publish(UiStage::Installing)', install)
+        self.assertIn('installSince < 500000', install)
+        self.assertIn('publish(UiStage::BootChecking)', SOURCE)
+        self.assertIn('publish(UiStage::Complete)', SOURCE)
+
+    def test_approval_binds_displayed_hash_and_pending_deadline(self):
+        approve = body('bool approveUpdate(', 'void deferUpdate(')
+        self.assertIn('const char* expectedSha', approve)
+        self.assertIn('!lowerHex(expectedSha)', approve)
+        self.assertIn('std::strcmp(expectedSha, ui.sha256)', approve)
+        condition = re.search(r'if \((!guard.owns_lock\(\).*?)\) return false;', approve, re.S)[1]
+        condition = condition.replace('!guard.owns_lock()', 'False').replace('active.load()', 'active')
+        condition = condition.replace('approvedRequest.load()', 'pending').replace('!lowerHex(expectedSha)', 'not valid')
+        condition = condition.replace('std::strcmp(expectedSha, ui.sha256)', 'different')
+        condition = condition.replace('!ui.signatureVerified', 'not verified')
+        condition = condition.replace('ui.stage != UiStage::Available', 'stage != "Available"')
+        condition = condition.replace('ui.stage != UiStage::WaitingPower', 'stage != "WaitingPower"')
+        condition = ' '.join(condition.replace('||', 'or').replace('&&', 'and').split())
+        def rejects(expected, shown, active=False, pending=False, verified=True, stage="Available"):
+            valid = bool(re.fullmatch('[0-9a-f]{64}', expected))
+            return eval(condition, {'__builtins__': {}}, dict(valid=valid, different=expected != shown,
+                active=active, pending=pending, verified=verified, stage=stage))
+        a, b = 'a' * 64, 'b' * 64
+        self.assertFalse(rejects(a, a))
+        self.assertTrue(rejects(a, b))  # A on screen cannot approve newer B.
+        self.assertTrue(rejects('a' * 63, a))
+        self.assertTrue(rejects(a, a, pending=True))
+        self.assertTrue(rejects(a, a, verified=False))
+        self.assertLess(approve.index('std::strcmp(expectedSha, ui.sha256)'), approve.index('std::memcpy(approvedHash'))
+        self.assertLess(approve.index('requestedAtMs.store'), approve.index('approvedRequest.store(true)'))
+        self.assertIn('bool busy() { return active.load() || approvedRequest.load(); }', SOURCE)
+        age = body('uint32_t requestAgeMs()', 'bool request()')
+        self.assertIn('return busy()', age)
+        take = body('bool takeRequest()', 'void fail(')
+        self.assertIn('requestAgeMs() >= 120000', take)
+        self.assertIn('reject("request_timeout")', take)
+        self.assertIn('approvedRequest.exchange(false)', take)
+        self.assertIn('requestLocked(true, true)', take)
+        self.assertIn('if (stage == UiStage::Failed || stage == UiStage::WaitingPower) approvedRequest.store(false)', SOURCE)
+        manual = body('bool request()', 'bool automaticCheckDue()')
+        self.assertLess(manual.index('approvedRequest.load()'), manual.index('std::memcpy(approvedHash'))
+        self.assertNotRegex(take, r'nvs_set|nvs_commit|esp_ota_begin')
+
+    def test_legacy_boot_facts_without_claimed_verification(self):
+        boot = body('void healthPoll(', 'bool rollbackTest()')
+        fallback = boot.split('if (!sha[0]) {', 1)[1].split('}', 1)[0]
+        self.assertIn('descriptor->version', fallback)
+        self.assertIn('candidate = slot(current)', fallback)
+        self.assertIn('ui.signatureVerified = sha[0]; ui.imageVerified = sha[0]', boot)
 
 
 if __name__ == '__main__':

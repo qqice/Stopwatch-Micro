@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ota_release import ImmutableReleaseStore, METADATA, canonical_message
+from ota_release import ImmutableReleaseStore, METADATA, canonical_message, validate_manifest
 import mosaico_ota_release as signer
 import quota_service
 
@@ -22,7 +22,9 @@ class ReleaseTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
-        self.image = bytes(range(256)) * 20
+        self.image = bytearray(bytes(range(256)) * 20)
+        self.image[48:80] = b"0.7.0-mosaico-ota".ljust(32, b"\0")
+        self.image = bytes(self.image)
         self.sha = hashlib.sha256(self.image).hexdigest()
         self.manifest = dict(METADATA, size=len(self.image), sha256=self.sha,
                              signature=base64.b64encode(bytes.fromhex("3006020101020101")).decode())
@@ -118,13 +120,38 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(signer, "validate_image"):
             manifest = signer.sign_release(self.directory / "firmware.bin", keypath, output)
             key.public_key().verify(base64.b64decode(manifest["signature"]),
-                                    canonical_message(manifest["size"], manifest["sha256"]), ec.ECDSA(hashes.SHA256()))
+                                    canonical_message(manifest["size"], manifest["sha256"], manifest.get("version")), ec.ECDSA(hashes.SHA256()))
             ImmutableReleaseStore(output)
             saved = (output / "manifest.json").read_bytes()
             with self.assertRaises(ValueError):
                 signer.sign_release(self.directory / "firmware.bin", keypath, output)
             self.assertEqual((output / "manifest.json").read_bytes(), saved)
         self.assertEqual(set(p.name for p in output.iterdir()), {"firmware.bin", "manifest.json"})
+
+    def test_schema_separation_and_version_tampering(self):
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        key = ec.generate_private_key(ec.SECP256R1())
+        path = self.directory / "ephemeral-key.pem"
+        path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+        with patch.object(signer, "validate_image"):
+            for schema1 in (False, True):
+                manifest = signer.sign_release(self.directory / "firmware.bin", path,
+                    self.directory / str(schema1), schema1=schema1)
+                validate_manifest(manifest)
+                version = manifest.get("version")
+                self.assertEqual(manifest["schema"], 1 if schema1 else 2)
+                if not schema1: self.assertEqual(version, "0.7.0-mosaico-ota")
+                sig = base64.b64decode(manifest["signature"])
+                key.public_key().verify(sig, canonical_message(manifest["size"], manifest["sha256"], version), ec.ECDSA(hashes.SHA256()))
+                for wrong in (["0.7.1-mosaico-ota", None] if version else ["0.7.0-mosaico-ota"]):
+                    with self.assertRaises(InvalidSignature):
+                        key.public_key().verify(sig, canonical_message(manifest["size"], manifest["sha256"], wrong), ec.ECDSA(hashes.SHA256()))
+        v2 = dict(self.manifest, schema=2, version="0.7.0")
+        for bad in ("", "x" * 32, "0.7\n0", "0.7 0", "\u7248\u672c", True):
+            with self.assertRaises(ValueError): validate_manifest(dict(v2, version=bad))
 
 
 if __name__ == "__main__":

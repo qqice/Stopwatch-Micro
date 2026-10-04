@@ -199,6 +199,10 @@ const char* AppCodexMicro::debugScreenName()
 #endif
         case view::CodexMicroView::Page::History:
             return "history";
+#ifdef MOSAICO_BOARD
+        case view::CodexMicroView::Page::OTA:
+            return "ota";
+#endif
         case view::CodexMicroView::Page::Agent:
             return "agent";
     }

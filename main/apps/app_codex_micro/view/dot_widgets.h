@@ -3,7 +3,7 @@
 #include <lvgl.h>
 
 namespace mosaico_dot {
-enum class Icon { Wifi, WifiOff, Battery, Bolt, Hourglass, ResetCard, Credit, Clock, Unknown, Gap, Correction, Quota, Coin };
+enum class Icon { Wifi, WifiOff, Battery, Bolt, Hourglass, ResetCard, Credit, Clock, Unknown, Gap, Correction, Quota, Coin, Download, Check, Chip, Arrow, Refresh };
 // Allocation failure returns nullptr; setters accept nullptr. LVGL-thread only.
 // Text retains up to 32 glyphs. Longer input gets a trailing '?'; an area too
 // small to fit the retained text shows '?' instead of clipping exact values.

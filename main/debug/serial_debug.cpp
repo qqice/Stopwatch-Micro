@@ -233,19 +233,19 @@ void SerialDebug::handleLine(char* line)
         result(command ? command : "parse", "FAIL", "reason=ota_busy no_changes=1");
         return;
     }
-    if (command && std::strcmp(command, "ota-update") == 0) {
+    if (command && (!std::strcmp(command, "ota-update") || !std::strcmp(command, "ota-bypass"))) {
         const char* confirm = ::strtok_r(nullptr, " \t", &save);
         if (!confirm || std::strcmp(confirm, "CONFIRM_EXTERNAL_POWER") || ::strtok_r(nullptr, " \t", &save)) {
-            result("ota-update", "FAIL", "expected=CONFIRM_EXTERNAL_POWER manual_USB_external_power_confirmation_required=1");
+            result(command, "FAIL", "expected=CONFIRM_EXTERNAL_POWER manual_USB_external_power_confirmation_required=1");
             return;
         }
         if (_async_test != AsyncTest::None) {
-            result("ota-update", "FAIL", "reason=async_diagnostic_active cancel_first=1");
+            result(command, "FAIL", "reason=async_diagnostic_active cancel_first=1");
             return;
         }
         const bool ok = MosaicoOta::request();
         if (ok) GetNetworkQuota().wakeForFirmwareUpdate();
-        result("ota-update", ok ? "PASS" : "FAIL", "external_power=human_confirmed_not_measured SOC_not_used=1");
+        result(command, ok ? "PASS" : "FAIL", "external_power=human_confirmed_not_measured SOC_not_used=1");
         return;
     }
     if (command && std::strcmp(command, "ota-rollback-test") == 0) {
