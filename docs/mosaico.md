@@ -70,6 +70,21 @@ A passing probe does not prove LCD DMA/QSPI correctness. Explicit
 `off` restores it. The flag is RAM-only, defaults off on boot and is never enabled
 automatically. Long optical standby acceptance still requires user observation.
 
+The owner subsequently observed no corruption at320MHz. The installed6.1 S31
+clock code gives these coupled domains (MHz):
+
+| CPU | MEM bus | SYS | APB |
+| --- | --- | --- | --- |
+| 320 | 160 | 106.67 | 53.33 |
+| 160 | 160 | 80 | 40 |
+| 80 | 80 | 80 | 40 |
+
+This strengthens a low-frequency/display-memory-path association, not proof of
+a particular defect. `debug display-test-frequency 160` is a RAM-only idle test:
+160 shares the80MHz SYS/APB clocks but retains the320MHz MEM-bus speed, making it
+a useful next optical comparison. `320` restores protection; normal active
+operation remains320. Source SPI clock is still configured40MHz BBPLL.
+
 ## Battery telemetry and guarded nominal configuration
 
 The [official V1.0 guide](https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s31/esp-mosaico/user_guide_v1.0.html)
@@ -99,6 +114,24 @@ Even successful nominal configuration does not characterize the physical cell.
 Real FCC accuracy needs the [TI qualified learning cycle](https://www.ti.com/lit/ug/sluubd4a/sluubd4a.pdf)
 and current/voltage calibration requires suitable independent measurements. Do
 not force a deep discharge or label a nominal65 initialization as a measured65.
+
+The owner subsequently explicitly authorized unsealing. `debug gauge-access
+open` now supports one documented factory-key sequence on this validated sealed
+device, with a separate readback-verified access journal bound to chip MAC, type,
+prior security state and CRC. Failed attempts are latched; keys are not printed,
+changed, enumerated or retried. `debug gauge-access restore` safely exits CFG and
+restores the original SEALED state. Unknown-prior-unsealed access is refused;
+there is still no automatic boot-time access change or OTP write.
+
+Important new boundary: [TI lists a100mAh recommended minimum](https://www.ti.com/product/BQ27220).
+The writable I2 range including65 does not establish supported accuracy at65mAh.
+Accordingly, direct65 initialization is an explicitly owner-authorized experiment,
+not characterized calibration; `*` on a consistent SOC value preserves that
+qualification. TI's [scaling method](https://www.ti.com/lit/pdf/SLUA792) also requires
+matching current calibration and unit-dependent parameters. Without independent
+current measurements, this build does not blindly double CC gain or copy the
+reference19-field virtual130 profile. Default charge/learning thresholds can
+still be inappropriate for a65mA charger; capacity learning remains unverified.
 
 ## Important boot contract
 
@@ -148,11 +181,16 @@ There are no per-dot LVGL objects, animation timers or additional network polls.
 
 When awake, fresh visible meters can highlight only their already-filled region.
 Coins and reset cards turn slowly about their vertical axis; the capacity icon
-pulses only during measured charging. One UI scheduler runs at most four motion
+pulses only during measured charging. One UI scheduler runs at most ten motion
 steps per second, with no per-widget timer. Hidden, stale, unknown, offline and
 locked states stop motion. The meter fill and capacity never change just for
 animation. Time uses restrained cyan; quota and battery use red/amber/mint
 according to their actual percentages.
+
+Rotation now completes a turn in twelve seconds; meter highlights traverse in
+eight seconds and use a more visible three-column reflection. The original
+40-second turn, small icons' integer-coordinate quantization and single-column
+24/255 highlight explained the barely visible effect. Fill counts remain unchanged.
 
 The visual inspiration is the compact dot-graph language of
 [btop](https://github.com/aristocratos/btop); glyph patterns and drawing code are
@@ -264,3 +302,22 @@ Six pre-mitigation wake observations (three at fixed 320 MHz and three with an
 minor artifacts were reported in trials 1 and 4. Frequency transition therefore
 was not necessary for those minor artifacts. The ordering change is a bounded
 mitigation, not a confirmed root-cause fix for the earlier large-area incident.
+
+### This unit's nominal experiment (2026-10-04)
+
+Explicit factory access was verified (SEALED to FULL_ACCESS). The two authorized
+capacity fields were changed from 3000 to65mAh. The transaction reported
+`critical_cfg_exit_or_security`; its historical FAIL is retained. Cleanup then
+passed and independent standard reads showed Design/FCC/RM65mAh, SEC3 (SEALED),
+CFG0, SOC100,4203mV and zero instantaneous/average current. No gain, EDV,
+charger, key-memory or OTP parameter was changed. The intermediate failing
+exit's security state was not captured, so automatic sealing is an inference,
+not a demonstrated chip behavior or a TI-guaranteed0091 result.
+
+A strict read-only journal reconciliation is provided separately: it may close
+only this board's matching pending transaction after identity, two complete
+standard target readbacks and verified sealed/initialized/non-CFG/non-CAL state.
+It performs no access-key or capacity writes and does not retroactively turn
+the original failed experiment into PASS. Nominal correction is not a completed
+learning cycle, calibrated cell capacity, or characterized accuracy below TI's
+recommended100mAh range.

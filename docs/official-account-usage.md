@@ -58,3 +58,11 @@ The device continues to display official account daily totals and observation-ti
 hourly increments (which can lag and are not actual consumption hours). The
 existing service remains unchanged by this audit; no new local uploader or
 partial-coverage model aggregation was installed.
+
+After the owner upgraded the Mac standalone CLI to0.160.0, the same authenticated
+read was repeated: account usage still had the five summary fields,121 daily
+buckets containing only dates/tokens, and `threadUsage:null` without a threadId.
+Rate limits still returned one primary bucket, with no daily-model breakdown.
+The already generated0.160 protocol therefore did not reveal a new account-wide
+model/day query; the desktop-bundled Mac CLI remained0.159.2. This does not deny
+richer Desktop views, only the verified standalone export contract.
