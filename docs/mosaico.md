@@ -420,3 +420,41 @@ Quota/history and board selftests passed. This proves the conditional startup
 and no-rewrite branches on this unit, not arbitrary physical power-loss recovery
 or learned battery accuracy. The initial USB attach and reset reader saw transient
 Windows handle timeouts; reacquisition succeeded, with no new application write.
+
+## Bounded monitor power optimization
+
+Mosaico only: the awake application update delay is10ms instead of1ms; StopWatch
+keeps its original1ms control/HID path. LVGL tick period is10ms and the installed
+port increments LVGL time by that same period. Animation cadence remains10Hz.
+The existing touch timer changes from10ms awake to50ms locked (20Hz), then resets
+and becomes ready on wake. No per-widget timer or GPIO interrupt is introduced.
+This reduces polling without imposing a100ms touch-sampling window. The Function
+button and wake gesture consumption are unchanged; short-tap acceptance remains
+an on-device check, not a consequence of source tests.
+
+On V1.0, unused CODEC_PW56, PA_CTRL45 and MOTOR8 are explicitly driven LOW before
+OUTPUT is enabled. The [official guide](https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s31/esp-mosaico/user_guide_v1.0.html)
+and [CoreBoard schematic, pages3/4](https://dl.espressif.com/AE/SCH_SCH_ESP-Mosaico_CoreBoard_V1_0_2026-08-18.pdf)
+bind these dedicated controls; [NS4150B data sheet](https://dl.espressif.com/dl/schematics/NS4150B.pdf)
+defines CTRL LOW as shutdown. Command success does not measure the rail voltage,
+current, phantom powering or previous ON state. Shared GPIO60/57, charger,
+NAND/sensors and the PSRAM/QSPI configuration are untouched.
+
+`debug idle-runtime` reports polling and gate-command state. Default standby
+remains320MHz while unvalidated settings are absent. After optical validation,
+`debug display-idle-frequency 160 CONFIRM` can save a reversible opt-in; `320
+CONFIRM` restores protection. Only160/320 are accepted, writes are read back,
+unknown/corrupt values select320, and the command requires awake phase0 and no
+critical gauge transaction. It stores only `display_pw/idle_mhz`, never network
+credentials or calibration. RAM diagnostic80/160/320 overrides remain separate;
+explicit diagnostic320 really forces320 even with saved160, until reset or a
+successful saved-policy change. `display-low-clock off` uses that protective320
+RAM override; disabling diagnostic state via the internal boolean API returns
+control to the saved policy.
+
+Waking synchronously requests320 before hiding the lock panel/full redraw. The
+network worker and GUI serialize clock configuration and recheck current lock
+state; active/network-update phases remain320. The160MHz trial is not a proven
+root-cause fix. Poll/callback reductions are software activity changes, not a
+measured percentage reduction in battery energy. No genuine light/deep sleep or
+whole-board rail cutoff is enabled in this iteration.

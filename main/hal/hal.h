@@ -215,6 +215,18 @@ public:
     void lvglUnlock();
     void startLvglUpdate();
     void stopLvglUpdate();
+    struct TouchPollingInfo {
+        bool idle = false;
+        uint32_t periodMs = 0;
+        bool unusedGatesOff = false; // Output setup succeeded, NOT measured voltage/current.
+    };
+#ifdef MOSAICO_BOARD
+    void setTouchIdlePolling(bool idle);
+    TouchPollingInfo touchPollingInfo() const;
+#else
+    void setTouchIdlePolling(bool) {}
+    TouchPollingInfo touchPollingInfo() const { return {}; }
+#endif
 
     /* ---------------------------------- Touch --------------------------------- */
     struct TouchPoint {

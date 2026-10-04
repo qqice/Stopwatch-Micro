@@ -77,6 +77,7 @@ void percent(uint16_t bp, char* out, size_t size) {
 }
 namespace view {
 CodexMicroView::~CodexMicroView() {
+    GetHAL().setTouchIdlePolling(false);
     GetNetworkQuota().setLocked(false);
     if (_root) lv_obj_delete(_root);
     GetHAL().setBackLightBrightness(_brightness, false);
@@ -509,6 +510,7 @@ void CodexMicroView::togglePage() {
 void CodexMicroView::wakeDisplay() {
     if (!ready()) return;
     GetNetworkQuota().setLocked(false); _activity = lv_tick_get(); _locked = false;
+    GetHAL().setTouchIdlePolling(false);
     if (_overlay) lv_obj_add_flag(_overlay, LV_OBJ_FLAG_HIDDEN);
     if (_lockPanel) lv_obj_add_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN);
     GetHAL().setBackLightBrightness(_brightness, false);
@@ -517,6 +519,7 @@ void CodexMicroView::lockDisplay() {
     if (_locked || !ready()) return;
     stopAnimations();
     _locked = true; GetNetworkQuota().setLocked(true);
+    GetHAL().setTouchIdlePolling(true);
     lv_obj_remove_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_lockPanel);
     lv_obj_remove_flag(_overlay, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_overlay);
     refreshQuota(GetHAL().millis()); ++_lockRefreshCount; _refresh = lv_tick_get();

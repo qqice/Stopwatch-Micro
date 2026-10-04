@@ -242,6 +242,43 @@ void SerialDebug::handleLine(char* line)
         return;
     }
 #ifdef MOSAICO_BOARD
+    if (std::strcmp(command, "idle-runtime") == 0) {
+        const auto touch = GetHAL().touchPollingInfo();
+        char details[200]{};
+        std::snprintf(details, sizeof(details),
+            "touch_idle=%d touch_period_ms=%lu unused_gate_commands_ok=%d configured_idle_mhz=%lu main_awake_delay_ms=10 lvgl_tick_ms=10",
+            touch.idle, static_cast<unsigned long>(touch.periodMs), touch.unusedGatesOff,
+            static_cast<unsigned long>(GetNetworkQuota().idleCpuFrequency()));
+        result("idle-runtime", "PASS", details);
+        return;
+    }
+    if (std::strcmp(command, "display-idle-frequency") == 0) {
+        const char* value = ::strtok_r(nullptr, " \t", &save);
+        if (!value) {
+            char details[80]{};
+            std::snprintf(details, sizeof(details), "configured_idle_mhz=%lu default=320 allowed=160,320",
+                          static_cast<unsigned long>(GetNetworkQuota().idleCpuFrequency()));
+            result("display-idle-frequency", "PASS", details);
+            return;
+        }
+        uint32_t mhz = 0;
+        const char* confirm = ::strtok_r(nullptr, " \t", &save);
+        if (!parseUnsignedStrict(value, 160, 320, mhz) || (mhz != 160 && mhz != 320) ||
+            !confirm || std::strcmp(confirm, "CONFIRM") || ::strtok_r(nullptr, " \t", &save)) {
+            result("display-idle-frequency", "FAIL", "expected=160_or_320_CONFIRM no_changes=1");
+            return;
+        }
+        const auto power = GetNetworkQuota().powerStats();
+        if (power.locked || power.phase != 0 ||
+            GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical) {
+            result("display-idle-frequency", "SKIP", "requires_awake_phase_and_safe_gauge no_changes=1");
+            return;
+        }
+        const bool ok = GetNetworkQuota().setIdleCpuFrequency(mhz);
+        result("display-idle-frequency", ok ? "PASS" : "FAIL",
+               ok ? "saved_readback_verified active_cpu320=1 reversible=1" : "settings_commit_or_readback_failed");
+        return;
+    }
     if (std::strcmp(command, "display-clocks") == 0) {
         const auto clocks = GetHAL().displayClockDiagnostics();
         char details[260]{};

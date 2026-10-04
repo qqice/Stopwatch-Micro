@@ -57,7 +57,13 @@ NetworkQuota& GetNetworkQuota()
 }
 void NetworkQuota::setLocked(bool locked)
 {
-    if (_locked.exchange(locked) != locked && _task_handle) xTaskNotifyGive(_task_handle);
+    const bool changed = _locked.exchange(locked) != locked;
+#ifdef MOSAICO_BOARD
+    // Boost synchronously BEFORE the view starts its full wake redraw, rather
+    // than racing the network worker's eventual wake notification.
+    if (!locked) setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+#endif
+    if (changed && _task_handle) xTaskNotifyGive(_task_handle);
     GetCodexMicroBle().requestRadioIdle(idleLocked());
 }
 void NetworkQuota::setPowerProfile(uint8_t profile)
@@ -80,11 +86,13 @@ void NetworkQuota::wait(uint32_t milliseconds)
 void NetworkQuota::setCpu(uint32_t mhz)
 {
 #ifdef MOSAICO_BOARD
+    std::lock_guard<std::mutex> clockLock(_cpu_mutex);
     // Repeated corruption is correlated with the 80MHz standby/transition
     // configuration. Keep CPU/SYS/MEM clock domains stable as a conservative
     // guard, NOT a proven display root-cause fix. Radio duty cycling is retained.
-    if (!_diagnostic_low_clock.load()) mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
-    else if (idleLocked() && mhz == 80) mhz = _diagnostic_idle_mhz.load();
+    if (idleLocked() && mhz == 80)
+        mhz = _diagnostic_override.load() ? _diagnostic_idle_mhz.load() : _idle_cpu_mhz.load();
+    else mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
 #endif
     if (_cpu_target == mhz) return;
     esp_pm_config_t config{};
@@ -98,16 +106,40 @@ void NetworkQuota::setCpu(uint32_t mhz)
 #ifdef MOSAICO_BOARD
 void NetworkQuota::setLowClockDiagnostic(bool enabled)
 {
+    if (enabled) _diagnostic_idle_mhz = 80; // legacy on/off means the original 80MHz experiment.
     _diagnostic_low_clock = enabled;
-    ESP_LOGW("DisplayClock", "diagnostic_low_clock=%d protection=%s", enabled,
-             enabled ? "DISABLED_BY_EXPLICIT_TEST" : "fixed-default-frequency");
+    _diagnostic_override = enabled;
+    ESP_LOGW("DisplayClock", "diagnostic_low_clock=%d configured_idle_mhz=%lu", enabled,
+             static_cast<unsigned long>(_idle_cpu_mhz.load()));
     if (_task_handle) xTaskNotifyGive(_task_handle);
 }
 void NetworkQuota::setDiagnosticIdleFrequency(uint32_t mhz)
 {
     if (mhz != 80 && mhz != 160 && mhz != CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ) return;
     _diagnostic_idle_mhz = mhz;
-    setLowClockDiagnostic(mhz != CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+    _diagnostic_low_clock = mhz != CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+    _diagnostic_override = true; // includes an explicit temporary 320MHz override.
+    ESP_LOGW("DisplayClock", "diagnostic_idle_override_mhz=%lu", static_cast<unsigned long>(mhz));
+    if (_task_handle) xTaskNotifyGive(_task_handle);
+}
+bool NetworkQuota::setIdleCpuFrequency(uint32_t mhz)
+{
+    if (mhz != 160 && mhz != 320) return false; // never persist the suspect 80MHz path.
+    nvs_handle_t handle = 0;
+    if (nvs_open("display_pw", NVS_READWRITE, &handle) != ESP_OK) return false;
+    esp_err_t result = nvs_set_u32(handle, "idle_mhz", mhz);
+    if (result == ESP_OK) result = nvs_commit(handle);
+    nvs_close(handle);
+    if (result != ESP_OK || nvs_open("display_pw", NVS_READONLY, &handle) != ESP_OK) return false;
+    uint32_t observed = 0;
+    result = nvs_get_u32(handle, "idle_mhz", &observed);
+    nvs_close(handle);
+    if (result != ESP_OK || observed != mhz) return false;
+    _idle_cpu_mhz = mhz;
+    _diagnostic_low_clock = false;
+    _diagnostic_override = false;
+    if (_task_handle) xTaskNotifyGive(_task_handle);
+    return true;
 }
 #endif
 void NetworkQuota::recordWifiRunning(bool running)
@@ -179,6 +211,16 @@ void NetworkQuota::begin()
     InitTokenHistory();
 #ifdef MOSAICO_BOARD
     InitQuotaMonitor();
+    // Loading this setting cannot enable an unsupported frequency. Diagnostics
+    // are still RAM-only; choosing 160 requires the separate explicit command.
+    nvs_handle_t displayHandle = 0;
+    uint32_t savedIdle = 320;
+    if (nvs_open("display_pw", NVS_READONLY, &displayHandle) == ESP_OK) {
+        if (nvs_get_u32(displayHandle, "idle_mhz", &savedIdle) != ESP_OK ||
+            (savedIdle != 160 && savedIdle != 320)) savedIdle = 320;
+        nvs_close(displayHandle);
+    }
+    _idle_cpu_mhz = savedIdle;
 #endif
     GetTailnetQuota().load();
     nvs_handle_t handle;

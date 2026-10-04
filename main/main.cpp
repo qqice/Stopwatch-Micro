@@ -84,8 +84,13 @@ extern "C" void app_main(void)
             if (GetHAL().isBatteryLevelValid()) GetCodexMicroBle().setBattery(battery, GetHAL().isBatteryCharging());
         }
 #endif
-        // main_task, Bluedroid, and the HID TX worker share CPU0. Yield one
-        // tick so transport activity cannot reduce touch/UI scheduling time.
+#ifdef MOSAICO_BOARD
+        // The monitor has no low-latency remote-control path. Keep its 10Hz
+        // motion/100Hz touch responsive without a 1kHz application update loop.
+        vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 10));
+#else
+        // Preserve StopWatch HID/control latency and scheduling.
         vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 1));
+#endif
     }
 }

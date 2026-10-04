@@ -28,6 +28,7 @@
 #include "../hal.h"
 #include "../utils/settings/settings.h"
 #include "mosaico_gauge_model.h"
+#include "mosaico_touch_power_model.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
@@ -65,6 +66,8 @@ esp_lcd_panel_handle_t panel = nullptr;
 esp_lcd_touch_handle_t touch = nullptr;
 lv_display_t* display = nullptr;
 bool port_ready = false;
+std::atomic<bool> touch_idle_polling{false};
+std::atomic<bool> unused_gates_off{false};
 // Serialized by the LVGL port mutex once it exists. Keep physical brightness
 // separate from the requested setting while a wake redraw is pending.
 int panel_brightness = -1;
@@ -681,6 +684,18 @@ bool Hal::gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize)
 
 void Hal::i2c_init()
 {
+    // V1.0-only dedicated unused gates: CODEC_PW56 active-high (guide/LDO),
+    // PA_CTRL45 -> NS4150B CTRL low=Shutdown (core schematic p4/datasheet),
+    // MOTOR8 active-high (guide). Set LOW output latches BEFORE enabling output
+    // to avoid an enable pulse. Do not change system rails, LEDs or sensors.
+    for (const gpio_num_t pin : {GPIO_NUM_56, GPIO_NUM_45, GPIO_NUM_8}) {
+        ESP_ERROR_CHECK(gpio_set_level(pin, 0));
+    }
+    gpio_config_t unused{};
+    unused.pin_bit_mask = mosaico_touch_power::UnusedGateMask;
+    unused.mode = GPIO_MODE_OUTPUT;
+    ESP_ERROR_CHECK(gpio_config(&unused));
+    unused_gates_off.store(true, std::memory_order_relaxed); // Command success only; no electrical claim.
     // Active-low peripheral rail only. Never touch whole-device power GPIO57,
     // boot straps, charger, audio-enable or NAND/expansion pins.
     gpio_config_t rail{};
@@ -1304,7 +1319,9 @@ void Hal::lvgl_init()
     config.task_affinity = 1;
     config.task_max_sleep_ms = 500;
     config.task_stack_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT;
-    config.timer_period_ms = 5;
+    // esp_lvgl_port uses this same configured period for esp_timer scheduling
+    // AND lv_tick_inc(period_ms), so elapsed-time scaling stays unchanged.
+    config.timer_period_ms = mosaico_touch_power::LvglTickPeriodMs;
     ESP_ERROR_CHECK(lvgl_port_init(&config));
     port_ready = true;
     if (!lvglLock()) ESP_ERROR_CHECK(ESP_ERR_TIMEOUT);
@@ -1332,7 +1349,8 @@ void Hal::lvgl_init()
     lv_indev_set_type(lvTouchpad, LV_INDEV_TYPE_POINTER);
     lv_indev_set_display(lvTouchpad, display);
     lv_indev_set_read_cb(lvTouchpad, read_touch);
-    lv_timer_set_period(lv_indev_get_read_timer(lvTouchpad), 10);
+    lv_timer_set_period(lv_indev_get_read_timer(lvTouchpad),
+                        mosaico_touch_power::pollingPeriodMs(touch_idle_polling.load(std::memory_order_relaxed)));
     lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), LV_PART_MAIN);
     bootLogo = std::make_unique<BootLogo>();
     lvglUnlock();
@@ -1341,6 +1359,41 @@ void Hal::lvgl_init()
 
 bool Hal::lvglLock() { return port_ready && lvgl_port_lock(0); }
 void Hal::lvglUnlock() { if (port_ready) lvgl_port_unlock(); }
+
+void Hal::setTouchIdlePolling(bool idle)
+{
+    if (!port_ready) {
+        // Preserve a startup request; lvgl_init applies it to the new timer.
+        touch_idle_polling.store(idle, std::memory_order_relaxed);
+        return;
+    }
+    if (!lvglLock()) return;
+    if (touch_idle_polling.load(std::memory_order_relaxed) == idle) {
+        lvglUnlock();
+        return; // No reset, task wake or invalidation on repeated requests.
+    }
+    touch_idle_polling.store(idle, std::memory_order_relaxed);
+    if (lvTouchpad) {
+        lv_timer_t* timer = lv_indev_get_read_timer(lvTouchpad);
+        if (timer) {
+            lv_timer_set_period(timer, mosaico_touch_power::pollingPeriodMs(idle));
+            lv_timer_reset(timer);
+            if (!idle) {
+                lv_timer_ready(timer);
+                // Wake the existing port task, not a new task/timer, so an
+                // external button-driven wake gets a fresh sample promptly.
+                ESP_ERROR_CHECK(lvgl_port_task_wake(LVGL_PORT_EVENT_USER, nullptr));
+            }
+        }
+    }
+    lvglUnlock();
+}
+
+Hal::TouchPollingInfo Hal::touchPollingInfo() const
+{
+    const bool idle = touch_idle_polling.load(std::memory_order_relaxed);
+    return {idle, mosaico_touch_power::pollingPeriodMs(idle), unused_gates_off.load(std::memory_order_relaxed)};
+}
 void Hal::startLvglUpdate()
 {
     if (!lvglLock()) return;

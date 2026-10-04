@@ -2,6 +2,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#ifdef MOSAICO_BOARD
+#include <mutex>
+#endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -32,6 +35,10 @@ public:
     void setDiagnosticIdleFrequency(uint32_t mhz);
     uint32_t diagnosticIdleFrequency() const { return _diagnostic_idle_mhz.load(); }
     bool lowClockDiagnosticEnabled() const { return _diagnostic_low_clock.load(); }
+    // Explicit reversible opt-in after optical validation. Only 160/320MHz;
+    // factory/missing/corrupt settings keep the protective 320MHz default.
+    bool setIdleCpuFrequency(uint32_t mhz);
+    uint32_t idleCpuFrequency() const { return _idle_cpu_mhz.load(); }
 #endif
     bool configured() const
     {
@@ -73,7 +80,10 @@ private:
     std::atomic<uint8_t> _power_profile{2}, _power_phase{0};
 #ifdef MOSAICO_BOARD
     std::atomic<bool> _diagnostic_low_clock{false};
+    std::atomic<bool> _diagnostic_override{false};
     std::atomic<uint32_t> _diagnostic_idle_mhz{80};
+    std::atomic<uint32_t> _idle_cpu_mhz{320};
+    std::mutex _cpu_mutex;
 #endif
     std::atomic<uint32_t> _power_cycles{0};
     std::atomic<int> _clock_error{0};
