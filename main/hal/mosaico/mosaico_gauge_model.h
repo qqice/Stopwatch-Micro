@@ -59,6 +59,22 @@ struct AccessJournal {
 };
 static_assert(offsetof(AccessJournal, crc) == 28 && sizeof(AccessJournal) == 32, "Access journal layout changed");
 
+enum class ReloadState : uint8_t { Pending = 1, Failed, Completed };
+struct ReloadJournal {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t deviceType;
+    uint8_t unitMah;
+    uint8_t state;
+    uint16_t reserved;
+    uint8_t mac[6];
+    uint16_t targetDesign;
+    uint16_t targetFcc;
+    uint16_t reserved2;
+    uint32_t crc;
+};
+static_assert(offsetof(ReloadJournal, crc) == 24 && sizeof(ReloadJournal) == 28, "Boot latch layout changed");
+
 inline uint32_t crc32(const void* data, size_t size)
 {
     const auto* bytes = static_cast<const uint8_t*>(data);
@@ -72,6 +88,7 @@ inline uint32_t crc32(const void* data, size_t size)
 
 inline void seal(Journal& journal) { journal.crc = crc32(&journal, offsetof(Journal, crc)); }
 inline void seal(AccessJournal& journal) { journal.crc = crc32(&journal, offsetof(AccessJournal, crc)); }
+inline void seal(ReloadJournal& journal) { journal.crc = crc32(&journal, offsetof(ReloadJournal, crc)); }
 inline bool reasonableFcc(uint16_t value) { return value > 0 && value <= MaxReasonableFcc; }
 inline bool configExitAccepted(uint16_t operation)
 {
@@ -126,6 +143,37 @@ inline bool failedDefaultAttempt(const AccessJournal& journal)
     // Persisted BEFORE sending words: a crash or missing confirmation never
     // authorizes replaying unknown keys on the next OPEN request.
     return (journal.unsealAttempted && !journal.unsealVerified) || (journal.fullAttempted && !journal.fullVerified);
+}
+
+inline bool validReloadJournal(const ReloadJournal& journal, const uint8_t mac[6])
+{
+    return journal.magic == 0x47423635U && journal.version == 1 && journal.deviceType == DeviceType &&
+           journal.unitMah == 1 && journal.state >= static_cast<uint8_t>(ReloadState::Pending) &&
+           journal.state <= static_cast<uint8_t>(ReloadState::Completed) && journal.reserved == 0 && journal.reserved2 == 0 &&
+           journal.targetDesign == NominalMah && journal.targetFcc == NominalMah &&
+           std::memcmp(journal.mac, mac, 6) == 0 && journal.crc == crc32(&journal, offsetof(ReloadJournal, crc));
+}
+
+inline bool bootHistoryEligible(const Journal& nominal, const AccessJournal& access)
+{
+    // Actual CRC/MAC validation is mandatory at the caller before this policy.
+    return nominal.action == 1 && nominal.state == static_cast<uint8_t>(State::VerifiedSealedPrior3) &&
+           nominal.targetDesign == NominalMah && nominal.targetFcc == NominalMah &&
+           nominal.lastDesign == nominal.targetDesign && nominal.lastFcc == nominal.targetFcc &&
+           access.state == static_cast<uint8_t>(AccessState::Restored) && access.priorSecurity == 3 &&
+           access.lastSecurity == 3 && access.unsealVerified && access.fullVerified && !failedDefaultAttempt(access);
+}
+
+inline bool keepLearnedNominal(uint16_t design, uint16_t fcc)
+{
+    return design == NominalMah && reasonableFcc(fcc);
+}
+
+inline bool bootFactoryPairEligible(const Journal& nominal, uint16_t design, uint16_t fcc)
+{
+    // The public nominal transaction will preserve this exact original backup.
+    return design == FactoryMah && fcc == FactoryMah && nominal.originalDesign == FactoryMah &&
+           nominal.originalFcc == FactoryMah && nominal.changedFcc == 1;
 }
 
 inline bool recoveryState(uint8_t state)
@@ -239,6 +287,25 @@ inline bool selftest()
     if (!validAccessJournal(access, mac) || failedDefaultAttempt(access)) return false;
     access.priorSecurity ^= 1;
     if (validAccessJournal(access, mac)) return false;
+    access.priorSecurity = 3; access.lastSecurity = 3;
+    access.state = static_cast<uint8_t>(AccessState::Restored); seal(access);
+    Journal bootNominal = journal;
+    bootNominal.state = static_cast<uint8_t>(State::VerifiedSealedPrior3);
+    bootNominal.lastDesign = NominalMah; bootNominal.lastFcc = NominalMah;
+    if (!bootHistoryEligible(bootNominal, access) || !keepLearnedNominal(65, 62) || keepLearnedNominal(65, 3000) ||
+        !bootFactoryPairEligible(bootNominal, 3000, 3000) || bootFactoryPairEligible(bootNominal, 65, 3000)) return false;
+    bootNominal.state = static_cast<uint8_t>(State::ExitFailed);
+    if (bootHistoryEligible(bootNominal, access)) return false;
+    bootNominal.state = static_cast<uint8_t>(State::VerifiedSealedPrior3);
+    bootNominal.lastDesign = FactoryMah; bootNominal.lastFcc = FactoryMah;
+    if (bootHistoryEligible(bootNominal, access)) return false;
+    ReloadJournal reload{};
+    reload.magic = 0x47423635U; reload.version = 1; reload.deviceType = DeviceType; reload.unitMah = 1;
+    reload.state = static_cast<uint8_t>(ReloadState::Pending); reload.targetDesign = 65; reload.targetFcc = 65;
+    std::memcpy(reload.mac, mac, 6); seal(reload);
+    if (!validReloadJournal(reload, mac)) return false;
+    reload.state ^= 1;
+    if (validReloadJournal(reload, mac)) return false;
     std::memcpy(journal.mac, mac, 6); seal(journal);
     if (!validJournal(journal, mac) || !restorePairAllowed(journal, 65, 3000) ||
         !restorePairAllowed(journal, 3000, 65) || restorePairAllowed(journal, 130, 65) ||

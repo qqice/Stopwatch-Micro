@@ -306,6 +306,43 @@ void SerialDebug::handleLine(char* line)
         result("gauge", battery.valid ? "PASS" : "FAIL", details);
         return;
     }
+    if (std::strcmp(command, "gauge-boot") == 0) {
+        if (::strtok_r(nullptr, " \t", &save)) {
+            result("gauge-boot", "FAIL", "expected=no_arguments readonly_diagnostic=1");
+            return;
+        }
+        const auto info = GetHAL().gaugeBootReloadInfo();
+        char details[200]{};
+        std::snprintf(details, sizeof(details), "state=%u attempted=%d reason=%s readonly_diagnostic=1",
+                      static_cast<unsigned>(info.status), info.attempted, info.reason);
+        result("gauge-boot", info.status == Hal::GaugeBootReloadStatus::Critical ? "FAIL" :
+               (info.status == Hal::GaugeBootReloadStatus::Deferred ? "SKIP" : "PASS"), details);
+        return;
+    }
+    if (std::strcmp(command, "runtime-restart") == 0) {
+        const char* confirm = ::strtok_r(nullptr, " \t", &save);
+        if (!confirm || std::strcmp(confirm, "CONFIRM") || ::strtok_r(nullptr, " \t", &save)) {
+            result("runtime-restart", "SKIP", "requires_CONFIRM no_changes=1");
+            return;
+        }
+        const auto power = GetNetworkQuota().powerStats();
+        if (power.locked || power.phase != 0) {
+            result("runtime-restart", "SKIP", "requires_awake_radio_phase no_changes=1");
+            return;
+        }
+        // Snapshot waits for any boot transaction to finish. No ROM download
+        // request, flash erase, bond reset or parameter write is involved.
+        const auto info = GetHAL().gaugeBootReloadInfo();
+        if (info.status == Hal::GaugeBootReloadStatus::Critical) {
+            result("runtime-restart", "SKIP", "critical_gauge_requires_inspection no_changes=1");
+            return;
+        }
+        result("runtime-restart", "PASS", "action=normal_application_restart");
+        std::fflush(stdout);
+        GetHAL().delay(250);
+        GetHAL().reboot();
+        return;
+    }
     if (std::strcmp(command, "gauge-selftest") == 0) {
         result("gauge-selftest", GetHAL().gaugeSafetySelfTest() ? "PASS" : "FAIL",
                "nominal_only=1 mac_crc_journal_unit_binding=1 quiet_temperature_guards=1 no_device_writes=1");

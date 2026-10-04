@@ -4,6 +4,7 @@
 #include "token_history.h"
 #ifdef MOSAICO_BOARD
 #include "quota_monitor.h"
+#include <hal/hal.h>
 #endif
 #include <memory>
 #include <algorithm>
@@ -240,6 +241,9 @@ void NetworkQuota::run()
     int64_t nextRefresh = 0, windowDeadline = 0;
     constexpr int64_t RefreshIntervalUs = 300LL * 1000000;
     constexpr int64_t UpdateWindowUs    = 90LL * 1000000;
+#ifdef MOSAICO_BOARD
+    int64_t nextGaugeCheckUs = 0;
+#endif
     while (true) {
         const bool locked = idleLocked();
         const int64_t now = esp_timer_get_time();
@@ -283,8 +287,25 @@ void NetworkQuota::run()
             }
             setCpu(_power_profile == 2 ? 80 : CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
             setPhase(2);
+#ifdef MOSAICO_BOARD
+            // Deferred preconditions get read-only checks, at most once/minute,
+            // while radios are off. A real attempt is latched by the HAL; failed
+            // access/configuration must never become an automatic retry loop.
+            if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Deferred &&
+                esp_timer_get_time() >= nextGaugeCheckUs) {
+                char reason[128]{};
+                const auto status = GetHAL().gaugeBootReload(reason, sizeof(reason));
+                ESP_LOGI("GaugeBoot", "idle status=%u reason=%s", static_cast<unsigned>(status), reason);
+                nextGaugeCheckUs = esp_timer_get_time() + 60LL * 1000000;
+            }
+#endif
             const int64_t remaining = (nextRefresh - esp_timer_get_time()) / 1000;
-            wait(static_cast<uint32_t>(remaining > 0 ? remaining : 1));
+            uint32_t waitMs = static_cast<uint32_t>(remaining > 0 ? remaining : 1);
+#ifdef MOSAICO_BOARD
+            if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Deferred)
+                waitMs = std::min<uint32_t>(waitMs, 60000);
+#endif
+            wait(waitMs);
             continue;
         }
         setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);

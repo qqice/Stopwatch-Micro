@@ -99,7 +99,8 @@ nominal-configuration operation, not measured ADC/cell calibration. It allows
 only Design Capacity at 0x929F and, only for the unambiguous factory 3000/3000mAh
 default, initial FCC at 0x929D. A plausible learned FCC is preserved. Target is
 fixed at documented nominal65. No gain, EDV, offset, charger, security key or OTP
-write exists; no seal/unseal/access escalation or automatic startup write exists.
+write is permitted. Access changes are separate, guarded transactions; the later
+owner-authorized conditional startup policy is described below.
 
 Writing requires existing FULL_ACCESS, gauge ID0x0220, initialized/quiet near-full
 conditions and safe temperature. Typed expected values, authenticated MAC
@@ -121,7 +122,8 @@ device, with a separate readback-verified access journal bound to chip MAC, type
 prior security state and CRC. Failed attempts are latched; keys are not printed,
 changed, enumerated or retried. `debug gauge-access restore` safely exits CFG and
 restores the original SEALED state. Unknown-prior-unsealed access is refused;
-there is still no automatic boot-time access change or OTP write.
+OTP remains forbidden. Boot-time access is limited to the explicitly authorized
+policy below, not a generic automatic unseal or retry.
 
 Important new boundary: [TI lists a100mAh recommended minimum](https://www.ti.com/product/BQ27220).
 The writable I2 range including65 does not establish supported accuracy at65mAh.
@@ -363,3 +365,58 @@ Do not begin a claimed calibration/learning cycle until reset-aware, qualified
 RAM-profile loading is implemented and tested. The UI correctly restores the
 unknown-nominal marker for the present3000mAh profile; SOC100 is not calibrated.
 No automatic access or profile write was added by this UI deployment.
+
+## Authorized conditional startup RAM reload
+
+This unit may restore only the already verified nominal DC/FCC65 pair, not a
+complete characterized CEDV profile. The first check runs after gauge/NVS init
+and before display/radios. Already-correct DC65 with a sane live FCC is untouched,
+including learned FCC. Unrecognized history or a nonfactory pair is not rewritten.
+Only matching MAC/type/unit/CRC nominal and access records proving the previous
+sealed65 endpoint authorize default3000/3000 reload. Identity0220, SEC3/CFG0/CAL0,
+initialized complete telemetry and the original near-full/quiet/temperature gates
+must all pass. No guessed SOC, voltage correction, gain/EDV or OTP write is added.
+
+If read-only safety preconditions are not yet met, the configured quota worker
+may revisit them once/minute while locked and radios are off. A low-battery,
+charging or loaded boot can remain deferred; this is intentional, not a claim
+that every boot is corrected immediately. The UI retains its unknown-nominal
+marker until actual fields become consistent. It is not a learning/calibration
+completion marker.
+
+A separate CRC/unit-bound reload journal is committed and read back BEFORE
+access. Pending, failed or corrupt reload records block automatic retries even
+across reset. After one real attempt per boot, cleanup always restores SEALED
+and checks CFG/CAL clear and initialized status. Success includes target readback
+and an observed sealed endpoint. A recursive transaction lock excludes interleaved
+manual access/nominal/reconciliation calls; battery reads retain their own lock.
+No keys are logged or changed, no generic profile executor is introduced.
+
+`debug gauge-boot` only snapshots status/attempt/reason. `debug runtime-restart
+CONFIRM` is a guarded normal app restart, not ROM download, erase or gauge reset;
+it refuses a critical gauge state and requires the awake radio phase. Software
+restart does not establish physical power-loss retention. A real power-cycle
+verification must distinguish reloading65 from merely retaining live RAM.
+Pending/failure after sudden power interruption is not proof that finally ran.
+Its diagnostic reports observed security/CFG/CAL (or unreadable); it blocks new
+writes and requires explicit protective `debug gauge-access restore` inspection.
+A corrupt/foreign record is never used to guess keys or resume a parameter write.
+The new reload does not persist a learned FCC across gauge power loss, audit the
+full cell profile, or qualify a discharge. Live learned FCC is merely preserved.
+A true gauge POR may return UNSEALED2 rather than the validated SEALED3 state.
+That case remains Deferred: old history does not authorize guessing a return
+path, self-sealing an unknown prior2 state, or silently escalating access. This
+conditional feature is not universal recovery at arbitrary battery/security
+states. Inspect and explicitly recover such a unit before claiming a power-loss
+cycle succeeded.
+Protective access-restore does not clear the reload failure latch. Re-enabling
+an interrupted/failed automatic reload requires an explicitly reviewed unit-bound
+journal repair; there is deliberately no generic failure-reset/retry command.
+
+On-device acceptance: the first new-app startup reported Applied/attempted1 and
+read back DC/FCC/RM65 with SEC3/CFG0. A subsequent ordinary application restart
+reported Skipped/attempted0/already65 and the same protected capacity readback.
+Quota/history and board selftests passed. This proves the conditional startup
+and no-rewrite branches on this unit, not arbitrary physical power-loss recovery
+or learned battery accuracy. The initial USB attach and reset reader saw transient
+Windows handle timeouts; reacquisition succeeded, with no new application write.

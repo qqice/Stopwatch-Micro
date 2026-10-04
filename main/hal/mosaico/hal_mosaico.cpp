@@ -71,6 +71,10 @@ int panel_brightness = -1;
 int pending_wake_brightness = -1;
 i2c_master_dev_handle_t gauge = nullptr;
 std::mutex battery_mutex;
+// All mutating transactions take this BEFORE battery_mutex. Recursive so the
+// boot wrapper can serialize its public Access/Nominal/Reconcile/Restore steps.
+std::recursive_mutex gauge_transaction_mutex;
+Hal::GaugeBootReloadInfo gauge_boot_info;
 bool battery_valid = false;
 uint8_t battery_soc = 0;
 uint16_t battery_mv = 0;
@@ -220,7 +224,9 @@ void sample_battery_locked(bool refresh = false)
     // Conservative nominal consistency only: 65 physical mAh, sane capacity
     // registers and valid raw SOC. Never infer learned FCC or pack accuracy.
     sample.nominalConfigured = sample.valid && sample.capacityValid && sample.designMah == 65 &&
-                               sample.fullMah <= mosaico_gauge::MaxReasonableFcc;
+                               sample.fullMah <= mosaico_gauge::MaxReasonableFcc &&
+                               mosaico_gauge::configExitAccepted(sample.operationStatus) &&
+                               ((sample.operationStatus >> 1) & 3) == 3;
     battery_telemetry = sample;
     battery_valid = sample.valid;
     if (battery_valid) {
@@ -545,11 +551,40 @@ bool gauge_return_access(const mosaico_gauge::AccessJournal& journal)
     gauge_access_word(AccessWord::Seal); // one attempt; readback determines actual protection.
     return gauge_wait_security(3);
 }
+
+esp_err_t gauge_load_reload(mosaico_gauge::ReloadJournal& journal, const uint8_t mac[6])
+{
+    nvs_handle_t handle = 0;
+    esp_err_t result = nvs_open("gaugecal", NVS_READONLY, &handle);
+    if (result != ESP_OK) return result;
+    size_t size = sizeof(journal);
+    result = nvs_get_blob(handle, "reload_v1", &journal, &size);
+    nvs_close(handle);
+    if (result == ESP_OK && (size != sizeof(journal) || !mosaico_gauge::validReloadJournal(journal, mac))) return ESP_FAIL;
+    return result;
+}
+
+bool gauge_store_reload(mosaico_gauge::ReloadJournal& journal, const uint8_t mac[6])
+{
+    mosaico_gauge::seal(journal);
+    if (!mosaico_gauge::validReloadJournal(journal, mac)) return false;
+    gauge_feed();
+    nvs_handle_t handle = 0;
+    if (nvs_open("gaugecal", NVS_READWRITE, &handle) != ESP_OK) return false;
+    esp_err_t result = nvs_set_blob(handle, "reload_v1", &journal, sizeof(journal));
+    if (result == ESP_OK) result = nvs_commit(handle);
+    nvs_close(handle);
+    gauge_feed();
+    mosaico_gauge::ReloadJournal readback{};
+    return result == ESP_OK && gauge_load_reload(readback, mac) == ESP_OK &&
+           std::memcmp(&journal, &readback, sizeof(journal)) == 0;
+}
 } // namespace
 
 bool Hal::gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize)
 {
     using namespace mosaico_gauge;
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     std::lock_guard<std::mutex> lock(battery_mutex);
     const auto report = [&](bool success, const char* why) {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
@@ -728,6 +763,7 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
                                  char* reason, size_t reasonSize)
 {
     using namespace mosaico_gauge;
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     std::lock_guard<std::mutex> lock(battery_mutex);
     const auto report = [&](bool success, const char* why) {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
@@ -957,6 +993,7 @@ bool Hal::gaugeSafetySelfTest() const { return mosaico_gauge::selftest(); }
 bool Hal::gaugeReconcileNominal(char* reason, size_t reasonSize)
 {
     using namespace mosaico_gauge;
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     std::lock_guard<std::mutex> lock(battery_mutex);
     const auto report = [&](bool ok, const char* why) {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
@@ -1002,6 +1039,152 @@ bool Hal::gaugeReconcileNominal(char* reason, size_t reasonSize)
     nominal.lastFcc = battery_telemetry.fullMah;
     if (!gauge_store_journal(nominal, mac.data())) return report(false, "critical_reconcile_journal_readback");
     return report(true, "reconciled_std_target_observed_sec3_expected_prior3");
+}
+
+Hal::GaugeBootReloadInfo Hal::gaugeBootReloadInfo() const
+{
+    // No I2C/NVS and no triggering work. Waiting here prevents a runtime-reset
+    // guard from observing an unfinished access/nominal/reload transaction.
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    return gauge_boot_info;
+}
+
+Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
+{
+    using namespace mosaico_gauge;
+    using Status = GaugeBootReloadStatus;
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    const auto finish = [&](Status status, const char* why) {
+        gauge_boot_info.status = status;
+        std::snprintf(gauge_boot_info.reason, sizeof(gauge_boot_info.reason), "%s", why);
+        if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
+        return status;
+    };
+    // Only Deferred readonly probes may be revisited by the caller's scheduler.
+    if (gauge_boot_info.attempted || gauge_boot_info.status != Status::Deferred) {
+        if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", gauge_boot_info.reason);
+        return gauge_boot_info.status;
+    }
+    ReloadJournal latch{};
+    const auto mac = getFactoryMac();
+    {
+        // Release the nonrecursive battery mutex BEFORE calling public methods.
+        // The outer recursive transaction mutex remains held across every step.
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        if (!gauge || !selftest()) return finish(Status::Skipped, "boot_skip_unknown_gauge_or_model");
+        const esp_err_t latchLoaded = gauge_load_reload(latch, mac.data());
+        if (latchLoaded != ESP_OK && latchLoaded != ESP_ERR_NVS_NOT_FOUND)
+            return finish(Status::Critical, "boot_critical_corrupt_or_unknown_failure_latch");
+        if (latchLoaded == ESP_OK && latch.state != static_cast<uint8_t>(ReloadState::Completed)) {
+            // A power cut can interrupt finally cleanup. Never retry access or
+            // parameters automatically; capture readonly SEC/CFG for the info
+            // getter and require explicit protective access-restore by the owner.
+            uint16_t operation = 0;
+            char details[128]{};
+            if (gauge_word(0x3A, operation)) std::snprintf(details, sizeof(details),
+                "boot_critical_%s_no_retry observed_sec=%u cfg=%u cal=%u",
+                latch.state == static_cast<uint8_t>(ReloadState::Pending) ? "pending" : "failed",
+                (operation >> 1) & 3, !!(operation & 0x0400), !!(operation & 1));
+            else std::snprintf(details, sizeof(details), "boot_critical_persistent_failure_no_retry_security_unreadable");
+            return finish(Status::Critical, details);
+        }
+        Journal nominal{};
+        AccessJournal access{};
+        if (gauge_load_journal(nominal, mac.data()) != ESP_OK || gauge_load_access(access, mac.data()) != ESP_OK)
+            return finish(Status::Skipped, "boot_skip_unknown_or_invalid_unit_history");
+        if (!bootHistoryEligible(nominal, access))
+            return finish(Status::Skipped, "boot_skip_history_not_verified_sealed_prior3");
+        sample_battery_locked(true);
+        const auto sample = battery_telemetry;
+        if (!sample.valid || !sample.capacityValid) return finish(Status::Deferred, "boot_deferred_readonly_telemetry");
+        if (!configExitAccepted(sample.operationStatus) || ((sample.operationStatus >> 1) & 3) != 3)
+            return finish(Status::Deferred, "boot_deferred_not_idle_sealed_cfg_clear");
+        if (keepLearnedNominal(sample.designMah, sample.fullMah))
+            return finish(Status::Skipped, "boot_skip_already65_preserve_learned_fcc");
+        if (!bootFactoryPairEligible(nominal, sample.designMah, sample.fullMah))
+            return finish(Status::Skipped, "boot_skip_nonfactory_or_backup_mismatch_no_writes");
+        uint16_t operation = 0;
+        GaugePair profile;
+        if (!gauge_access_preflight(operation, profile) || ((operation >> 1) & 3) != 3 ||
+            !bootFactoryPairEligible(nominal, profile.design, profile.fcc))
+            return finish(Status::Deferred, "boot_deferred_quiet_full_temperature_no_force");
+        if (!gauge_identity()) return finish(Status::Deferred, "boot_deferred_readonly_identity");
+        // Durable per-unit Pending latch BEFORE any automatic access attempt.
+        // Unknown/pending/corrupt records on a later boot never retry themselves.
+        latch = {};
+        latch.magic = 0x47423635U; latch.version = 1; latch.deviceType = DeviceType; latch.unitMah = 1;
+        latch.state = static_cast<uint8_t>(ReloadState::Pending);
+        latch.targetDesign = NominalMah; latch.targetFcc = NominalMah;
+        std::memcpy(latch.mac, mac.data(), sizeof(latch.mac));
+        if (!gauge_store_reload(latch, mac.data())) return finish(Status::Critical, "boot_critical_prepare_failure_latch");
+    }
+    gauge_boot_info.attempted = true; // one attempt per boot, even when OPEN later refuses/aborts.
+    char phaseReason[128]{}, closeReason[128]{};
+    const bool opened = gaugeAccess(GaugeAccessAction::Open, phaseReason, sizeof(phaseReason));
+    const bool applied = opened && gaugeSetNominalCapacity(FactoryMah, NominalMah, false, phaseReason, sizeof(phaseReason));
+    // Finally is unconditional after entering the access-attempt scope. No key
+    // or parameter retries are scheduled, regardless of which step failed.
+    const bool closed = gaugeAccess(GaugeAccessAction::Restore, closeReason, sizeof(closeReason));
+    bool safelySealed = false;
+    uint16_t finalOperation = 0;
+    bool finalStatusRead = false;
+    {
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        finalStatusRead = gauge_word(0x3A, finalOperation);
+        safelySealed = finalStatusRead && configExitAccepted(finalOperation) && ((finalOperation >> 1) & 3) == 3;
+    }
+    bool reconciled = false;
+    if (opened && applied && closed && safelySealed) {
+        // Boot-owned closure only: applied==true in THIS serialized transaction
+        // authorizes closing its successful Committed result after finally Seal.
+        // Do not broaden the public interrupted-operation reconcile whitelist.
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        Journal terminal{};
+        AccessJournal access{};
+        reconciled = gauge_load_journal(terminal, mac.data()) == ESP_OK &&
+                     gauge_load_access(access, mac.data()) == ESP_OK && terminal.action == 1 &&
+                     (terminal.state == static_cast<uint8_t>(State::Committed) ||
+                      terminal.state == static_cast<uint8_t>(State::VerifiedSealedPrior3)) &&
+                     terminal.targetDesign == NominalMah && terminal.targetFcc == NominalMah &&
+                     terminal.lastDesign == terminal.targetDesign && terminal.lastFcc == terminal.targetFcc &&
+                     access.state == static_cast<uint8_t>(AccessState::Restored) && access.priorSecurity == 3 &&
+                     access.lastSecurity == 3 && access.unsealVerified && access.fullVerified && !failedDefaultAttempt(access);
+        for (unsigned read = 0; read < 2 && reconciled; ++read) {
+            reconciled = gauge_identity();
+            sample_battery_locked(true);
+            const auto& sample = battery_telemetry;
+            reconciled = reconciled && sample.valid && sample.capacityValid && configExitAccepted(sample.operationStatus) &&
+                         ((sample.operationStatus >> 1) & 3) == 3 && sample.designMah == terminal.targetDesign &&
+                         sample.fullMah == terminal.targetFcc && sample.remainingMah <= sample.fullMah;
+        }
+        if (reconciled) {
+            terminal.state = static_cast<uint8_t>(State::VerifiedSealedPrior3);
+            reconciled = gauge_store_journal(terminal, mac.data());
+        }
+        if (!reconciled) std::snprintf(phaseReason, sizeof(phaseReason), "boot_owned_terminal_closure_failed");
+    }
+    const bool success = opened && applied && closed && safelySealed && reconciled;
+    latch.state = static_cast<uint8_t>(success ? ReloadState::Completed : ReloadState::Failed);
+    bool recorded = false;
+    {
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        recorded = gauge_store_reload(latch, mac.data());
+    }
+    if (!recorded) return finish(Status::Critical, "boot_critical_final_failure_latch_readback");
+    if (!closed || !safelySealed) {
+        char details[128]{};
+        if (finalStatusRead) std::snprintf(details, sizeof(details),
+            "boot_critical_final_cleanup observed_sec=%u cfg=%u cal=%u", (finalOperation >> 1) & 3,
+            !!(finalOperation & 0x0400), !!(finalOperation & 1));
+        else std::snprintf(details, sizeof(details), "boot_critical_final_cleanup_security_unreadable");
+        return finish(Status::Critical, details);
+    }
+    if (!success) {
+        char details[128]{};
+        std::snprintf(details, sizeof(details), "boot_critical_attempt_failed_sealed_no_retry: %.72s", phaseReason);
+        return finish(Status::Critical, details);
+    }
+    return finish(Status::Applied, "boot_applied65_experimental_sealed_verified_once");
 }
 
 Hal::MosaicoClockDiagnostics Hal::displayClockDiagnostics() const

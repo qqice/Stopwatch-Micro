@@ -43,6 +43,13 @@ void Hal::init()
     BootTraceStage(2);
     i2c_init();
     pmic_init();
+#ifdef MOSAICO_BOARD
+    // NVS and the gauge are ready, but display/radios have not started. Restore
+    // only this unit's authenticated RAM profile under the HAL safety policy.
+    char gaugeReason[128]{};
+    const auto gaugeReload = gaugeBootReload(gaugeReason, sizeof(gaugeReason));
+    ESP_LOGI("GaugeBoot", "startup status=%u reason=%s", static_cast<unsigned>(gaugeReload), gaugeReason);
+#endif
     BootTraceStage(3);
     ioe_init();
     BootTraceStage(4);

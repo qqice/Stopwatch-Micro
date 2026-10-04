@@ -137,6 +137,12 @@ public:
         bool directDmaTrue = false;
     };
     enum class GaugeAccessAction { Open, Restore };
+    enum class GaugeBootReloadStatus { Deferred, Skipped, Applied, Critical };
+    struct GaugeBootReloadInfo {
+        GaugeBootReloadStatus status = GaugeBootReloadStatus::Deferred;
+        bool attempted = false;
+        char reason[128] = "boot_reload_not_checked";
+    };
 #ifdef MOSAICO_BOARD
     BatteryTelemetry batteryTelemetry(bool refresh = false);
     // Explicit RAM nominal setup/restore only. For APPLY expectedOld must match
@@ -156,6 +162,11 @@ public:
     // Explicit read-only gauge audit + NVS-only journal reconciliation. Never
     // sends access keys, CFG controls or capacity/configuration data.
     bool gaugeReconcileNominal(char* reason, size_t reasonSize);
+    // Caller owns startup/radio-off scheduling. No task/timer is created here.
+    GaugeBootReloadStatus gaugeBootReload(char* reason, size_t reasonSize);
+    // Snapshot only, no I2C/NVS. Waits for any transaction to finish before a
+    // caller uses it to permit a runtime restart.
+    GaugeBootReloadInfo gaugeBootReloadInfo() const;
     MosaicoClockDiagnostics displayClockDiagnostics() const;
     // Caller must exclude concurrent flash/NVS operations (esp_cache_msync rule).
     bool displayRamProbe(uint32_t& errors);
@@ -177,6 +188,18 @@ public:
     {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "unsupported: not Mosaico");
         return false;
+    }
+    GaugeBootReloadStatus gaugeBootReload(char* reason, size_t reasonSize)
+    {
+        if (reason && reasonSize) std::snprintf(reason, reasonSize, "unsupported: not Mosaico");
+        return GaugeBootReloadStatus::Skipped;
+    }
+    GaugeBootReloadInfo gaugeBootReloadInfo() const
+    {
+        GaugeBootReloadInfo info;
+        info.status = GaugeBootReloadStatus::Skipped;
+        std::snprintf(info.reason, sizeof(info.reason), "unsupported: not Mosaico");
+        return info;
     }
     bool displayRamProbe(uint32_t& errors) { errors = 0; return false; }
 #endif
