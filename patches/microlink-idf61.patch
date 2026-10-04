@@ -100,10 +100,24 @@ index a11aefd..30704e9 100644
  static const char *base64_lookup = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
  
 diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/components/microlink/components/wireguard_lwip/src/wireguardif.c
-index 6627fd0..7981cce 100644
+index 6627fd0..7d321fe 100644
 --- a/components/microlink/components/wireguard_lwip/src/wireguardif.c
 +++ b/components/microlink/components/wireguard_lwip/src/wireguardif.c
-@@ -755,8 +755,8 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
+@@ -539,9 +539,10 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
+ 								if (dest_ok) {
+ 									// Send packet to be processed by LWIP
+ 									WG_DEBUG("[WG_RX_IP] Passing %u bytes to IP layer\n", (unsigned)pbuf->tot_len);
+-									ip_input(pbuf, device->netif);
+-									// pbuf is owned by IP layer now
+-									pbuf = NULL;
++									// Honor the caller's input context; only success transfers ownership.
++									if (device->netif->input && device->netif->input(pbuf, device->netif) == ERR_OK) {
++										pbuf = NULL;
++									}
+ 								} else {
+ 									WG_DEBUG("[WG_RX_IP] DROPPED: dest_ok=false\n");
+ 								}
+@@ -755,8 +756,8 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
  
  	uint8_t type = wireguard_get_message_type(data, len);
  
@@ -227,23 +241,18 @@ diff --git a/components/microlink/src/microlink.c b/components/microlink/src/mic
 index 237f039..fd5379a 100644
 --- a/components/microlink/src/microlink.c
 +++ b/components/microlink/src/microlink.c
-@@ -14,7 +14,8 @@
- #include "esp_wifi.h"
+@@ -15,6 +15,7 @@
  #include "nvs_flash.h"
  #include "nvs.h"
--#include "cJSON.h"
-+#include "cJSON.h"
+ #include "cJSON.h"
 +#include "psa/crypto.h"
  #include <string.h>
  #include <stdio.h>
  #include <fcntl.h>
-@@ -24,7 +25,24 @@
- #include "ml_cellular.h"
- #endif
+@@ -26,6 +27,23 @@
  
--static const char *TAG = "microlink";
-+static const char *TAG = "microlink";
-+
+ static const char *TAG = "microlink";
+ 
 +#define ML_STOP_TIMEOUT_MS 15000
 +
 +static void drain_packet_queue(QueueHandle_t queue) {
@@ -260,21 +269,14 @@ index 237f039..fd5379a 100644
 +    ml_derp_tx_item_t item;
 +    while (queue && xQueueReceive(queue, &item, 0) == pdTRUE) free(item.data);
 +}
- 
++
  /* NVS keys */
  #define NVS_NAMESPACE       "microlink"
-@@ -151,11 +169,15 @@ esp_err_t microlink_factory_reset(void) {
-  * Public API
-  * ========================================================================== */
- 
--microlink_t *microlink_init(const microlink_config_t *config) {
-+microlink_t *microlink_init(const microlink_config_t *config) {
-     if (!config || !config->auth_key) {
+ #define NVS_KEY_MACHINE_PRI "machine_pri"
+@@ -156,6 +174,10 @@ microlink_t *microlink_init(const microlink_config_t *config) {
          ESP_LOGE(TAG, "Invalid config: auth_key required");
--        return NULL;
--    }
-+        return NULL;
-+    }
+         return NULL;
+     }
 +    if (psa_crypto_init() != PSA_SUCCESS) {
 +        ESP_LOGE(TAG, "PSA crypto initialization failed");
 +        return NULL;
@@ -296,19 +298,10 @@ index 237f039..fd5379a 100644
          microlink_destroy(ml);
          return NULL;
      }
-@@ -297,14 +320,25 @@ microlink_t *microlink_init(const microlink_config_t *config) {
-     return ml;
- }
- 
--esp_err_t microlink_start(microlink_t *ml) {
-+esp_err_t microlink_start(microlink_t *ml) {
-     if (!ml) return ESP_ERR_INVALID_ARG;
-     if (ml->state != ML_STATE_IDLE) {
-         ESP_LOGW(TAG, "Already started (state=%d)", ml->state);
+@@ -304,6 +327,17 @@ esp_err_t microlink_start(microlink_t *ml) {
          return ESP_ERR_INVALID_STATE;
      }
  
--    ml->state = ML_STATE_WIFI_WAIT;
 +    xEventGroupClearBits(ml->events, ML_EVT_SHUTDOWN_REQUEST | ML_EVT_TASK_EXITED_MASK |
 +                                         ML_EVT_COORD_REGISTERED | ML_EVT_DERP_CONNECTED | ML_EVT_WG_READY |
 +                                         ML_EVT_DERP_CONNECT_REQ | ML_EVT_DERP_RECONNECT);
@@ -320,70 +313,51 @@ index 237f039..fd5379a 100644
 +    drain_peer_queue(ml->peer_update_queue);
 +    ml_coord_cmd_t stale_cmd;
 +    while (xQueueReceive(ml->coord_cmd_queue, &stale_cmd, 0) == pdTRUE) {}
-+    ml->state = ML_STATE_WIFI_WAIT;
+     ml->state = ML_STATE_WIFI_WAIT;
  
      /* Set WiFi TX power if configured */
-     if (ml->config.wifi_tx_power_dbm > 0) {
-@@ -372,31 +406,35 @@ skip_bsd_socket:
- 
-     ret = xTaskCreatePinnedToCore(ml_net_io_task, "ml_net_io", ML_TASK_NET_IO_STACK,
+@@ -374,29 +408,33 @@ skip_bsd_socket:
                                     ml, ML_TASK_NET_IO_PRIO, &ml->net_io_task, ML_TASK_NET_IO_CORE);
--    if (ret != pdPASS) {
--        ESP_LOGE(TAG, "Failed to create net_io task");
+     if (ret != pdPASS) {
+         ESP_LOGE(TAG, "Failed to create net_io task");
 -        return ESP_FAIL;
--    }
-+    if (ret != pdPASS) {
-+        ESP_LOGE(TAG, "Failed to create net_io task");
 +        goto start_failure;
-+    }
+     }
 +    ml->lifecycle_expected |= ML_EVT_NET_IO_EXITED;
  
      ret = xTaskCreatePinnedToCore(ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK,
                                     ml, ML_TASK_DERP_TX_PRIO, &ml->derp_tx_task, ML_TASK_DERP_TX_CORE);
--    if (ret != pdPASS) {
--        ESP_LOGE(TAG, "Failed to create derp_tx task");
+     if (ret != pdPASS) {
+         ESP_LOGE(TAG, "Failed to create derp_tx task");
 -        return ESP_FAIL;
--    }
-+    if (ret != pdPASS) {
-+        ESP_LOGE(TAG, "Failed to create derp_tx task");
 +        goto start_failure;
-+    }
+     }
 +    ml->lifecycle_expected |= ML_EVT_DERP_TX_EXITED;
  
      ret = xTaskCreatePinnedToCore(ml_coord_task, "ml_coord", ML_TASK_COORD_STACK,
                                     ml, ML_TASK_COORD_PRIO, &ml->coord_task, ML_TASK_COORD_CORE);
--    if (ret != pdPASS) {
--        ESP_LOGE(TAG, "Failed to create coord task");
+     if (ret != pdPASS) {
+         ESP_LOGE(TAG, "Failed to create coord task");
 -        return ESP_FAIL;
--    }
-+    if (ret != pdPASS) {
-+        ESP_LOGE(TAG, "Failed to create coord task");
 +        goto start_failure;
-+    }
+     }
 +    ml->lifecycle_expected |= ML_EVT_COORD_EXITED;
  
      ret = xTaskCreatePinnedToCore(ml_wg_mgr_task, "ml_wg_mgr", ML_TASK_WG_MGR_STACK,
                                     ml, ML_TASK_WG_MGR_PRIO, &ml->wg_mgr_task, ML_TASK_WG_MGR_CORE);
--    if (ret != pdPASS) {
--        ESP_LOGE(TAG, "Failed to create wg_mgr task");
+     if (ret != pdPASS) {
+         ESP_LOGE(TAG, "Failed to create wg_mgr task");
 -        return ESP_FAIL;
--    }
-+    if (ret != pdPASS) {
-+        ESP_LOGE(TAG, "Failed to create wg_mgr task");
 +        goto start_failure;
-+    }
+     }
 +    ml->lifecycle_expected |= ML_EVT_WG_MGR_EXITED;
  
      /* WiFi is expected to be connected before microlink_start() is called.
       * Signal the event so coord/wg_mgr tasks proceed immediately. */
-@@ -411,8 +449,12 @@ skip_bsd_socket:
-         ml_config_httpd_start(ml->config_httpd, ml);
-     }
+@@ -413,6 +451,10 @@ skip_bsd_socket:
  
--    ESP_LOGI(TAG, "All tasks started");
--    return ESP_OK;
-+    ESP_LOGI(TAG, "All tasks started");
-+    return ESP_OK;
+     ESP_LOGI(TAG, "All tasks started");
+     return ESP_OK;
 +
 +start_failure:
 +    microlink_stop(ml);
@@ -400,29 +374,14 @@ index 237f039..fd5379a 100644
      if (ml_zerocopy_init(ml) == ESP_OK) {
          ESP_LOGI(TAG, "Rebind: zero-copy DISCO PCB recreated");
          goto rebind_wg_update;
-@@ -505,18 +547,27 @@ rebind_wg_update:
-     return ESP_OK;
- }
+@@ -508,15 +550,24 @@ rebind_wg_update:
+ esp_err_t microlink_stop(microlink_t *ml) {
+     if (!ml) return ESP_ERR_INVALID_ARG;
  
--esp_err_t microlink_stop(microlink_t *ml) {
--    if (!ml) return ESP_ERR_INVALID_ARG;
--
--    ESP_LOGI(TAG, "Stopping...");
--    xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
--
--    /* Wait for tasks to exit (they check ML_EVT_SHUTDOWN_REQUEST).
--     * Tasks call vTaskDelete(NULL) to self-delete, so we must NOT call
--     * vTaskDelete() on them again — that causes a crash in uxListRemove
--     * because the task's list node is already invalid. Just wait and
--     * NULL the handles. */
--    vTaskDelay(pdMS_TO_TICKS(3000));
-+esp_err_t microlink_stop(microlink_t *ml) {
-+    if (!ml) return ESP_ERR_INVALID_ARG;
-+
 +    if (ml->state == ML_STATE_IDLE && ml->lifecycle_expected == 0) return ESP_OK;
 +
-+    ESP_LOGI(TAG, "Stopping...");
-+    xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
+     ESP_LOGI(TAG, "Stopping...");
+     xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
 +    ml_coord_cmd_t disconnect = ML_CMD_DISCONNECT;
 +    if (ml->coord_cmd_queue) xQueueSend(ml->coord_cmd_queue, &disconnect, 0);
 +    if (ml->coord_sock >= 0) shutdown(ml->coord_sock, SHUT_RDWR);
@@ -430,7 +389,13 @@ index 237f039..fd5379a 100644
 +    if (ml->disco_sock4 >= 0) shutdown(ml->disco_sock4, SHUT_RDWR);
 +    if (ml->stun_sock >= 0) shutdown(ml->stun_sock, SHUT_RDWR);
 +    if (ml->stun_sock6 >= 0) shutdown(ml->stun_sock6, SHUT_RDWR);
-+
+ 
+-    /* Wait for tasks to exit (they check ML_EVT_SHUTDOWN_REQUEST).
+-     * Tasks call vTaskDelete(NULL) to self-delete, so we must NOT call
+-     * vTaskDelete() on them again — that causes a crash in uxListRemove
+-     * because the task's list node is already invalid. Just wait and
+-     * NULL the handles. */
+-    vTaskDelay(pdMS_TO_TICKS(3000));
 +    const EventBits_t exited = xEventGroupWaitBits(ml->events, ml->lifecycle_expected,
 +                                                     pdFALSE, pdTRUE, pdMS_TO_TICKS(ML_STOP_TIMEOUT_MS));
 +    if ((exited & ml->lifecycle_expected) != ml->lifecycle_expected) {
@@ -440,14 +405,7 @@ index 237f039..fd5379a 100644
  
      ml->net_io_task = NULL;
      ml->derp_tx_task = NULL;
-@@ -524,21 +575,28 @@ esp_err_t microlink_stop(microlink_t *ml) {
-     ml->wg_mgr_task = NULL;
- 
-     /* Stop HTTP config server */
--    if (ml->config_httpd) {
-+    if (ml->config_httpd) {
-         ml_config_httpd_stop(ml->config_httpd);
-     }
+@@ -530,7 +581,7 @@ esp_err_t microlink_stop(microlink_t *ml) {
  
      /* Clean up zero-copy PCB if active */
  #ifdef CONFIG_ML_ZERO_COPY_WG
@@ -456,13 +414,10 @@ index 237f039..fd5379a 100644
  #endif
  
      /* Close sockets */
-     if (ml->disco_sock4 >= 0) { ml_close_sock(ml->disco_sock4); ml->disco_sock4 = -1; }
+@@ -538,6 +589,13 @@ esp_err_t microlink_stop(microlink_t *ml) {
      if (ml->stun_sock >= 0) { ml_close_sock(ml->stun_sock); ml->stun_sock = -1; }
--    if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
--
--    ml->state = ML_STATE_IDLE;
-+    if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
-+
+     if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
+ 
 +    drain_derp_queue(ml->derp_tx_queue);
 +    drain_packet_queue(ml->disco_rx_queue);
 +    drain_packet_queue(ml->wg_rx_queue);
@@ -470,10 +425,9 @@ index 237f039..fd5379a 100644
 +    drain_peer_queue(ml->peer_update_queue);
 +    ml->lifecycle_expected = 0;
 +
-+    ml->state = ML_STATE_IDLE;
+     ml->state = ML_STATE_IDLE;
      ESP_LOGI(TAG, "Stopped");
      return ESP_OK;
- }
 @@ -546,7 +604,10 @@ esp_err_t microlink_stop(microlink_t *ml) {
  void microlink_destroy(microlink_t *ml) {
      if (!ml) return;
@@ -1680,7 +1634,7 @@ index e65d72d..d64d23c 100644
  
              setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_wg_mgr.c
-index ed40942..aa00fb6 100644
+index ed40942..51bc66f 100644
 --- a/components/microlink/src/ml_wg_mgr.c
 +++ b/components/microlink/src/ml_wg_mgr.c
 @@ -24,6 +24,7 @@
@@ -1870,6 +1824,15 @@ index ed40942..aa00fb6 100644
  
      /* Extract sender's disco public key */
      const uint8_t *sender_disco_key = pkt->data + 6;
+@@ -1163,7 +1185,7 @@ static void process_wg_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
+ 
+     /* Allocate PBUF_RAM and copy data so the pbuf OWNS its data.
+      * This is required because wireguardif decrypts in-place and then
+-     * calls ip_input → tcpip_input which posts to the TCPIP thread.
++     * calls netif->input (tcpip_input) which posts to the TCPIP thread.
+      * With PBUF_REF the backing data would be freed before the TCPIP
+      * thread processes the packet. */
+     struct pbuf *p = pbuf_alloc(PBUF_RAW, pkt->len, PBUF_RAM);
 @@ -1331,14 +1353,16 @@ esp_err_t ml_wg_mgr_trigger_handshake(microlink_t *ml, uint32_t dest_vpn_ip) {
      err_t is_up = wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index, NULL, NULL);
      if (is_up == ERR_OK) return ESP_OK;
