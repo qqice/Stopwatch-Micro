@@ -106,6 +106,26 @@ class DotWidgetsTests(unittest.TestCase):
                     self.assertEqual(len(range(filled)), filled)
                     if not filled:
                         self.assertEqual(highlight, -1)
+                    # Three-column continuous reflection. It is only a color
+                    # overlay on already-filled dots; a one-column fill pulses.
+                    def wave(column):
+                        if not columns or column >= columns:
+                            return 0
+                        if columns == 1:
+                            p = phase % 180
+                            return 40 + ((p if p <= 90 else 180 - p) * 80 // 90) // 2
+                        circumference = columns * 256
+                        position = phase * circumference // 360
+                        distance = abs(column * 256 - position)
+                        distance = min(distance, circumference - distance)
+                        return (384 - distance) * 80 // 384 if distance < 384 else 0
+                    mixes = [wave(col) for col in range(200 // rows)]
+                    self.assertTrue(all(0 <= mix <= 80 for mix in mixes))
+                    self.assertTrue(all(col * rows < filled for col, mix in enumerate(mixes) if mix))
+                    self.assertLessEqual(sum(mix > 0 for mix in mixes), 3)
+        self.assertIn("if (columns == 1) return 40 + pulse(phase) / 2;", HEADER)
+        self.assertIn("dsc.bg_color = lit ? foreground : lv_color_hex(0x283642);", SOURCE)
+        self.assertIn("s->icon == Icon::Battery && s->valid && m.pulse", SOURCE)
         self.assertNotRegex(SOURCE, r"\blv_(timer_create|anim_start|obj_create)\s*\(.*(?:phase|motion)")
 
     def test_actual_cpp_syntax_and_static_assert(self):

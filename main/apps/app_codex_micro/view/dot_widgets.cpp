@@ -46,18 +46,20 @@ constexpr bool iconPatternsTest() {
     return distinct;
 }
 static_assert(iconPatternsTest(), "dot icon dimensions and bit bounds");
-struct Motion { int scale = 1000, highlight = -1, pulse = 0; };
+struct Motion { int scale = 1000, wavePhase = -1, pulse = 0; };
 Motion motion(const State& s, int w, int h, uint16_t phase, bool enabled) {
     Motion m;
     if (!enabled) return m;
-    if (s.kind == Kind::Meter)
-        m.highlight = detail::highlightColumn(detail::meterLayout(w, h, s.rows), s.bp, s.known, phase, true);
+    if (s.kind == Kind::Meter) {
+        if (detail::highlightColumn(detail::meterLayout(w, h, s.rows), s.bp, s.known, phase, true) >= 0)
+            m.wavePhase = phase % 360;
+    }
     else if (s.kind == Kind::Icon && detail::min(w / 9, h / 9) >= 2) {
         if (s.icon == Icon::Coin || s.icon == Icon::ResetCard) {
             m.scale = detail::flipScale(phase);
             // Both faces of the symmetric coin are visually identical.
             if (s.icon == Icon::Coin && m.scale < 0) m.scale = -m.scale;
-        } else if (s.icon == Icon::Battery && s.valid && detail::filledDots(5, s.level * 100))
+        } else if (s.icon == Icon::Battery && s.valid)
             m.pulse = detail::pulse(phase);
     }
     return m;
@@ -104,12 +106,15 @@ void event(lv_event_t* e) {
         }
     } else if (s->kind == Kind::Meter) {
         const auto g = detail::meterLayout(w, h, s->rows);
-        for (int x = 0; x < g.columns; ++x) for (int y = 0; y < g.rows; ++y) {
-            const bool lit = detail::meterLit(x, y, g, s->bp, s->known);
-            dsc.bg_color = lv_color_hex(lit ? (s->known ? s->color : 0x69716D) : 0x283642);
-            if (lit && s->known && x == m.highlight)
-                dsc.bg_color = lv_color_mix(lv_color_hex(0xFFFFFF), dsc.bg_color, 24);
-            dot(layer, dsc, a.x1 + g.x + x * g.pitch, a.y1 + g.y + y * g.pitch, g.diameter);
+        for (int x = 0; x < g.columns; ++x) {
+            const int mix = detail::waveMix(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, m.wavePhase)), m.wavePhase >= 0, x);
+            const auto foreground = mix ? lv_color_mix(lv_color_hex(0xFFFFFF), lv_color_hex(s->color), static_cast<uint8_t>(mix))
+                                        : lv_color_hex(s->known ? s->color : 0x69716D);
+            for (int y = 0; y < g.rows; ++y) {
+                const bool lit = detail::meterLit(x, y, g, s->bp, s->known);
+                dsc.bg_color = lit ? foreground : lv_color_hex(0x283642);
+                dot(layer, dsc, a.x1 + g.x + x * g.pitch, a.y1 + g.y + y * g.pitch, g.diameter);
+            }
         }
     } else {
         const int p = detail::min(w / 9, h / 9);
@@ -133,7 +138,9 @@ void event(lv_event_t* e) {
                 }
             }
             dsc.bg_color = lv_color_hex(s->color);
-            if (lit && s->icon == Icon::Battery && x >= 2 && x <= 6 && y >= 3 && y <= 5 && m.pulse)
+            // Only existing mask/fill dots pulse; zero capacity still has an
+            // honest outline that can indicate actual charging.
+            if (lit && s->icon == Icon::Battery && s->valid && m.pulse)
                 dsc.bg_color = lv_color_mix(lv_color_hex(0xFFFFFF), dsc.bg_color, static_cast<uint8_t>(m.pulse));
             if (lit) dot(layer, dsc, ox + detail::projectedX(x, p, m.scale), oy + y * p, d);
         }
@@ -184,7 +191,19 @@ void setMotion(lv_obj_t* obj, uint16_t phase, bool enabled) {
     // The next otherwise-required draw will use its static appearance.
     if (!enabled) return;
     const auto base = lv_color_hex(s->color), white = lv_color_hex(0xFFFFFF);
-    bool changed = old.highlight != next.highlight && !lv_color_eq(base, lv_color_mix(white, base, 24));
+    bool changed = false;
+    if (old.wavePhase != next.wavePhase) {
+        const auto g = detail::meterLayout(w, h, s->rows);
+        const int filled = s->known ? detail::filledDots(g.columns * g.rows, s->bp) : 0;
+        for (int x = 0; x * g.rows < filled; ++x) {
+            const int a = detail::waveMix(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, old.wavePhase)), old.wavePhase >= 0, x);
+            const int b = detail::waveMix(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, next.wavePhase)), next.wavePhase >= 0, x);
+            if (!lv_color_eq(lv_color_mix(white, base, static_cast<uint8_t>(a)), lv_color_mix(white, base, static_cast<uint8_t>(b)))) {
+                changed = true;
+                break;
+            }
+        }
+    }
     if (old.pulse != next.pulse && !lv_color_eq(lv_color_mix(white, base, static_cast<uint8_t>(old.pulse)),
                                               lv_color_mix(white, base, static_cast<uint8_t>(next.pulse)))) changed = true;
     const int p = detail::min(w / 9, h / 9);

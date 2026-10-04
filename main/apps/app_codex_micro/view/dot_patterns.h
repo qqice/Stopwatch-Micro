@@ -22,7 +22,7 @@ constexpr int projectedX(int x, int pitch, int scale) {
 }
 constexpr int pulse(uint16_t phase) {
     const int p = phase % 180;
-    return (p <= 90 ? p : 180 - p) * 24 / 90;
+    return (p <= 90 ? p : 180 - p) * 80 / 90;
 }
 struct Layout { int pitch, diameter, width, height, x, y; };
 // Normal numeric percentages retain gaps. Dense detail text may use one-pixel
@@ -57,10 +57,23 @@ constexpr int highlightColumn(Grid g, uint16_t bp, bool known, uint16_t phase, b
     const int columns = filled ? (filled + g.rows - 1) / g.rows : 0;
     return enabled && columns ? (phase % 360) * columns / 360 : -1;
 }
+constexpr int waveMix(Grid g, uint16_t bp, bool known, uint16_t phase, bool enabled, int column) {
+    const int filled = known ? filledDots(g.columns * g.rows, bp) : 0;
+    const int columns = filled ? (filled + g.rows - 1) / g.rows : 0;
+    if (!enabled || !columns || column < 0 || column >= columns) return 0;
+    // A lone real filled column cannot move: pulse it without adding capacity.
+    if (columns == 1) return 40 + pulse(phase) / 2;
+    const int circumference = columns * 256;
+    const int position = (phase % 360) * circumference / 360;
+    int distance = column * 256 - position;
+    if (distance < 0) distance = -distance;
+    distance = min(distance, circumference - distance);
+    return distance < 384 ? (384 - distance) * 80 / 384 : 0;
+}
 constexpr bool motionTest() {
     for (int phase = 0; phase < 360; ++phase) {
         const int scale = flipScale(static_cast<uint16_t>(phase));
-        if (scale < -1000 || scale > 1000 || pulse(phase) < 0 || pulse(phase) > 24) return false;
+        if (scale < -1000 || scale > 1000 || pulse(phase) < 0 || pulse(phase) > 80) return false;
         for (int pitch : {2, 3, 4}) for (int x = 0; x < 9; ++x) {
             const int pos = projectedX(x, pitch, scale);
             if (pos < 0 || pos > 8 * pitch) return false;
@@ -72,8 +85,16 @@ constexpr bool motionTest() {
             if (col >= 0 && !meterLit(col, 0, g, bp, true)) return false;
             if (highlightColumn(g, bp, false, phase, true) != -1 || highlightColumn(g, bp, true, phase, false) != -1)
                 return false;
+            const int filled = filledDots(g.columns * g.rows, bp);
+            for (int x = 0; x < g.columns; ++x) {
+                const int mix = waveMix(g, bp, true, phase, true, x);
+                if (mix < 0 || mix > 80 || (mix && x * g.rows >= filled)) return false;
+                if (waveMix(g, bp, false, phase, true, x) || waveMix(g, bp, true, phase, false, x)) return false;
+            }
         }
     }
+    const auto tiny = meterLayout(198, 28, 3);
+    if (waveMix(tiny, 100, true, 0, true, 0) == waveMix(tiny, 100, true, 90, true, 0)) return false;
     return flipScale(0) == 1000 && flipScale(90) == 0 && flipScale(180) == -1000;
 }
 static_assert(motionTest(), "motion stays within icon bounds and actual meter fill");

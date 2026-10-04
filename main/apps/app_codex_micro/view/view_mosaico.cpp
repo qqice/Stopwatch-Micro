@@ -217,7 +217,7 @@ void CodexMicroView::refreshBattery(uint32_t now) {
     _batteryCharging = telemetry.valid && telemetry.currentMa > 3 && GetHAL().isBatteryCharging();
     _capacityKnown = telemetry.valid && telemetry.capacityValid && telemetry.nominalConfigured;
     char text[80];
-    if (telemetry.valid) std::snprintf(text, sizeof(text), "%u%%%s", static_cast<unsigned>(telemetry.reportedSoc), telemetry.nominalConfigured ? "" : "?");
+    if (telemetry.valid) std::snprintf(text, sizeof(text), "%u%%%s", static_cast<unsigned>(telemetry.reportedSoc), telemetry.nominalConfigured ? "*" : "?");
     else std::snprintf(text, sizeof(text), "?");
     const uint32_t color = telemetry.valid ? levelColor(static_cast<uint16_t>(telemetry.reportedSoc) * 100) : Gray;
     if (_locked) {
@@ -246,9 +246,10 @@ void CodexMicroView::stopAnimations() {
 }
 void CodexMicroView::updateAnimations(uint32_t tick) {
     if (_locked) return;
-    if (tick - _motionTick < 250) return;
+    if (tick - _motionTick < 100) return;
     _motionTick = tick;
-    const uint16_t phase = static_cast<uint16_t>(((tick - _motionEpoch) % 40000U) * 360U / 40000U);
+    const uint16_t phase = static_cast<uint16_t>(((tick - _motionEpoch) % 12000U) * 360U / 12000U);
+    const uint16_t meterPhase = static_cast<uint16_t>(((tick - _motionEpoch) % 8000U) * 360U / 8000U);
     setMotion(_batteryIcon, phase, _batteryValid && _batteryCharging);
     const uint32_t now = GetHAL().millis();
     const uint64_t age = static_cast<uint64_t>(_quota->ageSecondsAtReceipt) + (now - _quota->receivedAtMs) / 1000U;
@@ -266,9 +267,9 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
         setMotion(_creditIcons[i], phase, visible && top + 278 < 370 && top + 306 > 0 && bucket.creditsKnown && !lv_obj_has_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN));
         for (size_t j = 0; j < 2; ++j) {
             const auto& window = bucket.windows[j];
-            setMotion(_windowBars[i][j], phase, visible && top + 110 < 370 && top + 134 > 0 && window.available && window.remainingBasisPoints > 0);
+            setMotion(_windowBars[i][j], meterPhase, visible && top + 110 < 370 && top + 134 > 0 && window.available && window.remainingBasisPoints > 0);
             const bool knownTime = window.available && window.resetEpoch && _quota->capturedEpoch && window.durationMinutes && window.resetEpoch > epoch;
-            setMotion(_resetBars[i][j], phase, visible && top + 222 < 370 && top + 246 > 0 && knownTime);
+            setMotion(_resetBars[i][j], meterPhase, visible && top + 222 < 370 && top + 246 > 0 && knownTime);
         }
     }
 }
