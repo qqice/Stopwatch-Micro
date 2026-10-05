@@ -507,3 +507,48 @@ cannot reconstruct the earlier low-battery network failure. There is no SOC10%
 network cutoff in this code; locked phase2 intentionally has Wi-Fi/tailnet off.
 Low-voltage TX instability and cache/network delays remain hypotheses, not fixes.
 Future diagnostics must capture battery voltage and link/fetch failure concurrently.
+
+## Cold-start correction (0.7.2)
+
+The CO5300 2.1.0 default SPI init sequence sends brightness255 and DISPON before
+LVGL has submitted its first frame. The Mosaico-local vendor table preserves all
+other commands but sets brightness0 and omits DISPON. After the first full-screen
+refresh submission, tx_param drains pending color DMA, then the HAL sets the
+requested brightness and turns the panel on. This closes a verified startup
+ordering gap; it is not proof of optical scan/vblank completion or elimination
+of every possible green flash. Existing wake redraw ordering remains in place.
+
+A cold-start sample returned Design/FCC3000mAh, RM2986mAh and SOC100%, with +67mA
+charging. The prior automatic RAM restoration required +/-3mA and SOC>=95,
+so it deferred indefinitely under charging/load. BQ27220 RAM configuration must
+be restored after power-up/reset when it reverts to ROM defaults; see TI SLUUBD4A
+chapter8/8.3.1, not an OTP-programming workflow.
+
+Only this unit's CRC/MAC-verified prior successful nominal/access history and an
+exact factory3000/3000 pair permit the private boot transaction. Its project
+admission bounds are3500..4350mV,10..45C (integer0.1K bounds), +/-130mA current
+and average; these are NOT TI guarantees of SOC accuracy. Fresh checks span every
+access/APPLY checkpoint. A durable Pending latch precedes access, an outer lock
+and RAII confine privilege, unknown/mixed profiles are rejected, and finally
+exit/reseal/readback remain mandatory. Manual access/nominal/restore keep their
+strict policy. No OTP, calibration offsets, chemistry, charger or key memory is
+written; learned/nonfactory FCC is not forced to65. A65mAh pair is nominal
+configuration, not validated cell characterization. Reinit under load may alter
+SOC/RM; charging/discharging observations remain required for accuracy acceptance.
+
+Function now cycles quota -> history -> OTA -> quota even without an update.
+Idle OTA shows the actual running version/slot, not a fictitious candidate/hash.
+Locked Function consumes the wake press, and busy OTA cannot be switched away.
+
+Hardware deployment on2026-10-05: network transfer first failed a chunk and a
+bounded retry panicked in the old0.7.1 image. The healthy ota0 was preserved;
+no more network retries were made. After physical BOOT, only ota1 and8KiB
+otadata were written/verified; the exact metadata was backed up and all flash
+outside those erase ranges had equal before/after MD5. Bootloader/table/NVS/
+NAND were not changed by the ROM writer. The0.7.2 application reached ota1 VALID
+and its boot-owned gauge transaction restored Design/FCC/RM65mAh with SEALED,
+CFG/CAL clear; fresh quota was available. Its first steady sample was4209mV,
++12mA and SOC100%, a charging sample, not a discharge-accuracy test. No saved
+panic remained on that startup. Neither this ROM deployment nor that observation
+fixes or accepts the newly observed network-OTA reliability failure. User cold
+optical, physical Function cycle and5–10min battery discharge checks are pending.

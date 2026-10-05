@@ -73,11 +73,15 @@ std::atomic<bool> unused_gates_off{false};
 // separate from the requested setting while a wake redraw is pending.
 int panel_brightness = -1;
 int pending_wake_brightness = -1;
+bool pending_boot_display = false;
 i2c_master_dev_handle_t gauge = nullptr;
 std::mutex battery_mutex;
 // All mutating transactions take this BEFORE battery_mutex. Recursive so the
 // boot wrapper can serialize its public Access/Nominal/Reconcile/Restore steps.
 std::recursive_mutex gauge_transaction_mutex;
+// Private, transaction-mutex owned privilege: only a durable boot intent may
+// enable it. Public manual access/nominal/restore retains its strict policy.
+bool boot_factory_reload_scope = false;
 Hal::GaugeBootReloadInfo gauge_boot_info;
 bool battery_valid = false;
 uint8_t battery_soc = 0;
@@ -124,6 +128,10 @@ void observe_refresh(lv_event_t* event)
             const int brightness = pending_wake_brightness;
             pending_wake_brightness = -1;
             ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, brightness));
+            if (pending_boot_display) {
+                ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
+                pending_boot_display = false;
+            }
             panel_brightness = brightness;
             ESP_LOGI(Tag, "Wake redraw completed; brightness=%d", brightness);
         }
@@ -332,6 +340,13 @@ bool gauge_quiet_full(uint16_t& operation, bool ownedUnresolvedRestore = false)
     ok &= gauge_word(0x06, temperature);
     ok &= gauge_word(0x0C, current);
     ok &= gauge_word(0x14, average);
+    if (ok && boot_factory_reload_scope && !ownedUnresolvedRestore && ((operation >> 1) & 3) == 1) {
+        uint16_t dc = 0, fcc = 0;
+        return gauge_word(0x3C, dc) && gauge_word(0x12, fcc) &&
+            dc == mosaico_gauge::FactoryMah && fcc == mosaico_gauge::FactoryMah &&
+            mosaico_gauge::bootReloadPhysical(operation, mv, temperature,
+                static_cast<int16_t>(current), static_cast<int16_t>(average));
+    }
     return ok && (ownedUnresolvedRestore ?
         mosaico_gauge::quietFullRestore(operation, soc, mv, temperature, static_cast<int16_t>(current),
                                        static_cast<int16_t>(average), true) :
@@ -528,16 +543,20 @@ bool gauge_store_access(mosaico_gauge::AccessJournal& journal, const uint8_t mac
            std::memcmp(&journal, &readback, sizeof(journal)) == 0;
 }
 
-bool gauge_access_preflight(uint16_t& operation, GaugePair& profile)
+bool gauge_access_preflight(uint16_t& operation, GaugePair& profile, bool bootReadonlyProbe = false)
 {
     uint16_t soc = 0, mv = 0, temperature = 0, current = 0, average = 0, remaining = 0;
     bool ok = gauge_word(0x3A, operation);
     ok &= gauge_word(0x2C, soc); ok &= gauge_word(0x08, mv); ok &= gauge_word(0x06, temperature);
     ok &= gauge_word(0x0C, current); ok &= gauge_word(0x14, average);
     ok &= gauge_word(0x3C, profile.design); ok &= gauge_word(0x12, profile.fcc); ok &= gauge_word(0x10, remaining);
-    return ok && profile.fcc && remaining <= profile.fcc &&
-           mosaico_gauge::quietAccess(operation, soc, mv, temperature,
-                                      static_cast<int16_t>(current), static_cast<int16_t>(average));
+    if (!ok || !profile.fcc || remaining > profile.fcc) return false;
+    if (boot_factory_reload_scope || bootReadonlyProbe)
+        return profile.design == mosaico_gauge::FactoryMah && profile.fcc == mosaico_gauge::FactoryMah &&
+            mosaico_gauge::bootReloadPhysical(operation, mv, temperature,
+            static_cast<int16_t>(current), static_cast<int16_t>(average));
+    return mosaico_gauge::quietAccess(operation, soc, mv, temperature,
+        static_cast<int16_t>(current), static_cast<int16_t>(average));
 }
 
 uint8_t gauge_observed_security()
@@ -1129,9 +1148,9 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
             return finish(Status::Skipped, "boot_skip_nonfactory_or_backup_mismatch_no_writes");
         uint16_t operation = 0;
         GaugePair profile;
-        if (!gauge_access_preflight(operation, profile) || ((operation >> 1) & 3) != 3 ||
+        if (!gauge_access_preflight(operation, profile, true) || ((operation >> 1) & 3) != 3 ||
             !bootFactoryPairEligible(nominal, profile.design, profile.fcc))
-            return finish(Status::Deferred, "boot_deferred_quiet_full_temperature_no_force");
+            return finish(Status::Deferred, "boot_deferred_reload_voltage_temperature_load");
         if (!gauge_identity()) return finish(Status::Deferred, "boot_deferred_readonly_identity");
         // Durable per-unit Pending latch BEFORE any automatic access attempt.
         // Unknown/pending/corrupt records on a later boot never retry themselves.
@@ -1143,6 +1162,13 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         if (!gauge_store_reload(latch, mac.data())) return finish(Status::Critical, "boot_critical_prepare_failure_latch");
     }
     gauge_boot_info.attempted = true; // one attempt per boot, even when OPEN later refuses/aborts.
+    // Permission begins only AFTER history/factory checks and durable Pending.
+    // The recursive transaction lock above prevents any manual caller sharing
+    // this permission; all exits (including finally failures) revoke it.
+    struct BootReloadScope {
+        BootReloadScope() { boot_factory_reload_scope = true; }
+        ~BootReloadScope() { boot_factory_reload_scope = false; }
+    } reloadScope;
     char phaseReason[128]{}, closeReason[128]{};
     const bool opened = gaugeAccess(GaugeAccessAction::Open, phaseReason, sizeof(phaseReason));
     const bool applied = opened && gaugeSetNominalCapacity(FactoryMah, NominalMah, false, phaseReason, sizeof(phaseReason));
@@ -1281,7 +1307,19 @@ void Hal::display_init()
     io.flags.quad_mode = true;
     io.flags.psram_dma_direct = true;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(static_cast<esp_lcd_spi_bus_handle_t>(SPI2_HOST), &io, &panel_io));
+    // Driver 2.1.0 default sequence, except zero brightness and no DISPON.
+    // Its default enables a fully bright panel before any pixel RAM is drawn.
+    // Keep the panel off until the first LVGL frame drains through tx_param.
+    static const uint8_t zero[] = {0x00}, mode[] = {0x80}, control[] = {0x20}, full[] = {0xFF};
+    static const uint8_t columns[] = {0x00, 0x06, 0x01, 0xDD}, rows[] = {0x00, 0x00, 0x01, 0xD1};
+    static const co5300_lcd_init_cmd_t darkInit[] = {
+        {0xFE, zero, 0, 0}, {0xC4, mode, 1, 0}, {0x35, zero, 0, 10},
+        {0x53, control, 1, 10}, {0x51, zero, 1, 10}, {0x63, full, 1, 10},
+        {0x2A, columns, 4, 0}, {0x2B, rows, 4, 0}, {0x11, zero, 0, 60},
+    };
     co5300_vendor_config_t vendor{};
+    vendor.init_cmds = darkInit;
+    vendor.init_cmds_size = sizeof(darkInit) / sizeof(darkInit[0]);
     vendor.flags.use_qspi_interface = 1;
     esp_lcd_panel_dev_config_t config{};
     config.reset_gpio_num = GPIO_NUM_42;
@@ -1291,8 +1329,10 @@ void Hal::display_init()
     ESP_ERROR_CHECK(esp_lcd_new_panel_co5300(panel_io, &config, &panel));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
-    setBackLightBrightness(getBackLightBrightness(true));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, false));
+    panel_brightness = 0;
+    pending_boot_display = true;
+    pending_wake_brightness = getBackLightBrightness(true);
 }
 
 bool Hal::display_ready() const { return panel && display; }
@@ -1478,8 +1518,8 @@ void Hal::setBackLightBrightness(int brightness, bool saveToSettings)
         const bool locked = port_ready && lvglLock();
         if (!port_ready || locked) {
             _bl_brightness = target;
-            if (locked && display && target > WakeDimThreshold &&
-                ((panel_brightness >= 0 && panel_brightness <= WakeDimThreshold) || pending_wake_brightness >= 0)) {
+            if (locked && display && (pending_boot_display || (target > WakeDimThreshold &&
+                ((panel_brightness >= 0 && panel_brightness <= WakeDimThreshold) || pending_wake_brightness >= 0)))) {
                 // Wake paths hide the lock/overlay under the same recursive
                 // mutex before this call. Full-screen invalidation also covers
                 // further UI changes made before the caller releases that lock.

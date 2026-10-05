@@ -94,6 +94,42 @@ class OtaUiTests(unittest.TestCase):
         self.assertIn('if (_locked) return;',CPP); self.assertIn('tick - _motionTick < 100',CPP)
         self.assertIn('const bool otaMotion = _page == Page::OTA',CPP)
         self.assertNotIn('lv_timer_create',DOT)
+    def test_permanent_third_page_and_function_guards(self):
+        toggle=CPP.split('void CodexMicroView::togglePage()',1)[1].split('void CodexMicroView::wakeDisplay()',1)[0]
+        self.assertIn('if (_locked) { wakeDisplay(); return; }',toggle)
+        self.assertIn('if (otaBusy()) return;',toggle)
+        self.assertIn('else if (_page == Page::History) setPageForDebug(Page::OTA);',toggle)
+        self.assertNotIn('_ota.stage',toggle)
+        self.assertLess(toggle.index('if (_locked)'),toggle.index('if (otaBusy())'))
+        wake=CPP.split('void CodexMicroView::wakeDisplay()',1)[1].split('void CodexMicroView::lockDisplay()',1)[0]
+        self.assertIn('if (_otaPending) { _otaPending = false; setPageForDebug(Page::OTA); }',wake)
+        self.assertIn('if (_page == Page::OTA) renderOta();',wake)
+        pages=('Command','History','OTA')
+        for start in pages:
+            for locked,busy,pending in ((False,False,False),(True,False,False),(True,False,True),(False,True,False)):
+                page=start
+                if locked:
+                    if pending: page='OTA'
+                elif not busy:
+                    page=pages[(pages.index(page)+1)%len(pages)]
+                expected='OTA' if locked and pending else start if locked or busy else pages[(pages.index(start)+1)%3]
+                self.assertEqual(page,expected)
+        setpage=CPP.split('bool CodexMicroView::setPageForDebug(',1)[1].split('void CodexMicroView::togglePage()',1)[0]
+        self.assertIn('if (_page != Page::OTA) _otaReturn = _page;',setpage)
+    def test_idle_has_only_running_image_information(self):
+        render=CPP.split('void CodexMicroView::renderOta()',1)[1].split('void CodexMicroView::touchEvent(',1)[0]
+        self.assertIn('const bool idle = _ota.stage == S::Idle;',render)
+        self.assertIn('phase = _otaSeen ? "NO UPDATE" : "CHECKING"',render)
+        self.assertIn('_ota.currentVersion[0] ? _ota.currentVersion : "READING VERSION"',render)
+        self.assertIn('if (idle) lv_obj_add_flag(_otaTarget, LV_OBJ_FLAG_HIDDEN)',render)
+        self.assertIn('for (auto* obj : {_otaHash, _otaSignature, _otaImageIcon, _otaSignatureIcon})',render)
+        self.assertIn('if (idle) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN)',render)
+        self.assertIn('const bool slotTransition = !idle &&',render)
+        self.assertIn('idle ? 127 : (i ? 254 : 0)',render)
+        self.assertIn('if (idle && (i || !_otaSeen || _ota.currentSlot < 0))',render)
+        for seen,current in ((True,0),(True,1),(False,0),(True,-1)):
+            visible=[not (i or not seen or current<0) for i in range(2)]
+            self.assertEqual(visible,[seen and current>=0,False])
     def test_actual_target_syntax_when_configured(self):
         db=R/'.artifacts/mosaico/ota-build/compile_commands.json'
         if not db.exists(): self.skipTest('target configuration unavailable')

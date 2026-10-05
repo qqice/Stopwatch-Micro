@@ -123,6 +123,17 @@ inline bool quietAccess(uint16_t op, uint16_t soc, uint16_t mv, uint16_t tempera
            quietFull(static_cast<uint16_t>((op & ~0x0006U) | 0x0002U), soc, mv, temperature, current, average);
 }
 
+inline bool bootReloadPhysical(uint16_t op, uint16_t mv, uint16_t temperature,
+                               int16_t current, int16_t average)
+{
+    // Project admission bounds, NOT TI accuracy guarantees or calibration.
+    // RAM factory-profile reload must not depend on its incorrect factory SOC.
+    const unsigned security = (op >> 1) & 3;
+    return security >= 1 && security <= 3 && !(op & 0x0401) && (op & 0x0020) &&
+           mv >= 3500 && mv <= 4350 && temperature >= 2832 && temperature <= 3181 &&
+           current >= -130 && current <= 130 && average >= -130 && average <= 130;
+}
+
 inline bool validAccessJournal(const AccessJournal& journal, const uint8_t mac[6])
 {
     return journal.magic == 0x47414331U && journal.version == 1 && journal.deviceType == DeviceType &&
@@ -300,6 +311,18 @@ inline bool selftest()
     bootNominal.lastDesign = FactoryMah; bootNominal.lastFcc = FactoryMah;
     if (bootHistoryEligible(bootNominal, access)) return false;
     ReloadJournal reload{};
+    if (!bootReloadPhysical(0x00b6, 4122, 2982, 67, 67) ||
+        !bootReloadPhysical(0x0022, 3500, 2832, -130, 130) ||
+        bootReloadPhysical(0x00b6, 3499, 2982, 0, 0) ||
+        bootReloadPhysical(0x00b6, 4351, 2982, 0, 0) ||
+        bootReloadPhysical(0x00b6, 4122, 2831, 0, 0) ||
+        bootReloadPhysical(0x00b6, 4122, 3182, 0, 0) ||
+        bootReloadPhysical(0x00b6, 4122, 2982, 131, 0) ||
+        bootReloadPhysical(0x00b6, 4122, 2982, 0, -131) ||
+        bootReloadPhysical(0x04b6, 4122, 2982, 0, 0) ||
+        bootReloadPhysical(0x00b7, 4122, 2982, 0, 0) ||
+        bootReloadPhysical(0x00b0, 4122, 2982, 0, 0) ||
+        quietAccess(0x00b6, 100, 4122, 2982, 67, 67)) return false;
     reload.magic = 0x47423635U; reload.version = 1; reload.deviceType = DeviceType; reload.unitMah = 1;
     reload.state = static_cast<uint8_t>(ReloadState::Pending); reload.targetDesign = 65; reload.targetFcc = 65;
     std::memcpy(reload.mac, mac, 6); seal(reload);
