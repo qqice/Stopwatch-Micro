@@ -216,7 +216,7 @@ void SerialDebug::handleLine(char* line)
     char* command = ::strtok_r(nullptr, " \t", &save);
 #ifdef MOSAICO_BOARD
     if (command && std::strcmp(command, "ota-status") == 0) {
-        char details[256]{};
+        char details[384]{};
         MosaicoOta::status(details, sizeof(details));
         result("ota-status", "PASS", details);
         return;
@@ -232,6 +232,19 @@ void SerialDebug::handleLine(char* line)
     if (MosaicoOta::busy() && (!command || (std::strcmp(command, "ping") && std::strcmp(command, "status")))) {
         result(command ? command : "parse", "FAIL", "reason=ota_busy no_changes=1");
         return;
+    }
+    if (command && (!std::strcmp(command, "ota-check") || !std::strcmp(command, "ota-download") ||
+                    !std::strcmp(command, "ota-install") || !std::strcmp(command, "ota-reboot"))) {
+        const char* sha = ::strtok_r(nullptr, " \t", &save);
+        const bool needsHash = !std::strcmp(command, "ota-download") || !std::strcmp(command, "ota-install");
+        if ((needsHash && !sha) || (!needsHash && sha) || ::strtok_r(nullptr, " \t", &save) || _async_test != AsyncTest::None) {
+            result(command, "FAIL", "reason=arguments_or_async_diagnostic"); return;
+        }
+        const bool ok = !std::strcmp(command, "ota-check") ? MosaicoOta::requestCheck() :
+            !std::strcmp(command, "ota-download") ? MosaicoOta::approveUpdate(sha) :
+            !std::strcmp(command, "ota-install") ? MosaicoOta::approveInstall(sha) : MosaicoOta::requestReboot();
+        if (ok) GetNetworkQuota().wakeForFirmwareUpdate();
+        result(command, ok ? "PASS" : "FAIL", "queued_only=1 safety_gates_retained=1"); return;
     }
     if (command && (!std::strcmp(command, "ota-update") || !std::strcmp(command, "ota-bypass"))) {
         const char* confirm = ::strtok_r(nullptr, " \t", &save);

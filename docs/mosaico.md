@@ -570,3 +570,16 @@ S3 syntax checks passed. Signed network OTA0.7.5 ota0 ->0.7.6 ota1 reached VALID
 without a new saved panic. These checks do not measure animation FPS; perceived
 smoothness still needs the user's observation. A subsequent staged-button UX
 request is separate from this bounded draw-workload change.
+
+## UI overlap regression contract
+
+Check actual widget creation sizes and every dynamic position, not just a
+layout sketch. Include every OTA state, longest percentage/version/hash/error,
+label line-height/long-mode, dot geometry and animation/translated clip bounds.
+The prior percentage object was84px high at y106 while byte text began at y162;
+this drawing overlap was missed by tests assuming a48px box. It is now52px,
+pitch7, with target-compiled checks for100% and100.00%. Byte/error text, metadata,
+slot cards and action have fixed separate regions; labels are single-line
+clipped/ellipsized rather than unbounded wrapping. These regression gates do
+not replace physical screen inspection. Run them whenever a widget, string,
+font, state or transition changes.

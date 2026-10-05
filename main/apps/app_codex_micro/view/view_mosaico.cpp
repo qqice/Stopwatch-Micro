@@ -4,6 +4,8 @@
 #include "reset_countdown.h"
 #include <hal/hal.h>
 #include <host/network_quota.h>
+#include <host/tailscale_transport.h>
+#include <tusb.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -227,15 +229,17 @@ void CodexMicroView::initOta() {
     _otaCurrent = label(_otaPage, 0, 58, 440, "", &lv_font_montserrat_20);
     _otaTarget = label(_otaPage, 0, 110, 440, "", &lv_font_montserrat_20);
     for (auto* text : {_otaCurrent, _otaTarget}) {
-        lv_obj_set_height(text, 48); lv_label_set_long_mode(text, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_set_height(text, 24); lv_label_set_long_mode(text, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_style_text_font(text, &lv_font_montserrat_16, 0);
     }
     lv_obj_set_style_text_color(_otaCurrent, lv_color_hex(Cyan), 0);
     lv_obj_set_style_text_color(_otaTarget, lv_color_hex(Gold), 0);
     _otaStageIcon = createIcon(_otaPage, Icon::Refresh, 88, Gold); place(_otaStageIcon, 176, 106);
     lv_obj_add_flag(_otaStageIcon, LV_OBJ_FLAG_HIDDEN);
-    _otaPercent = createText(_otaPage, 440, 84, 12); place(_otaPercent, 0, 106);
+    _otaPercent = createText(_otaPage, 440, 52, 7); place(_otaPercent, 0, 106);
     _otaMeter = createMeter(_otaPage, 440, 28, 3); place(_otaMeter, 0, 194);
     _otaBytes = label(_otaPage, 0, 224, 440, "", &lv_font_montserrat_20);
+    lv_obj_set_height(_otaBytes, 24); lv_label_set_long_mode(_otaBytes, LV_LABEL_LONG_MODE_CLIP);
     _otaHash = label(_otaPage, 36, 146, 404, "", &lv_font_montserrat_20);
     _otaSignature = label(_otaPage, 36, 178, 404, "", &lv_font_montserrat_20);
     _otaImageIcon = createIcon(_otaPage, Icon::Chip, 28, Gold); place(_otaImageIcon, 0, 144);
@@ -252,31 +256,93 @@ void CodexMicroView::initOta() {
         _otaChips[i] = createIcon(_otaSlots[i], Icon::Chip, 36, i ? Gold : Cyan); place(_otaChips[i], 16, 42);
     }
     _otaButton = lv_button_create(_otaPage); panel(_otaButton, 0, 334, 440, 64, 0x11251F);
-    lv_obj_set_style_border_width(_otaButton, 2, 0);
-    lv_obj_set_style_border_color(_otaButton, lv_color_hex(Green), 0);
-    lv_obj_set_style_bg_color(_otaButton, lv_color_hex(0x101418), LV_STATE_DISABLED);
-    lv_obj_set_style_border_color(_otaButton, lv_color_hex(Gray), LV_STATE_DISABLED);
-    _otaButtonLabel = createText(_otaButton, 440, 40, 4, Green); place(_otaButtonLabel, 0, 12);
-    setText(_otaButtonLabel, "UPGRADE", Green);
+    lv_obj_set_style_bg_opa(_otaButton, LV_OPA_TRANSP, LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(_otaButton, LV_OPA_TRANSP, LV_STATE_DISABLED);
+    lv_obj_set_style_bg_opa(_otaButton, LV_OPA_TRANSP, LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(_otaButton, 0, 0);
+    _otaButtonLabel = createText(_otaButton, 440, 40, 4, Orange); place(_otaButtonLabel, 0, 12);
+    setText(_otaButtonLabel, "CHECK", Orange);
     lv_obj_remove_flag(_otaButtonLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_otaButton, otaBorderEvent, LV_EVENT_DRAW_MAIN, this);
     lv_obj_add_event_cb(_otaButton, otaEvent, LV_EVENT_CLICKED, this);
     lv_obj_add_flag(_otaButton, LV_OBJ_FLAG_EVENT_BUBBLE);
 }
 bool CodexMicroView::otaBusy() const {
     using S = MosaicoOta::UiStage;
-    return _otaApproved || _ota.stage == S::Downloading ||
-        _ota.stage == S::Verifying || _ota.stage == S::ReadyInstall ||
+    return _otaApproved || _ota.stage == S::Checking || _ota.stage == S::Downloading ||
+        _ota.stage == S::Verifying ||
         _ota.stage == S::Installing || _ota.stage == S::BootChecking;
+}
+bool CodexMicroView::otaHasDownloadOffer() const {
+    return _ota.signatureVerified && _ota.sha256[0] && _ota.sha256[0] != '-';
+}
+bool CodexMicroView::otaActionEnabled() const {
+    if (_otaApproved) return false;
+    using S = MosaicoOta::UiStage;
+    switch (_ota.stage) {
+    case S::Idle: case S::Complete: case S::Failed: case S::Available: return _otaNetworkReady;
+    case S::ReadyInstall: return _ota.imageVerified && _externalPowerReady;
+    case S::WaitingPower: return _ota.imageVerified ? _externalPowerReady : _otaNetworkReady;
+    case S::ReadyReboot: return true;
+    default: return false;
+    }
+}
+void CodexMicroView::renderOtaAction() {
+    using S = MosaicoOta::UiStage;
+    const char* action = "CHECK";
+    switch (_ota.stage) {
+    case S::Available: case S::Downloading: case S::Verifying: action = "DOWNLOAD"; break;
+    case S::ReadyInstall: case S::Installing: action = "UPGRADE"; break;
+    case S::WaitingPower: action = _ota.imageVerified ? "UPGRADE" : otaHasDownloadOffer() ? "DOWNLOAD" : "CHECK"; break;
+    case S::ReadyReboot: case S::BootChecking: action = "REBOOT"; break;
+    default: break;
+    }
+    const bool enabled = otaActionEnabled();
+    const bool wasDisabled = lv_obj_has_state(_otaButton, LV_STATE_DISABLED);
+    if (enabled) {
+        lv_obj_remove_state(_otaButton, LV_STATE_DISABLED);
+        lv_obj_add_flag(_otaButton, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+        lv_obj_add_state(_otaButton, LV_STATE_DISABLED);
+        lv_obj_remove_flag(_otaButton, LV_OBJ_FLAG_CLICKABLE);
+    }
+    setText(_otaButtonLabel, action, enabled ? Orange : 0x68451C);
+    if (wasDisabled == enabled) lv_obj_invalidate(_otaButton);
+}
+void CodexMicroView::otaBorderEvent(lv_event_t* e) {
+    auto* obj = lv_event_get_current_target_obj(e);
+    lv_area_t a; lv_obj_get_coords(obj, &a);
+    auto* layer = lv_event_get_layer(e);
+    lv_draw_line_dsc_t d; lv_draw_line_dsc_init(&d);
+    d.color = lv_color_hex(lv_obj_has_state(obj, LV_STATE_DISABLED) ? 0x68451C : Orange);
+    d.width = 2; d.dash_width = 6; d.dash_gap = 4;
+    const lv_value_precise_t x1 = a.x1 + 1, x2 = a.x2 - 1, y1 = a.y1 + 1, y2 = a.y2 - 1;
+    d.p1 = {x1, y1}; d.p2 = {x2, y1}; lv_draw_line(layer, &d);
+    d.p1 = {x2, y1}; d.p2 = {x2, y2}; lv_draw_line(layer, &d);
+    d.p1 = {x2, y2}; d.p2 = {x1, y2}; lv_draw_line(layer, &d);
+    d.p1 = {x1, y2}; d.p2 = {x1, y1}; lv_draw_line(layer, &d);
 }
 void CodexMicroView::otaEvent(lv_event_t* e) {
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(e));
     if (self->_suppressed || self->_locked || self->_swipeConsumed || self->_slideTo || self->_page != Page::OTA || self->otaBusy()) return;
+    if (!self->otaActionEnabled()) return;
     using S = MosaicoOta::UiStage;
-    if (self->_ota.stage != S::Available && self->_ota.stage != S::WaitingPower) return;
-    if (MosaicoOta::approveUpdate(self->_ota.sha256)) {
+    bool accepted = false;
+    switch (self->_ota.stage) {
+    case S::Idle: case S::Complete: case S::Failed: accepted = MosaicoOta::requestCheck(); break;
+    case S::Available: accepted = MosaicoOta::approveUpdate(self->_ota.sha256); break;
+    case S::ReadyInstall: accepted = MosaicoOta::approveInstall(self->_ota.sha256); break;
+    case S::WaitingPower:
+        accepted = self->_ota.imageVerified ? MosaicoOta::approveInstall(self->_ota.sha256) :
+            self->otaHasDownloadOffer() ? MosaicoOta::approveUpdate(self->_ota.sha256) : MosaicoOta::requestCheck();
+        break;
+    case S::ReadyReboot: accepted = MosaicoOta::requestReboot(); break;
+    default: break;
+    }
+    if (accepted) {
         GetNetworkQuota().wakeForFirmwareUpdate();
         self->_otaApproved = true; self->_activity = lv_tick_get();
-        self->renderOta();
+        self->renderOtaAction();
     }
 }
 void CodexMicroView::refreshOta(uint32_t tick) {
@@ -287,7 +353,7 @@ void CodexMicroView::refreshOta(uint32_t tick) {
             std::strcmp(next.targetVersion, _ota.targetVersion) != 0 || std::strcmp(next.sha256, _ota.sha256) != 0);
         _ota = next; _otaSeen = true;
         // A backend response releases the local request latch, including power rejection and timeout.
-        if (_ota.stage != S::Available) _otaApproved = false;
+        _otaApproved = false;
         if (offer) { _otaPending = true; if (_page != Page::OTA) _otaReturn = _page; }
         if (!_locked) renderOta();
     }
@@ -303,18 +369,21 @@ void CodexMicroView::refreshOta(uint32_t tick) {
 }
 void CodexMicroView::renderOta() {
     using S = MosaicoOta::UiStage;
-    const bool idle = _ota.stage == S::Idle;
-    const bool offer = _ota.stage == S::Available || _ota.stage == S::WaitingPower;
+    const bool idle = _ota.stage == S::Idle || _ota.stage == S::Checking ||
+        (_ota.stage == S::WaitingPower && !_ota.imageVerified && !otaHasDownloadOffer());
+    const bool offer = _ota.stage == S::Available || (_ota.stage == S::WaitingPower && !_ota.imageVerified && otaHasDownloadOffer());
     const bool terminal = _ota.stage == S::Complete || _ota.stage == S::Failed || _ota.stage == S::Idle;
-    const bool discovery = offer || terminal;
+    const bool discovery = offer || terminal || idle;
     const char* phase = "CURRENT";
     switch (_ota.stage) {
+    case S::Checking: phase = "CHECKING"; break;
     case S::Available: phase = "UPDATE"; break;
-    case S::WaitingPower: phase = "USB POWER"; break;
+    case S::WaitingPower: phase = _ota.imageVerified ? "USB POWER" : otaHasDownloadOffer() ? "DOWNLOAD BLOCKED" : "CHECK REQUIRED"; break;
     case S::Downloading: phase = "DOWNLOADING"; break;
     case S::Verifying: phase = "VERIFYING"; break;
     case S::ReadyInstall: phase = "READY"; break;
-    case S::Installing: phase = "RESTARTING"; break;
+    case S::Installing: phase = "INSTALLING"; break;
+    case S::ReadyReboot: phase = "READY TO REBOOT"; break;
     case S::BootChecking: phase = "BOOT CHECK"; break;
     case S::Complete: phase = "VERIFIED 100%"; break;
     case S::Failed: phase = "FAILED"; break;
@@ -325,7 +394,7 @@ void CodexMicroView::renderOta() {
     char text[96];
     lv_label_set_text(_otaCurrent, _ota.currentVersion[0] ? _ota.currentVersion : "READING VERSION");
     lv_label_set_text(_otaTarget, _ota.stage == S::Complete ? _ota.currentVersion : _ota.targetVersion);
-    place(_otaTarget, 0, discovery && _ota.stage != S::Complete ? 110 : 58);
+    place(_otaTarget, 0, _ota.stage == S::Failed ? 110 : discovery && _ota.stage != S::Complete ? 86 : 58);
     if (discovery && _ota.stage != S::Complete) lv_obj_remove_flag(_otaCurrent, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaCurrent, LV_OBJ_FLAG_HIDDEN);
     // Idle describes only the running image, never a cached or unknown candidate.
     if (idle) lv_obj_add_flag(_otaTarget, LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(_otaTarget, LV_OBJ_FLAG_HIDDEN);
@@ -334,10 +403,10 @@ void CodexMicroView::renderOta() {
         : std::min<uint16_t>(10000, _ota.progressBasisPoints);
     // Byte/health progress are the only meaningful percentages; installation is an activity icon.
     const bool numericProgress = download || _ota.stage == S::BootChecking;
-    const bool stageIcon = _ota.stage == S::ReadyInstall || _ota.stage == S::Installing;
+    const bool stageIcon = _ota.stage == S::ReadyInstall || _ota.stage == S::Installing || _ota.stage == S::ReadyReboot || (_ota.stage == S::WaitingPower && _ota.imageVerified);
     if (stageIcon) {
         lv_obj_remove_flag(_otaStageIcon, LV_OBJ_FLAG_HIDDEN);
-        setIcon(_otaStageIcon, _ota.stage == S::ReadyInstall ? Icon::Check : Icon::Refresh,
+        setIcon(_otaStageIcon, _ota.stage == S::Installing ? Icon::Refresh : Icon::Check,
                 _ota.stage == S::ReadyInstall && _ota.imageVerified ? Green : Gold);
     } else lv_obj_add_flag(_otaStageIcon, LV_OBJ_FLAG_HIDDEN);
     if (!discovery && numericProgress) {
@@ -353,53 +422,46 @@ void CodexMicroView::renderOta() {
         else std::snprintf(text, sizeof(text), "%.2f %sB", _ota.size / divisor, mega ? "M" : "K");
         lv_label_set_text(_otaBytes, text); lv_obj_remove_flag(_otaBytes, LV_OBJ_FLAG_HIDDEN);
     } else lv_obj_add_flag(_otaBytes, LV_OBJ_FLAG_HIDDEN);
-    std::snprintf(text, sizeof(text), "SHA %.16s", _ota.sha256[0] ? _ota.sha256 : "--"); lv_label_set_text(_otaHash, text);
-    std::snprintf(text, sizeof(text), "SIG %.12s", _ota.signatureShort[0] ? _ota.signatureShort : "--"); lv_label_set_text(_otaSignature, text);
+    std::snprintf(text, sizeof(text), "SHA %.12s", _ota.sha256[0] ? _ota.sha256 : "--"); lv_label_set_text(_otaHash, text);
+    std::snprintf(text, sizeof(text), "SIG %.8s", _ota.signatureShort[0] ? _ota.signatureShort : "--"); lv_label_set_text(_otaSignature, text);
     setIcon(_otaImageIcon, _ota.imageVerified ? Icon::Check : (_ota.stage == S::Downloading ? Icon::Download : _ota.stage == S::Verifying ? Icon::Refresh : Icon::Chip), _ota.imageVerified ? Green : Gold);
     setIcon(_otaSignatureIcon, _ota.signatureVerified ? Icon::Check : Icon::Unknown, _ota.signatureVerified ? Green : Gold);
-    // Compact verification row leaves the permanent action tile unobstructed.
+    // Fixed one-line metadata and version boxes: no line can grow into the cards/action.
     for (auto* obj : {_otaHash, _otaSignature}) {
-        lv_obj_set_style_text_font(obj, discovery ? &lv_font_montserrat_20 : &lv_font_montserrat_16, 0);
-        lv_obj_set_height(obj, 24);
+        lv_obj_set_style_text_font(obj, &lv_font_montserrat_14, 0);
+        lv_obj_set_height(obj, 24); lv_label_set_long_mode(obj, LV_LABEL_LONG_MODE_CLIP);
     }
-    lv_obj_set_width(_otaHash, discovery ? 404 : 184);
-    lv_obj_set_width(_otaSignature, discovery ? 404 : 168);
-    place(_otaHash, 36, discovery ? 162 : 222); place(_otaImageIcon, 0, discovery ? 160 : 220);
-    place(_otaSignature, discovery ? 36 : 272, discovery ? 194 : 222);
-    place(_otaSignatureIcon, discovery ? 0 : 236, discovery ? 192 : 220);
-    for (auto* obj : {_otaHash, _otaSignature, _otaImageIcon, _otaSignatureIcon}) {
-        if (idle) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_width(_otaHash, 184); lv_obj_set_width(_otaSignature, 168);
+    place(_otaHash, 36, 222); place(_otaImageIcon, 0, 220);
+    place(_otaSignature, 272, 222); place(_otaSignatureIcon, 236, 220);
+    const bool hashKnown = !idle && _ota.sha256[0] && _ota.sha256[0] != '-';
+    const bool signatureKnown = !idle && _ota.signatureShort[0] && _ota.signatureShort[0] != '-';
+    for (auto* obj : {_otaHash, _otaImageIcon}) {
+        if (hashKnown) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+    for (auto* obj : {_otaSignature, _otaSignatureIcon}) {
+        if (signatureKnown) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
     }
     const bool sameSlot = _ota.currentSlot >= 0 && _ota.currentSlot == _ota.targetSlot;
     const bool slotTransition = !idle && _ota.currentSlot >= 0 && _ota.targetSlot >= 0 && !sameSlot;
     for (size_t i = 0; i < 2; ++i) {
         lv_label_set_text(_otaSlotNames[i], !idle && sameSlot ? (i ? "VERIFY" : "ACTIVE") : (i ? "NEW" : "CURRENT"));
-        place(_otaSlots[i], idle ? 127 : (i ? 254 : 0), discovery ? 224 : 252);
+        place(_otaSlots[i], idle ? 127 : (i ? 254 : 0), 252);
         if (idle && (i || !_otaSeen || _ota.currentSlot < 0)) lv_obj_add_flag(_otaSlots[i], LV_OBJ_FLAG_HIDDEN);
         else lv_obj_remove_flag(_otaSlots[i], LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_height(_otaSlots[i], discovery ? 100 : 72);
-        place(_otaSlotNumbers[i], 72, discovery ? 24 : 16);
-        lv_obj_set_height(_otaSlotNumbers[i], discovery ? 70 : 52);
-        setTextPitch(_otaSlotNumbers[i], discovery ? 9 : 7);
-        place(_otaChips[i], 16, discovery ? 42 : 24);
+        lv_obj_set_height(_otaSlots[i], 72);
+        place(_otaSlotNumbers[i], 72, 16);
+        lv_obj_set_height(_otaSlotNumbers[i], 52);
+        setTextPitch(_otaSlotNumbers[i], 7);
+        place(_otaChips[i], 16, 24);
         const int slot = i ? _ota.targetSlot : _ota.currentSlot;
         std::snprintf(text, sizeof(text), "%s", slot == 0 ? "0" : slot == 1 ? "1" : "?"); setText(_otaSlotNumbers[i], text, i ? Gold : Cyan);
         lv_obj_set_style_border_width(_otaSlots[i], i && _ota.imageVerified ? 3 : 1, 0);
         lv_obj_set_style_border_color(_otaSlots[i], lv_color_hex(i ? Gold : Cyan), 0);
     }
-    place(_otaArrow, 202, discovery ? 256 : 278);
+    place(_otaArrow, 202, 270);
     if (slotTransition) lv_obj_remove_flag(_otaArrow, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaArrow, LV_OBJ_FLAG_HIDDEN);
-    // This action never disappears: disabled stages remain an honest dark tile.
-    const bool enabled = offer && !_otaApproved;
-    if (enabled) {
-        lv_obj_remove_state(_otaButton, LV_STATE_DISABLED);
-        lv_obj_add_flag(_otaButton, LV_OBJ_FLAG_CLICKABLE);
-    } else {
-        lv_obj_add_state(_otaButton, LV_STATE_DISABLED);
-        // Let the underlying page receive navigation gestures, never an OTA click.
-        lv_obj_remove_flag(_otaButton, LV_OBJ_FLAG_CLICKABLE);
-    }
-    setText(_otaButtonLabel, "UPGRADE", enabled ? Green : Gray);
+    renderOtaAction();
     if (_ota.stage == S::Failed) {
         // The backend supplies a short ID; never expose arbitrary diagnostic text.
         char safe[25]{}; size_t n = 0;
@@ -448,6 +510,10 @@ void CodexMicroView::refreshBattery(uint32_t now) {
     _batteryReadTick = now; _batterySeen = true; _batteryValid = telemetry.valid;
     _batteryCharging = telemetry.valid && telemetry.currentMa > 3 && GetHAL().isBatteryCharging();
     _capacityKnown = telemetry.valid && telemetry.capacityValid && telemetry.nominalConfigured;
+    _externalPowerReady = telemetry.valid && telemetry.voltageMv >= 3900 &&
+        ((telemetry.operationStatus >> 1) & 3) == 3 && !(telemetry.operationStatus & 0x0401) &&
+        (tud_mounted() || telemetry.currentMa > 3);
+    if (!_locked) renderOtaAction();
     char text[80];
     if (telemetry.valid) std::snprintf(text, sizeof(text), "%u%%%s", static_cast<unsigned>(telemetry.reportedSoc), telemetry.nominalConfigured ? "*" : "?");
     else std::snprintf(text, sizeof(text), "?");
@@ -826,6 +892,8 @@ bool CodexMicroView::lockForDebug() { if (!ready()) return false; lockDisplay();
 void CodexMicroView::update(const CodexMicroState&) {
     if (!ready()) return;
     const uint32_t tick = lv_tick_get();
+    const bool networkReady = GetNetworkQuota().connected() && (!GetTailnetQuota().enabled() || GetTailnetQuota().ready());
+    if (networkReady != _otaNetworkReady) { _otaNetworkReady = networkReady; if (!_locked) renderOtaAction(); }
     refreshOta(tick);
     bool interacting = lv_obj_is_scrolling(_quotaPage);
     for (auto* input = lv_indev_get_next(nullptr); input; input = lv_indev_get_next(input))

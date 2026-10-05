@@ -38,6 +38,10 @@ private:
     static void cellEvent(lv_event_t* event);
     static void modeEvent(lv_event_t* event);
     static void otaEvent(lv_event_t* event);
+    static void otaBorderEvent(lv_event_t* event);
+    bool otaActionEnabled() const;
+    bool otaHasDownloadOffer() const;
+    void renderOtaAction();
     void initOta();
     lv_obj_t* pagePanel(Page page) const;
     void navigatePage(int direction);
@@ -58,6 +62,7 @@ private:
     const TokenHistoryCell* selectedCell() const;
     MosaicoOta::UiSnapshot _ota{};
     bool _otaSeen = false, _otaPending = false, _otaApproved = false;
+    bool _externalPowerReady = false, _otaNetworkReady = false;
     Page _otaReturn = Page::Command;
     lv_obj_t* _otaPage = nullptr;
     lv_obj_t* _otaTitle = nullptr;

@@ -163,25 +163,40 @@ retains ROM recovery. Private rollback files record exact offsets, lengths and
 restore ordering; recovery writes require separately confirmed physical identity.
 ## Automatic policy and current acceptance boundary
 
-### Confirmation UI (0.7.0 and later)
+### Staged action UI (0.8.0 and later)
 
-The default is now automatic **discovery**, not automatic installation. A verified
-offer displays current/target versions, abbreviated SHA256/signature fingerprints
-and the active/target OTA slots. The single full-width dot-matrix UPGRADE button
-approves only the displayed image hash. It remains visible but dark/disabled
-when unavailable or busy. A changed offer must be approved again. Back/LATER
-buttons are removed; Function and horizontal swipes navigate the three pages
-with a200ms panel-slide animation. During OTA, navigation remains locked.
+The default is automatic **discovery**, not automatic installation. Background
+checks do not publish busy Checking or wake the locked display. The transparent
+action tile has an orange dashed frame and dot text; disabled actions remain
+visible in dark orange. Back/LATER buttons are removed. Function and horizontal
+swipes navigate the three pages with a200ms panel slide.
+
+CHECK explicitly queries a signed release when Wi-Fi/tailnet is ready. A valid
+offer displays DOWNLOAD and actual version/hash/slot information. DOWNLOAD
+binds the full displayed SHA256 and permits battery power, but requires a valid
+sealed gauge, CFG/CAL clear and >=3500mV before erase and periodically during
+writes. It stops at ReadyInstall after full hash/SDK/version validation, without
+selecting a boot slot or rebooting.
+
+UPGRADE binds that verified image and requires fresh >=3900mV plus enumerated
+USB or positive charging current>3mA and a valid sealed gauge. A full battery
+on USB remains eligible with zero charging current. It commits the candidate
+journal and boot selection, then stops at ReadyReboot. REBOOT explicitly starts
+the selected image; a subsequent hardware power cycle also applies it. After
+healthy startup the action returns to CHECK. ReadyInstall/ReadyReboot allow
+navigation and retain the verified image; discovery cannot overwrite it.
+Download/verification/install/boot-health keep navigation locked. INSTALL and
+REBOOT are handled before network gates and need no network after verification.
 
 The next page shows actual downloaded bytes/percentage. Full-image SHA256,
 SDK image validation and the signed version check complete before the verified
 installation page appears. Installation has an activity animation, not a made-up
 flash percentage. After reboot, health-check progress covers the real acceptance
 window; failure retains the existing rollback behavior. Download already writes
-the inactive slot, so the installation phase selects and boots the verified image.
+the inactive slot, so installation selects it and REBOOT applies it.
 
 For authorized USB maintenance, `debug ota-bypass CONFIRM_EXTERNAL_POWER`
-queues the same update pipeline without touching the screen. The existing
+queues the full download/install/reboot pipeline without screen approvals. The existing
 `debug ota-update CONFIRM_EXTERNAL_POWER` remains compatible. Neither command
 bypasses power/gauge checks, signature validation, image validation or rollback.
 Normal OTA needs no ROM/BOOT transition. Fully automatic approval remains an
@@ -328,3 +343,40 @@ scalars and44-byte RTC placement were checked in the linked binary. These two
 successful transfers establish this bounded regression result, not long-term
 reliability or the unique original cause of the TLSF fault. UI touch/animation
 quality requires physical observation separately from these OTA checks.
+
+### Later failure and allocator diagnosis
+
+A later0.7.6 transfer failed again in ROM `tlsf_malloc`: PC2f80a2aa, failed
+PSRAM block-header size read502cae90, HTTP phase5 at offset880640. The healthy
+slot was retained. This invalidates any interpretation of the earlier successes
+as a universal fix; the original pollution/unavailable-memory cause is unproved.
+
+The diagnostic application uses ESP-IDF's supported source TLSF allocator
+(`HEAP_TLSF_USE_ROM_IMPL=n`) and light boundary canaries, with heap functions
+remaining in IRAM. This changes layout/timing and improves attribution; it is
+not an SDK patch or proof that ROM alone caused corruption. Reproduce the
+overlay with `boards/mosaico/sdkconfig.heapdiag.defaults` and the validated
+dual-slot profile. Do not flash generated loader/table artifacts for this change.
+
+0.8.0 diagnostic bootstrap passed. A complete0.8.1 manual DOWNLOAD remained at
+ReadyInstall for15s without selection/restart; wrong hashes were rejected and
+CHECK could not overwrite the retained image. With Wi-Fi actually stopped,
+INSTALL selected the target and remained ReadyReboot for15s. Only explicit
+REBOOT activated it, followed by VALID health acceptance. The0.8.2 USB bypass
+full pipeline also passed without a new saved panic. Battery-only download and
+physical orange-button/overlap/smoothness observations remain separate pending
+tests; connected-USB diagnostics do not establish those observations.
+
+For unattended recovery, reopen/reconnect runtime CDC and verify an idle VALID
+current slot before retrying a signed inactive-slot download. Never switch to
+ROM, erase all or overwrite the active slot as a retry shortcut. Count only
+new boot/panic records; retained historical panic data is not a new failure.
+At least3 repeated identical failure phase/offset positions require a stop and
+manual attention; use a bounded total attempt budget rather than infinite retries.
+
+Diagnostic regression completed0.8.0 ->0.8.1 (manual stages), then0.8.1 ->0.8.2
+and0.8.2 ->0.8.3 (USB full-pipeline bypass), all alternate-slot VALID without
+new saved panics or observed canary failures. Final0.8.3 runs ota1, quota fresh,
+sealed nominal gauge65mAh unchanged. No additional BOOT was needed after the
+diagnostic bootstrap. This is three successful diagnostic-profile transfers;
+changing allocator/layout/timing still prevents claiming a unique original cause.

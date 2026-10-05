@@ -20,11 +20,11 @@ class DotWidgetsTests(unittest.TestCase):
     def test_upgrade_glyphs(self):
         glyphs = dict((key, tuple(map(int, rows.split(","))))
                       for key, rows in re.findall(r"\{'(.)',\{([\d,]+)\}\}", HEADER + SOURCE))
-        for char in "UPGRADE":
+        for char in "CHECKDOWNLOADUPGRADEREBOOT":
             self.assertIn(char, glyphs)
             self.assertEqual(len(glyphs[char]), 7)
             self.assertNotEqual(glyphs[char], glyphs["?"])
-        self.assertIn('static_assert(uiGlyph', SOURCE)
+        self.assertIn('static_assert(actionGlyphsTest()', SOURCE)
 
     def test_source_glyphs(self):
         glyphs = dict((key, tuple(map(int, rows.split(","))))
@@ -226,6 +226,17 @@ class DotWidgetsTests(unittest.TestCase):
                                  "-I" + str(ROOT / "components/lvgl"),
                                  str(VIEW / "dot_widgets.cpp")], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # Compile actual textLayout/validBounds with dimensions read from the view,
+        # guarding both short and maximal honest percentage strings.
+        view=(VIEW / "view_mosaico.cpp").read_text(encoding="utf-8")
+        w,h,pitch=map(int,re.search(r'_otaPercent = createText\(_otaPage, (\d+), (\d+), (\d+)\)',view).groups())
+        checks='#include "dot_patterns.h"\nusing namespace mosaico_dot::detail;\n'
+        for count in (len("100%"),len("100.00%")):
+            checks+=f'static_assert(validBounds(textLayout({w},{h},{count},{pitch}),{w},{h}) && textLayout({w},{h},{count},{pitch}).diameter>0);\n'
+        result=subprocess.run([compiler,"-std=c++17","-fsyntax-only","-x","c++","-I"+str(VIEW),"-"],
+                              input=checks,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
 
 
 if __name__ == "__main__":

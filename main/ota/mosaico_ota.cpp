@@ -31,14 +31,18 @@ std::mutex snapshotLock; // Never held over flash, crypto, NVS, or telemetry cal
 UiSnapshot ui{0, 0, 0, UiStage::Idle, "", "-", "", "", "", -1, -1, false, false, false, 0};
 std::atomic<bool> approvedRequest{false}, autoInstall{false};
 std::atomic<bool> preferenceLoaded{false};
-bool imageReady = false, signedVersion = false;
+std::atomic<bool> imageReady{false}; // Retained staged image, distinct from historical boot verification.
+bool signedVersion = false;
+std::atomic<bool> checkQueued{false}, checking{false}, installQueued{false}, rebootQueued{false};
+std::atomic<bool> selected{false}, verified{false};
+std::atomic<UiStage> statusStage{UiStage::Idle};
 int64_t readySince = 0, installSince = 0;
 char approvedHash[65]{};
 struct Descriptor { bool versionSigned; uint32_t size; uint8_t hash[32]; char sha[65], version[32], fingerprint[17]; };
 std::atomic<bool> active{false};
 std::atomic<uint32_t> requestedAtMs{0};
 std::atomic<bool> pending{false};
-bool writing = false, hashLive = false, automaticMode = false;
+bool writing = false, hashLive = false, automaticMode = false, usbBypass = false;
 int64_t nextAutomaticCheck = 0;
 std::atomic<const char*> autoState{"idle"};
 bool currentHashChecked = false, currentHashValid = false;
@@ -62,6 +66,12 @@ bool gaugeSafe()
     const auto b = GetHAL().batteryTelemetry(true);
     return b.valid && ((b.operationStatus >> 1) & 3) == 3 && !(b.operationStatus & 0x0401);
 }
+bool downloadPowerSafe()
+{
+    if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical) return false;
+    const auto b = GetHAL().batteryTelemetry(true);
+    return b.valid && ((b.operationStatus >> 1) & 3) == 3 && !(b.operationStatus & 0x0401) && b.voltageMv >= 3500;
+}
 bool automaticPowerSafe()
 {
     if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical) return false;
@@ -81,6 +91,7 @@ void publish(UiStage stage, const char* error = "")
 {
     std::lock_guard<std::mutex> guard(snapshotLock);
     if (stage == UiStage::Failed || stage == UiStage::WaitingPower) approvedRequest.store(false);
+    statusStage.store(stage);
     ui.stage = stage; ui.size = expectedSize.load(); ui.received = received.load();
     ui.automaticInstall = autoInstall.load();
     ui.progressBasisPoints = ui.size ? static_cast<uint16_t>(static_cast<uint64_t>(ui.received) * 10000 / ui.size) : 0;
@@ -118,7 +129,9 @@ void failLocked(const char* message)
     pending = false;
     target = nullptr;
     std::snprintf(reason, sizeof(reason), "%s", message ? message : "failed");
-    imageReady = false;
+    imageReady = false; verified.store(false);
+    { std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.imageVerified = false; }
+    checkQueued = checking = installQueued = rebootQueued = false;
     publish(UiStage::Failed, message ? message : "failed");
     active.store(false);
 }
@@ -206,9 +219,9 @@ bool recordAttempt()
 }
 bool requestLocked(bool automatic, bool preserveAge = false)
 {
-    if (active.load() || approvedRequest.load()) return false;
+    if (active.load() || approvedRequest.load() || imageReady || selected.load()) return false;
     if (!currentReady()) return reject("running_or_layout_not_ready");
-    if (!(automatic ? automaticPowerSafe() : gaugeSafe())) return reject("gauge_not_valid_sealed_cfg0_cal0");
+    if (!downloadPowerSafe()) return reject("gauge_not_valid_sealed_cfg0_cal0");
     automaticMode = automatic;
     received = expectedSize = 0;
     pending = true;
@@ -304,7 +317,7 @@ void healthTimeout(void*)
 }
 }
 
-bool busy() { return active.load() || approvedRequest.load(); }
+bool busy() { return active.load() || approvedRequest.load() || checkQueued.load() || checking.load() || installQueued.load() || rebootQueued.load() || bootPending.load(); }
 bool healthPending() { return bootPending.load(); }
 uint32_t requestAgeMs()
 {
@@ -314,17 +327,25 @@ bool request()
 {
     std::lock_guard<std::mutex> guard(lock);
     { std::lock_guard<std::mutex> uiGuard(snapshotLock);
-      if (active.load() || approvedRequest.load()) return false;
+      if (busy() || imageReady || selected.load()) return false;
       if (ui.signatureVerified && ui.sha256[0] &&
           (ui.stage == UiStage::Available || ui.stage == UiStage::WaitingPower)) std::memcpy(approvedHash, ui.sha256, 65);
-      else approvedHash[0] = 0; }
-    return requestLocked(false); // Explicit external-power-confirmed USB bypass.
+      else {
+          approvedHash[0] = 0;
+          // A completed boot journal is history, not a staged image for this request.
+          ui.signatureVerified = ui.imageVerified = false;
+          ui.sha256[0] = ui.signatureShort[0] = 0;
+          verified.store(false); ++ui.revision;
+      } }
+    const bool accepted = requestLocked(true);
+    usbBypass = accepted;
+    return accepted; // Explicit USB bypass skips screen approvals, never safety gates.
 }
 bool automaticCheckDue()
 {
     std::lock_guard<std::mutex> guard(lock);
     const int64_t now = esp_timer_get_time();
-    if (busy() || now < nextAutomaticCheck) return false;
+    if (busy() || imageReady || selected.load() || now < nextAutomaticCheck) return false;
     if (!currentReady()) { autoState.store("not_valid"); return false; }
     nextAutomaticCheck = now + 3600000000LL;
     autoState.store("checking");
@@ -333,22 +354,23 @@ bool automaticCheckDue()
 bool discoverManifest(const char* json)
 {
     std::lock_guard<std::mutex> guard(lock);
-    if (active.load() || approvedRequest.load()) return false;
+    if (active.load() || approvedRequest.load() || imageReady || selected.load()) return false;
     Descriptor d{}; const char* error = "manifest_invalid";
     if (!validateDescriptor(json, d, error)) { publish(UiStage::Failed, error); return false; }
     if (!currentReady()) return false;
     if (!currentImageHash()) { publish(UiStage::Failed, "current_hash_failed"); return false; }
     char attempted[65];
     if (!readAttempt(attempted)) { publish(UiStage::Failed, "attempt_read_failed"); return false; }
-    if (!std::strcmp(d.sha, currentHash) || !std::strcmp(d.sha, attempted)) return false;
+    if (!std::strcmp(d.sha, currentHash) || !std::strcmp(d.sha, attempted)) { publish(UiStage::Idle); return false; }
     expectedSize = d.size; received = 0;
     const int8_t nextSlot = slot(esp_ota_get_next_update_partition(nullptr));
     { std::lock_guard<std::mutex> uiGuard(snapshotLock);
       std::snprintf(ui.targetVersion, sizeof(ui.targetVersion), "%s", d.version);
       std::memcpy(ui.sha256, d.sha, 65); std::memcpy(ui.signatureShort, d.fingerprint, 17);
-      ui.signatureVerified = true; ui.imageVerified = false;
+      ui.signatureVerified = true; ui.imageVerified = false; verified.store(false);
       ui.targetSlot = nextSlot; }
     publish(UiStage::Available);
+    checking.store(false);
     if (autoInstall.load()) approveUpdate(d.sha);
     return true;
 }
@@ -362,8 +384,8 @@ bool copyUiSnapshot(UiSnapshot& out)
 bool approveUpdate(const char* expectedSha)
 {
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
-    if (!guard.owns_lock() || active.load() || approvedRequest.load() || !lowerHex(expectedSha) ||
-        std::strcmp(expectedSha, ui.sha256) || !ui.signatureVerified ||
+    if (!guard.owns_lock() || busy() || !lowerHex(expectedSha) ||
+        std::strcmp(expectedSha, ui.sha256) || !ui.signatureVerified || ui.imageVerified ||
         (ui.stage != UiStage::Available && ui.stage != UiStage::WaitingPower)) return false;
     // Only a short in-memory copy and atomic queue; network owner performs all work.
     std::memcpy(approvedHash, ui.sha256, 65);
@@ -373,8 +395,8 @@ bool approveUpdate(const char* expectedSha)
 void deferUpdate()
 {
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
-    if (!guard.owns_lock() || active.load()) return;
-    approvedRequest.store(false); ui.stage = UiStage::Idle; ++ui.revision;
+    if (!guard.owns_lock() || busy() || ui.imageVerified || selected.load()) return;
+    approvedRequest.store(false); statusStage.store(UiStage::Idle); ui.stage = UiStage::Idle; ++ui.revision;
 }
 bool automaticInstall() { return autoInstall.load(); }
 bool setAutomaticInstall(bool enabled)
@@ -394,8 +416,9 @@ bool takeRequest()
     if (!active.load() && approvedRequest.load() && requestAgeMs() >= 120000) return reject("request_timeout");
     if (!active.load() && approvedRequest.exchange(false)) {
         if (!currentReady()) { publish(UiStage::Failed, "running_not_ready"); return false; }
-        if (!automaticPowerSafe()) { publish(UiStage::WaitingPower); return false; }
-        if (!requestLocked(true, true)) return false;
+        if (!downloadPowerSafe()) { publish(UiStage::WaitingPower, "download_voltage_or_gauge"); return false; }
+        usbBypass = false;
+        if (!requestLocked(autoInstall.load(), true)) return false;
     }
     const bool result = pending && active.load();
     pending = false;
@@ -417,8 +440,8 @@ bool beginManifest(const char* json)
     { std::lock_guard<std::mutex> uiGuard(snapshotLock);
       std::snprintf(ui.targetVersion, sizeof(ui.targetVersion), "%s", d.version);
       std::memcpy(ui.sha256, d.sha, 65); std::memcpy(ui.signatureShort, d.fingerprint, 17);
-      ui.signatureVerified = true; ui.imageVerified = false; }
-    if (!currentReady() || !(automaticMode ? automaticPowerSafe() : gaugeSafe())) return reject("prewrite_safety");
+      ui.signatureVerified = true; ui.imageVerified = false; verified.store(false); }
+    if (!currentReady() || !downloadPowerSafe()) return reject("prewrite_safety");
     const auto* running = esp_ota_get_running_partition();
     target = esp_ota_get_next_update_partition(nullptr);
     if (!exactSlot(target) || target->address == running->address || expectedSize > target->size)
@@ -441,6 +464,7 @@ bool writeChunk(uint32_t offset, const uint8_t* data, size_t length)
         length > expectedSize - received) return reject("chunk_offset_or_length");
     if (length > 4096 || !esp_ptr_in_dram(data) || !esp_ptr_in_dram(data + length - 1))
         return reject("chunk_not_internal");
+    if (offset % 65536U == 0 && !downloadPowerSafe()) return reject("download_power_lost");
     if (esp_ota_write(handle, data, length) != ESP_OK) return reject("ota_write");
     if (psa_hash_update(&hash, data, length)) return reject("hash_update");
     received += length;
@@ -466,30 +490,94 @@ bool finishDownload()
     { std::lock_guard<std::mutex> uiGuard(snapshotLock); std::memcpy(verifiedVersion, ui.targetVersion, 32); }
     if (esp_ota_get_partition_description(target, &downloaded) != ESP_OK ||
         (signedVersion && std::strcmp(verifiedVersion, downloaded.version))) return reject("image_version_mismatch");
-    imageReady = true; readySince = esp_timer_get_time(); installSince = 0;
+    imageReady = true; verified.store(true); readySince = esp_timer_get_time(); installSince = 0;
     { std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.imageVerified = true; }
     publish(UiStage::ReadyInstall);
+    active.store(usbBypass || automaticMode);
     return true;
 }
 bool installVerified()
 {
     std::lock_guard<std::mutex> guard(lock);
-    if (!active.load() || !imageReady || esp_timer_get_time() - readySince < 1500000) return false;
-    if (!currentReady() || !(automaticMode ? automaticPowerSafe() : gaugeSafe())) return reject("prereboot_safety");
+    if (!active.load() || !imageReady || selected.load()) return false;
+    if ((usbBypass || automaticMode) && esp_timer_get_time() - readySince < 1500000) return false;
+    if (!currentReady() || !automaticPowerSafe()) {
+        active.store(false); installSince = 0;
+        publish(UiStage::WaitingPower, "install_external_power_required"); return false;
+    }
     if (!installSince) {
         installSince = esp_timer_get_time(); publish(UiStage::Installing); return false;
     }
     if (esp_timer_get_time() - installSince < 500000) return false;
-    if (!currentReady() || !(automaticMode ? automaticPowerSafe() : gaugeSafe())) return reject("commit_safety");
+    // Fresh power evidence immediately before persistent journal/selector writes.
+    if (!currentReady() || !automaticPowerSafe()) {
+        active.store(false); installSince = 0;
+        publish(UiStage::WaitingPower, "install_power_lost"); return false;
+    }
     if (!recordAttempt()) return reject("attempt_commit_failed");
     if (esp_ota_set_boot_partition(target) != ESP_OK) return reject("set_boot_partition");
-    std::snprintf(reason, sizeof(reason), "verified_restarting");
-    // Keep active true until the normal restart: no idle/sleep window.
-    esp_restart();
+    selected.store(true); publish(UiStage::ReadyReboot);
+    std::snprintf(reason, sizeof(reason), "verified_selected");
+    active.store(false);
     return true;
 }
+bool requestCheck()
+{
+    std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
+    if (!guard.owns_lock() || busy() || selected.load() ||
+        ui.stage == UiStage::ReadyInstall || ui.stage == UiStage::ReadyReboot ||
+        (ui.stage == UiStage::WaitingPower && imageReady.load())) return false;
+    requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
+    checkQueued.store(true); return true;
+}
+bool takeCheckRequest()
+{
+    if (!checkQueued.exchange(false)) return false;
+    checking.store(true); publish(UiStage::Checking); return true;
+}
+void finishCheck(bool transportOk)
+{
+    checking.store(false);
+    if (!transportOk) publish(UiStage::Failed, "manifest_download");
+    else if (statusStage.load() == UiStage::Checking) publish(UiStage::Idle);
+}
+bool approveInstall(const char* expectedSha)
+{
+    std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
+    if (!guard.owns_lock() || busy() || !lowerHex(expectedSha) || std::strcmp(expectedSha, ui.sha256) ||
+        !ui.signatureVerified || !ui.imageVerified || !imageReady.load() || selected.load() ||
+        (ui.stage != UiStage::ReadyInstall && ui.stage != UiStage::WaitingPower)) return false;
+    requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
+    installQueued.store(true); return true;
+}
+bool requestReboot()
+{
+    std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
+    if (!guard.owns_lock() || busy() || ui.stage != UiStage::ReadyReboot || !selected.load()) return false;
+    rebootQueued.store(true); return true;
+}
+void processLocalRequests()
+{
+    if (rebootQueued.exchange(false) && selected.load()) { active.store(true); esp_restart(); return; }
+    if (installQueued.exchange(false)) {
+        automaticMode = usbBypass = false; installSince = 0; active.store(true);
+    }
+    // Only bounded install work is polled here, never download or network work.
+    const UiStage stage = statusStage.load();
+    if (active.load() && imageReady && !selected.load() &&
+        (stage == UiStage::ReadyInstall || stage == UiStage::WaitingPower || stage == UiStage::Installing)) {
+        const int64_t deadline = esp_timer_get_time() + 6000000;
+        while (active.load() && !selected.load() && esp_timer_get_time() < deadline) {
+            installVerified(); vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (active.load()) fail("install_stage_timeout");
+        if ((usbBypass || automaticMode) && selected.load()) {
+            vTaskDelay(pdMS_TO_TICKS(500)); active.store(true); esp_restart();
+        }
+    }
+}
 bool finish() { return finishDownload(); } // Compatibility: caller must now explicitly installVerified().
-void status(char* out, size_t length)
+void baseStatus(char* out, size_t length)
 {
     if (!out || !length) return;
     // Never wait behind sector erase/write, and never read flash while active.
@@ -500,7 +588,7 @@ void status(char* out, size_t length)
             static_cast<int>(running ? ESP_OTA_IMG_VALID : ESP_OTA_IMG_UNDEFINED), pending.load(),
             static_cast<unsigned long>(received.load()), static_cast<unsigned long>(expectedSize.load()), autoState.load());
     };
-    if (active.load()) { progress(); return; }
+    if (busy()) { progress(); return; }
     std::unique_lock<std::mutex> guard(lock, std::try_to_lock);
     if (!guard.owns_lock()) { progress(); return; }
     const auto* running = esp_ota_get_running_partition();
@@ -508,8 +596,18 @@ void status(char* out, size_t length)
     if (running) esp_ota_get_state_partition(running, &state);
     std::snprintf(out, length, "running=%s address=0x%lx state=%d busy=%d pending=%d received=%lu size=%lu reason=%s auto_state=%s",
         running ? running->label : "unknown", static_cast<unsigned long>(running ? running->address : 0),
-        static_cast<int>(state), active.load(), pending.load(), static_cast<unsigned long>(received.load()),
+        static_cast<int>(state), busy(), pending.load(), static_cast<unsigned long>(received.load()),
         static_cast<unsigned long>(expectedSize.load()), reason, autoState.load());
+}
+void status(char* out, size_t length)
+{
+    if (!out || !length) return;
+    baseStatus(out, length);
+    const size_t used = std::strlen(out);
+    const char* stages[] = {"idle", "checking", "available", "waiting_power", "downloading", "verifying", "ready_install", "installing", "ready_reboot", "boot_checking", "complete", "failed"};
+    const unsigned stage = static_cast<unsigned>(statusStage.load());
+    std::snprintf(out + used, length - used, " stage=%s image_verified=%d selected=%d",
+        stage < sizeof(stages)/sizeof(stages[0]) ? stages[stage] : "unknown", verified.load(), selected.load());
 }
 void healthPoll(bool appLoopReady)
 {
@@ -554,6 +652,7 @@ void healthPoll(bool appLoopReady)
           std::memcpy(ui.signatureShort, fingerprint, sizeof(fingerprint));
           std::memcpy(ui.targetVersion, ver, sizeof(ver)); std::memcpy(ui.sha256, sha, sizeof(sha));
           ui.targetSlot = candidate; ui.signatureVerified = sha[0]; ui.imageVerified = sha[0]; }
+        verified.store(sha[0] != 0);
         publish(UiStage::BootChecking);
 
         esp_timer_create_args_t args{};
@@ -604,7 +703,7 @@ void healthPoll(bool appLoopReady)
 bool rollbackTest()
 {
     std::lock_guard<std::mutex> guard(lock);
-    if (active.load() || !gaugeSafe()) return false;
+    if (busy() || imageReady || selected.load() || !gaugeSafe()) return false;
     // SDK checks that another bootable image exists before changing the state.
     return esp_ota_mark_app_invalid_rollback_and_reboot() == ESP_OK;
 }

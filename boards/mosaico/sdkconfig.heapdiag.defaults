@@ -1,0 +1,9 @@
+# Application-only diagnostic overlay for the preview S31 allocator fault.
+# Combine with the validated dual-slot OTA profile; do not flash a new loader
+# or partition table merely because this build generates those artifacts.
+# Source TLSF gives debuggable code and current IDF fixes; canaries detect
+# allocation boundaries. This is not proof of the original corruption source.
+# CONFIG_HEAP_TLSF_USE_ROM_IMPL is not set
+CONFIG_HEAP_POISONING_LIGHT=y
+# CONFIG_HEAP_POISONING_DISABLED is not set
+# CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH is not set

@@ -2,7 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 namespace MosaicoOta {
-enum class UiStage : uint8_t { Idle, Available, WaitingPower, Downloading, Verifying, ReadyInstall, Installing, BootChecking, Complete, Failed };
+enum class UiStage : uint8_t { Idle, Checking, Available, WaitingPower, Downloading, Verifying, ReadyInstall, Installing, ReadyReboot, BootChecking, Complete, Failed };
 struct UiSnapshot {
     uint32_t revision, size, received;
     UiStage stage;
@@ -12,18 +12,24 @@ struct UiSnapshot {
     uint16_t progressBasisPoints;
 };
 bool copyUiSnapshot(UiSnapshot& out);
-bool approveUpdate(const char* expectedSha); // Must match the hash displayed in the caller snapshot.
+bool requestCheck(); // Queue discovery; callbacks perform no network or telemetry work.
+bool takeCheckRequest(); // Network owner only.
+void finishCheck(bool transportOk);
+bool approveInstall(const char* expectedSha);
+bool requestReboot();
+void processLocalRequests(); // Owner only, before radio/network readiness gates.
+bool approveUpdate(const char* expectedSha); // DOWNLOAD only; must match the hash displayed in the caller snapshot.
 void deferUpdate();
 bool setAutomaticInstall(bool enabled);
 bool automaticInstall();
 bool discoverManifest(const char* json); // Network owner: signature verification and read-only discovery.
 bool finishDownload();
-bool installVerified(); // Network owner only, after >=1500 ms ReadyInstall display window.
+bool installVerified(); // Network owner only, explicit consent or full-pipeline mode; manual flow does not reboot.
 bool busy();
 bool healthPending();
 uint32_t requestAgeMs();
 bool request(); // Caller must obtain explicit confirmation of USB/external power.
-bool automaticCheckDue(); // Network owner only; never wakes radio or bypasses the VALID/power gate.
+bool automaticCheckDue(); // Network owner only; online hourly discovery, never wakes radio.
 bool requestAutomatic(const char* manifest);
 bool takeRequest(); // Only the network owner consumes requests and writes images.
 bool beginManifest(const char* json);

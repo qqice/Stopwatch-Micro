@@ -299,6 +299,7 @@ void NetworkQuota::run()
 #endif
     while (true) {
 #ifdef MOSAICO_BOARD
+        MosaicoOta::processLocalRequests(); // INSTALL/REBOOT do not require network readiness.
         if (MosaicoOta::busy() && MosaicoOta::requestAgeMs() > 120000)
             MosaicoOta::fail("network_ready_timeout");
 #endif
@@ -404,11 +405,12 @@ void NetworkQuota::run()
         }
 #ifdef MOSAICO_BOARD
         // Reuse an already-online quota window. Do not wake radios just for OTA.
-        if (MosaicoOta::automaticCheckDue()) {
+        if (MosaicoOta::takeCheckRequest() || MosaicoOta::automaticCheckDue()) {
             std::unique_ptr<char[]> manifest(new (std::nothrow) char[2048]);
             int manifestSize = 0;
-            if (manifest && requestJson("/v1/ota/manifest", manifest.get(), 2048, manifestSize))
-                MosaicoOta::discoverManifest(manifest.get());
+            const bool downloaded = manifest && requestJson("/v1/ota/manifest", manifest.get(), 2048, manifestSize);
+            if (downloaded) MosaicoOta::discoverManifest(manifest.get());
+            MosaicoOta::finishCheck(downloaded);
         }
         if (MosaicoOta::takeRequest()) {
             updateFirmware();
@@ -624,15 +626,8 @@ void NetworkQuota::updateFirmware()
     MosaicoOtaBreadcrumb(8, size); // final hash/SDK verification
     if (!heap_caps_check_integrity_all(true)) { MosaicoOta::fail("heap_after_download"); return; }
     if (!MosaicoOta::finishDownload()) return;
-    // A truthful verified-image page is visible before boot selection. All
-    // delays are in the network owner; LVGL/input remain responsive.
-    const int64_t installDeadline = esp_timer_get_time() + 6000000;
-    while (MosaicoOta::busy() && esp_timer_get_time() < installDeadline) {
-        MosaicoOtaBreadcrumb(9, size); // candidate journal, selection, restart
-        MosaicoOta::installVerified();
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    if (MosaicoOta::busy()) MosaicoOta::fail("install_stage_timeout");
+    MosaicoOta::processLocalRequests(); // Full pipeline only when explicitly enabled/bypassed.
+
 }
 #endif
 #ifdef MOSAICO_BOARD

@@ -86,8 +86,8 @@ class AutomaticOtaSourceTests(unittest.TestCase):
         self.assertIn('approvedRequest.store(true)', approve)
         self.assertNotRegex(approve, r'esp_ota_|nvs_|requestLocked')
         take = body('bool takeRequest()', 'void fail(')
-        self.assertIn('automaticPowerSafe()', take)
-        self.assertIn('publish(UiStage::WaitingPower)', take)
+        self.assertIn('downloadPowerSafe()', take)
+        self.assertIn('publish(UiStage::WaitingPower,', take)
         finish = body('bool finishDownload()', 'bool installVerified()')
         self.assertLess(finish.index('psa_hash_finish'), finish.index('esp_ota_end'))
         self.assertIn('image_version_mismatch', finish)
@@ -107,37 +107,112 @@ class AutomaticOtaSourceTests(unittest.TestCase):
         self.assertIn('!lowerHex(expectedSha)', approve)
         self.assertIn('std::strcmp(expectedSha, ui.sha256)', approve)
         condition = re.search(r'if \((!guard.owns_lock\(\).*?)\) return false;', approve, re.S)[1]
-        condition = condition.replace('!guard.owns_lock()', 'False').replace('active.load()', 'active')
+        condition = condition.replace('!guard.owns_lock()', 'False').replace('busy()', '(active or pending)')
         condition = condition.replace('approvedRequest.load()', 'pending').replace('!lowerHex(expectedSha)', 'not valid')
         condition = condition.replace('std::strcmp(expectedSha, ui.sha256)', 'different')
-        condition = condition.replace('!ui.signatureVerified', 'not verified')
+        condition = condition.replace('!ui.signatureVerified', 'not verified').replace('ui.imageVerified', 'image_verified')
         condition = condition.replace('ui.stage != UiStage::Available', 'stage != "Available"')
         condition = condition.replace('ui.stage != UiStage::WaitingPower', 'stage != "WaitingPower"')
         condition = ' '.join(condition.replace('||', 'or').replace('&&', 'and').split())
-        def rejects(expected, shown, active=False, pending=False, verified=True, stage="Available"):
+        def rejects(expected, shown, active=False, pending=False, verified=True, stage="Available", image_verified=False):
             valid = bool(re.fullmatch('[0-9a-f]{64}', expected))
             return eval(condition, {'__builtins__': {}}, dict(valid=valid, different=expected != shown,
-                active=active, pending=pending, verified=verified, stage=stage))
+                active=active, pending=pending, verified=verified, stage=stage, image_verified=image_verified))
         a, b = 'a' * 64, 'b' * 64
         self.assertFalse(rejects(a, a))
         self.assertTrue(rejects(a, b))  # A on screen cannot approve newer B.
         self.assertTrue(rejects('a' * 63, a))
         self.assertTrue(rejects(a, a, pending=True))
         self.assertTrue(rejects(a, a, verified=False))
+        self.assertTrue(rejects(a, a, image_verified=True, stage="WaitingPower"))
         self.assertLess(approve.index('std::strcmp(expectedSha, ui.sha256)'), approve.index('std::memcpy(approvedHash'))
         self.assertLess(approve.index('requestedAtMs.store'), approve.index('approvedRequest.store(true)'))
-        self.assertIn('bool busy() { return active.load() || approvedRequest.load(); }', SOURCE)
+        self.assertIn('bool busy() { return active.load() || approvedRequest.load() || checkQueued.load()', SOURCE)
         age = body('uint32_t requestAgeMs()', 'bool request()')
         self.assertIn('return busy()', age)
         take = body('bool takeRequest()', 'void fail(')
         self.assertIn('requestAgeMs() >= 120000', take)
         self.assertIn('reject("request_timeout")', take)
         self.assertIn('approvedRequest.exchange(false)', take)
-        self.assertIn('requestLocked(true, true)', take)
+        self.assertIn('requestLocked(autoInstall.load(), true)', take)
         self.assertIn('if (stage == UiStage::Failed || stage == UiStage::WaitingPower) approvedRequest.store(false)', SOURCE)
         manual = body('bool request()', 'bool automaticCheckDue()')
-        self.assertLess(manual.index('approvedRequest.load()'), manual.index('std::memcpy(approvedHash'))
+        self.assertLess(manual.index('busy()'), manual.index('std::memcpy(approvedHash'))
         self.assertNotRegex(take, r'nvs_set|nvs_commit|esp_ota_begin')
+
+    def test_download_battery_guard_and_staged_selection(self):
+        power = body('bool downloadPowerSafe()', 'bool automaticPowerSafe()')
+        self.assertIn('b.voltageMv >= 3500', power)
+        expression = re.search(r'return (b.valid.*?);', power, re.S)[1]
+        expression = ' '.join(expression.replace('&&', 'and').replace('!(', 'not (').split())
+        def allowed(mv, valid=True, operation=6):
+            b = types.SimpleNamespace(valid=valid, operationStatus=operation, voltageMv=mv)
+            return eval(expression, {'__builtins__': {}}, {'b': b})
+        self.assertTrue(allowed(3500))
+        for args in [(3499, True, 6), (4000, False, 6), (4000, True, 2), (4000, True, 7), (4000, True, 0x406)]:
+            self.assertFalse(allowed(*args))
+        self.assertNotIn('tud_mounted', power)
+        self.assertNotIn('currentMa', power)
+        finish = body('bool finishDownload()', 'bool installVerified()')
+        self.assertIn('active.store(usbBypass || automaticMode)', finish)
+        self.assertNotRegex(finish, r'esp_restart|recordAttempt|set_boot_partition')
+        install = body('bool installVerified()', 'bool requestCheck()')
+        self.assertEqual(install.count('!automaticPowerSafe()'), 2)
+        self.assertNotIn('esp_restart', install)
+        self.assertIn('publish(UiStage::ReadyReboot)', install)
+        self.assertIn('active.store(false)', install)
+        for start, end in [('bool requestCheck()', 'bool takeCheckRequest()'),
+                           ('bool approveInstall(', 'bool requestReboot()'),
+                           ('bool requestReboot()', 'void processLocalRequests()')]:
+            queue = body(start, end)
+            self.assertIn('snapshotLock, std::try_to_lock', queue)
+            self.assertNotRegex(queue, r'batteryTelemetry|esp_ota_|esp_restart|nvs_|requestJson')
+        install_queue = body('bool approveInstall(', 'bool requestReboot()')
+        self.assertIn('std::strcmp(expectedSha, ui.sha256)', install_queue)
+        due = body('bool automaticCheckDue()', 'bool discoverManifest(')
+        self.assertIn('imageReady || selected.load()', due)
+        owner = (ROOT / 'main/host/network_quota.cpp').read_text().split('while (true) {', 1)[1]
+        self.assertLess(owner.index('processLocalRequests()'), owner.index('esp_wifi_start()'))
+        self.assertLess(owner.index('processLocalRequests()'), owner.index('GetTailnetQuota().start()'))
+
+    def test_completed_boot_history_not_a_retained_candidate(self):
+        check = body('bool requestCheck()', 'bool takeCheckRequest()')
+        self.assertNotIn('|| ui.imageVerified', check)
+        condition = re.search(r'if \((!guard.owns_lock\(\).*?)\) return false;', check, re.S)[1]
+        condition = condition.replace('!guard.owns_lock()', 'False').replace('busy()', 'busy')
+        condition = condition.replace('selected.load()', 'selected').replace('imageReady.load()', 'retained')
+        condition = re.sub(r'ui.stage == UiStage::(\w+)', r'stage == "\1"', condition)
+        condition = ' '.join(condition.replace('||', 'or').replace('&&', 'and').split())
+        def rejects(stage, retained=False, selected=False):
+            return eval(condition, {'__builtins__': {}}, dict(busy=False, stage=stage, retained=retained, selected=selected))
+        # Both unsigned bootstrap and signed/verified journal boot end at Complete.
+        for historical_verified in (False, True):
+            self.assertFalse(rejects('Complete'))
+            self.assertFalse(rejects('Idle'))
+        self.assertFalse(rejects('WaitingPower'))
+        self.assertTrue(rejects('WaitingPower', retained=True))
+        self.assertTrue(rejects('ReadyInstall', retained=True))
+        self.assertTrue(rejects('ReadyReboot', retained=True, selected=True))
+        install = body('bool approveInstall(', 'bool requestReboot()')
+        self.assertIn('!imageReady.load()', install)
+        request = body('bool request()', 'bool automaticCheckDue()')
+        self.assertIn('ui.signatureVerified = ui.imageVerified = false', request)
+        self.assertIn('ui.sha256[0] = ui.signatureShort[0] = 0', request)
+        self.assertLess(request.index('verified.store(false)'), request.index('requestLocked(true)'))
+        for start, end in [('bool discoverManifest(', 'bool requestAutomatic('),
+                           ('bool beginManifest(', 'bool writeChunk(')]:
+            accept = body(start, end)
+            self.assertIn('ui.imageVerified = false; verified.store(false)', accept)
+        boot = body('void healthPoll(', 'bool rollbackTest()')
+        self.assertIn('verified.store(sha[0] != 0)', boot)
+
+    def test_only_manual_check_publishes_busy_checking(self):
+        due = body('bool automaticCheckDue()', 'bool discoverManifest(')
+        self.assertNotIn('publish(', due)
+        self.assertNotIn('checking.store', due)
+        manual = body('bool takeCheckRequest()', 'void finishCheck(')
+        self.assertIn('checking.store(true)', manual)
+        self.assertIn('publish(UiStage::Checking)', manual)
 
     def test_legacy_boot_facts_without_claimed_verification(self):
         boot = body('void healthPoll(', 'bool rollbackTest()')

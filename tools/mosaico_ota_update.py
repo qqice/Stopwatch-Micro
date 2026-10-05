@@ -59,6 +59,11 @@ def main():
     if d.get('running')==target:
      if d.get('state')=='2':print('NETWORK_OTA_ACCEPTED running='+target+' state=VALID',flush=True);return
      if d.get('state')=='1':time.sleep(5);continue
+    # Staged firmware briefly exposes its selected image before the USB
+    # full-pipeline mode restarts. Idle is not necessarily an abort in that
+    # bounded ReadyReboot window; only the actual opposite-slot VALID boot wins.
+    if d.get('stage')=='ready_reboot' and d.get('selected')=='1':
+     time.sleep(2);continue
     raise SystemExit('OTA rejected/aborted or rolled back: running='+d.get('running','unknown')+' reason='+d.get('reason','unknown'))
    print('OTA_PROGRESS received='+d.get('received','0')+' size='+d.get('size','0'),flush=True)
    time.sleep(10)
