@@ -41,6 +41,7 @@ private:
     static void modeEvent(lv_event_t* event);
     static void otaEvent(lv_event_t* event);
     static void otaBorderEvent(lv_event_t* event);
+    bool otaKeepAwake() const;
     bool otaActionEnabled() const;
     bool otaHasDownloadOffer() const;
     void renderOtaAction();

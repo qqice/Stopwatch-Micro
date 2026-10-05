@@ -83,7 +83,7 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         self.assertIn('wakeForFirmwareUpdate()',callback)
         self.assertIn('_otaApproved = true',callback)
         self.assertIn('if (otaBusy() && page != Page::OTA) return false;',CPP)
-        self.assertIn('if (_locked || !ready() || otaBusy()) return;',CPP)
+        self.assertIn('if (_locked || !ready() || otaKeepAwake()) return;',CPP)
         self.assertIn('if (otaBusy()) return;',CPP)
         self.assertNotIn('setAutomaticInstall',CPP)
     def test_honest_progress_and_verification(self):

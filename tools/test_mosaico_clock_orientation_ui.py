@@ -117,6 +117,7 @@ struct View {
  struct Config { uint32_t chargeTimeoutSeconds=60,batteryTimeoutSeconds=60; };
  struct Display { Config config; } _displaySettings;
  bool _locked=false; int lockCount=0, refreshCount=0;
+ constexpr bool otaKeepAwake() { return false; }
  constexpr uint32_t lv_tick_get() { return now; }
  constexpr void lockDisplay() { ++lockCount; _locked=true; now+=3; _refresh=lv_tick_get(); }
  constexpr void setPageForDebug() { _activity=lv_tick_get(); }

@@ -392,6 +392,9 @@ bool CodexMicroView::otaBusy() const {
         _ota.stage == S::Verifying ||
         _ota.stage == S::Installing || _ota.stage == S::BootChecking;
 }
+bool CodexMicroView::otaKeepAwake() const {
+    return _page == Page::OTA || otaBusy() || MosaicoOta::busy();
+}
 bool CodexMicroView::otaHasDownloadOffer() const {
     return _ota.signatureVerified && _ota.sha256[0] && _ota.sha256[0] != '-';
 }
@@ -1048,6 +1051,7 @@ bool CodexMicroView::setPageForDebug(Page page) {
     if (page == Page::Command && _quota->truncated) lv_obj_remove_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN);
     if (page == Page::Command && _clockMinute >= 0 && !_quota->truncated) lv_obj_remove_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
+    if (page == Page::OTA && _locked) wakeDisplay();
     return true;
 }
 lv_obj_t* CodexMicroView::pagePanel(Page page) const {
@@ -1120,7 +1124,7 @@ void CodexMicroView::wakeDisplay() {
 }
 void CodexMicroView::lockDisplay() {
     if (_rotationFault) return;
-    if (_locked || !ready() || otaBusy()) return;
+    if (_locked || !ready() || otaKeepAwake()) return;
     cancelOrientation(); GetHAL().setMotionIdle(true);
     cancelPageSlide(); _touchTracking = false; _swipeConsumed = true;
     stopAnimations();
@@ -1151,11 +1155,12 @@ void CodexMicroView::update(const CodexMicroState&) {
     if (!_locked) refreshClock(tick);
     // Rendering/page callbacks can record activity after the entry tick.
     tick = lv_tick_get();
-    if (!_locked && interacting) _activity = tick;
+    const bool keepAwake = otaKeepAwake();
+    if (!_locked && (interacting || keepAwake)) _activity = tick;
     const uint32_t idleElapsed = tick - _activity;
     const uint32_t timeoutSeconds = _chargeProfile ? _displaySettings.config.chargeTimeoutSeconds :
         std::min<uint32_t>(60, _displaySettings.config.batteryTimeoutSeconds);
-    if (!_locked && !interacting && timeoutSeconds && idleElapsed >= timeoutSeconds * 1000U && idleElapsed < 0x80000000U) lockDisplay();
+    if (!_locked && !interacting && !keepAwake && timeoutSeconds && idleElapsed >= timeoutSeconds * 1000U && idleElapsed < 0x80000000U) lockDisplay();
     // Revision checks are local memory only; no touch or UI path performs HTTP.
     // lockDisplay records a fresh refresh timestamp; never compare it to an older tick.
     tick = lv_tick_get();
