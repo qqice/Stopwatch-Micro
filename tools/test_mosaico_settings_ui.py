@@ -64,6 +64,7 @@ class SettingsUiTests(unittest.TestCase):
             body=body.replace('static constexpr', 'constexpr') # C++17 constexpr adapter: identical constant tables.
             methods.append('constexpr '+body)
         harness='#include "'+(R/'main/host/mosaico_display_settings_model.h').as_posix()+'"\n'
+        harness+='#include "'+(V/'charge_supply_state.h').as_posix()+'"\n'
         harness+=r'''
 #include <algorithm>
 #include <cstddef>
@@ -79,7 +80,8 @@ struct CodexMicroView {
  struct Hit { CodexMicroView* owner; size_t index; };
  Page _page=Page::Settings; RotationPhase _rotationPhase=RotationPhase::Idle;
  bool _rotationFault=false,_locked=false,_suppressed=false,_swipeConsumed=false,busy=false;
- bool _settingsRequestFailed=false,_chargeProfile=false,_profileSeen=false,_positiveCurrent=false;
+ bool _settingsRequestFailed=false,_chargeProfile=false,_profileSeen=false;
+ mosaico_charge::ChargeSupplyState _chargeSupply{};
  bool _shiftPending=false,_touchTracking=false,_usb=false,snapshotReady=true,accept=true;
  unsigned _activity=0,_now=123,_shiftIndex=0;
  int _brightness=80,_appliedBrightness=-1,renders=0,requests=0;
@@ -125,10 +127,12 @@ constexpr bool profiles() {
  if(v._hal.brightness!=80 || v._activity!=123)return false;
  v._now=124;v.refreshDisplaySettings();if(v._activity!=123 || v._hal.calls!=1)return false;
  v._usb=true;v.bank.config.chargeBrightness=95;++v.bank.revision;v.refreshDisplaySettings();
- if(v._hal.brightness!=95 || v._activity!=124 || !v._chargeProfile)return false; // Full USB, no positive current.
+ if(v._hal.brightness!=80 || v._activity!=123 || v._chargeProfile)return false; // USB is not charge-profile evidence.
+ v._chargeSupply.update(true,4);v.refreshDisplaySettings();
+ if(v._hal.brightness!=95 || v._activity!=124 || !v._chargeProfile)return false;
  v._now=125;v.refreshDisplaySettings();if(v._activity!=124)return false;
- v._usb=false;v._positiveCurrent=true;v.refreshDisplaySettings();if(v._activity!=124)return false;
- v._positiveCurrent=false;v.bank.config.batteryBrightness=35;++v.bank.revision;v.refreshDisplaySettings();
+ v._usb=false;v._chargeSupply.update(true,0);v.refreshDisplaySettings();if(v._activity!=124 || !v._chargeProfile)return false;
+ v._chargeSupply.update(true,-4);v.bank.config.batteryBrightness=35;++v.bank.revision;v.refreshDisplaySettings();
  if(v._hal.brightness!=35 || v._activity!=125 || v._chargeProfile)return false;
  v._locked=true;v.bank.config.lockBrightness=0;++v.bank.revision;v.refreshDisplaySettings();
  if(v._hal.brightness!=0)return false;

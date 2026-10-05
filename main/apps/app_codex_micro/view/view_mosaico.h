@@ -9,6 +9,7 @@
 #include <lvgl.h>
 #include <ota/mosaico_ota.h>
 #include <host/mosaico_display_settings.h>
+#include "charge_supply_state.h"
 
 namespace view {
 class CodexMicroView {
@@ -99,7 +100,8 @@ private:
     std::array<Hit, 12> _settingsHits{};
     MosaicoDisplay::Snapshot _displaySettings{};
     bool _settingsRequestFailed = false;
-    bool _chargeProfile = false, _profileSeen = false, _positiveCurrent = false;
+    bool _chargeProfile = false, _profileSeen = false;
+    mosaico_charge::ChargeSupplyState _chargeSupply{};
     bool _shiftPending = false;
     unsigned _shiftIndex = 0;
     int _appliedBrightness = -1;

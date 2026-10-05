@@ -488,3 +488,21 @@ Tests check visible-widget margins for every offset. This reduces static-pattern
 risk; it cannot guarantee no burn-in or repair an already worn panel, and is not
 OLED compensation/pixel-cleaning. Hardware settings, persistence, brightness
 profiles, zero-brightness wake and rotated shifted touch need user acceptance.
+
+## 0.10.1 full-charge/direct5V UI supply hint
+Display profiles and lightning no longer use USB stack enumeration. A RAM-only
+state machine anchors on valid gauge current >3mA, retains the external-supply
+hint for the -3..3mA deadband (including full-charge zero), and clears it on valid
+current <-3mA or invalid telemetry. Battery charging animation uses positive
+current only; zero-current full charge retains a static lightning indicator.
+This hint does not feed OTA safety checks, is not persisted and does not infer
+supply from100% SOC or voltage alone. Existing OTA safety policy is unchanged.
+
+CoreBoardV1.0 page5 wiring shows CHRG/STDBY routed to the charging LED and the
+5V_IN_flag node at TP22, without a verified MCU-readable detector. Therefore this
+is UI inference, not physical5V detection. A full-charge cold boot at zero current
+has no positive-current anchor and remains in the battery profile; reliable
+identification in that situation requires additional input evidence. To verify
+this fix, start while actual charging is observable, leave the external5V source
+connected through full charge, then unplug and confirm the battery profile returns.
+No charger controls, fuel-gauge configuration or GPIO circuitry were modified.

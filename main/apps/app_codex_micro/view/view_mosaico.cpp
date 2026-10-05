@@ -317,7 +317,7 @@ void CodexMicroView::refreshDisplaySettings() {
         _displaySettings = next;
         if (statusChanged && _settingsPage) renderSettings();
     }
-    const bool chargeProfile = tud_mounted() || _positiveCurrent;
+    const bool chargeProfile = _chargeSupply.external;
     if (!_profileSeen || chargeProfile != _chargeProfile) {
         _profileSeen = true; _chargeProfile = chargeProfile; _activity = lv_tick_get();
     }
@@ -632,8 +632,8 @@ void CodexMicroView::modeEvent(lv_event_t* e) {
 void CodexMicroView::refreshBattery(uint32_t now) {
     const auto telemetry = GetHAL().batteryTelemetry(false);
     _batteryReadTick = now; _batterySeen = true; _batteryValid = telemetry.valid;
-    _positiveCurrent = telemetry.valid && telemetry.currentMa > 3;
-    _batteryCharging = telemetry.valid && telemetry.currentMa > 3 && GetHAL().isBatteryCharging();
+    _chargeSupply.update(telemetry.valid, telemetry.currentMa);
+    _batteryCharging = telemetry.valid && telemetry.currentMa > 3;
     const bool critical = GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical;
     _externalPowerReady = MosaicoOta::manualInstallPowerSafe(telemetry, tud_mounted(), critical);
     if (!_locked) renderOtaAction();
@@ -649,7 +649,7 @@ void CodexMicroView::refreshBattery(uint32_t now) {
         lv_label_set_text(_battery, text);
         lv_obj_set_style_text_color(_battery, lv_color_hex(color), 0);
         setIcon(_batteryIcon, Icon::Battery, color, telemetry.reportedSoc, telemetry.valid);
-        if (_batteryCharging) lv_obj_remove_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
+        if (_chargeSupply.external) lv_obj_remove_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
     }
 
 }
