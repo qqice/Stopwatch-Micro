@@ -17,6 +17,15 @@ SOURCE = (VIEW / "dot_widgets.cpp").read_text(encoding="utf-8")
 
 
 class DotWidgetsTests(unittest.TestCase):
+    def test_upgrade_glyphs(self):
+        glyphs = dict((key, tuple(map(int, rows.split(","))))
+                      for key, rows in re.findall(r"\{'(.)',\{([\d,]+)\}\}", HEADER + SOURCE))
+        for char in "UPGRADE":
+            self.assertIn(char, glyphs)
+            self.assertEqual(len(glyphs[char]), 7)
+            self.assertNotEqual(glyphs[char], glyphs["?"])
+        self.assertIn('static_assert(uiGlyph', SOURCE)
+
     def test_source_glyphs(self):
         glyphs = dict((key, tuple(map(int, rows.split(","))))
                       for key, rows in re.findall(r"\{'(.)',\{([\d,]+)\}\}", HEADER))
@@ -167,7 +176,7 @@ class DotWidgetsTests(unittest.TestCase):
         self.assertIn("setText(_lockQuota, lockText, lockKnown ? quotaLevelColor(lockBp, _quota->stale) : Gray);", view)
         self.assertNotRegex(view, r"quotaColor\s*=\s*[^;]*stale\s*\?\s*Gray")
         animation = view.split("void CodexMicroView::updateAnimations(", 1)[1].split("void CodexMicroView::refreshQuota(", 1)[0]
-        for gate in ("if (_locked) return;", "_page == Page::Command", "!_quota->stale", "age <= 130", "GetNetworkQuota().connected()",
+        for gate in ("if (_locked || _suppressed) return;", "_page == Page::Command", "!_quota->stale", "age <= 130", "GetNetworkQuota().connected()",
                      "!lv_obj_has_flag(_cards[i], LV_OBJ_FLAG_HIDDEN)", "window.available && window.remainingBasisPoints > 0"):
             self.assertIn(gate, animation)
         lock = view.split("void CodexMicroView::lockDisplay()", 1)[1].split("void CodexMicroView::", 1)[0]

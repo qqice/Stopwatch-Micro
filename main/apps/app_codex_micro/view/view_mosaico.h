@@ -23,7 +23,7 @@ public:
     bool micActive() const { return false; }
     Page currentPage() const { return _page; }
     bool setPageForDebug(Page page);
-    void setInputSuppressed(bool suppressed) { _suppressed = suppressed; }
+    void setInputSuppressed(bool suppressed);
     void wakeDisplay();
     bool otaBusy() const;
     bool locked() const { return _locked; }
@@ -39,6 +39,11 @@ private:
     static void modeEvent(lv_event_t* event);
     static void otaEvent(lv_event_t* event);
     void initOta();
+    lv_obj_t* pagePanel(Page page) const;
+    void navigatePage(int direction);
+    void cancelPageSlide();
+    static void slideExec(void* owner, int32_t offset);
+    static void slideCompleted(lv_anim_t* anim);
     void refreshOta(uint32_t tick);
     void renderOta();
     void refreshQuota(uint32_t now);
@@ -68,8 +73,9 @@ private:
     lv_obj_t* _otaImageIcon = nullptr;
     lv_obj_t* _otaSignatureIcon = nullptr;
     lv_obj_t* _otaArrow = nullptr;
-    std::array<lv_obj_t*, 2> _otaSlots{}, _otaSlotNames{}, _otaSlotNumbers{}, _otaButtons{}, _otaButtonLabels{}, _otaChips{};
-    std::array<Hit, 2> _otaHits{};
+    std::array<lv_obj_t*, 2> _otaSlots{}, _otaSlotNames{}, _otaSlotNumbers{}, _otaChips{};
+    lv_obj_t* _otaButton = nullptr;
+    lv_obj_t* _otaButtonLabel = nullptr;
     lv_obj_t* _root = nullptr;
     lv_obj_t* _quotaPage = nullptr;
     lv_obj_t* _historyPage = nullptr;
@@ -110,6 +116,11 @@ private:
     std::unique_ptr<TokenHistorySnapshot> _history;
     Page _page = Page::Command;
     bool _hourly = false, _locked = false, _suppressed = false;
+    bool _touchTracking = false, _swipeConsumed = false;
+    lv_point_t _touchStart{};
+    lv_obj_t* _slideFrom = nullptr;
+    lv_obj_t* _slideTo = nullptr;
+    int _slideDirection = 1;
     std::size_t _selected = SIZE_MAX;
     uint32_t _activity = 0, _refresh = 0, _lockRefreshCount = 0;
     uint32_t _quotaRevision = UINT32_MAX, _historyRevision = UINT32_MAX;

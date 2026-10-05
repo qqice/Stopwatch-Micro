@@ -91,6 +91,7 @@ void formatCountdown(mosaico_time::Countdown time, char* out, size_t size, bool 
 }
 namespace view {
 CodexMicroView::~CodexMicroView() {
+    cancelPageSlide();
     GetHAL().setTouchIdlePolling(false);
     GetNetworkQuota().setLocked(false);
     if (_root) lv_obj_delete(_root);
@@ -105,7 +106,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_scroll_dir(parent, LV_DIR_NONE);
     _brightness = std::max(10, GetHAL().getBackLightBrightness());
     _root = lv_obj_create(parent); panel(_root, 0, 0, 480, 480, 0x000000);
-    lv_obj_add_event_cb(_root, touchEvent, LV_EVENT_PRESSED, this);
+    lv_obj_add_event_cb(_root, touchEvent, LV_EVENT_ALL, this);
     _wifiIcon = createIcon(_root, Icon::WifiOff, 28, Orange); place(_wifiIcon, 20, 22);
     _batteryIcon = createIcon(_root, Icon::Battery, 32); place(_batteryIcon, 296, 20);
     _boltIcon = createIcon(_root, Icon::Bolt, 24, Gold); place(_boltIcon, 266, 24);
@@ -208,7 +209,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(_overlay, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_overlay, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(_overlay, LV_OBJ_FLAG_CLICKABLE); // Function-only wake; no touch handler.
-    bool widgetsReady = _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _qualityIcon && _qualityValue && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    bool widgetsReady = _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _qualityIcon && _qualityValue && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
         widgetsReady = widgetsReady && _cardBadges[i] && _cardValues[i] && _secondValues[i] && _creditIcons[i];
@@ -249,13 +250,17 @@ void CodexMicroView::initOta() {
         lv_obj_set_style_text_color(name, lv_color_hex(i ? Gold : Cyan), 0);
         _otaSlotNumbers[i] = createText(_otaSlots[i], 90, 70, 9, i ? Gold : Cyan); place(_otaSlotNumbers[i], 72, 24);
         _otaChips[i] = createIcon(_otaSlots[i], Icon::Chip, 36, i ? Gold : Cyan); place(_otaChips[i], 16, 42);
-        _otaButtons[i] = lv_button_create(_otaPage); panel(_otaButtons[i], i ? 230 : 0, 334, 210, 64, i ? 0x244F3C : 0x242A30);
-        _otaButtonLabels[i] = label(_otaButtons[i], 0, 20, 210, i ? "UPGRADE" : "LATER", &lv_font_montserrat_20);
-        lv_obj_set_style_text_align(_otaButtonLabels[i], LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_remove_flag(_otaButtonLabels[i], LV_OBJ_FLAG_CLICKABLE);
-        _otaHits[i] = {this, i}; lv_obj_add_event_cb(_otaButtons[i], otaEvent, LV_EVENT_CLICKED, &_otaHits[i]);
-        lv_obj_add_flag(_otaButtons[i], LV_OBJ_FLAG_EVENT_BUBBLE);
     }
+    _otaButton = lv_button_create(_otaPage); panel(_otaButton, 0, 334, 440, 64, 0x11251F);
+    lv_obj_set_style_border_width(_otaButton, 2, 0);
+    lv_obj_set_style_border_color(_otaButton, lv_color_hex(Green), 0);
+    lv_obj_set_style_bg_color(_otaButton, lv_color_hex(0x101418), LV_STATE_DISABLED);
+    lv_obj_set_style_border_color(_otaButton, lv_color_hex(Gray), LV_STATE_DISABLED);
+    _otaButtonLabel = createText(_otaButton, 440, 40, 4, Green); place(_otaButtonLabel, 0, 12);
+    setText(_otaButtonLabel, "UPGRADE", Green);
+    lv_obj_remove_flag(_otaButtonLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_otaButton, otaEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_flag(_otaButton, LV_OBJ_FLAG_EVENT_BUBBLE);
 }
 bool CodexMicroView::otaBusy() const {
     using S = MosaicoOta::UiStage;
@@ -264,20 +269,14 @@ bool CodexMicroView::otaBusy() const {
         _ota.stage == S::Installing || _ota.stage == S::BootChecking;
 }
 void CodexMicroView::otaEvent(lv_event_t* e) {
-    auto* hit = static_cast<Hit*>(lv_event_get_user_data(e)); auto* self = hit->owner;
-    if (self->_suppressed || self->_locked || self->_page != Page::OTA || self->otaBusy()) return;
+    auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(e));
+    if (self->_suppressed || self->_locked || self->_swipeConsumed || self->_slideTo || self->_page != Page::OTA || self->otaBusy()) return;
     using S = MosaicoOta::UiStage;
-    if (hit->index == 1) {
-        if (self->_ota.stage != S::Available && self->_ota.stage != S::WaitingPower) return;
-        if (MosaicoOta::approveUpdate(self->_ota.sha256)) {
-            GetNetworkQuota().wakeForFirmwareUpdate();
-            self->_otaApproved = true; self->_activity = lv_tick_get();
-            lv_obj_add_state(self->_otaButtons[1], LV_STATE_DISABLED);
-            lv_obj_add_state(self->_otaButtons[0], LV_STATE_DISABLED);
-        }
-    } else {
-        if (self->_ota.stage == S::Available || self->_ota.stage == S::WaitingPower || self->_ota.stage == S::Failed) MosaicoOta::deferUpdate();
-        self->_otaPending = false; self->setPageForDebug(self->_otaReturn);
+    if (self->_ota.stage != S::Available && self->_ota.stage != S::WaitingPower) return;
+    if (MosaicoOta::approveUpdate(self->_ota.sha256)) {
+        GetNetworkQuota().wakeForFirmwareUpdate();
+        self->_otaApproved = true; self->_activity = lv_tick_get();
+        self->renderOta();
     }
 }
 void CodexMicroView::refreshOta(uint32_t tick) {
@@ -293,6 +292,7 @@ void CodexMicroView::refreshOta(uint32_t tick) {
         if (!_locked) renderOta();
     }
     if (otaBusy()) {
+        cancelPageSlide(); _touchTracking = false; _swipeConsumed = true;
         _activity = tick;
         // Only an actual accepted operation can wake the display, never discovery polling.
         if (_locked) wakeDisplay();
@@ -345,6 +345,7 @@ void CodexMicroView::renderOta() {
         percent(bp, text, sizeof(text)); setText(_otaPercent, text, download ? Green : Cyan);
         setMeter(_otaMeter, bp, download ? _ota.size != 0 : _ota.stage == S::BootChecking, download ? Green : Cyan);
     } else for (auto* obj : {_otaPercent, _otaMeter}) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    place(_otaBytes, 0, stageIcon ? 194 : 162);
     if (!discovery && (download || _ota.size)) {
         const bool mega = _ota.size >= 1000000;
         const double divisor = mega ? 1000000.0 : 1000.0;
@@ -356,8 +357,16 @@ void CodexMicroView::renderOta() {
     std::snprintf(text, sizeof(text), "SIG %.12s", _ota.signatureShort[0] ? _ota.signatureShort : "--"); lv_label_set_text(_otaSignature, text);
     setIcon(_otaImageIcon, _ota.imageVerified ? Icon::Check : (_ota.stage == S::Downloading ? Icon::Download : _ota.stage == S::Verifying ? Icon::Refresh : Icon::Chip), _ota.imageVerified ? Green : Gold);
     setIcon(_otaSignatureIcon, _ota.signatureVerified ? Icon::Check : Icon::Unknown, _ota.signatureVerified ? Green : Gold);
-    place(_otaHash, 36, discovery ? 162 : 344); place(_otaImageIcon, 0, discovery ? 160 : 342);
-    place(_otaSignature, 36, discovery ? 194 : 374); place(_otaSignatureIcon, 0, discovery ? 192 : 372);
+    // Compact verification row leaves the permanent action tile unobstructed.
+    for (auto* obj : {_otaHash, _otaSignature}) {
+        lv_obj_set_style_text_font(obj, discovery ? &lv_font_montserrat_20 : &lv_font_montserrat_16, 0);
+        lv_obj_set_height(obj, 24);
+    }
+    lv_obj_set_width(_otaHash, discovery ? 404 : 184);
+    lv_obj_set_width(_otaSignature, discovery ? 404 : 168);
+    place(_otaHash, 36, discovery ? 162 : 222); place(_otaImageIcon, 0, discovery ? 160 : 220);
+    place(_otaSignature, discovery ? 36 : 272, discovery ? 194 : 222);
+    place(_otaSignatureIcon, discovery ? 0 : 236, discovery ? 192 : 220);
     for (auto* obj : {_otaHash, _otaSignature, _otaImageIcon, _otaSignatureIcon}) {
         if (idle) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
     }
@@ -368,20 +377,29 @@ void CodexMicroView::renderOta() {
         place(_otaSlots[i], idle ? 127 : (i ? 254 : 0), discovery ? 224 : 252);
         if (idle && (i || !_otaSeen || _ota.currentSlot < 0)) lv_obj_add_flag(_otaSlots[i], LV_OBJ_FLAG_HIDDEN);
         else lv_obj_remove_flag(_otaSlots[i], LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_height(_otaSlots[i], discovery ? 100 : 84);
+        lv_obj_set_height(_otaSlots[i], discovery ? 100 : 72);
         place(_otaSlotNumbers[i], 72, discovery ? 24 : 16);
-        lv_obj_set_height(_otaSlotNumbers[i], discovery ? 70 : 64);
-        place(_otaChips[i], 16, discovery ? 42 : 32);
+        lv_obj_set_height(_otaSlotNumbers[i], discovery ? 70 : 52);
+        setTextPitch(_otaSlotNumbers[i], discovery ? 9 : 7);
+        place(_otaChips[i], 16, discovery ? 42 : 24);
         const int slot = i ? _ota.targetSlot : _ota.currentSlot;
         std::snprintf(text, sizeof(text), "%s", slot == 0 ? "0" : slot == 1 ? "1" : "?"); setText(_otaSlotNumbers[i], text, i ? Gold : Cyan);
         lv_obj_set_style_border_width(_otaSlots[i], i && _ota.imageVerified ? 3 : 1, 0);
         lv_obj_set_style_border_color(_otaSlots[i], lv_color_hex(i ? Gold : Cyan), 0);
-        if (discovery && (i == 0 || offer)) lv_obj_remove_flag(_otaButtons[i], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaButtons[i], LV_OBJ_FLAG_HIDDEN);
-        if (_otaApproved) lv_obj_add_state(_otaButtons[i], LV_STATE_DISABLED); else lv_obj_remove_state(_otaButtons[i], LV_STATE_DISABLED);
     }
     place(_otaArrow, 202, discovery ? 256 : 278);
     if (slotTransition) lv_obj_remove_flag(_otaArrow, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaArrow, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(_otaButtonLabels[0], offer ? "LATER" : "BACK");
+    // This action never disappears: disabled stages remain an honest dark tile.
+    const bool enabled = offer && !_otaApproved;
+    if (enabled) {
+        lv_obj_remove_state(_otaButton, LV_STATE_DISABLED);
+        lv_obj_add_flag(_otaButton, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+        lv_obj_add_state(_otaButton, LV_STATE_DISABLED);
+        // Let the underlying page receive navigation gestures, never an OTA click.
+        lv_obj_remove_flag(_otaButton, LV_OBJ_FLAG_CLICKABLE);
+    }
+    setText(_otaButtonLabel, "UPGRADE", enabled ? Green : Gray);
     if (_ota.stage == S::Failed) {
         // The backend supplies a short ID; never expose arbitrary diagnostic text.
         char safe[25]{}; size_t n = 0;
@@ -392,16 +410,38 @@ void CodexMicroView::renderOta() {
     }
 }
 void CodexMicroView::touchEvent(lv_event_t* e) {
+    const auto code = lv_event_get_code(e);
+    if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING && code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(e));
-    if (!self->_locked) self->_activity = lv_tick_get();
+    if (self->_suppressed || self->_locked || self->otaBusy() || self->_slideTo) {
+        self->_touchTracking = false; self->_swipeConsumed = true;
+        return;
+    }
+    auto* input = lv_event_get_indev(e);
+    if (!input || lv_indev_get_type(input) != LV_INDEV_TYPE_POINTER) return;
+    lv_point_t point{}; lv_indev_get_point(input, &point);
+    if (code == LV_EVENT_PRESSED) {
+        self->_activity = lv_tick_get(); self->_touchStart = point;
+        self->_touchTracking = true; self->_swipeConsumed = false;
+    } else if (self->_touchTracking && (code == LV_EVENT_PRESSING || code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST)) {
+        const int dx = point.x - self->_touchStart.x;
+        const int dy = point.y - self->_touchStart.y;
+        // Large horizontal motion consumes this contact even if it later drifts vertically.
+        if (std::abs(dx) >= 96) self->_swipeConsumed = true;
+        if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+            self->_touchTracking = false;
+            if (code == LV_EVENT_RELEASED && std::abs(dx) >= 96 && std::abs(dy) <= 48 && std::abs(dx) >= 2 * std::abs(dy))
+                self->navigatePage(dx < 0 ? 1 : -1);
+        }
+    }
 }
 void CodexMicroView::cellEvent(lv_event_t* e) {
     auto* hit = static_cast<Hit*>(lv_event_get_user_data(e));
-    if (!hit->owner->_suppressed && !hit->owner->_locked) hit->owner->selectHistory(hit->index);
+    if (!hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_swipeConsumed && !hit->owner->_slideTo && !hit->owner->otaBusy()) hit->owner->selectHistory(hit->index);
 }
 void CodexMicroView::modeEvent(lv_event_t* e) {
     auto* hit = static_cast<Hit*>(lv_event_get_user_data(e));
-    if (!hit->owner->_suppressed && !hit->owner->_locked) hit->owner->showHistory(hit->index == 1);
+    if (!hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_swipeConsumed && !hit->owner->_slideTo && !hit->owner->otaBusy()) hit->owner->showHistory(hit->index == 1);
 }
 void CodexMicroView::refreshBattery(uint32_t now) {
     const auto telemetry = GetHAL().batteryTelemetry(false);
@@ -438,7 +478,7 @@ void CodexMicroView::stopAnimations() {
     }
 }
 void CodexMicroView::updateAnimations(uint32_t tick) {
-    if (_locked) return;
+    if (_locked || _suppressed) return;
     if (tick - _motionTick < 100) return;
     _motionTick = tick;
     const uint16_t phase = static_cast<uint16_t>(((tick - _motionEpoch) % 12000U) * 360U / 12000U);
@@ -693,6 +733,9 @@ bool CodexMicroView::showHistory(bool hourly) {
 bool CodexMicroView::setPageForDebug(Page page) {
     if (!ready() || page == Page::Agent || (page != Page::Command && page != Page::History && page != Page::OTA)) return false;
     if (otaBusy() && page != Page::OTA) return false;
+    cancelPageSlide();
+    if (_touchTracking) _swipeConsumed = true;
+    _touchTracking = false;
     if (page == Page::OTA) {
         if (_page != Page::OTA) _otaReturn = _page;
         renderOta();
@@ -707,13 +750,56 @@ bool CodexMicroView::setPageForDebug(Page page) {
     if (page == Page::Command && _quota->truncated) lv_obj_remove_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN);
     return true;
 }
+lv_obj_t* CodexMicroView::pagePanel(Page page) const {
+    return page == Page::Command ? _quotaPage : page == Page::History ? _historyPage : _otaPage;
+}
+void CodexMicroView::cancelPageSlide() {
+    lv_anim_delete(this, slideExec);
+    for (auto* panel : {_slideFrom, _slideTo}) if (panel) {
+        lv_obj_set_x(panel, 20);
+        if (panel != pagePanel(_page)) lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
+    }
+    _slideFrom = _slideTo = nullptr;
+}
+void CodexMicroView::slideExec(void* owner, int32_t offset) {
+    auto* self = static_cast<CodexMicroView*>(owner);
+    if (!self->_slideTo) return;
+    lv_obj_set_x(self->_slideFrom, 20 - self->_slideDirection * offset);
+    lv_obj_set_x(self->_slideTo, 20 + self->_slideDirection * (480 - offset));
+}
+void CodexMicroView::slideCompleted(lv_anim_t* anim) {
+    auto* self = static_cast<CodexMicroView*>(anim->var);
+    if (self->_slideFrom) {
+        lv_obj_add_flag(self->_slideFrom, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_x(self->_slideFrom, 20);
+    }
+    if (self->_slideTo) lv_obj_set_x(self->_slideTo, 20);
+    self->_slideFrom = self->_slideTo = nullptr;
+}
+void CodexMicroView::navigatePage(int direction) {
+    if (_suppressed || _locked || !ready() || otaBusy() || _slideTo) return;
+    const Page pages[] = {Page::Command, Page::History, Page::OTA};
+    const int index = _page == Page::Command ? 0 : _page == Page::History ? 1 : 2;
+    auto* from = pagePanel(_page);
+    if (!setPageForDebug(pages[(index + (direction > 0 ? 1 : 2)) % 3])) return;
+    _slideFrom = from; _slideTo = pagePanel(_page); _slideDirection = direction > 0 ? 1 : -1;
+    lv_obj_remove_flag(_slideFrom, LV_OBJ_FLAG_HIDDEN);
+    // Executed by LVGL's existing timer under its single port mutex; no screen/snapshot allocations.
+    slideExec(this, 0);
+    lv_anim_t anim; lv_anim_init(&anim); lv_anim_set_var(&anim, this);
+    lv_anim_set_exec_cb(&anim, slideExec); lv_anim_set_values(&anim, 0, 480);
+    lv_anim_set_duration(&anim, 200); lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&anim, slideCompleted); lv_anim_start(&anim);
+}
+void CodexMicroView::setInputSuppressed(bool suppressed) {
+    _suppressed = suppressed;
+    if (suppressed) { _touchTracking = false; _swipeConsumed = true; cancelPageSlide(); stopAnimations(); }
+}
 void CodexMicroView::togglePage() {
     if (_suppressed || !ready()) return;
     if (_locked) { wakeDisplay(); return; }
     if (otaBusy()) return;
-    if (_page == Page::Command) setPageForDebug(Page::History);
-    else if (_page == Page::History) setPageForDebug(Page::OTA);
-    else setPageForDebug(Page::Command);
+    navigatePage(1);
 }
 void CodexMicroView::wakeDisplay() {
     if (!ready()) return;
@@ -727,6 +813,7 @@ void CodexMicroView::wakeDisplay() {
 }
 void CodexMicroView::lockDisplay() {
     if (_locked || !ready() || otaBusy()) return;
+    cancelPageSlide(); _touchTracking = false; _swipeConsumed = true;
     stopAnimations();
     _locked = true; GetNetworkQuota().setLocked(true);
     GetHAL().setTouchIdlePolling(true);

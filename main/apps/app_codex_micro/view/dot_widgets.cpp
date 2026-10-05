@@ -52,12 +52,17 @@ constexpr bool iconPatternsTest() {
 }
 static_assert(iconPatternsTest(), "dot icon dimensions and bit bounds");
 constexpr detail::Glyph otaGlyphs[] = {
-    {'O',{14,17,17,17,17,17,14}}, {'T',{31,4,4,4,4,4,4}}, {'A',{14,17,17,31,17,17,17}}
+    {'O',{14,17,17,17,17,17,14}}, {'T',{31,4,4,4,4,4,4}}, {'A',{14,17,17,31,17,17,17}},
+    {'U',{17,17,17,17,17,17,14}}, {'G',{14,17,16,23,17,17,15}},
+    {'R',{30,17,17,30,20,18,17}}, {'D',{30,17,17,17,17,17,30}}, {'E',{31,16,16,30,16,16,31}}
 };
-const detail::Glyph& uiGlyph(char c) {
+constexpr const detail::Glyph& uiGlyph(char c) {
     for (const auto& g : otaGlyphs) if (g.key == c) return g;
     return detail::glyph(c);
 }
+static_assert(uiGlyph('U').key == 'U' && uiGlyph('P').key == 'P' && uiGlyph('G').key == 'G' &&
+              uiGlyph('R').key == 'R' && uiGlyph('A').key == 'A' && uiGlyph('D').key == 'D' &&
+              uiGlyph('E').key == 'E', "upgrade button must never substitute unknown glyphs");
 struct Motion { int scale = 1000, wavePhase = -1, pulse = 0; };
 Motion motion(const State& s, int w, int h, uint16_t phase, bool enabled) {
     Motion m;

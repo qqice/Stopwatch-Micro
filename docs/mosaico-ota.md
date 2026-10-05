@@ -167,8 +167,11 @@ restore ordering; recovery writes require separately confirmed physical identity
 
 The default is now automatic **discovery**, not automatic installation. A verified
 offer displays current/target versions, abbreviated SHA256/signature fingerprints
-and the active/target OTA slots. LATER dismisses the offer; UPGRADE approves only
-the displayed image hash. A changed offer must be approved again.
+and the active/target OTA slots. The single full-width dot-matrix UPGRADE button
+approves only the displayed image hash. It remains visible but dark/disabled
+when unavailable or busy. A changed offer must be approved again. Back/LATER
+buttons are removed; Function and horizontal swipes navigate the three pages
+with a200ms panel-slide animation. During OTA, navigation remains locked.
 
 The next page shows actual downloaded bytes/percentage. Full-image SHA256,
 SDK image validation and the signed version check complete before the verified
