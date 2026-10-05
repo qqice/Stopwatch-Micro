@@ -478,7 +478,7 @@ void CodexMicroView::stopAnimations() {
     }
 }
 void CodexMicroView::updateAnimations(uint32_t tick) {
-    if (_locked || _suppressed) return;
+    if (_locked || _suppressed || _slideTo) return;
     if (tick - _motionTick < 100) return;
     _motionTick = tick;
     const uint16_t phase = static_cast<uint16_t>(((tick - _motionEpoch) % 12000U) * 360U / 12000U);

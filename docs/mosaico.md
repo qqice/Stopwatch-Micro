@@ -552,3 +552,21 @@ CFG/CAL clear; fresh quota was available. Its first steady sample was4209mV,
 panic remained on that startup. Neither this ROM deployment nor that observation
 fixes or accepts the newly observed network-OTA reliability failure. User cold
 optical, physical Function cycle and5–10min battery discharge checks are pending.
+
+## Slide draw workload reduction (0.7.6)
+
+Point-matrix rendering skips text glyph/row and meter column/row ranges outside
+the current LVGL clip, keeping original pixel coordinates, colors and wave lift.
+Per-widget animation invalidation pauses during the unchanged200ms page slide.
+Partial RGB565 double buffers grow from40 to120 rows: four LVGL strips per full
+screen instead of twelve, with150KiB extra PSRAM for pixel buffers (not a total
+peak-memory claim). SPI descriptor reserve accommodates hardware-split tails;
+the LCD driver still caps individual transactions and keeps CS active until the
+final completion callback. SPI clock remains40MHz. No full-page snapshots,
+increased lock-screen cadence, power/gauge settings or SDK patches are involved.
+
+144 host tests (one skipped), seven automatic source tests, target builds and
+S3 syntax checks passed. Signed network OTA0.7.5 ota0 ->0.7.6 ota1 reached VALID
+without a new saved panic. These checks do not measure animation FPS; perceived
+smoothness still needs the user's observation. A subsequent staged-button UX
+request is separate from this bounded draw-workload change.

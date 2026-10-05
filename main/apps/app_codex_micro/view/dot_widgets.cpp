@@ -83,8 +83,26 @@ Motion motion(const State& s, int w, int h, uint16_t phase, bool enabled) {
     }
     return m;
 }
+// Inclusive LVGL clip bounds, half-open indices. Extent includes dot diameter
+// (or a full glyph); subtraction is clamped before division for negative origins.
+struct Span { int first, end; };
+constexpr Span visibleSpan(int origin, int step, int extent, int count, int low, int high) {
+    if (step <= 0 || extent <= 0 || count <= 0 || high < low || high < origin) return {0, 0};
+    const int delta = low - origin - extent + 1;
+    const int first = detail::min(count, delta > 0 ? (delta + step - 1) / step : 0);
+    const int end = detail::min(count, (high - origin) / step + 1);
+    return {first, detail::max(first, end)};
+}
+static_assert(visibleSpan(-20, 8, 5, 8, 0, 0).first == 2 &&
+              visibleSpan(-20, 8, 5, 8, 0, 0).end == 3, "inclusive translated dot edge");
+static_assert(visibleSpan(0, 8, 5, 8, 5, 7).first == 1 &&
+              visibleSpan(0, 8, 5, 8, 5, 7).end == 1, "dot gap must stay empty");
+static_assert(visibleSpan(0, 8, 5, 8, -8, -1).end == 0 &&
+              visibleSpan(0, 8, 5, 8, 100, 110).first == 8, "fully clipped span");
 void dot(lv_layer_t* layer, lv_draw_rect_dsc_t& dsc, int x, int y, int d) {
     const lv_area_t area = {x, y, x + d - 1, y + d - 1};
+    const auto& clip = layer->_clip_area;
+    if (area.x2 < clip.x1 || area.x1 > clip.x2 || area.y2 < clip.y1 || area.y1 > clip.y2) return;
     lv_draw_rect(layer, &dsc, &area);
 }
 void event(lv_event_t* e) {
@@ -100,8 +118,11 @@ void event(lv_event_t* e) {
     lv_area_t a;
     lv_obj_get_content_coords(obj, &a);
     const int w = lv_area_get_width(&a), h = lv_area_get_height(&a);
-    const auto m = motion(*s, w, h, s->phase, s->motion);
     auto* layer = lv_event_get_layer(e);
+    // DRAW_MAIN creates tasks synchronously: _clip_area is valid here, not in a draw unit.
+    const auto& clip = layer->_clip_area;
+    if (a.x2 < clip.x1 || a.x1 > clip.x2 || a.y2 < clip.y1 || a.y1 > clip.y2) return;
+    const auto m = motion(*s, w, h, s->phase, s->motion);
     lv_draw_rect_dsc_t dsc;
     lv_draw_rect_dsc_init(&dsc);
     dsc.bg_color = lv_color_hex(s->color);
@@ -116,21 +137,27 @@ void event(lv_event_t* e) {
             l = detail::textLayout(w, h, count, s->pitch);
         }
         if (!l.diameter) return;
-        for (int i = 0; i < count; ++i) {
+        const auto chars = visibleSpan(a.x1 + l.x, 6 * l.pitch, 4 * l.pitch + l.diameter, count, clip.x1, clip.x2);
+        const auto rows = visibleSpan(a.y1 + l.y, l.pitch, l.diameter, 7, clip.y1, clip.y2);
+        for (int i = chars.first; i < chars.end; ++i) {
             const auto& glyph = uiGlyph(cannotFit ? '?' : s->text[i]);
-            for (int y = 0; y < 7; ++y) for (int x = 0; x < 5; ++x)
+            for (int y = rows.first; y < rows.end; ++y) for (int x = 0; x < 5; ++x)
                 if (glyph.rows[y] & (1 << (4 - x)))
                     dot(layer, dsc, a.x1 + l.x + (i * 6 + x) * l.pitch,
                         a.y1 + l.y + y * l.pitch, l.diameter);
         }
     } else if (s->kind == Kind::Meter) {
         const auto g = detail::meterLayout(w, h, s->rows);
-        for (int x = 0; x < g.columns; ++x) {
+        const auto columns = visibleSpan(a.x1 + g.x, g.pitch, g.diameter, g.columns, clip.x1, clip.x2);
+        for (int x = columns.first; x < columns.end; ++x) {
             const int mix = detail::waveMix(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, m.wavePhase)), m.wavePhase >= 0, x);
             const int lift = detail::waveLift(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, m.wavePhase)), m.wavePhase >= 0, x);
             const auto foreground = mix ? lv_color_mix(lv_color_hex(0xFFFFFF), lv_color_hex(s->color), static_cast<uint8_t>(mix))
                                         : lv_color_hex(s->known ? s->color : 0x69716D);
-            for (int y = 0; y < g.rows; ++y) {
+            // A partly filled column contains both lifted and unlifted dots.
+            // This union is conservative; dot() applies the exact final clip check.
+            const auto rows = visibleSpan(a.y1 + g.y - lift, g.pitch, g.diameter + lift, g.rows, clip.y1, clip.y2);
+            for (int y = rows.first; y < rows.end; ++y) {
                 const bool lit = detail::meterLit(x, y, g, s->bp, s->known);
                 dsc.bg_color = lit ? foreground : lv_color_hex(0x283642);
                 dot(layer, dsc, a.x1 + g.x + x * g.pitch, a.y1 + g.y + y * g.pitch - (lit ? lift : 0), g.diameter);

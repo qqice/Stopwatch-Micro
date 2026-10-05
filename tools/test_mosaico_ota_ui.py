@@ -90,7 +90,7 @@ class OtaUiTests(unittest.TestCase):
         self.assertEqual(len(rows),18)
         self.assertEqual(len(set(rows)),18)
         for row in rows:self.assertEqual(len(row),9);self.assertTrue(all(0<=x<512 for x in row))
-        self.assertIn('if (_locked || _suppressed) return;',CPP); self.assertIn('tick - _motionTick < 100',CPP)
+        self.assertIn('if (_locked || _suppressed || _slideTo) return;',CPP); self.assertIn('tick - _motionTick < 100',CPP)
         self.assertIn('const bool otaMotion = _page == Page::OTA',CPP)
         self.assertNotIn('lv_timer_create',DOT)
     def test_permanent_third_page_and_function_guards(self):

@@ -176,12 +176,44 @@ class DotWidgetsTests(unittest.TestCase):
         self.assertIn("setText(_lockQuota, lockText, lockKnown ? quotaLevelColor(lockBp, _quota->stale) : Gray);", view)
         self.assertNotRegex(view, r"quotaColor\s*=\s*[^;]*stale\s*\?\s*Gray")
         animation = view.split("void CodexMicroView::updateAnimations(", 1)[1].split("void CodexMicroView::refreshQuota(", 1)[0]
-        for gate in ("if (_locked || _suppressed) return;", "_page == Page::Command", "!_quota->stale", "age <= 130", "GetNetworkQuota().connected()",
+        for gate in ("if (_locked || _suppressed || _slideTo) return;", "_page == Page::Command", "!_quota->stale", "age <= 130", "GetNetworkQuota().connected()",
                      "!lv_obj_has_flag(_cards[i], LV_OBJ_FLAG_HIDDEN)", "window.available && window.remainingBasisPoints > 0"):
             self.assertIn(gate, animation)
         lock = view.split("void CodexMicroView::lockDisplay()", 1)[1].split("void CodexMicroView::", 1)[0]
         self.assertIn("stopAnimations();", lock)
 
+    def test_clip_spans_preserve_inclusive_geometry(self):
+        def span(origin, step, extent, count, low, high):
+            if step <= 0 or extent <= 0 or count <= 0 or high < low or high < origin:
+                return range(0)
+            delta = low-origin-extent+1
+            first = min(count, (delta+step-1)//step if delta>0 else 0)
+            end = min(count, (high-origin)//step+1)
+            return range(first,max(first,end))
+        for origin in (-480,-20,0,23,480):
+            for step in (2,4,8,24):
+                for extent in (1,step-1,step,4*step+1):
+                    for count in (0,1,7,32):
+                        for low in range(origin-12,origin+count*step+12,3):
+                            for width in (1,2,7,40):
+                                high=low+width-1
+                                expected=[i for i in range(count) if origin+i*step<=high and origin+i*step+extent-1>=low]
+                                self.assertEqual(list(span(origin,step,extent,count,low,high)),expected)
+        # Meter row union must preserve every genuinely visible lit/unlit dot,
+        # including the wave apex at the clip boundary; exact dot check removes extras.
+        for lift in range(4):
+            for low in range(-4,30):
+                high=low+2
+                candidates=set(span(3-lift,8,5+lift,3,low,high))
+                for row in range(3):
+                    for lit in (False,True):
+                        y=3+row*8-(lift if lit else 0)
+                        if y<=high and y+4>=low:self.assertIn(row,candidates)
+        for source in ('layer->_clip_area','i = chars.first; i < chars.end','y = rows.first; y < rows.end',
+                       'x = columns.first; x < columns.end','g.diameter + lift'):
+            self.assertIn(source,SOURCE)
+        self.assertIn('static_assert(visibleSpan', SOURCE)
+        self.assertNotIn('lv_area_private.h', SOURCE)
     def test_actual_cpp_syntax_and_static_assert(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
         if not compiler:

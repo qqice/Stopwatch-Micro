@@ -58,6 +58,11 @@
 namespace {
 constexpr char Tag[] = "HAL-Mosaico";
 constexpr int Resolution = 480;
+// Four strips per full screen instead of twelve. Two RGB565 PSRAM buffers
+// cost 150KiB more than the old 40-row setting; no full-page snapshot or
+// increased idle refresh rate. Keep the DMA transfer bound and LVGL coupled.
+constexpr int DisplayBufferRows = 120;
+static_assert(Resolution % DisplayBufferRows == 0 && DisplayBufferRows % 2 == 0);
 // Matches the current CodexMicroView LockedBrightness without changing the
 // shared view or the S3 backend's brightness behavior.
 constexpr int WakeDimThreshold = 8;
@@ -1292,7 +1297,11 @@ void Hal::display_init()
     spi.data1_io_num = 51;
     spi.data2_io_num = 35;
     spi.data3_io_num = 9;
-    spi.max_transfer_sz = Resolution * 40 * 2;
+    // S31's per-transaction bit-length cap splits a color strip into several
+    // queued transfers. Reserve extra DMA descriptors for those split tails;
+    // this allocates descriptors, not another pixel buffer. The LCD driver
+    // still obtains/caps each transaction via spi_bus_get_max_transaction_len.
+    spi.max_transfer_sz = Resolution * DisplayBufferRows * 4;
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &spi, SPI_DMA_CH_AUTO));
     esp_lcd_panel_io_spi_config_t io{};
     io.cs_gpio_num = GPIO_NUM_50;
@@ -1377,7 +1386,7 @@ void Hal::lvgl_init()
     lvgl_port_display_cfg_t disp_config{};
     disp_config.io_handle = panel_io;
     disp_config.panel_handle = panel;
-    disp_config.buffer_size = Resolution * 40;
+    disp_config.buffer_size = Resolution * DisplayBufferRows;
     disp_config.double_buffer = true;
     disp_config.hres = Resolution;
     disp_config.vres = Resolution;
