@@ -14,7 +14,7 @@ class ChargeSupplyUiTests(unittest.TestCase):
         battery=CPP.split('void CodexMicroView::refreshBattery(',1)[1].split('void CodexMicroView::refreshClock',1)[0]
         self.assertEqual(battery.count('batteryTelemetry(false)'),1)
         self.assertNotIn('isBatteryCharging()',battery)
-        self.assertIn('_chargeSupply.update(telemetry.valid, telemetry.currentMa)',battery)
+        self.assertIn('_chargeSupply.update(telemetry.valid, telemetry.currentMa, telemetry.reportedSoc)',battery)
         self.assertIn('_batteryCharging = telemetry.valid && telemetry.currentMa > 3;',battery)
         self.assertIn('if (_chargeSupply.external) lv_obj_remove_flag(_boltIcon',battery)
         # Deliberately unchanged: the inference does not widen OTA safety.
@@ -33,20 +33,28 @@ class ChargeSupplyUiTests(unittest.TestCase):
         code='#include "'+(V/'charge_supply_state.h').as_posix()+'"\n'+r'''
 using namespace mosaico_charge;
 constexpr bool boundaries() {
+ ChargeSupplyState cold;
+ cold.update(true,0,100);if(!cold.external || cold.chargedAnchor)return false;
+ cold.update(true,0,99);if(cold.external || cold.chargedAnchor)return false;
+ cold.update(true,-4,100);if(cold.external || cold.chargedAnchor)return false;
+ cold.update(true,0,99);if(cold.external)return false;
  ChargeSupplyState s;
- s.update(true,0);if(s.external)return false; // Cold full/zero is not evidence.
- for(int i=-3;i<=3;++i){s.update(true,i);if(s.external)return false;}
- s.update(true,4);if(!s.external)return false;
- for(int pass=0;pass<10;++pass)for(int i=-3;i<=3;++i){s.update(true,i);if(!s.external)return false;}
- s.update(true,0);if(!s.external)return false; // Full charge after positive anchor.
- s.update(true,-4);if(s.external)return false;
- s.update(true,0);if(s.external)return false; // No sticky charge state after unplug.
- s.update(true,100);s.update(false,100);if(s.external)return false;
- s.update(true,0);if(s.external)return false;
- s.update(true,4);s.update(false,0);if(s.external)return false;
- s.update(true,4);s.update(true,-1000);return !s.external;
+ s.update(true,0,99);if(s.external)return false;
+ for(int i=-3;i<=3;++i){s.update(true,i,99);if(s.external)return false;}
+ s.update(true,4,99);if(!s.external || !s.chargedAnchor)return false;
+ for(int pass=0;pass<10;++pass)for(int i=-3;i<=3;++i){s.update(true,i,99);if(!s.external)return false;}
+ s.update(true,0,100);if(!s.external)return false;
+ s.update(true,0,99);if(!s.external || !s.chargedAnchor)return false; // Real charge anchor survives taper/SOC noise.
+ s.update(true,-4,100);if(s.external || s.chargedAnchor)return false;
+ s.update(true,0,99);if(s.external)return false;
+ s.update(true,100,100);s.update(false,100,100);if(s.external || s.chargedAnchor)return false;
+ s.update(true,0,99);if(s.external)return false;
+ s.update(true,4,99);s.update(false,0,100);if(s.external || s.chargedAnchor)return false;
+ ChargeSupplyState badSoc;
+ for(int soc=101;soc<=255;++soc){badSoc.update(true,0,soc);if(badSoc.external)return false;}
+ s.update(true,4,99);s.update(true,-1000,100);return !s.external && !s.chargedAnchor;
 }
-struct Telemetry { bool valid=true;int currentMa=0; };
+struct Telemetry { bool valid=true;int currentMa=0;uint8_t reportedSoc=99; };
 struct Hal { Telemetry sample;int reads=0;bool forced=false;
  constexpr Telemetry batteryTelemetry(bool refresh){++reads;forced=refresh;return sample;}
 };
@@ -58,19 +66,22 @@ struct CodexMicroView {
 '''+prefix+r'''
 constexpr bool integration() {
  CodexMicroView v;
- v.refreshBattery(1);if(v._chargeSupply.external || v._batteryCharging)return false;
+ v._hal.sample.reportedSoc=100;v.refreshBattery(1);
+ if(!v._chargeSupply.external || v._chargeSupply.chargedAnchor || v._batteryCharging)return false;
+ v._hal.sample.reportedSoc=99;v.refreshBattery(1);
+ if(v._chargeSupply.external || v._batteryCharging)return false;
  v._hal.sample.currentMa=4;v.refreshBattery(2);
  if(!v._chargeSupply.external || !v._batteryCharging)return false;
- v._hal.sample.currentMa=0;v.refreshBattery(3);
+ v._hal.sample.currentMa=0;v._hal.sample.reportedSoc=100;v.refreshBattery(3);
  if(!v._chargeSupply.external || v._batteryCharging)return false; // Static bolt, no charging animation.
  v._hal.sample.currentMa=-4;v.refreshBattery(4);
  if(v._chargeSupply.external || v._batteryCharging)return false;
- v._hal.sample.currentMa=0;v.refreshBattery(5);if(v._chargeSupply.external)return false;
+ v._hal.sample.currentMa=0;v._hal.sample.reportedSoc=99;v.refreshBattery(5);if(v._chargeSupply.external)return false;
  v._hal.sample.currentMa=4;v.refreshBattery(6);
  v._hal.sample.valid=false;v.refreshBattery(7);
- return !v._chargeSupply.external && !v._batteryCharging && v._hal.reads==7 && !v._hal.forced;
+ return !v._chargeSupply.external && !v._batteryCharging && v._hal.reads==8 && !v._hal.forced;
 }
-static_assert(boundaries(),"deadband requires a positive anchor, negative or invalid samples clear it");
+static_assert(boundaries(),"deadband permits exact full SOC or charge anchor, negative or invalid samples clear both states");
 static_assert(integration(),"single cached gauge sample drives static supply bolt and actual charging animation separately");
 '''
         with tempfile.TemporaryDirectory() as directory:

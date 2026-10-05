@@ -635,7 +635,7 @@ void CodexMicroView::modeEvent(lv_event_t* e) {
 void CodexMicroView::refreshBattery(uint32_t now) {
     const auto telemetry = GetHAL().batteryTelemetry(false);
     _batteryReadTick = now; _batterySeen = true; _batteryValid = telemetry.valid;
-    _chargeSupply.update(telemetry.valid, telemetry.currentMa);
+    _chargeSupply.update(telemetry.valid, telemetry.currentMa, telemetry.reportedSoc);
     _batteryCharging = telemetry.valid && telemetry.currentMa > 3;
     const bool critical = GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical;
     _externalPowerReady = MosaicoOta::manualInstallPowerSafe(telemetry, tud_mounted(), critical);

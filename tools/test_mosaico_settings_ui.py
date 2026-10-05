@@ -128,11 +128,11 @@ constexpr bool profiles() {
  v._now=124;v.refreshDisplaySettings();if(v._activity!=123 || v._hal.calls!=1)return false;
  v._usb=true;v.bank.config.chargeBrightness=95;++v.bank.revision;v.refreshDisplaySettings();
  if(v._hal.brightness!=80 || v._activity!=123 || v._chargeProfile)return false; // USB is not charge-profile evidence.
- v._chargeSupply.update(true,4);v.refreshDisplaySettings();
+ v._chargeSupply.update(true,4,99);v.refreshDisplaySettings();
  if(v._hal.brightness!=95 || v._activity!=124 || !v._chargeProfile)return false;
  v._now=125;v.refreshDisplaySettings();if(v._activity!=124)return false;
- v._usb=false;v._chargeSupply.update(true,0);v.refreshDisplaySettings();if(v._activity!=124 || !v._chargeProfile)return false;
- v._chargeSupply.update(true,-4);v.bank.config.batteryBrightness=35;++v.bank.revision;v.refreshDisplaySettings();
+ v._usb=false;v._chargeSupply.update(true,0,100);v.refreshDisplaySettings();if(v._activity!=124 || !v._chargeProfile)return false;
+ v._chargeSupply.update(true,-4,100);v.bank.config.batteryBrightness=35;++v.bank.revision;v.refreshDisplaySettings();
  if(v._hal.brightness!=35 || v._activity!=125 || v._chargeProfile)return false;
  v._locked=true;v.bank.config.lockBrightness=0;++v.bank.revision;v.refreshDisplaySettings();
  if(v._hal.brightness!=0)return false;

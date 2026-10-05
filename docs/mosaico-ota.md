@@ -506,3 +506,23 @@ identification in that situation requires additional input evidence. To verify
 this fix, start while actual charging is observable, leave the external5V source
 connected through full charge, then unplug and confirm the battery profile returns.
 No charger controls, fuel-gauge configuration or GPIO circuitry were modified.
+
+## 0.10.2 OTA page stay-awake and full-zero UI policy
+
+The OTA page never follows configured idle timeout, including CHECK/idle, offer,
+DOWNLOAD, verification, UPGRADE/ready, REBOOT/ready, completed and failed states.
+Local pending/busy and authoritative backend queues/busy also inhibit locking,
+so a temporarily stale UI snapshot cannot open an idle-lock window. This blocks
+lock-triggered radio suspension; it does not claim to fix unrelated network loss.
+Exiting OTA starts a fresh normal-page idle period. Battery usage increases while
+this page stays open. Existing OTA power/health/signature/slot gates are unchanged.
+
+At the user's explicit request,0.10.2 replaces0.10.1's cold-full limitation with a
+simple UI-only heuristic: exactly100% SOC and current within -3..+3mA selects the
+external-supply profile without needing a prior positive-current sample. If that
+sample was the only basis,99% clears it. Positive charging current still establishes
+a RAM anchor that can hold neutral-current full/taper samples; negative current
+below-3mA or invalid telemetry clears both states. No USB signal, manual button,
+load probe or persisted supply flag is used. Static lightning remains visible
+for the supply hint, while battery charging animation still needs positive current.
+This is accepted inference, not a measured5V input, and never relaxes OTA safety.
