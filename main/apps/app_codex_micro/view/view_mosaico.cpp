@@ -205,6 +205,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     _qualityIcon = createIcon(detail, Icon::Unknown, 28, Gray); place(_qualityIcon, 12, 76);
     _qualityValue = createText(detail, 370, 36, 4); place(_qualityValue, 52, 68);
     initOta();
+    initSettings();
     _lockPanel = lv_obj_create(_root); panel(_lockPanel, 0, 0, 480, 480, 0);
     _lockClock = createText(_lockPanel, 240, 64, 8, Orange); place(_lockClock, 120, 64);
     setText(_lockClock, "--:--", Orange);
@@ -224,7 +225,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_style_radius(_rotationCurtain, 0, 0);
     lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
-    bool widgetsReady = _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _qualityIcon && _qualityValue && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    bool widgetsReady = _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _qualityIcon && _qualityValue && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
         widgetsReady = widgetsReady && _cardBadges[i] && _cardValues[i] && _secondValues[i] && _creditIcons[i];
@@ -233,8 +234,110 @@ void CodexMicroView::init(lv_obj_t* parent) {
     if (!widgetsReady) { lv_obj_delete(_root); _root = nullptr; if (_rotationCurtain) lv_obj_delete(_rotationCurtain); _rotationCurtain = nullptr; return; }
     _activity = lv_tick_get(); _motionEpoch = _activity; _refresh = _activity; refreshQuota(GetHAL().millis()); refreshHistory();
     refreshClock(_activity, true);
+    refreshDisplaySettings();
     if (!GetHAL().isDisplayOrientationHealthy()) { _rotationFault = true; cancelOrientation(); }
     GetHAL().setMotionIdle(_rotationFault);
+}
+// Settings reuse LVGL's input/render loop; callbacks only enqueue RAM changes.
+void CodexMicroView::initSettings() {
+    _settingsPage = lv_obj_create(_root); panel(_settingsPage, 20, 64, 440, 402, 0);
+    lv_obj_add_flag(_settingsPage, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
+    static const char* names[] = {"CHG SEC", "BAT SEC", "CHG %", "BAT %", "LOCK %", "SHIFT"};
+    for (size_t row = 0; row < 6; ++row) {
+        const int y = static_cast<int>(row) * 62;
+        auto* name = label(_settingsPage, 4, y + 16, 164, names[row], &lv_font_montserrat_16);
+        lv_obj_set_height(name, 24);
+        _settingsValues[row] = label(_settingsPage, 174, y + 14, 110, "", &lv_font_montserrat_20);
+        lv_obj_set_height(_settingsValues[row], 28);
+        lv_obj_set_style_text_align(_settingsValues[row], LV_TEXT_ALIGN_CENTER, 0);
+        for (size_t side = 0; side < 2; ++side) {
+            auto* button = lv_button_create(_settingsPage);
+            panel(button, 300 + static_cast<int>(side) * 70, y, 60, 54);
+            auto* text = label(button, 0, 15, 60, row == 5 ? (side ? "ON" : "OFF") : (side ? "+" : "-"), &lv_font_montserrat_20);
+            lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_remove_flag(text, LV_OBJ_FLAG_CLICKABLE);
+            auto& hit = _settingsHits[row * 2 + side]; hit = {this, row * 2 + side};
+            lv_obj_add_event_cb(button, settingsEvent, LV_EVENT_CLICKED, &hit);
+            lv_obj_add_flag(button, LV_OBJ_FLAG_EVENT_BUBBLE);
+        }
+    }
+    _settingsStatus = createIcon(_settingsPage, Icon::Check, 24, Green); place(_settingsStatus, 208, 374);
+    renderSettings();
+}
+void CodexMicroView::renderSettings() {
+    const auto& c = _displaySettings.config;
+    const uint32_t values[] = {c.chargeTimeoutSeconds, c.batteryTimeoutSeconds, c.chargeBrightness, c.batteryBrightness, c.lockBrightness};
+    for (size_t row = 0; row < 5; ++row) {
+        char text[16];
+        if (row == 0 && !values[row]) std::snprintf(text, sizeof(text), "NEVER");
+        else std::snprintf(text, sizeof(text), "%lu", static_cast<unsigned long>(values[row]));
+        lv_label_set_text(_settingsValues[row], text);
+    }
+    lv_label_set_text(_settingsValues[5], c.burnIn ? "ON" : "OFF");
+    const bool error = _settingsRequestFailed || _displaySettings.error;
+    const bool pending = _displaySettings.pending;
+    setIcon(_settingsStatus, error ? Icon::Unknown : pending ? Icon::Hourglass : Icon::Check,
+            error ? Orange : pending ? Gold : _displaySettings.savedRevision == _displaySettings.revision ? Green : Gray);
+}
+void CodexMicroView::settingsEvent(lv_event_t* event) {
+    auto* hit = static_cast<Hit*>(lv_event_get_user_data(event));
+    if (!hit || !hit->owner) return;
+    auto* self = hit->owner;
+    if (self->_rotationFault || self->_locked || self->_suppressed || self->_swipeConsumed || self->_slideTo ||
+        self->_rotationPhase != RotationPhase::Idle || self->otaBusy() || self->_page != Page::Settings) return;
+    auto config = self->_displaySettings.config;
+    const size_t row = hit->index / 2;
+    const bool up = hit->index % 2;
+    if (row < 2) {
+        static constexpr uint32_t charge[] = {15, 30, 60, 120, 300, 600, 0};
+        static constexpr uint32_t battery[] = {15, 30, 45, 60};
+        auto& value = row ? config.batteryTimeoutSeconds : config.chargeTimeoutSeconds;
+        const auto* options = row ? battery : charge;
+        const size_t count = row ? 4 : 7;
+        size_t index = 0; while (index + 1 < count && options[index] != value) ++index;
+        value = options[(index + (up ? 1 : count - 1)) % count];
+    } else if (row < 5) {
+        auto& value = row == 2 ? config.chargeBrightness : row == 3 ? config.batteryBrightness : config.lockBrightness;
+        const int low = row == 4 ? 0 : 10;
+        const int next = up ? (value / 5 + 1) * 5 : value ? ((value - 1) / 5) * 5 : 0;
+        value = static_cast<uint8_t>(std::clamp(next, low, 100));
+    } else config.burnIn = up;
+    self->_settingsRequestFailed = !MosaicoDisplay::request(config);
+    self->_activity = lv_tick_get();
+    self->refreshDisplaySettings(); // Accepted RAM config applies immediately, persistence is worker-owned.
+    self->renderSettings();
+}
+void CodexMicroView::refreshDisplaySettings() {
+    MosaicoDisplay::Snapshot next{};
+    if (MosaicoDisplay::snapshot(next)) {
+        next.config = MosaicoDisplay::sanitize(next.config);
+        if (next.config.burnIn != _displaySettings.config.burnIn) _shiftPending = true;
+        const bool statusChanged = next.revision != _displaySettings.revision || next.savedRevision != _displaySettings.savedRevision ||
+            next.pending != _displaySettings.pending || next.error != _displaySettings.error;
+        _displaySettings = next;
+        if (statusChanged && _settingsPage) renderSettings();
+    }
+    const bool chargeProfile = tud_mounted() || _positiveCurrent;
+    if (!_profileSeen || chargeProfile != _chargeProfile) {
+        _profileSeen = true; _chargeProfile = chargeProfile; _activity = lv_tick_get();
+    }
+    const auto& c = _displaySettings.config;
+    _brightness = _chargeProfile ? c.chargeBrightness : c.batteryBrightness;
+    const int target = _locked ? c.lockBrightness : _brightness;
+    if (!_rotationFault && target != _appliedBrightness) {
+        GetHAL().setBackLightBrightness(target, false); _appliedBrightness = target;
+    }
+}
+void CodexMicroView::applyBurnInShift(bool touching) {
+    if (!_shiftPending || touching || _touchTracking || _slideTo || _rotationPhase != RotationPhase::Idle ||
+        _rotationFault || _suppressed || otaBusy()) return;
+    // Bounded two-pixel scan, including the centre; no new timer or touch offsets.
+    static constexpr int offsets[9][2] = {{0, 0}, {2, 0}, {2, 2}, {0, 2}, {-2, 2}, {-2, 0}, {-2, -2}, {0, -2}, {2, -2}};
+    if (_displaySettings.config.burnIn) {
+        _shiftIndex = (_shiftIndex + 1) % 9;
+        lv_obj_set_pos(_root, offsets[_shiftIndex][0], offsets[_shiftIndex][1]);
+    } else { _shiftIndex = 0; lv_obj_set_pos(_root, 0, 0); }
+    _shiftPending = false;
 }
 // All OTA widgets are children of this 440x402 panel; the shared status bar survives.
 void CodexMicroView::initOta() {
@@ -529,6 +632,7 @@ void CodexMicroView::modeEvent(lv_event_t* e) {
 void CodexMicroView::refreshBattery(uint32_t now) {
     const auto telemetry = GetHAL().batteryTelemetry(false);
     _batteryReadTick = now; _batterySeen = true; _batteryValid = telemetry.valid;
+    _positiveCurrent = telemetry.valid && telemetry.currentMa > 3;
     _batteryCharging = telemetry.valid && telemetry.currentMa > 3 && GetHAL().isBatteryCharging();
     const bool critical = GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical;
     _externalPowerReady = MosaicoOta::manualInstallPowerSafe(telemetry, tud_mounted(), critical);
@@ -923,7 +1027,7 @@ bool CodexMicroView::showHistory(bool hourly) {
 }
 bool CodexMicroView::setPageForDebug(Page page) {
     if (_rotationFault) return false;
-    if (!ready() || page == Page::Agent || (page != Page::Command && page != Page::History && page != Page::OTA)) return false;
+    if (!ready() || page == Page::Agent || (page != Page::Command && page != Page::History && page != Page::OTA && page != Page::Settings)) return false;
     if (otaBusy() && page != Page::OTA) return false;
     cancelOrientation();
     cancelPageSlide();
@@ -934,18 +1038,20 @@ bool CodexMicroView::setPageForDebug(Page page) {
         renderOta();
     }
     if (page == Page::OTA) lv_obj_remove_flag(_otaPage, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaPage, LV_OBJ_FLAG_HIDDEN);
+    if (page == Page::Settings) { renderSettings(); lv_obj_remove_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN); }
+    else lv_obj_add_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN);
     if (page != Page::Command) stopAnimations();
     _page = page; _activity = lv_tick_get();
     if (page == Page::Command) { lv_obj_remove_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); }
     else if (page == Page::History) { refreshHistory(); lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN); }
-    if (page == Page::OTA) { lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN); }
+    if (page == Page::OTA || page == Page::Settings) { lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN); }
     if (page == Page::Command && _quota->truncated) lv_obj_remove_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN);
     if (page == Page::Command && _clockMinute >= 0 && !_quota->truncated) lv_obj_remove_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
     return true;
 }
 lv_obj_t* CodexMicroView::pagePanel(Page page) const {
-    return page == Page::Command ? _quotaPage : page == Page::History ? _historyPage : _otaPage;
+    return page == Page::Command ? _quotaPage : page == Page::History ? _historyPage : page == Page::Settings ? _settingsPage : _otaPage;
 }
 void CodexMicroView::cancelPageSlide() {
     lv_anim_delete(this, slideExec);
@@ -972,10 +1078,10 @@ void CodexMicroView::slideCompleted(lv_anim_t* anim) {
 }
 void CodexMicroView::navigatePage(int direction) {
     if (_rotationFault || _suppressed || _locked || !ready() || otaBusy() || _slideTo || _rotationPhase != RotationPhase::Idle) return;
-    const Page pages[] = {Page::Command, Page::History, Page::OTA};
-    const int index = _page == Page::Command ? 0 : _page == Page::History ? 1 : 2;
+    const Page pages[] = {Page::Command, Page::History, Page::OTA, Page::Settings};
+    const int index = _page == Page::Command ? 0 : _page == Page::History ? 1 : _page == Page::OTA ? 2 : 3;
     auto* from = pagePanel(_page);
-    if (!setPageForDebug(pages[(index + (direction > 0 ? 1 : 2)) % 3])) return;
+    if (!setPageForDebug(pages[(index + (direction > 0 ? 1 : 3)) % 4])) return;
     _slideFrom = from; _slideTo = pagePanel(_page); _slideDirection = direction > 0 ? 1 : -1;
     lv_obj_remove_flag(_slideFrom, LV_OBJ_FLAG_HIDDEN);
     // Executed by LVGL's existing timer under its single port mutex; no screen/snapshot allocations.
@@ -1004,7 +1110,11 @@ void CodexMicroView::wakeDisplay() {
     GetHAL().setMotionIdle(_suppressed || otaBusy()); refreshClock(lv_tick_get(), true);
     if (_overlay) lv_obj_add_flag(_overlay, LV_OBJ_FLAG_HIDDEN);
     if (_lockPanel) lv_obj_add_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN);
-    GetHAL().setBackLightBrightness(_brightness, false);
+    refreshQuota(GetHAL().millis());
+    if (_page == Page::History) refreshHistory();
+    refreshDisplaySettings();
+    GetHAL().setBackLightBrightness(_brightness, false); _appliedBrightness = _brightness;
+    lv_obj_invalidate(_root);
     if (_page == Page::OTA) renderOta(); // Apply snapshots cached while locked without changing pages.
     if (_otaPending) { _otaPending = false; setPageForDebug(Page::OTA); }
 }
@@ -1022,7 +1132,8 @@ void CodexMicroView::lockDisplay() {
     refreshClock(lv_tick_get(), true);
     lv_obj_invalidate(_lockPanel); // Also redraw an unchanged minute on lock entry.
     refreshQuota(GetHAL().millis()); ++_lockRefreshCount; _refresh = lv_tick_get();
-    GetHAL().setBackLightBrightness(8, false);
+    GetHAL().setBackLightBrightness(_displaySettings.config.lockBrightness, false);
+    _appliedBrightness = _displaySettings.config.lockBrightness;
 }
 bool CodexMicroView::lockForDebug() { if (!ready()) return false; lockDisplay(); return _locked; }
 void CodexMicroView::update(const CodexMicroState&) {
@@ -1036,12 +1147,15 @@ void CodexMicroView::update(const CodexMicroState&) {
         touching = touching || lv_indev_get_state(input) == LV_INDEV_STATE_PRESSED;
     interacting = interacting || touching || _slideTo || _rotationPhase != RotationPhase::Idle;
     updateOrientation(touching);
+    refreshDisplaySettings();
     if (!_locked) refreshClock(tick);
     // Rendering/page callbacks can record activity after the entry tick.
     tick = lv_tick_get();
     if (!_locked && interacting) _activity = tick;
     const uint32_t idleElapsed = tick - _activity;
-    if (!_locked && !interacting && idleElapsed >= 60000U && idleElapsed < 0x80000000U) lockDisplay();
+    const uint32_t timeoutSeconds = _chargeProfile ? _displaySettings.config.chargeTimeoutSeconds :
+        std::min<uint32_t>(60, _displaySettings.config.batteryTimeoutSeconds);
+    if (!_locked && !interacting && timeoutSeconds && idleElapsed >= timeoutSeconds * 1000U && idleElapsed < 0x80000000U) lockDisplay();
     // Revision checks are local memory only; no touch or UI path performs HTTP.
     // lockDisplay records a fresh refresh timestamp; never compare it to an older tick.
     tick = lv_tick_get();
@@ -1050,13 +1164,13 @@ void CodexMicroView::update(const CodexMicroState&) {
         _refresh = tick; refreshQuota(GetHAL().millis());
         if (!_locked) refreshHistory();
         if (_locked) ++_lockRefreshCount;
-        static constexpr int offsets[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
-        const auto& shift = offsets[(tick / 60000) % 4]; lv_obj_set_pos(_root, shift[0], shift[1]);
+        _shiftPending = true;
     } else if (!_locked) {
         if (_quotaRevision != QuotaMonitorRevision()) refreshQuota(GetHAL().millis());
         if (_page == Page::History) refreshHistory();
     }
     if (!_locked && GetHAL().millis() - _batteryReadTick >= 5000) refreshBattery(GetHAL().millis());
+    applyBurnInShift(touching);
     updateAnimations(tick);
 }
 }

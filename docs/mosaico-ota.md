@@ -455,3 +455,36 @@ future timestamps, while preserving real one-minute expiry and uint32 rollover.
 A source-extracted constexpr regression covers the callback advancing time by3ms,
 60000ms expiry, future timestamps and rollover; the old implementation fails the
 same harness. Hardware CHECK acceptance remains a separate user observation.
+
+## 0.10.0 display settings and pixel shift
+
+Function and swipe now cycle Quota -> History -> OTA -> Settings. Settings expose
+charge/battery idle timers, charge/battery awake brightness, locked brightness,
+and pixel-shift enable. Charge time:15/30/60/120/300/600seconds or NEVER; battery:
+15/30/45/60seconds, never above60. Awake brightness10..100%; lock0..100%, with
+Function-only wake retained even at zero. Defaults preserve60seconds/80%/8%.
+USB enumeration or valid positive charging current selects the charge profile,
+including a fully charged USB-connected unit. This is not a measured VBUS signal.
+
+Edits apply immediately in RAM and queue a coalesced save to a dedicated versioned
+CRC-checked blob in `mosaico_disp`. No GUI callback writes flash. Green check means
+saved, grey check means defaults loaded, gold hourglass queued, orange question
+mark a save error. Owner serialization defers saves during OTA/boot health/staged
+selection. A settings-only fallback supports no-network operation; provisioning
+Wi-Fi later performs a checked writer handoff before any network-owner OTA writes.
+Only one writer survives. Failed saves retain current RAM and previous storage;
+new user edits retry, without a background busy loop. `debug display-settings`
+is read-only and reports config, revision, save status and error.
+
+Pixel shifting follows the bounded-small-offset/monotonic cadence principles in
+[AOSP BurnInProtectionHelper](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/master/services/core/java/com/android/server/policy/BurnInProtectionHelper.java)
+and the pixel-shift concept described by
+[Samsung](https://www.samsung.com/sg/support/displays/how-to-solve-image-shift-issues-on-your-samsung-oled-monitor/).
+This implementation moves native LVGL content over nine offsets within ±2px at
+the existing minute cadence, without a new timer. Shift is deferred during contact,
+page/rotation animation, input suppression and OTA activity. Disabling recentres.
+Touch hit regions move with LVGL objects, not an extra coordinate transform.
+Tests check visible-widget margins for every offset. This reduces static-pattern
+risk; it cannot guarantee no burn-in or repair an already worn panel, and is not
+OLED compensation/pixel-cleaning. Hardware settings, persistence, brightness
+profiles, zero-brightness wake and rotated shifted touch need user acceptance.

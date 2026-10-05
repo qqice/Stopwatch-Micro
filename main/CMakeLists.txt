@@ -17,7 +17,8 @@ if(MOSAICO_BOARD)
         list(APPEND APP_SRCS "ota/panic_capture.cpp" "hal/mosaico/vfs_internal_ops.c")
     endif()
     list(APPEND APP_SRCS "apps/app_codex_micro/view/view_mosaico.cpp"
-        "apps/app_codex_micro/view/dot_widgets.cpp" "host/quota_monitor.cpp" "ota/mosaico_ota.cpp")
+        "apps/app_codex_micro/view/dot_widgets.cpp" "host/quota_monitor.cpp" "ota/mosaico_ota.cpp"
+        "host/mosaico_display_settings.cpp")
     set(PLATFORM_SRCS "hal/hal.cpp" "hal/mosaico/hal_mosaico.cpp" "hal/mosaico/bt_config.c" "hal/mosaico/usb_console.c"
         "hal/ble/codex_micro_ble.cpp" "hal/ble/hid_gatt_compat.cpp"
         "hal/utils/button/Button_Class.cpp" "hal/utils/settings/settings.cc")

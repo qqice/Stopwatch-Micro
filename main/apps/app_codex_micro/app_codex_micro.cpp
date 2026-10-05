@@ -202,6 +202,8 @@ const char* AppCodexMicro::debugScreenName()
 #ifdef MOSAICO_BOARD
         case view::CodexMicroView::Page::OTA:
             return "ota";
+        case view::CodexMicroView::Page::Settings:
+            return "settings";
 #endif
         case view::CodexMicroView::Page::Agent:
             return "agent";

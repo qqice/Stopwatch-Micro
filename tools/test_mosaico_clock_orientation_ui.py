@@ -97,7 +97,7 @@ class ClockOrientationUiTests(unittest.TestCase):
         update=CPP.split('void CodexMicroView::update(',1)[1]
         self.assertIn('if (!_locked) refreshClock(tick)',update)
         self.assertIn('if (refreshElapsed >= 60000U && refreshElapsed < 0x80000000U)',update)
-        self.assertIn('static constexpr int offsets[4][2]',update)
+        self.assertIn('_shiftPending = true',update)
         self.assertNotIn('lv_timer_create',CPP)
 
     def test_actual_update_idle_and_refresh_timestamp_boundaries(self):
@@ -110,8 +110,12 @@ class ClockOrientationUiTests(unittest.TestCase):
         # Actual production recaptures/unsigned elapsed guards, not a Python model.
         harness=r"""
 #include <cstdint>
+#include <algorithm>
 struct View {
  uint32_t now=100, _activity=100, _refresh=100;
+ bool _chargeProfile=false;
+ struct Config { uint32_t chargeTimeoutSeconds=60,batteryTimeoutSeconds=60; };
+ struct Display { Config config; } _displaySettings;
  bool _locked=false; int lockCount=0, refreshCount=0;
  constexpr uint32_t lv_tick_get() { return now; }
  constexpr void lockDisplay() { ++lockCount; _locked=true; now+=3; _refresh=lv_tick_get(); }
@@ -142,7 +146,18 @@ constexpr bool cases() {
  if(!wrap._locked || wrap.refreshCount || wrap.lockCount!=1)return false;
  View wrapRefresh;wrapRefresh._locked=true;wrapRefresh._refresh=0xfffffff0U;
  wrapRefresh.now=wrapRefresh._refresh+60000U;wrapRefresh.compare();
- return wrapRefresh.refreshCount==1;
+ if(wrapRefresh.refreshCount!=1)return false;
+ View never;never._chargeProfile=true;never._displaySettings.config.chargeTimeoutSeconds=0;
+ never.now=600100;never.compare();if(never._locked)return false;
+ View longCharge;longCharge._chargeProfile=true;longCharge._displaySettings.config.chargeTimeoutSeconds=600;
+ longCharge.now=600099;longCharge.compare();if(longCharge._locked)return false;
+ longCharge.now=600100;longCharge.compare();if(!longCharge._locked)return false;
+ View shortBattery;shortBattery._displaySettings.config.batteryTimeoutSeconds=45;
+ shortBattery.now=45099;shortBattery.compare();if(shortBattery._locked)return false;
+ shortBattery.now=45100;shortBattery.compare();if(!shortBattery._locked)return false;
+ View corruptBattery;corruptBattery._displaySettings.config.batteryTimeoutSeconds=600;
+ corruptBattery.now=60100;corruptBattery.compare();
+ return corruptBattery._locked;
 }
 static_assert(cases(), "fresh callback ticks cannot cause instant lock or duplicate refresh; real minute and wrap work");
 """

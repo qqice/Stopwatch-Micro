@@ -6,6 +6,7 @@
 #include "serial_debug.h"
 #ifdef MOSAICO_BOARD
 #include <host/system_clock.h>
+#include <host/mosaico_display_settings.h>
 #endif
 
 #include <apps/app_codex_micro/app_codex_micro.h>
@@ -218,6 +219,16 @@ void SerialDebug::handleLine(char* line)
 
     char* command = ::strtok_r(nullptr, " \t", &save);
 #ifdef MOSAICO_BOARD
+    if (command && std::strcmp(command, "display-settings") == 0) {
+        const auto s = MosaicoDisplay::snapshot();
+        char details[256];
+        std::snprintf(details, sizeof(details),
+            "charge_timeout=%lu battery_timeout=%lu charge_brightness=%u battery_brightness=%u lock_brightness=%u burn_in=%d revision=%lu saved_revision=%lu pending=%d error=%ld",
+            static_cast<unsigned long>(s.config.chargeTimeoutSeconds), static_cast<unsigned long>(s.config.batteryTimeoutSeconds),
+            s.config.chargeBrightness, s.config.batteryBrightness, s.config.lockBrightness, s.config.burnIn,
+            static_cast<unsigned long>(s.revision), static_cast<unsigned long>(s.savedRevision), s.pending, static_cast<long>(s.error));
+        result("display-settings", s.error ? "FAIL" : "PASS", details); return;
+    }
     if (command && std::strcmp(command, "ota-status") == 0) {
         char details[384]{};
         MosaicoOta::status(details, sizeof(details));

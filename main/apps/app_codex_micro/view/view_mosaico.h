@@ -8,11 +8,12 @@
 #include <host/token_history.h>
 #include <lvgl.h>
 #include <ota/mosaico_ota.h>
+#include <host/mosaico_display_settings.h>
 
 namespace view {
 class CodexMicroView {
 public:
-    enum class Page : uint8_t { Command = 0, History, Agent, OTA };
+    enum class Page : uint8_t { Command = 0, History, Agent, OTA, Settings };
     ~CodexMicroView();
     void init(lv_obj_t* parent);
     void update(const CodexMicroState& state);
@@ -43,6 +44,11 @@ private:
     bool otaHasDownloadOffer() const;
     void renderOtaAction();
     void initOta();
+    void initSettings();
+    void renderSettings();
+    void refreshDisplaySettings();
+    void applyBurnInShift(bool touching);
+    static void settingsEvent(lv_event_t* event);
     lv_obj_t* pagePanel(Page page) const;
     void navigatePage(int direction);
     void cancelPageSlide();
@@ -87,6 +93,16 @@ private:
     std::array<lv_obj_t*, 2> _otaSlots{}, _otaSlotNames{}, _otaSlotNumbers{}, _otaChips{};
     lv_obj_t* _otaButton = nullptr;
     lv_obj_t* _otaButtonLabel = nullptr;
+    lv_obj_t* _settingsPage = nullptr;
+    lv_obj_t* _settingsStatus = nullptr;
+    std::array<lv_obj_t*, 6> _settingsValues{};
+    std::array<Hit, 12> _settingsHits{};
+    MosaicoDisplay::Snapshot _displaySettings{};
+    bool _settingsRequestFailed = false;
+    bool _chargeProfile = false, _profileSeen = false, _positiveCurrent = false;
+    bool _shiftPending = false;
+    unsigned _shiftIndex = 0;
+    int _appliedBrightness = -1;
     lv_obj_t* _root = nullptr;
     lv_obj_t* _quotaPage = nullptr;
     lv_obj_t* _historyPage = nullptr;

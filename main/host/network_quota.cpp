@@ -4,6 +4,7 @@
 #include "token_history.h"
 #ifdef MOSAICO_BOARD
 #include "quota_monitor.h"
+#include "mosaico_display_settings.h"
 #include "system_clock.h"
 #include <ota/panic_capture.h>
 #include <hal/hal.h>
@@ -86,6 +87,10 @@ void NetworkQuota::refreshWhileLocked()
 }
 void NetworkQuota::wait(uint32_t milliseconds)
 {
+#ifdef MOSAICO_BOARD
+    MosaicoDisplay::Snapshot display;
+    if (MosaicoDisplay::snapshot(display) && display.pending && milliseconds > 250) milliseconds = 250;
+#endif
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(milliseconds));
 }
 void NetworkQuota::setCpu(uint32_t mhz)
@@ -229,17 +234,30 @@ void NetworkQuota::begin()
 #endif
     GetTailnetQuota().load();
     nvs_handle_t handle;
-    if (nvs_open("quota_net", NVS_READONLY, &handle) != ESP_OK) return;
+    if (nvs_open("quota_net", NVS_READONLY, &handle) != ESP_OK) {
+#ifdef MOSAICO_BOARD
+        MosaicoDisplay::startFallbackOwner();
+#endif
+        return;
+    }
     size_t a = sizeof(_ssid), b = sizeof(_password), c = sizeof(_url), d = sizeof(_token);
     bool ok = nvs_get_str(handle, "ssid", _ssid, &a) == ESP_OK &&
               nvs_get_str(handle, "password", _password, &b) == ESP_OK &&
               nvs_get_str(handle, "url", _url, &c) == ESP_OK && nvs_get_str(handle, "token", _token, &d) == ESP_OK;
     nvs_close(handle);
-    if (!ok || !_ssid[0] || !_url[0] || !_token[0]) return;
+    if (!ok || !_ssid[0] || !_url[0] || !_token[0]) {
+#ifdef MOSAICO_BOARD
+        MosaicoDisplay::startFallbackOwner();
+#endif
+        return;
+    }
     _configured = true;
     if (xTaskCreate(task, "quota_wifi", 8192, this, 2, &_task_handle) != pdPASS) {
         _configured = false;
         ++_failures;
+#ifdef MOSAICO_BOARD
+        MosaicoDisplay::startFallbackOwner();
+#endif
     }
 }
 void NetworkQuota::task(void* arg)
@@ -252,15 +270,24 @@ void NetworkQuota::run()
     setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
     if (esp_netif_init() != ESP_OK) {
         ++_failures;
+#ifdef MOSAICO_BOARD
+        MosaicoDisplay::startFallbackOwner();
+#endif
         return;
     }
     esp_err_t err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ++_failures;
+#ifdef MOSAICO_BOARD
+        MosaicoDisplay::startFallbackOwner();
+#endif
         return;
     }
     if (!esp_netif_create_default_wifi_sta()) {
         ++_failures;
+#ifdef MOSAICO_BOARD
+        MosaicoDisplay::startFallbackOwner();
+#endif
         return;
     }
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
@@ -284,6 +311,9 @@ void NetworkQuota::run()
         esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK || esp_wifi_set_config(WIFI_IF_STA, &config) != ESP_OK ||
         esp_wifi_start() != ESP_OK) {
         ++_failures;
+#ifdef MOSAICO_BOARD
+        MosaicoDisplay::startFallbackOwner();
+#endif
         return;
     }
     recordWifiRunning(true);
@@ -299,11 +329,13 @@ void NetworkQuota::run()
     constexpr int64_t RefreshIntervalUs = 300LL * 1000000;
     constexpr int64_t UpdateWindowUs    = 90LL * 1000000;
 #ifdef MOSAICO_BOARD
+    const bool ownsDisplaySettings = MosaicoDisplay::claimNetworkOwner();
     int64_t nextGaugeCheckUs = 0;
 
 #endif
     while (true) {
 #ifdef MOSAICO_BOARD
+        if (ownsDisplaySettings) MosaicoDisplay::service();
         MosaicoOta::processLocalRequests(); // INSTALL/REBOOT do not require network readiness.
         if (MosaicoOta::busy() && MosaicoOta::requestAgeMs() > 120000)
             MosaicoOta::fail("network_ready_timeout");

@@ -22,6 +22,7 @@ using namespace smooth_ui_toolkit;
 
 #ifdef MOSAICO_BOARD
 #include <ota/mosaico_ota.h>
+#include <host/mosaico_display_settings.h>
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
 #include <ota/panic_capture.h>
 #endif
@@ -43,6 +44,9 @@ extern "C" void app_main(void)
 
     // HAL init
     GetHAL().init();
+#ifdef MOSAICO_BOARD
+    MosaicoDisplay::init();
+#endif
     BootTraceStage(6);
 
     // The standalone Mosaico monitor has no remote-control or pairing surface.
