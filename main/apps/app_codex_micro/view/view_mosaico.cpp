@@ -1027,7 +1027,7 @@ void CodexMicroView::lockDisplay() {
 bool CodexMicroView::lockForDebug() { if (!ready()) return false; lockDisplay(); return _locked; }
 void CodexMicroView::update(const CodexMicroState&) {
     if (!ready()) return;
-    const uint32_t tick = lv_tick_get();
+    uint32_t tick = lv_tick_get();
     const bool networkReady = GetNetworkQuota().connected() && (!GetTailnetQuota().enabled() || GetTailnetQuota().ready());
     if (networkReady != _otaNetworkReady) { _otaNetworkReady = networkReady; if (!_locked) renderOtaAction(); }
     refreshOta(tick);
@@ -1037,10 +1037,16 @@ void CodexMicroView::update(const CodexMicroState&) {
     interacting = interacting || touching || _slideTo || _rotationPhase != RotationPhase::Idle;
     updateOrientation(touching);
     if (!_locked) refreshClock(tick);
+    // Rendering/page callbacks can record activity after the entry tick.
+    tick = lv_tick_get();
     if (!_locked && interacting) _activity = tick;
-    if (!_locked && !interacting && tick - _activity >= 60000) lockDisplay();
+    const uint32_t idleElapsed = tick - _activity;
+    if (!_locked && !interacting && idleElapsed >= 60000U && idleElapsed < 0x80000000U) lockDisplay();
     // Revision checks are local memory only; no touch or UI path performs HTTP.
-    if (tick - _refresh >= 60000) {
+    // lockDisplay records a fresh refresh timestamp; never compare it to an older tick.
+    tick = lv_tick_get();
+    const uint32_t refreshElapsed = tick - _refresh;
+    if (refreshElapsed >= 60000U && refreshElapsed < 0x80000000U) {
         _refresh = tick; refreshQuota(GetHAL().millis());
         if (!_locked) refreshHistory();
         if (_locked) ++_lockRefreshCount;

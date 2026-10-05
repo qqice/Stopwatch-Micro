@@ -442,3 +442,16 @@ post-test inspection; USB enumeration/current is not a physical VBUS measurement
 time/date. OTA meter motion is left-to-right; quota/reset meter waves are unchanged.
 The lock overlay is not raised above the clock panel; entry forces repaint. The
 original invisible-clock cause has not been physically established.
+
+## 0.9.4 CHECK/idle timing correction
+The CHECK response can expose an update offer. `refreshOta()` changes pages and
+records a fresh activity time, after `update()` already captured its entry tick.
+Unsigned subtraction with that older tick can falsely report a huge idle duration
+and lock immediately. The same ordering can spuriously trigger the refresh path
+when `lockDisplay()` records its own newer timestamp.
+
+Both comparisons now recapture LVGL time after the relevant callbacks and reject
+future timestamps, while preserving real one-minute expiry and uint32 rollover.
+A source-extracted constexpr regression covers the callback advancing time by3ms,
+60000ms expiry, future timestamps and rollover; the old implementation fails the
+same harness. Hardware CHECK acceptance remains a separate user observation.

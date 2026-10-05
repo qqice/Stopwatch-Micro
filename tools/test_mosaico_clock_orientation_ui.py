@@ -96,9 +96,74 @@ class ClockOrientationUiTests(unittest.TestCase):
         self.assertNotIn('lv_obj_remove_flag(_overlay',lock)
         update=CPP.split('void CodexMicroView::update(',1)[1]
         self.assertIn('if (!_locked) refreshClock(tick)',update)
-        self.assertIn('if (tick - _refresh >= 60000)',update)
+        self.assertIn('if (refreshElapsed >= 60000U && refreshElapsed < 0x80000000U)',update)
         self.assertIn('static constexpr int offsets[4][2]',update)
         self.assertNotIn('lv_timer_create',CPP)
+
+    def test_actual_update_idle_and_refresh_timestamp_boundaries(self):
+        compilers=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+        if not compilers:self.skipTest('embedded compiler unavailable')
+        update=CPP.split('void CodexMicroView::update(',1)[1]
+        start=update.index('    tick = lv_tick_get();')
+        end=update.index('        _refresh = tick;',start)
+        timing=update[start:end]
+        # Actual production recaptures/unsigned elapsed guards, not a Python model.
+        harness=r"""
+#include <cstdint>
+struct View {
+ uint32_t now=100, _activity=100, _refresh=100;
+ bool _locked=false; int lockCount=0, refreshCount=0;
+ constexpr uint32_t lv_tick_get() { return now; }
+ constexpr void lockDisplay() { ++lockCount; _locked=true; now+=3; _refresh=lv_tick_get(); }
+ constexpr void setPageForDebug() { _activity=lv_tick_get(); }
+ constexpr void refreshOta() { now+=3; setPageForDebug(); }
+ constexpr void compare(bool interacting=false) {
+  uint32_t tick=now-3; // The stale entry tick captured before callbacks.
+"""+timing+r"""
+   ++refreshCount;
+  }
+ }
+};
+constexpr bool cases() {
+ View offer; offer.refreshOta();offer.compare();
+ if(offer._locked || offer.refreshCount || offer._activity!=103)return false;
+ View future;future._activity=104;future._refresh=104;future.compare();
+ if(future._locked || future.refreshCount)return false;
+ View idle;idle.now=60100;idle.compare();
+ if(!idle._locked || idle.lockCount!=1 || idle.refreshCount || idle._refresh!=60103)return false;
+ View before;before.now=60099;before.compare();
+ if(before._locked || before.refreshCount)return false;
+ View refresh;refresh._locked=true;refresh.now=60100;refresh.compare();
+ if(refresh.refreshCount!=1)return false;
+ View wrap;wrap._activity=0xfffffff0U;wrap._refresh=wrap._activity;
+ wrap.now=wrap._activity+59999U;wrap.compare();
+ if(wrap._locked || wrap.refreshCount)return false;
+ wrap.now=wrap._activity+60000U;wrap.compare();
+ if(!wrap._locked || wrap.refreshCount || wrap.lockCount!=1)return false;
+ View wrapRefresh;wrapRefresh._locked=true;wrapRefresh._refresh=0xfffffff0U;
+ wrapRefresh.now=wrapRefresh._refresh+60000U;wrapRefresh.compare();
+ return wrapRefresh.refreshCount==1;
+}
+static_assert(cases(), "fresh callback ticks cannot cause instant lock or duplicate refresh; real minute and wrap work");
+"""
+        # Source call-chain evidence for CHECK -> Available -> newer activity.
+        ota=CPP.split('void CodexMicroView::refreshOta(',1)[1].split('void CodexMicroView::renderOta()',1)[0]
+        self.assertIn('_otaPending = false; setPageForDebug(Page::OTA)',ota)
+        page=CPP.split('bool CodexMicroView::setPageForDebug(',1)[1].split('lv_obj_t* CodexMicroView::pagePanel',1)[0]
+        self.assertIn('_activity = lv_tick_get()',page)
+        self.assertLess(update.index('refreshOta(tick)'),start)
+        with tempfile.TemporaryDirectory() as directory:
+            source=Path(directory)/'idle.cpp';source.write_text(harness,encoding='utf8')
+            result=subprocess.run([str(compilers[-1]),'-std=c++17','-fsyntax-only',str(source)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            # Reintroduce the old stale-tick subtraction into the same harness:
+            # the new regression must reject it, proving the test detects the bug.
+            old=harness.replace('tick = lv_tick_get();','')
+            old=old.replace(' && idleElapsed < 0x80000000U','').replace(' && refreshElapsed < 0x80000000U','')
+            source.write_text(old,encoding='utf8')
+            regression=subprocess.run([str(compilers[-1]),'-std=c++17','-fsyntax-only',str(source)],capture_output=True,text=True)
+            self.assertNotEqual(regression.returncode,0)
+            self.assertIn('static assertion failed',regression.stderr)
 
     def test_orientation_cleanup_and_low_memory_boundary(self):
         for name in ('~CodexMicroView','setPageForDebug','lockDisplay','setInputSuppressed'):
