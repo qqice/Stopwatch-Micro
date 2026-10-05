@@ -6,6 +6,7 @@
 #include <host/network_quota.h>
 #include <host/tailscale_transport.h>
 #include <host/system_clock.h>
+#include <ota/mosaico_ota_power.h>
 #include <tusb.h>
 #include <algorithm>
 #include <cstdio>
@@ -148,8 +149,8 @@ void CodexMicroView::init(lv_obj_t* parent) {
         lv_obj_add_flag(_cards[i], LV_OBJ_FLAG_HIDDEN);
     }
     _clockIcon = createIcon(_root, Icon::Clock, 26, Purple); place(_clockIcon, 20, 430);
-    _footer = createText(_root, 170, 34, 4, Purple); place(_footer, 44, 426);
-    _clockDate = createText(_root, 170, 34, 4, Purple); place(_clockDate, 270, 426);
+    _footer = createText(_root, 180, 48, 6, Purple); place(_footer, 48, 426);
+    _clockDate = createText(_root, 180, 48, 6, Purple); place(_clockDate, 270, 426);
     lv_obj_add_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
     _bucketCount = label(_root, 290, 440, 170, "", &lv_font_montserrat_14);
     lv_obj_set_style_text_align(_bucketCount, LV_TEXT_ALIGN_RIGHT, 0);
@@ -205,8 +206,8 @@ void CodexMicroView::init(lv_obj_t* parent) {
     _qualityValue = createText(detail, 370, 36, 4); place(_qualityValue, 52, 68);
     initOta();
     _lockPanel = lv_obj_create(_root); panel(_lockPanel, 0, 0, 480, 480, 0);
-    _lockClock = createText(_lockPanel, 170, 34, 4, Purple); place(_lockClock, 155, 76);
-    setText(_lockClock, "--:--", Purple);
+    _lockClock = createText(_lockPanel, 240, 64, 8, Orange); place(_lockClock, 120, 64);
+    setText(_lockClock, "--:--", Orange);
     _lockQuota = createText(_lockPanel, 400, 90, 12); place(_lockQuota, 40, 148);
     _lockResetIcon = createIcon(_lockPanel, Icon::Hourglass, 28, Cyan);
     _lockResetTime = createText(_lockPanel, 340, 48, 6, Cyan);
@@ -298,7 +299,7 @@ bool CodexMicroView::otaActionEnabled() const {
     case S::Idle: case S::Complete: case S::Failed: case S::Available: return _otaNetworkReady;
     case S::ReadyInstall: return _ota.imageVerified && _externalPowerReady;
     case S::WaitingPower: return _ota.imageVerified ? _externalPowerReady : _otaNetworkReady;
-    case S::ReadyReboot: return true;
+    case S::ReadyReboot: return _externalPowerReady;
     default: return false;
     }
 }
@@ -529,9 +530,8 @@ void CodexMicroView::refreshBattery(uint32_t now) {
     const auto telemetry = GetHAL().batteryTelemetry(false);
     _batteryReadTick = now; _batterySeen = true; _batteryValid = telemetry.valid;
     _batteryCharging = telemetry.valid && telemetry.currentMa > 3 && GetHAL().isBatteryCharging();
-    _externalPowerReady = telemetry.valid && telemetry.voltageMv >= 3900 &&
-        ((telemetry.operationStatus >> 1) & 3) == 3 && !(telemetry.operationStatus & 0x0401) &&
-        (tud_mounted() || telemetry.currentMa > 3);
+    const bool critical = GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical;
+    _externalPowerReady = MosaicoOta::manualInstallPowerSafe(telemetry, tud_mounted(), critical);
     if (!_locked) renderOtaAction();
     char text[80];
     if (telemetry.valid) std::snprintf(text, sizeof(text), "%u%%%s", static_cast<unsigned>(telemetry.reportedSoc), telemetry.nominalConfigured ? "*" : "?");
@@ -565,7 +565,7 @@ void CodexMicroView::refreshClock(uint32_t tick, bool force) {
         std::strftime(date, sizeof(date), "%m-%d", &local);
     } else _clockMinute = -1;
     setText(_footer, clock, Purple);
-    setText(_lockClock, clock, Purple);
+    setText(_lockClock, clock, Orange);
     setIcon(_clockIcon, Icon::Clock, Purple);
     setText(_clockDate, date, Purple);
     if (_clockMinute >= 0 && _page == Page::Command && !_quota->truncated) lv_obj_remove_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
@@ -675,7 +675,9 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
     using S = MosaicoOta::UiStage;
     const bool otaMotion = _page == Page::OTA && (_ota.stage == S::Downloading || _ota.stage == S::Verifying || _ota.stage == S::Installing || _ota.stage == S::BootChecking);
     setMotion(_otaStageIcon, meterPhase, _page == Page::OTA && _ota.stage == S::Installing);
-    setMotion(_otaMeter, meterPhase, otaMotion && !lv_obj_has_flag(_otaMeter, LV_OBJ_FLAG_HIDDEN));
+    // Reverse only OTA phase: quota/reset meters retain their right-to-left wave.
+    const uint16_t otaMeterPhase = static_cast<uint16_t>((360U - meterPhase) % 360U);
+    setMotion(_otaMeter, otaMeterPhase, otaMotion && !lv_obj_has_flag(_otaMeter, LV_OBJ_FLAG_HIDDEN));
     setMotion(_otaArrow, meterPhase, otaMotion && !lv_obj_has_flag(_otaArrow, LV_OBJ_FLAG_HIDDEN));
     for (auto* obj : {_otaChips[0], _otaChips[1]}) setMotion(obj, meterPhase, otaMotion);
     setMotion(_batteryIcon, phase, _batteryValid && _batteryCharging);
@@ -1015,8 +1017,10 @@ void CodexMicroView::lockDisplay() {
     _locked = true; GetNetworkQuota().setLocked(true);
     GetHAL().setTouchIdlePolling(true);
     lv_obj_remove_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_lockPanel);
-    lv_obj_remove_flag(_overlay, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_overlay);
+    // Function-only wake needs no overlay above custom DRAW_MAIN clock dots.
+    lv_obj_add_flag(_overlay, LV_OBJ_FLAG_HIDDEN);
     refreshClock(lv_tick_get(), true);
+    lv_obj_invalidate(_lockPanel); // Also redraw an unchanged minute on lock entry.
     refreshQuota(GetHAL().millis()); ++_lockRefreshCount; _refresh = lv_tick_get();
     GetHAL().setBackLightBrightness(8, false);
 }

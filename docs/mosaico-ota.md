@@ -419,3 +419,26 @@ Time, date and clock icon now share purple dot styling; HH:MM and MM-DD have the
 same pitch and widget size. The lower-right mAh caption is removed, not the SOC,
 charging indication or gauge telemetry. Lock shows HH:MM above the quota, using
 the existing minute refresh and pixel offset; no new timer or wake cadence.
+
+## Battery-powered manual OTA (0.9.2 policy bootstrap)
+
+0.9.1 can download on battery but requires external power to install. For the
+first test: download0.9.2 on battery, then connect USB for its INSTALL/REBOOT.
+Only after0.9.2 boots successfully can a later signed release test battery-only
+INSTALL and REBOOT. Do not mistake a battery download for full battery OTA.
+
+Manual battery installation/reboot requires fresh, valid, sealed gauge evidence,
+no configuration/critical state, voltage >=3900mV, nominal/valid capacity, SOC
+60..100%, and remaining capacity >=60% of full capacity. These are conservative
+software gates, not measured energy guarantees. Use a charged battery for tests.
+Download's existing3500mV periodic gate remains; automatic and USB bypass modes
+retain their external-power policy. The final gate is checked again before the
+journal/boot selector and before restart. A failed reboot power check retains the
+verified selected image instead of erasing it. An optional `attempt_power` journal
+records installation voltage, SOC, external-power heuristic and manual mode for
+post-test inspection; USB enumeration/current is not a physical VBUS measurement.
+
+0.9.2 UI uses larger native dots for clocks, orange lock time and purple awake
+time/date. OTA meter motion is left-to-right; quota/reset meter waves are unchanged.
+The lock overlay is not raised above the clock panel; entry forces repaint. The
+original invisible-clock cause has not been physically established.

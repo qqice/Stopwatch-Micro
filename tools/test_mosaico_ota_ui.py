@@ -8,6 +8,51 @@ HDR = (V / 'view_mosaico.h').read_text(encoding='utf8')
 DOT = (V / 'dot_widgets.cpp').read_text(encoding='utf8')
 
 class OtaUiTests(unittest.TestCase):
+    def test_ota_wave_is_left_to_right_only(self):
+        motion=CPP.split('void CodexMicroView::updateAnimations(',1)[1].split('void CodexMicroView::refreshQuota(',1)[0]
+        self.assertIn('setMotion(_otaMeter, otaMeterPhase,',motion)
+        self.assertIn('setMotion(_windowBars[i][j], meterPhase,',motion)
+        self.assertIn('setMotion(_resetBars[i][j], meterPhase,',motion)
+        expression=re.search(r'const uint16_t otaMeterPhase = static_cast<uint16_t>\(([^;]+)\);',motion)[1]
+        compilers=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+        if not compilers:self.skipTest('embedded compiler unavailable')
+        header=(V/'dot_patterns.h').as_posix()
+        source='#include "'+header+'"\nusing namespace mosaico_dot::detail;\n'
+        source+='constexpr uint16_t otaPhase(uint16_t meterPhase) { return '+expression+'; }\n'
+        source+=r"""
+constexpr bool direction() {
+ for(int bp: {1, 1500, 5000, 10000}) {
+  auto g=meterLayout(440,28,3);
+  int filled=filledDots(g.columns*g.rows,bp);
+  int cols=filled ? (filled+g.rows-1)/g.rows:0;
+  if(cols<2)continue;
+  int circumference=cols*256;
+  for(int phase=0;phase<359;++phase) {
+   int before=wavePosition(cols,otaPhase(phase)), after=wavePosition(cols,otaPhase(phase+1));
+   int advance=(after-before+circumference)%circumference;
+   if(advance>circumference/2)return false;
+   for(int x=0;x<g.columns;++x) {
+    int mix=waveMix(g,bp,true,otaPhase(phase),true,x);
+    if(mix && x*g.rows>=filled)return false;
+   }
+  }
+ }
+ return wavePosition(4,90)<wavePosition(4,0); // Unchanged default right-to-left.
+}
+static_assert(direction(), "OTA reverse phase moves right and never paints unfilled capacity");
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'wave.cpp';path.write_text(source)
+            result=subprocess.run([str(compilers[-1]),'-std=c++17','-fsyntax-only',str(path)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    def test_cached_install_gate_matches_backend(self):
+        battery=CPP.split('void CodexMicroView::refreshBattery(',1)[1].split('void CodexMicroView::refreshClock(',1)[0]
+        self.assertIn('batteryTelemetry(false)',battery)
+        self.assertIn('gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical',battery)
+        self.assertIn('MosaicoOta::manualInstallPowerSafe(telemetry, tud_mounted(), critical)',battery)
+        self.assertNotIn('batteryTelemetry(true)',battery)
+
     def test_panels_and_touch_regions(self):
         self.assertIn('panel(_otaPage, 20, 64, 440, 402, 0)', CPP)
         self.assertIn('panel(_otaButton, 0, 334, 440, 64', CPP)
@@ -139,7 +184,7 @@ class OtaUiTests(unittest.TestCase):
         gate=CPP.split('bool CodexMicroView::otaActionEnabled()',1)[1].split('void CodexMicroView::renderOtaAction()',1)[0]
         self.assertIn('return _otaNetworkReady;',gate)
         self.assertIn('return _ota.imageVerified && _externalPowerReady;',gate)
-        self.assertIn('case S::ReadyReboot: return true;',gate)
+        self.assertIn('case S::ReadyReboot: return _externalPowerReady;',gate)
         stages={'Idle':('CHECK','network'),'Complete':('CHECK','network'),'Failed':('CHECK','network'),
                 'Checking':('CHECK','disabled'),'Available':('DOWNLOAD','network'),
                 'Downloading':('DOWNLOAD','disabled'),'Verifying':('DOWNLOAD','disabled'),
@@ -177,15 +222,15 @@ class OtaUiTests(unittest.TestCase):
             after = True
             self.assertTrue(after)
             self.assertEqual(before, not image)
-    def test_cached_external_power_gate(self):
-        battery=CPP.split('void CodexMicroView::refreshBattery(',1)[1].split('void CodexMicroView::stopAnimations()',1)[0]
-        for predicate in ('telemetry.valid','telemetry.voltageMv >= 3900','((telemetry.operationStatus >> 1) & 3) == 3',
-                          '!(telemetry.operationStatus & 0x0401)','(tud_mounted() || telemetry.currentMa > 3)'):
-            self.assertIn(predicate,battery)
-        for valid,mv,status,usb,current,expected in ((True,3900,6,True,0,True),(True,3900,6,False,4,True),
-                (True,3899,6,True,0,False),(True,4000,6,False,3,False),(False,4000,6,True,100,False),
-                (True,4000,0x407,True,100,False)):
-            self.assertEqual(valid and mv>=3900 and (status>>1)&3==3 and not status&0x401 and (usb or current>3),expected)
+    def test_cached_gate_controls_install_and_reboot_actions(self):
+        action=CPP.split('bool CodexMicroView::otaActionEnabled()',1)[1].split('void CodexMicroView::renderOtaAction()',1)[0]
+        self.assertIn('case S::ReadyReboot: return _externalPowerReady;',action)
+        self.assertIn('case S::ReadyInstall: return _ota.imageVerified && _externalPowerReady;',action)
+        render=CPP.split('void CodexMicroView::renderOtaAction()',1)[1].split('void CodexMicroView::otaBorderEvent',1)[0]
+        self.assertIn('case S::ReadyReboot: case S::BootChecking: action = "REBOOT";',render)
+        self.assertIn('setText(_otaButtonLabel, action, enabled ? Orange : 0x68451C)',render)
+        self.assertNotIn('LV_OBJ_FLAG_HIDDEN',render)
+        self.assertIn('_otaNetworkReady',action)
         self.assertIn('GetNetworkQuota().connected() && (!GetTailnetQuota().enabled() || GetTailnetQuota().ready())',CPP)
     def test_swipe_navigation_guards_and_cleanup(self):
         touch=CPP.split('void CodexMicroView::touchEvent(',1)[1].split('void CodexMicroView::cellEvent(',1)[0]

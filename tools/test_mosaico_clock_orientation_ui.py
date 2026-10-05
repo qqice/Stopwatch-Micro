@@ -27,7 +27,9 @@ class ClockOrientationUiTests(unittest.TestCase):
             # Leave one-pixel clearance for all four burn-in offsets.
             self.assertGreaterEqual(min(a),1);self.assertLessEqual(a[0]+a[2],479);self.assertLessEqual(a[1]+a[3],479)
         self.assertEqual((w,h,p),(dw,dh,dp))
-        self.assertEqual(p,4)
+        self.assertEqual(p,6)
+        self.assertGreaterEqual(w//29,p);self.assertGreaterEqual(h//7,p)
+        self.assertEqual(max(1,p*7//10),4)
         pitch=min(p,w//29,h//7);diameter=max(1,pitch*7//10)
         drawn_w=28*pitch+diameter;drawn_h=6*pitch+diameter
         left=x+(w-drawn_w)//2;top=y+(h-drawn_h)//2
@@ -66,10 +68,12 @@ class ClockOrientationUiTests(unittest.TestCase):
         self.assertNotIn('lv_timer_create',CPP)
 
     def test_lock_clock_minute_refresh_and_geometry(self):
-        m=re.search(r'_lockClock = createText\(_lockPanel, (\d+), (\d+), (\d+), Purple\); place\(_lockClock, (\d+), (\d+)\)',CPP)
+        m=re.search(r'_lockClock = createText\(_lockPanel, (\d+), (\d+), (\d+), Orange\); place\(_lockClock, (\d+), (\d+)\)',CPP)
         self.assertIsNotNone(m)
         w,h,p,x,y=map(int,m.groups())
-        self.assertEqual((w,h,p),(170,34,4))
+        self.assertEqual((w,h,p),(240,64,8))
+        self.assertGreaterEqual(w//29,p);self.assertGreaterEqual(h//7,p)
+        self.assertEqual(p*7//10,5)
         self.assertEqual(x+w//2,240)
         quota=re.search(r'_lockQuota = createText\(_lockPanel, (\d+), (\d+), (\d+)\); place\(_lockQuota, (\d+), (\d+)\)',CPP)
         qw,qh,qp,qx,qy=map(int,quota.groups())
@@ -82,10 +86,14 @@ class ClockOrientationUiTests(unittest.TestCase):
                 self.assertLessEqual(rx+shiftx+rw,480);self.assertLessEqual(ry+shifty+rh,480)
         clock=CPP.split('void CodexMicroView::refreshClock(',1)[1].split('void CodexMicroView::cancelOrientation()',1)[0]
         self.assertIn('if (!force && minute == _clockMinute) return;',clock)
-        self.assertIn('setText(_lockClock, clock, Purple)',clock)
+        self.assertIn('setText(_lockClock, clock, Orange)',clock)
         self.assertIn('char clock[6] = "--:--"',clock)
         lock=CPP.split('void CodexMicroView::lockDisplay()',1)[1].split('bool CodexMicroView::lockForDebug()',1)[0]
         self.assertIn('refreshClock(lv_tick_get(), true)',lock)
+        self.assertIn('lv_obj_invalidate(_lockPanel)',lock)
+        self.assertIn('lv_obj_move_foreground(_lockPanel)',lock)
+        self.assertIn('lv_obj_add_flag(_overlay, LV_OBJ_FLAG_HIDDEN)',lock)
+        self.assertNotIn('lv_obj_remove_flag(_overlay',lock)
         update=CPP.split('void CodexMicroView::update(',1)[1]
         self.assertIn('if (!_locked) refreshClock(tick)',update)
         self.assertIn('if (tick - _refresh >= 60000)',update)

@@ -1,4 +1,5 @@
 #include "mosaico_ota.h"
+#include "mosaico_ota_power.h"
 #include "ota_public_key.h"
 #include <hal/hal.h>
 #include <cJSON.h>
@@ -72,13 +73,31 @@ bool downloadPowerSafe()
     const auto b = GetHAL().batteryTelemetry(true);
     return b.valid && ((b.operationStatus >> 1) & 3) == 3 && !(b.operationStatus & 0x0401) && b.voltageMv >= 3500;
 }
-bool automaticPowerSafe()
+struct InstallPowerEvidence { char text[96]{}; };
+void captureInstallPower(InstallPowerEvidence* evidence, const Hal::BatteryTelemetry& b, bool external, bool manual)
+{
+    if (evidence) std::snprintf(evidence->text, sizeof(evidence->text),
+        "mv:%u,soc:%u,external:%d,manual:%d", static_cast<unsigned>(b.voltageMv),
+        static_cast<unsigned>(b.reportedSoc), external, manual);
+}
+bool automaticPowerSafe(InstallPowerEvidence* evidence = nullptr)
 {
     if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical) return false;
     const auto b = GetHAL().batteryTelemetry(true);
+    const bool external = tud_mounted() || b.currentMa > 3;
+    captureInstallPower(evidence, b, external, false);
     // Conservative charging/enumerated USB policy, NOT a measured VBUS or SOC claim.
     return b.valid && ((b.operationStatus >> 1) & 3) == 3 && !(b.operationStatus & 0x0401) &&
-        b.voltageMv >= 3900 && (tud_mounted() || b.currentMa > 3);
+        b.voltageMv >= 3900 && external;
+}
+bool installPowerSafe(bool manual, InstallPowerEvidence* evidence = nullptr)
+{
+    if (!manual) return automaticPowerSafe(evidence);
+    const bool critical = GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical;
+    const auto b = GetHAL().batteryTelemetry(true);
+    const bool external = tud_mounted();
+    captureInstallPower(evidence, b, external || b.currentMa > 3, true);
+    return manualInstallPowerSafe(b, external, critical);
 }
 bool exactSlot(const esp_partition_t* p)
 {
@@ -201,7 +220,7 @@ bool readAttempt(char* attempt)
     if (rc == ESP_ERR_NVS_NOT_FOUND) { attempt[0] = 0; return true; }
     return rc == ESP_OK && length == 65 && lowerHex(attempt);
 }
-bool recordAttempt()
+bool recordAttempt(const InstallPowerEvidence& power)
 {
     char attempted[65];
     hashHex(expectedHash, attempted);
@@ -213,7 +232,8 @@ bool recordAttempt()
         nvs_set_str(handle, "candidate_ver", candidateVersion) == ESP_OK &&
         nvs_set_str(handle, "candidate_sig", fingerprint) == ESP_OK &&
         nvs_set_str(handle, "candidate_hash", attempted) == ESP_OK &&
-        nvs_set_i8(handle, "candidate_slot", candidateSlot) == ESP_OK && nvs_commit(handle) == ESP_OK;
+        nvs_set_i8(handle, "candidate_slot", candidateSlot) == ESP_OK &&
+        nvs_set_str(handle, "attempt_power", power.text) == ESP_OK && nvs_commit(handle) == ESP_OK;
     nvs_close(handle);
     return ok;
 }
@@ -501,20 +521,22 @@ bool installVerified()
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !imageReady || selected.load()) return false;
     if ((usbBypass || automaticMode) && esp_timer_get_time() - readySince < 1500000) return false;
-    if (!currentReady() || !automaticPowerSafe()) {
+    const bool manual = !(usbBypass || automaticMode);
+    if (!currentReady() || !installPowerSafe(manual)) {
         active.store(false); installSince = 0;
-        publish(UiStage::WaitingPower, "install_external_power_required"); return false;
+        publish(UiStage::WaitingPower, manual ? "install_power_required" : "install_external_power_required"); return false;
     }
     if (!installSince) {
         installSince = esp_timer_get_time(); publish(UiStage::Installing); return false;
     }
     if (esp_timer_get_time() - installSince < 500000) return false;
     // Fresh power evidence immediately before persistent journal/selector writes.
-    if (!currentReady() || !automaticPowerSafe()) {
+    InstallPowerEvidence power;
+    if (!currentReady() || !installPowerSafe(manual, &power)) {
         active.store(false); installSince = 0;
-        publish(UiStage::WaitingPower, "install_power_lost"); return false;
+        publish(UiStage::WaitingPower, manual ? "install_power_required" : "install_power_lost"); return false;
     }
-    if (!recordAttempt()) return reject("attempt_commit_failed");
+    if (!recordAttempt(power)) return reject("attempt_commit_failed");
     if (esp_ota_set_boot_partition(target) != ESP_OK) return reject("set_boot_partition");
     selected.store(true); publish(UiStage::ReadyReboot);
     std::snprintf(reason, sizeof(reason), "verified_selected");
@@ -556,9 +578,20 @@ bool requestReboot()
     if (!guard.owns_lock() || busy() || ui.stage != UiStage::ReadyReboot || !selected.load()) return false;
     rebootQueued.store(true); return true;
 }
+bool rebootWithFreshPower()
+{
+    if (!installPowerSafe(!(usbBypass || automaticMode))) {
+        active.store(false);
+        // Boot selection is already committed; never erase the retained image
+        // or selector just because power changed while waiting for reboot.
+        publish(UiStage::ReadyReboot, "reboot_power_required");
+        return false;
+    }
+    active.store(true); esp_restart(); return true;
+}
 void processLocalRequests()
 {
-    if (rebootQueued.exchange(false) && selected.load()) { active.store(true); esp_restart(); return; }
+    if (rebootQueued.exchange(false) && selected.load()) { rebootWithFreshPower(); return; }
     if (installQueued.exchange(false)) {
         automaticMode = usbBypass = false; installSince = 0; active.store(true);
     }
@@ -572,7 +605,7 @@ void processLocalRequests()
         }
         if (active.load()) fail("install_stage_timeout");
         if ((usbBypass || automaticMode) && selected.load()) {
-            vTaskDelay(pdMS_TO_TICKS(500)); active.store(true); esp_restart();
+            vTaskDelay(pdMS_TO_TICKS(500)); rebootWithFreshPower();
         }
     }
 }
@@ -608,6 +641,21 @@ void status(char* out, size_t length)
     const unsigned stage = static_cast<unsigned>(statusStage.load());
     std::snprintf(out + used, length - used, " stage=%s image_verified=%d selected=%d",
         stage < sizeof(stages)/sizeof(stages[0]) ? stages[stage] : "unknown", verified.load(), selected.load());
+    // Diagnostic evidence only: old journals remain valid when this key is absent.
+    // Do not read NVS during OTA writes or block behind the network owner.
+    if (busy()) return;
+    std::unique_lock<std::mutex> guard(lock, std::try_to_lock);
+    if (!guard.owns_lock() || busy()) return;
+    char power[96] = "unknown";
+    nvs_handle_t h;
+    if (nvs_open("mosaico_ota", NVS_READONLY, &h) == ESP_OK) {
+        size_t size = sizeof(power);
+        if (nvs_get_str(h, "attempt_power", power, &size) != ESP_OK)
+            std::snprintf(power, sizeof(power), "unknown");
+        nvs_close(h);
+    }
+    const size_t end = std::strlen(out);
+    std::snprintf(out + end, length - end, " attempt_power=%s", power);
 }
 void healthPoll(bool appLoopReady)
 {

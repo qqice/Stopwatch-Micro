@@ -16,12 +16,12 @@ def body(start, end):
 
 class AutomaticOtaSourceTests(unittest.TestCase):
     def test_actual_power_expression_boundaries(self):
-        power = body('bool automaticPowerSafe()', 'bool exactSlot(')
+        power = body('bool automaticPowerSafe(', 'bool installPowerSafe(')
         expression = re.search(r'return (b.valid.*?);', power, re.S)[1]
         expression = ' '.join(expression.replace('&&', 'and').replace('||', 'or').replace('!(', 'not (').split())
         def allowed(valid=True, mv=3900, current=4, mounted=False, operation=6):
             b = types.SimpleNamespace(valid=valid, operationStatus=operation, voltageMv=mv, currentMa=current)
-            return eval(expression, {'__builtins__': {}}, {'b': b, 'tud_mounted': lambda: mounted})
+            return eval(expression, {'__builtins__': {}}, {'b': b, 'external': mounted or current > 3})
         self.assertTrue(allowed())
         self.assertTrue(allowed(current=-10, mounted=True))  # Enumeration policy, not measured VBUS.
         for args in [dict(valid=False), dict(mv=3899, mounted=True), dict(current=3),
@@ -95,7 +95,7 @@ class AutomaticOtaSourceTests(unittest.TestCase):
         self.assertNotIn('esp_ota_set_boot_partition', finish)
         install = body('bool installVerified()', 'bool finish()')
         self.assertIn('readySince < 1500000', install)
-        self.assertLess(install.index('recordAttempt()'), install.index('esp_ota_set_boot_partition('))
+        self.assertLess(install.index('recordAttempt(power)'), install.index('esp_ota_set_boot_partition('))
         self.assertIn('publish(UiStage::Installing)', install)
         self.assertIn('installSince < 500000', install)
         self.assertIn('publish(UiStage::BootChecking)', SOURCE)
@@ -141,7 +141,7 @@ class AutomaticOtaSourceTests(unittest.TestCase):
         self.assertNotRegex(take, r'nvs_set|nvs_commit|esp_ota_begin')
 
     def test_download_battery_guard_and_staged_selection(self):
-        power = body('bool downloadPowerSafe()', 'bool automaticPowerSafe()')
+        power = body('bool downloadPowerSafe()', 'struct InstallPowerEvidence')
         self.assertIn('b.voltageMv >= 3500', power)
         expression = re.search(r'return (b.valid.*?);', power, re.S)[1]
         expression = ' '.join(expression.replace('&&', 'and').replace('!(', 'not (').split())
@@ -157,13 +157,15 @@ class AutomaticOtaSourceTests(unittest.TestCase):
         self.assertIn('active.store(usbBypass || automaticMode)', finish)
         self.assertNotRegex(finish, r'esp_restart|recordAttempt|set_boot_partition')
         install = body('bool installVerified()', 'bool requestCheck()')
-        self.assertEqual(install.count('!automaticPowerSafe()'), 2)
+        self.assertIn('!installPowerSafe(manual)', install)
+        self.assertIn('!installPowerSafe(manual, &power)', install)
+        self.assertIn('const bool manual = !(usbBypass || automaticMode)', install)
         self.assertNotIn('esp_restart', install)
         self.assertIn('publish(UiStage::ReadyReboot)', install)
         self.assertIn('active.store(false)', install)
         for start, end in [('bool requestCheck()', 'bool takeCheckRequest()'),
                            ('bool approveInstall(', 'bool requestReboot()'),
-                           ('bool requestReboot()', 'void processLocalRequests()')]:
+                           ('bool requestReboot()', 'bool rebootWithFreshPower()')]:
             queue = body(start, end)
             self.assertIn('snapshotLock, std::try_to_lock', queue)
             self.assertNotRegex(queue, r'batteryTelemetry|esp_ota_|esp_restart|nvs_|requestJson')
