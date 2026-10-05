@@ -4,7 +4,10 @@
 #include "token_history.h"
 #ifdef MOSAICO_BOARD
 #include "quota_monitor.h"
+#include <ota/panic_capture.h>
 #include <hal/hal.h>
+#include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
 #endif
 #include <memory>
 #include <algorithm>
@@ -260,6 +263,12 @@ void NetworkQuota::run()
         return;
     }
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
+#ifdef MOSAICO_BOARD
+    // Credentials/configuration are owned by the application's NVS namespace.
+    // WIFI_STORAGE_RAM is set only after init and cannot prevent init-time
+    // wifi_nvs_load. Avoid that unused persistent Wi-Fi path entirely.
+    init.nvs_enable = 0;
+#endif
     // Quota traffic is small and infrequent; reserve less scarce DMA SRAM.
     init.static_tx_buf_num = 4;
     init.cache_tx_buf_num  = 8;
@@ -535,13 +544,28 @@ bool NetworkQuota::fetch()
 #ifdef MOSAICO_BOARD
 void NetworkQuota::updateFirmware()
 {
+    struct TraceScope { ~TraceScope() { MosaicoOtaBreadcrumb(0, 0); } } traceScope;
+    MosaicoOtaBreadcrumb(1, 0); // allocation and initial heap probe
+    // Probe only during OTA, not normal/locked operation or every GUI frame.
+    if (!heap_caps_check_integrity_all(true)) { MosaicoOta::fail("heap_before_ota"); return; }
     // Only the network owner runs this path: no parallel quota HTTP, tailnet
     // pause, idle downclock or deferred gauge reload can race the transfer.
     constexpr size_t BodyCapacity = 8192, ChunkCapacity = 4096;
     std::unique_ptr<char[]> body(new (std::nothrow) char[BodyCapacity]);
-    std::unique_ptr<uint8_t[]> chunk(new (std::nothrow) uint8_t[ChunkCapacity]);
+    // Do not route NOR writes through cache-backed PSRAM. SDK fallback copies
+    // external input in 32-byte batches, multiplying cache/bus transitions.
+    // One reusable 4KiB internal chunk bounds SRAM use and gives the flash
+    // driver a directly readable source even while caches are suspended.
+    std::unique_ptr<uint8_t, decltype(&heap_caps_free)> chunk(
+        static_cast<uint8_t*>(heap_caps_malloc(ChunkCapacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        &heap_caps_free);
     if (!body || !chunk) { MosaicoOta::fail("ota_buffer_allocation"); return; }
+    if (!esp_ptr_in_dram(chunk.get()) || !esp_ptr_in_dram(chunk.get() + ChunkCapacity - 1)) {
+        MosaicoOta::fail("ota_buffer_not_internal"); return;
+    }
+    ESP_LOGI("NetworkOTA", "flash source internal=1 capacity=%u", static_cast<unsigned>(ChunkCapacity));
     int used = 0;
+    MosaicoOtaBreadcrumb(2, 0); // manifest HTTP/parse
     if (!requestJson("/v1/ota/manifest", body.get(), BodyCapacity, used)) {
         MosaicoOta::fail("manifest_download"); return;
     }
@@ -555,9 +579,14 @@ void NetworkQuota::updateFirmware()
     const uint32_t size = fieldsOk ? static_cast<uint32_t>(sizeValue->valuedouble) : 0;
     cJSON_Delete(manifest);
     if (!fieldsOk) { MosaicoOta::fail("manifest_metadata"); return; }
+    MosaicoOtaBreadcrumb(3, 0); // validation + inactive-slot erase
     if (!MosaicoOta::beginManifest(body.get())) return;
     const int64_t deadline = esp_timer_get_time() + 600LL * 1000000;
     for (uint32_t offset = 0; offset < size;) {
+        MosaicoOtaBreadcrumb(4, offset); // probe before allocating HTTP/JSON
+        if ((offset % 65536U) == 0 && !heap_caps_check_integrity_all(true)) {
+            MosaicoOta::fail("heap_during_ota"); return;
+        }
         if (esp_timer_get_time() >= deadline) { MosaicoOta::fail("download_timeout"); return; }
         char path[160]{};
         const int n = std::snprintf(path, sizeof(path), "/v1/ota/chunk?sha256=%s&offset=%lu",
@@ -566,6 +595,7 @@ void NetworkQuota::updateFirmware()
             MosaicoOta::fail("chunk_path"); return;
         }
         bool downloaded = false;
+        MosaicoOtaBreadcrumb(5, offset); // chunk HTTP
         // A failed HTTP read never advances offset or writes bytes. Retrying
         // this hash-bound chunk cannot mix releases or duplicate flash writes.
         for (unsigned attempt = 0; attempt < 3 && esp_timer_get_time() < deadline; ++attempt) {
@@ -573,6 +603,7 @@ void NetworkQuota::updateFirmware()
             if (attempt < 2) vTaskDelay(pdMS_TO_TICKS(300U << attempt));
         }
         if (!downloaded) { MosaicoOta::fail("chunk_download"); return; }
+        MosaicoOtaBreadcrumb(6, offset); // JSON allocation / decode / free
         cJSON* root = cJSON_ParseWithLength(body.get(), static_cast<size_t>(used));
         const cJSON* position = root ? cJSON_GetObjectItemCaseSensitive(root, "offset") : nullptr;
         const cJSON* data = root ? cJSON_GetObjectItemCaseSensitive(root, "data") : nullptr;
@@ -585,15 +616,19 @@ void NetworkQuota::updateFirmware()
             count == std::min<uint32_t>(ChunkCapacity, size - offset);
         cJSON_Delete(root);
         if (!ok) { MosaicoOta::fail("chunk_format"); return; }
+        MosaicoOtaBreadcrumb(7, offset); // SDK write + incremental hash
         if (!MosaicoOta::writeChunk(offset, chunk.get(), count)) return;
         offset += static_cast<uint32_t>(count);
         vTaskDelay(pdMS_TO_TICKS(1));
     }
+    MosaicoOtaBreadcrumb(8, size); // final hash/SDK verification
+    if (!heap_caps_check_integrity_all(true)) { MosaicoOta::fail("heap_after_download"); return; }
     if (!MosaicoOta::finishDownload()) return;
     // A truthful verified-image page is visible before boot selection. All
     // delays are in the network owner; LVGL/input remain responsive.
     const int64_t installDeadline = esp_timer_get_time() + 6000000;
     while (MosaicoOta::busy() && esp_timer_get_time() < installDeadline) {
+        MosaicoOtaBreadcrumb(9, size); // candidate journal, selection, restart
         MosaicoOta::installVerified();
         vTaskDelay(pdMS_TO_TICKS(100));
     }

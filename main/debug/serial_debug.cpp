@@ -223,7 +223,7 @@ void SerialDebug::handleLine(char* line)
     }
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
     if (command && std::strcmp(command, "panic") == 0) {
-        char details[256];
+        char details[320];
         const bool saved = MosaicoPanicStatus(details, sizeof(details));
         result("panic", saved ? "PASS" : "SKIP", details);
         return;

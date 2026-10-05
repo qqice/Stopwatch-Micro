@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Trigger signed network OTA via runtime CDC and verify the opposite slot is VALID."""
 import argparse,contextlib,io,time
+from pathlib import Path
 from serial.tools import list_ports
 from serial_debug_test import DebugClient
 
 def fields(result):return dict(p.split('=',1) for p in result.details.split() if '=' in p)
 def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--port',required=True);p.add_argument('--confirm-external-power',action='store_true');p.add_argument('--timeout',type=int,default=900);p.add_argument('--initial-observation-delay',type=int,default=0);p.add_argument('--bypass',action='store_true',help='Use the 0.7+ USB screen-confirmation bypass; safety checks remain enforced')
+ p.add_argument('--log',type=Path,help='Optional local serial evidence file; keep private because runtime logs may contain sensitive data')
  args=p.parse_args()
  if not args.confirm_external_power:raise SystemExit('Confirm USB/external power with --confirm-external-power; not inferred from SOC')
  if not 60<=args.timeout<=1800:raise SystemExit('timeout must be60..1800 seconds')
@@ -63,4 +65,10 @@ def main():
   raise SystemExit('OTA observation timed out; completion NOT accepted')
  finally:
   if client:client.close()
+  if args.log:
+   try:
+    args.log.parent.mkdir(parents=True,exist_ok=True)
+    args.log.write_text(captured.getvalue(),encoding='utf8')
+   except OSError as exc:
+    print('OTA_LOG_SAVE_FAILED '+type(exc).__name__,flush=True)
 if __name__=='__main__':main()

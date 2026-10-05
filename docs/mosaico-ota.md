@@ -274,3 +274,54 @@ tests (one skipped) and seven automatic OTA source tests passed. These do not
 establish on-screen visual quality or physical UPGRADE/LATER touch acceptance;
 those require the user's observation. The network/USB bypass flow is hardware
 verified, and the screen callback/hash binding is covered by source review/tests.
+
+## Network panic isolation and hardening (0.7.3+)
+
+The exact application ELF maps one previous panic to `wifi_nvs_load`. Wi-Fi
+storage was changed to RAM only after init, leaving its default init-time NVS
+path enabled. Mosaico now sets `wifi_init_config_t.nvs_enable=0` before init;
+application-owned credential/configuration NVS is unchanged.
+
+The exact S31 rev0 ROM ELF maps a second panic to `tlsf_malloc`, with a failed
+read in the PSRAM virtual window. Do not subtract an address constant to map
+ROM PC values into the application ELF. This identifies an allocator/heap-read
+failure, not the original source of corrupted/unavailable metadata. Symbols came
+from [Espressif ROM ELF releases](https://github.com/espressif/esp-rom-elfs/releases/tag/20260528),
+not an SDK patch or toolchain replacement.
+
+OTA uses one reusable4KiB INTERNAL|8BIT source buffer, with backend checks on
+both ends before `esp_ota_write`. Allocation failure is reported before erase.
+The SDK already supports external-input32-byte bouncing, so external buffering
+alone was not proved to be the cause. Internal buffering also reduces repeated
+flash bus/cache transitions. Heap integrity probes run only at OTA start, each
+64KiB and before final verification. Existing rollback/signature/hash/power
+checks are unchanged. A44-byte RTC panic record now also stores numeric phase
+and byte offset; its writer/wrapper are IRAM and context scalars are DRAM.
+
+Phase codes:0 idle;1 allocation/probe;2 manifest HTTP/parse;3 validation/erase;
+4 periodic probe;5 chunk HTTP;6 JSON/decode/free;7 write/hash;8 final verification;
+9 candidate journal/selection/restart. No payload/credentials are retained.
+`mosaico_ota_update.py --log <private-path>` optionally saves serial evidence;
+runtime logs may be sensitive, so do not publish that file.
+
+The definitive origin of the old TLSF failure remains unproved. Acceptance must
+record real alternate-slot transfers and absence of new heap/panic failures,
+not claim that source checks alone establish a universal fix.
+
+### Hardware regression, 2026-10-05
+
+The0.7.3 bootstrap was written only to inactive ota0 and8KiB selection metadata,
+with current ota1 preserved and all complementary flash MD5 unchanged. Exact
+selection metadata was backed up; no loader/table/NAND or credential writes.
+Then two complete signed network upgrades passed without ROM/BOOT commands:
+0.7.3 ota0 ->0.7.4 ota1 ->0.7.5 ota0. Both downloaded2,652,896 bytes and became
+VALID after health checks. Logs confirmed internal4KiB source allocation; no
+heap-check failure or new saved panic was observed. Final gauge remains sealed,
+Design/FCC65mAh, normal quota fresh; boot46/47 were normal software resets.
+
+Final S31 builds/image validation,142 host tests (one skipped), seven automatic
+source tests and S3 syntax regressions passed. IRAM breadcrumb/wrapper, DRAM
+scalars and44-byte RTC placement were checked in the linked binary. These two
+successful transfers establish this bounded regression result, not long-term
+reliability or the unique original cause of the TLSF fault. UI touch/animation
+quality requires physical observation separately from these OTA checks.

@@ -5,6 +5,7 @@
 #include <esp_ota_ops.h>
 #include <esp_app_desc.h>
 #include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <esp_image_format.h>
@@ -438,6 +439,8 @@ bool writeChunk(uint32_t offset, const uint8_t* data, size_t length)
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !writing || !data || !length || offset != received || received > expectedSize ||
         length > expectedSize - received) return reject("chunk_offset_or_length");
+    if (length > 4096 || !esp_ptr_in_dram(data) || !esp_ptr_in_dram(data + length - 1))
+        return reject("chunk_not_internal");
     if (esp_ota_write(handle, data, length) != ESP_OK) return reject("ota_write");
     if (psa_hash_update(&hash, data, length)) return reject("hash_update");
     received += length;

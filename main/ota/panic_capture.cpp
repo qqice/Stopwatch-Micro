@@ -11,14 +11,24 @@
 #include <cstdio>
 
 namespace {
-constexpr uint32_t CaptureMagic = 0x504e4331;
+constexpr uint32_t CaptureMagic = 0x504e4332;
 struct PanicCapture {
     uint32_t magic;
     int32_t core;
     uint32_t cause, addr, pc, ra, sp, mcause, mtval;
+    uint32_t otaPhase, otaOffset;
 };
 // No initializer: the linker/startup must leave this RTC NOLOAD record intact.
 RTC_NOINIT_ATTR volatile PanicCapture capture;
+DRAM_ATTR volatile uint32_t otaPhase = 0, otaOffset = 0;
+}
+
+void IRAM_ATTR MosaicoOtaBreadcrumb(uint32_t phase, uint32_t offset)
+{
+    otaPhase = 0;
+    otaOffset = offset;
+    __asm__ volatile("fence w,w" ::: "memory");
+    otaPhase = phase;
 }
 
 extern "C" void __real_esp_panic_handler(panic_info_t* info);
@@ -34,6 +44,8 @@ extern "C" void IRAM_ATTR __wrap_esp_panic_handler(panic_info_t* info)
     capture.sp = frame ? frame->sp : 0;
     capture.mcause = frame ? frame->mcause : 0;
     capture.mtval = frame ? frame->mtval : 0;
+    capture.otaPhase = otaPhase;
+    capture.otaOffset = otaOffset;
     __asm__ volatile("fence w,w" ::: "memory");
     capture.magic = CaptureMagic;
     __real_esp_panic_handler(info); // Preserve the SDK's complete panic handling.
@@ -46,19 +58,20 @@ bool MosaicoPanicStatus(char* out, size_t length)
         std::snprintf(out, length, "reason=no_saved_panic");
         return false;
     }
-    std::snprintf(out, length, "valid=1 arch=riscv current_reset=%d core=%ld cause=%lu addr=0x%08lx pc=0x%08lx ra=0x%08lx sp=0x%08lx mcause=0x%08lx mtval=0x%08lx",
+    std::snprintf(out, length, "valid=1 arch=riscv current_reset=%d core=%ld cause=%lu addr=0x%08lx pc=0x%08lx ra=0x%08lx sp=0x%08lx mcause=0x%08lx mtval=0x%08lx ota_phase=%lu ota_offset=%lu",
         static_cast<int>(esp_reset_reason()), static_cast<long>(capture.core),
         static_cast<unsigned long>(capture.cause), static_cast<unsigned long>(capture.addr),
         static_cast<unsigned long>(capture.pc), static_cast<unsigned long>(capture.ra),
         static_cast<unsigned long>(capture.sp), static_cast<unsigned long>(capture.mcause),
-        static_cast<unsigned long>(capture.mtval));
+        static_cast<unsigned long>(capture.mtval), static_cast<unsigned long>(capture.otaPhase),
+        static_cast<unsigned long>(capture.otaOffset));
     return true;
 }
 
 void MosaicoPanicReport()
 {
     if (esp_reset_reason() == ESP_RST_PANIC) {
-        char details[256];
+        char details[320];
         if (MosaicoPanicStatus(details, sizeof(details))) {
             std::printf("DBG PANIC_RTC %s\r\n", details);
             std::fflush(stdout);
