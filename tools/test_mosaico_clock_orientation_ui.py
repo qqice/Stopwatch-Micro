@@ -14,34 +14,39 @@ class ClockOrientationUiTests(unittest.TestCase):
         def values(pattern):
             m=re.search(pattern,CPP);self.assertIsNotNone(m,pattern)
             return tuple(map(int,m.groups()))
-        w,h,p=values(r'_footer = createText\(_root, (\d+), (\d+), (\d+)\)')
+        w,h,p=values(r'_footer = createText\(_root, (\d+), (\d+), (\d+), Purple\)')
         x,y=values(r'place\(_footer, (\d+), (\d+)\)')
         ix,iy=values(r'place\(_clockIcon, (\d+), (\d+)\)')
-        size,=values(r'createIcon\(_root, Icon::Clock, (\d+), Gray\)')
-        dx,dy,dw=values(r'_clockDate = label\(_root, (\d+), (\d+), (\d+)')
-        dh,=values(r'lv_obj_set_height\(_clockDate, (\d+)\)')
-        bx,by,bw=values(r'_batteryCapacity = label\(_root, (\d+), (\d+), (\d+)')
-        bh,=values(r'lv_obj_set_height\(_batteryCapacity, (\d+)\)')
+        size,=values(r'createIcon\(_root, Icon::Clock, (\d+), Purple\)')
+        dw,dh,dp=values(r'_clockDate = createText\(_root, (\d+), (\d+), (\d+), Purple\)')
+        dx,dy=values(r'place\(_clockDate, (\d+), (\d+)\)')
         qy,qh=values(r'panel\(_quotaPage, 20, (\d+), 440, (\d+), 0\)')
         tx,ty,tw=values(r'_bucketCount = label\(_root, (\d+), (\d+), (\d+)')
-        regions=((x,y,w,h),(ix,iy,size,size),(dx,dy,dw,dh),(bx,by,bw,bh))
+        regions=((x,y,w,h),(ix,iy,size,size),(dx,dy,dw,dh))
         for a in regions:
-            self.assertGreaterEqual(min(a),0);self.assertLessEqual(a[0]+a[2],480);self.assertLessEqual(a[1]+a[3],480)
-        # Icon slightly touches the clock object's unused left margin; only the
-        # actual source-glyph dot extent is relevant to drawn-text collision.
+            # Leave one-pixel clearance for all four burn-in offsets.
+            self.assertGreaterEqual(min(a),1);self.assertLessEqual(a[0]+a[2],479);self.assertLessEqual(a[1]+a[3],479)
+        self.assertEqual((w,h,p),(dw,dh,dp))
+        self.assertEqual(p,4)
         pitch=min(p,w//29,h//7);diameter=max(1,pitch*7//10)
         drawn_w=28*pitch+diameter;drawn_h=6*pitch+diameter
         left=x+(w-drawn_w)//2;top=y+(h-drawn_h)//2
         self.assertLessEqual(ix+size,left)
-        self.assertLessEqual(left+drawn_w,dx)
-        self.assertLessEqual(dx+dw,bx)
-        self.assertLessEqual(top+drawn_h,480)
+        self.assertLessEqual(x+w,dx)
+        self.assertLessEqual(top+drawn_h,479)
         self.assertLessEqual(qy+qh,y)
-        self.assertLessEqual(x+w,tx);self.assertLessEqual(tx+tw,480)
-        # Truncated count overlaps date/capacity; both are intentionally hidden.
-        self.assertLess(tx,dx+dw);self.assertLess(tx,bx+bw)
+        self.assertLessEqual(x+w,tx);self.assertLessEqual(tx+tw,479)
+        # Truncated count replaces the date, never the HH:MM clock.
+        self.assertLess(tx,dx+dw)
         self.assertIn('_clockMinute >= 0 && !_quota->truncated',CPP)
-        self.assertIn('_capacityKnown && _page == Page::Command && !_quota->truncated',CPP)
+        self.assertNotIn('_batteryCapacity',CPP+HDR)
+        self.assertNotIn('mAh',CPP)
+        self.assertIn('setIcon(_batteryIcon, Icon::Battery',CPP)
+        self.assertIn('lv_label_set_text(_battery, text)',CPP)
+        self.assertIn('lv_obj_remove_flag(_boltIcon',CPP)
+        self.assertIn('setText(_footer, clock, Purple)',CPP)
+        self.assertIn('setText(_clockDate, date, Purple)',CPP)
+        self.assertIn('setIcon(_clockIcon, Icon::Clock, Purple)',CPP)
         motion=CPP.split('void CodexMicroView::updateAnimations(',1)[1].split('void CodexMicroView::refreshQuota(',1)[0]
         self.assertNotIn('< 370',motion);self.assertIn('lv_obj_get_height(_quotaPage)',motion)
         glyphs={key:tuple(map(int,rows.split(','))) for key,rows in re.findall(r"\{'(.)',\{([\d,]+)\}\}",DOT)}
@@ -58,6 +63,33 @@ class ClockOrientationUiTests(unittest.TestCase):
         self.assertIn('_locked ? 60000U : 1000U',clock)
         self.assertIn('"--:--"',clock);self.assertIn('!_quota->truncated',clock)
         self.assertNotIn('setenv(',CPP);self.assertNotIn('tzset(',CPP);self.assertNotIn('nvs_',clock)
+        self.assertNotIn('lv_timer_create',CPP)
+
+    def test_lock_clock_minute_refresh_and_geometry(self):
+        m=re.search(r'_lockClock = createText\(_lockPanel, (\d+), (\d+), (\d+), Purple\); place\(_lockClock, (\d+), (\d+)\)',CPP)
+        self.assertIsNotNone(m)
+        w,h,p,x,y=map(int,m.groups())
+        self.assertEqual((w,h,p),(170,34,4))
+        self.assertEqual(x+w//2,240)
+        quota=re.search(r'_lockQuota = createText\(_lockPanel, (\d+), (\d+), (\d+)\); place\(_lockQuota, (\d+), (\d+)\)',CPP)
+        qw,qh,qp,qx,qy=map(int,quota.groups())
+        self.assertLessEqual(y+h,qy)
+        self.assertLessEqual(qy+qh,252) # reset starts at y252, ends y300
+        self.assertLessEqual(252+48,334) # battery starts at y334, ends y370
+        for shiftx,shifty in ((-1,-1),(1,-1),(1,1),(-1,1)):
+            for rx,ry,rw,rh in ((x,y,w,h),(qx,qy,qw,qh),(152,334,36,36),(204,338,200,24)):
+                self.assertGreaterEqual(rx+shiftx,0);self.assertGreaterEqual(ry+shifty,0)
+                self.assertLessEqual(rx+shiftx+rw,480);self.assertLessEqual(ry+shifty+rh,480)
+        clock=CPP.split('void CodexMicroView::refreshClock(',1)[1].split('void CodexMicroView::cancelOrientation()',1)[0]
+        self.assertIn('if (!force && minute == _clockMinute) return;',clock)
+        self.assertIn('setText(_lockClock, clock, Purple)',clock)
+        self.assertIn('char clock[6] = "--:--"',clock)
+        lock=CPP.split('void CodexMicroView::lockDisplay()',1)[1].split('bool CodexMicroView::lockForDebug()',1)[0]
+        self.assertIn('refreshClock(lv_tick_get(), true)',lock)
+        update=CPP.split('void CodexMicroView::update(',1)[1]
+        self.assertIn('if (!_locked) refreshClock(tick)',update)
+        self.assertIn('if (tick - _refresh >= 60000)',update)
+        self.assertIn('static constexpr int offsets[4][2]',update)
         self.assertNotIn('lv_timer_create',CPP)
 
     def test_orientation_cleanup_and_low_memory_boundary(self):

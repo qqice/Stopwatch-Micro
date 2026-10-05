@@ -20,7 +20,7 @@ constexpr RotationOutcome rotationOutcome(bool applied, bool restored) {
     return applied ? RotationOutcome::Applied : restored ? RotationOutcome::Restored : RotationOutcome::Unsafe;
 }
 
-// Sensor-to-panel axes for V1.0; physical four-edge acceptance remains required.
+// Sensor-to-panel axes for V1.0; horizontal signs corrected by physical four-edge acceptance.
 struct Model {
     uint16_t degrees = 0, candidate = 0;
     uint64_t since = 0;
@@ -35,7 +35,7 @@ struct Model {
             dominant < .65f || dominant < az * 1.25f || dominant < minor * 1.35f) {
             resetPending(); return false;
         }
-        const uint16_t next = ax > ay ? (x > 0 ? 90 : 270) : (y > 0 ? 0 : 180);
+        const uint16_t next = ax > ay ? (x > 0 ? 270 : 90) : (y > 0 ? 0 : 180);
         if (next == degrees) { resetPending(); return false; }
         if (!pending || next != candidate || ms < since) {
             candidate = next; since = ms; pending = true; return false;

@@ -92,13 +92,13 @@ private:
     lv_obj_t* _historyPage = nullptr;
     lv_obj_t* _overlay = nullptr;
     lv_obj_t* _lockPanel = nullptr;
+    lv_obj_t* _lockClock = nullptr;
     lv_obj_t* _lockQuota = nullptr;
     lv_obj_t* _lockResetTime = nullptr;
     lv_obj_t* _lockResetIcon = nullptr;
     lv_obj_t* _lockBattery = nullptr;
     lv_obj_t* _battery = nullptr;
     lv_obj_t* _batteryIcon = nullptr;
-    lv_obj_t* _batteryCapacity = nullptr;
     lv_obj_t* _wifiIcon = nullptr;
     lv_obj_t* _boltIcon = nullptr;
     lv_obj_t* _clockIcon = nullptr;
@@ -146,7 +146,7 @@ private:
     uint32_t _quotaRevision = UINT32_MAX, _historyRevision = UINT32_MAX;
     uint32_t _historyAgeKey = UINT32_MAX;
     uint32_t _motionEpoch = 0, _motionTick = 0, _batteryReadTick = 0;
-    bool _batterySeen = false, _batteryValid = false, _batteryCharging = false, _capacityKnown = false;
+    bool _batterySeen = false, _batteryValid = false, _batteryCharging = false;
     int _brightness = 80;
 };
 }

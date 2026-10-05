@@ -409,3 +409,13 @@ physical four-direction, touch/swipe, wake and visual acceptance.
 VALID (boot54), preserving0.8.3 in ota1. NTP time was valid; BMI270 ID0x24 initialized
 with zero read errors, display orientation was healthy. Physical four-way mapping,
 rotated touch/swipe and clock layout remain user acceptance items.
+
+## 0.9.1 physical feedback corrections
+The user accepted both swipe directions and quota layout on0.9.0. Physical
+portrait/180 orientation was correct, but90/270 were reversed. Only the BMI270
+horizontal sign mapping is swapped; LVGL touch rotation is unchanged.
+
+Time, date and clock icon now share purple dot styling; HH:MM and MM-DD have the
+same pitch and widget size. The lower-right mAh caption is removed, not the SOC,
+charging indication or gauge telemetry. Lock shows HH:MM above the quota, using
+the existing minute refresh and pixel offset; no new timer or wake cadence.

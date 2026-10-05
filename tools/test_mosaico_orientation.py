@@ -19,10 +19,10 @@ class OrientationTests(unittest.TestCase):
 using mosaico_orientation::Model;
 constexpr bool test() {
  Model m;
- if(m.sample(1,0,0,0)||m.sample(1,0,0,599)||!m.sample(1,0,0,600)||m.degrees!=90) return false;
- if(m.sample(0,0,1,700)||m.degrees!=90) return false;
+ if(m.sample(1,0,0,0)||m.sample(1,0,0,599)||!m.sample(1,0,0,600)||m.degrees!=270) return false;
+ if(m.sample(0,0,1,700)||m.degrees!=270) return false;
  if(m.sample(-1,0,0,800)||m.sample(.7,.7,0,1300)||m.sample(-1,0,0,1400)) return false;
- if(m.sample(-1,0,0,1999)||!m.sample(-1,0,0,2000)||m.degrees!=270) return false;
+ if(m.sample(-1,0,0,1999)||!m.sample(-1,0,0,2000)||m.degrees!=90) return false;
  if(m.sample(0,-1,0,2100)||!m.sample(0,-1,0,2700)||m.degrees!=180) return false;
  if(m.sample(0,1,0,2800)||!m.sample(0,1,0,3400)||m.degrees!=0) return false;
  if(m.sample(2,0,0,3500)||m.sample(0,0,0,3600)) return false;

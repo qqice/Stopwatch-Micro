@@ -147,13 +147,10 @@ void CodexMicroView::init(lv_obj_t* parent) {
         lv_obj_set_height(_cardMeta[i], 30); lv_label_set_long_mode(_cardMeta[i], LV_LABEL_LONG_MODE_DOTS);
         lv_obj_add_flag(_cards[i], LV_OBJ_FLAG_HIDDEN);
     }
-    _clockIcon = createIcon(_root, Icon::Clock, 26, Gray); place(_clockIcon, 20, 430);
-    _footer = createText(_root, 170, 34, 5); place(_footer, 44, 426);
-    _clockDate = label(_root, 224, 436, 104, "", &lv_font_montserrat_14);
-    lv_obj_set_height(_clockDate, 22); lv_obj_add_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
-    _batteryCapacity = label(_root, 340, 440, 120, "", &lv_font_montserrat_14);
-    lv_obj_set_height(_batteryCapacity, 18); lv_label_set_long_mode(_batteryCapacity, LV_LABEL_LONG_MODE_DOTS);
-    lv_obj_set_style_text_align(_batteryCapacity, LV_TEXT_ALIGN_RIGHT, 0);
+    _clockIcon = createIcon(_root, Icon::Clock, 26, Purple); place(_clockIcon, 20, 430);
+    _footer = createText(_root, 170, 34, 4, Purple); place(_footer, 44, 426);
+    _clockDate = createText(_root, 170, 34, 4, Purple); place(_clockDate, 270, 426);
+    lv_obj_add_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
     _bucketCount = label(_root, 290, 440, 170, "", &lv_font_montserrat_14);
     lv_obj_set_style_text_align(_bucketCount, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN);
@@ -208,6 +205,8 @@ void CodexMicroView::init(lv_obj_t* parent) {
     _qualityValue = createText(detail, 370, 36, 4); place(_qualityValue, 52, 68);
     initOta();
     _lockPanel = lv_obj_create(_root); panel(_lockPanel, 0, 0, 480, 480, 0);
+    _lockClock = createText(_lockPanel, 170, 34, 4, Purple); place(_lockClock, 155, 76);
+    setText(_lockClock, "--:--", Purple);
     _lockQuota = createText(_lockPanel, 400, 90, 12); place(_lockQuota, 40, 148);
     _lockResetIcon = createIcon(_lockPanel, Icon::Hourglass, 28, Cyan);
     _lockResetTime = createText(_lockPanel, 340, 48, 6, Cyan);
@@ -224,7 +223,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_style_radius(_rotationCurtain, 0, 0);
     lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
-    bool widgetsReady = _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _qualityIcon && _qualityValue && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    bool widgetsReady = _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _qualityIcon && _qualityValue && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
         widgetsReady = widgetsReady && _cardBadges[i] && _cardValues[i] && _secondValues[i] && _creditIcons[i];
@@ -530,7 +529,6 @@ void CodexMicroView::refreshBattery(uint32_t now) {
     const auto telemetry = GetHAL().batteryTelemetry(false);
     _batteryReadTick = now; _batterySeen = true; _batteryValid = telemetry.valid;
     _batteryCharging = telemetry.valid && telemetry.currentMa > 3 && GetHAL().isBatteryCharging();
-    _capacityKnown = telemetry.valid && telemetry.capacityValid && telemetry.nominalConfigured;
     _externalPowerReady = telemetry.valid && telemetry.voltageMv >= 3900 &&
         ((telemetry.operationStatus >> 1) & 3) == 3 && !(telemetry.operationStatus & 0x0401) &&
         (tud_mounted() || telemetry.currentMa > 3);
@@ -548,10 +546,6 @@ void CodexMicroView::refreshBattery(uint32_t now) {
         lv_obj_set_style_text_color(_battery, lv_color_hex(color), 0);
         setIcon(_batteryIcon, Icon::Battery, color, telemetry.reportedSoc, telemetry.valid);
         if (_batteryCharging) lv_obj_remove_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
-        if (_capacityKnown && _page == Page::Command && !_quota->truncated) {
-            std::snprintf(text, sizeof(text), "%u/%u mAh", static_cast<unsigned>(telemetry.remainingMah), static_cast<unsigned>(telemetry.fullMah));
-            lv_label_set_text(_batteryCapacity, text); lv_obj_remove_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN);
-        } else lv_obj_add_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN);
     }
 
 }
@@ -562,7 +556,7 @@ void CodexMicroView::refreshClock(uint32_t tick, bool force) {
     // never use persisted epochs or quota capture timestamps as a running RTC.
     const auto systemClock = MosaicoClock::snapshot();
     const int64_t minute = systemClock.valid ? systemClock.epoch / 60 : -1;
-    if (minute == _clockMinute) return;
+    if (!force && minute == _clockMinute) return;
     _clockMinute = minute;
     char clock[6] = "--:--", date[6]{};
     tm local{};
@@ -570,9 +564,10 @@ void CodexMicroView::refreshClock(uint32_t tick, bool force) {
         std::strftime(clock, sizeof(clock), "%H:%M", &local);
         std::strftime(date, sizeof(date), "%m-%d", &local);
     } else _clockMinute = -1;
-    setText(_footer, clock, _clockMinute >= 0 ? Cyan : Gray);
-    setIcon(_clockIcon, Icon::Clock, _clockMinute >= 0 ? Cyan : Gray);
-    lv_label_set_text(_clockDate, date);
+    setText(_footer, clock, Purple);
+    setText(_lockClock, clock, Purple);
+    setIcon(_clockIcon, Icon::Clock, Purple);
+    setText(_clockDate, date, Purple);
     if (_clockMinute >= 0 && _page == Page::Command && !_quota->truncated) lv_obj_remove_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
 }
@@ -788,8 +783,6 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         } else { lv_obj_add_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN); }
         lv_label_set_text(_cardMeta[i], bucket.reached);
     }
-    if (_capacityKnown && _page == Page::Command && !_quota->truncated) lv_obj_remove_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN);
     refreshClock(lv_tick_get());
     if (_quota->truncated && _page == Page::Command) {
         std::snprintf(buf, sizeof(buf), "%u/%lu", _quota->bucketCount,
@@ -939,8 +932,7 @@ bool CodexMicroView::setPageForDebug(Page page) {
         renderOta();
     }
     if (page == Page::OTA) lv_obj_remove_flag(_otaPage, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaPage, LV_OBJ_FLAG_HIDDEN);
-    if (page != Page::Command) { stopAnimations(); lv_obj_add_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN); }
-    else if (_capacityKnown && !_quota->truncated) lv_obj_remove_flag(_batteryCapacity, LV_OBJ_FLAG_HIDDEN);
+    if (page != Page::Command) stopAnimations();
     _page = page; _activity = lv_tick_get();
     if (page == Page::Command) { lv_obj_remove_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); }
     else if (page == Page::History) { refreshHistory(); lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN); }
@@ -1024,6 +1016,7 @@ void CodexMicroView::lockDisplay() {
     GetHAL().setTouchIdlePolling(true);
     lv_obj_remove_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_lockPanel);
     lv_obj_remove_flag(_overlay, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_overlay);
+    refreshClock(lv_tick_get(), true);
     refreshQuota(GetHAL().millis()); ++_lockRefreshCount; _refresh = lv_tick_get();
     GetHAL().setBackLightBrightness(8, false);
 }
