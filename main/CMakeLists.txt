@@ -77,3 +77,13 @@ endif()
 target_link_libraries(${COMPONENT_LIB} INTERFACE
     "-Wl,--wrap=esp_ble_gatts_create_attr_tab"
 )
+
+if(MOSAICO_BOARD)
+    # Exact managed-driver TU only; preserve SDK and managed component sources.
+    idf_component_get_property(bmi_lib espressif__bmi270 COMPONENT_LIB)
+    idf_component_get_property(bmi_dir espressif__bmi270 COMPONENT_DIR)
+    set_property(SOURCE "${bmi_dir}/src/bmi270.c" TARGET_DIRECTORY ${bmi_lib}
+        APPEND PROPERTY COMPILE_OPTIONS "-include"
+        "${CMAKE_CURRENT_LIST_DIR}/hal/mosaico/mosaico_bmi_delay.h"
+        "-DMOSAICO_BMI_DELAY_OVERRIDE=1")
+endif()

@@ -380,3 +380,32 @@ new saved panics or observed canary failures. Final0.8.3 runs ota1, quota fresh,
 sealed nominal gauge65mAh unchanged. No additional BOOT was needed after the
 diagnostic bootstrap. This is three successful diagnostic-profile transfers;
 changing allocator/layout/timing still prevents claiming a unique original cause.
+
+## Mosaico 0.9.0 clock and orientation
+
+The quota footer shows Shanghai local time (UTC+8) and date. SNTP calibrates the
+existing system RTC/HRT clock; a truly powered-off, offline boot shows `--:--`.
+There is no claim of a battery-backed RTC or persisted-time accuracy after power
+loss. `debug clock` reports validity and the last observed SNTP synchronization.
+
+BMI270 acceleration alone supplies four-way orientation, with a stable 600 ms
+candidate and flat/diagonal/acceleration rejection. Gyro and temperature stay
+unused; the acceleration sensor is powered down during lock and OTA. No shared
+peripheral power rail is toggled. The GUI reads a cache, not I2C. `debug motion`
+provides read-only sensor and display-orientation diagnostics.
+
+Rotation uses a short black-curtain fade and drained panel transactions; LVGL
+rotates raw touch coordinates exactly once. Checked mirror/swap failures attempt
+rollback. If rollback fails, the UI remains black and input-disabled rather than
+exposing mismatched touch/display coordinates. Portrait initialization explicitly
+issues the checked panel commands, since display registration alone does not.
+
+Both swipe directions use a single-contact threshold latch with release fallback;
+Function shares the page-slide animation. Rotation is deferred during touch,
+page transition, lock and OTA. Source/geometry tests and compilation do not replace
+physical four-direction, touch/swipe, wake and visual acceptance.
+
+0.9.0 was deployed from0.8.3 by one signed network update to ota0 and accepted
+VALID (boot54), preserving0.8.3 in ota1. NTP time was valid; BMI270 ID0x24 initialized
+with zero read errors, display orientation was healthy. Physical four-way mapping,
+rotated touch/swipe and clock layout remain user acceptance items.

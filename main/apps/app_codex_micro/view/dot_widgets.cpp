@@ -52,6 +52,7 @@ constexpr bool iconPatternsTest() {
 }
 static_assert(iconPatternsTest(), "dot icon dimensions and bit bounds");
 constexpr detail::Glyph otaGlyphs[] = {
+    {':',{0,4,4,0,4,4,0}},
     {'O',{14,17,17,17,17,17,14}}, {'T',{31,4,4,4,4,4,4}}, {'A',{14,17,17,31,17,17,17}},
     {'U',{17,17,17,17,17,17,14}}, {'G',{14,17,16,23,17,17,15}},
     {'R',{30,17,17,30,20,18,17}}, {'D',{30,17,17,17,17,17,30}}, {'E',{31,16,16,30,16,16,31}},
@@ -70,6 +71,8 @@ constexpr bool actionGlyphsTest() {
     return true;
 }
 static_assert(actionGlyphsTest(), "every staged action must have a real glyph");
+static_assert(uiGlyph(':').key == ':' && uiGlyph(':').rows[1] == 4 &&
+              uiGlyph(':').rows[4] == 4, "clock colon has two visible dots");
 struct Motion { int scale = 1000, wavePhase = -1, pulse = 0; };
 Motion motion(const State& s, int w, int h, uint16_t phase, bool enabled) {
     Motion m;

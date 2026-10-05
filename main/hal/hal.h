@@ -229,6 +229,29 @@ public:
     TouchPollingInfo touchPollingInfo() const { return {}; }
 #endif
 
+    struct MotionOrientation {
+        bool available = false, idle = false, valid = false;
+        uint8_t chipId = 0, initStage = 0;
+        int32_t error = 0;
+        float ax = 0, ay = 0, az = 0;
+        uint16_t degrees = 0;
+        uint32_t generation = 0, samples = 0, readErrors = 0;
+        int64_t sampleUs = 0;
+    };
+#ifdef MOSAICO_BOARD
+    MotionOrientation motionOrientation() const; // Cached only; no bus access.
+    void setMotionIdle(bool idle); // Task owns sensor-only PWR_CTRL, never rails.
+    bool setDisplayOrientation(uint16_t degrees); // Caller owns LVGL mutex.
+    uint16_t getDisplayOrientation() const;
+    bool isDisplayOrientationHealthy() const; // False: hardware/logical transform uncertain; block touch.
+#else
+    MotionOrientation motionOrientation() const { return {}; }
+    void setMotionIdle(bool) {}
+    bool setDisplayOrientation(uint16_t) { return false; }
+    uint16_t getDisplayOrientation() const { return 0; }
+    bool isDisplayOrientationHealthy() const { return true; }
+#endif
+
     /* ---------------------------------- Touch --------------------------------- */
     struct TouchPoint {
         int num = 0;

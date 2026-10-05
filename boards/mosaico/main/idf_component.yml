@@ -4,6 +4,7 @@ dependencies:
   espressif/esp_lcd_co5300: "2.1.0"
   waveshare/esp_lcd_touch_cst9217: "2.0.0"
   espressif/esp_lvgl_port: "2.9.0"
+  espressif/bmi270: "1.1.0"
   espressif/esp_tinyusb: "2.2.1"
   lvgl/lvgl:
     override_path: "../../../components/lvgl"

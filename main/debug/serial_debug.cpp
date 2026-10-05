@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include "serial_debug.h"
+#ifdef MOSAICO_BOARD
+#include <host/system_clock.h>
+#endif
 
 #include <apps/app_codex_micro/app_codex_micro.h>
 #include <apps/common/audio/audio.h>
@@ -276,6 +279,29 @@ void SerialDebug::handleLine(char* line)
         printHelp();
         return;
     }
+#ifdef MOSAICO_BOARD
+    if (command && std::strcmp(command, "clock") == 0) {
+        const auto clock = MosaicoClock::snapshot();
+        std::tm local{}; char wall[32] = "uncalibrated";
+        if (MosaicoClock::shanghaiTime(clock.epoch, local))
+            std::strftime(wall, sizeof(wall), "%Y-%m-%dT%H:%M:%S+08:00", &local);
+        char details[192];
+        std::snprintf(details, sizeof(details), "valid=%d epoch=%lld local=%s ntp_sync_epoch=%lld source=%s hard_off_retention=0",
+            clock.valid, static_cast<long long>(clock.epoch), wall,
+            static_cast<long long>(clock.lastNtpSync), clock.lastNtpSync ? "ntp" : (clock.valid ? "rtc" : "unknown"));
+        result("clock", clock.valid ? "PASS" : "SKIP", details); return;
+    }
+    if (command && std::strcmp(command, "motion") == 0) {
+        const auto motion = GetHAL().motionOrientation();
+        char details[256];
+        std::snprintf(details, sizeof(details), "available=%d idle=%d valid=%d chip=%02x init=%u error=%ld candidate=%u display=%u display_ok=%d generation=%lu samples=%lu read_errors=%lu ax=%.3f ay=%.3f az=%.3f",
+            motion.available, motion.idle, motion.valid, motion.chipId, motion.initStage,
+            static_cast<long>(motion.error), motion.degrees, GetHAL().getDisplayOrientation(), GetHAL().isDisplayOrientationHealthy(),
+            static_cast<unsigned long>(motion.generation), static_cast<unsigned long>(motion.samples),
+            static_cast<unsigned long>(motion.readErrors), motion.ax, motion.ay, motion.az);
+        result("motion", motion.available ? "PASS" : "SKIP", details); return;
+    }
+#endif
     if (std::strcmp(command, "ping") == 0) {
         result("ping", "PASS", "reply=pong");
         return;

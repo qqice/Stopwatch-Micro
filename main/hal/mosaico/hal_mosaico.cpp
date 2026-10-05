@@ -29,12 +29,15 @@
 #include "../utils/settings/settings.h"
 #include "mosaico_gauge_model.h"
 #include "mosaico_touch_power_model.h"
+#include "mosaico_orientation_model.h"
+#include "bmi270.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "esp_lcd_co5300.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_interface.h"
 #include "esp_lcd_touch_cst9217.h"
 #include "esp_lvgl_port.h"
 #include "esp_log.h"
@@ -101,6 +104,93 @@ std::atomic<uint32_t> touch_reads{0}, touch_max_gap_us{0};
 std::atomic<int64_t> touch_last_us{0}, refresh_start_us{0};
 std::atomic<int8_t> lvgl_core{-1};
 
+// Dedicated 12.5 Hz cache task; no LVGL callback performs motion I2C.
+portMUX_TYPE motion_mux = portMUX_INITIALIZER_UNLOCKED;
+Hal::MotionOrientation motion_snapshot;
+std::atomic<bool> motion_idle{false};
+TaskHandle_t motion_task_handle = nullptr;
+std::atomic<uint16_t> display_degrees{0};
+std::atomic<bool> orientation_healthy{true};
+esp_lcd_panel_t rotation_control{}; // Only control interface; draw handle remains the real panel.
+mosaico_orientation::ControlResult rotation_result;
+
+esp_err_t checked_swap(esp_lcd_panel_t*, bool swap)
+{
+    return rotation_result.record(esp_lcd_panel_swap_xy(panel, swap));
+}
+esp_err_t checked_mirror(esp_lcd_panel_t*, bool x, bool y)
+{
+    return rotation_result.record(esp_lcd_panel_mirror(panel, x, y));
+}
+
+
+esp_err_t motion_write(bmi270_handle_t* imu, uint8_t reg, uint8_t value)
+{
+    const uint8_t command[] = {reg, value};
+    const esp_err_t result = i2c_master_transmit(imu->i2c_handle, command, sizeof(command), 25);
+    // BMI270 APS writes require >=450us before the next bus transaction.
+    // A second tick covers entry close to a tick boundary without busy-spinning.
+    // This includes the APS-enable write immediately before first ACC enable.
+    if (result == ESP_OK) vTaskDelay(pdMS_TO_TICKS(1) + 1);
+    return result;
+}
+
+void motion_task(void* bus)
+{
+    Hal::MotionOrientation snapshot;
+    bmi270_handle_t* imu = nullptr;
+    bmi270_driver_config_t config{};
+    config.addr = 0x69;
+    config.interface = BMI270_USE_I2C;
+    config.i2c_bus = static_cast<i2c_master_bus_handle_t>(bus);
+    snapshot.initStage = 1;
+    snapshot.error = bmi270_create(&config, &imu); // ID checked before blob upload.
+    if (snapshot.error == ESP_OK) {
+        snapshot.initStage = 2;
+        snapshot.error = bmi270_get_chip_id(imu, &snapshot.chipId);
+        if (snapshot.error == ESP_OK && snapshot.chipId != BMI270_CHIP_ID) snapshot.error = ESP_ERR_NOT_FOUND;
+    }
+    // Deliberately never call bmi270_start: it enables gyro + temperature.
+    // ACC_CONF=0x26: power-optimized AVG4 at 25 Hz, range +/-2g.
+    if (snapshot.error == ESP_OK) { snapshot.initStage = 3; snapshot.error = motion_write(imu, 0x7d, 0); }
+    if (snapshot.error == ESP_OK) snapshot.error = bmi270_set_acce_range(imu, BMI270_ACC_RANGE_2_G);
+    if (snapshot.error == ESP_OK) snapshot.error = motion_write(imu, 0x40, 0x26);
+    if (snapshot.error == ESP_OK) snapshot.error = motion_write(imu, 0x7c, 0x01); // Advanced power saving.
+    snapshot.available = snapshot.error == ESP_OK;
+    snapshot.idle = motion_idle.load();
+    portENTER_CRITICAL(&motion_mux); motion_snapshot = snapshot; portEXIT_CRITICAL(&motion_mux);
+    if (!snapshot.available) {
+        if (imu) { motion_write(imu, 0x7d, 0); bmi270_delete(imu); }
+        ESP_LOGW(Tag, "BMI270 unavailable stage=%u error=%ld", snapshot.initStage, static_cast<long>(snapshot.error));
+        for (;;) ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // Nonfatal; handle remains valid.
+    }
+    mosaico_orientation::Model model;
+    bool enabled = false;
+    for (;;) {
+        const bool idle = motion_idle.load();
+        snapshot.idle = idle;
+        if (enabled == idle) {
+            snapshot.error = motion_write(imu, 0x7d, idle ? 0x00 : 0x04); // Only accelerometer.
+            if (snapshot.error == ESP_OK) { enabled = !idle; if (enabled) vTaskDelay(pdMS_TO_TICKS(80) + 2); }
+            model.resetPending(); snapshot.valid = false;
+        }
+        if (!idle && enabled && snapshot.error == ESP_OK) {
+            snapshot.error = bmi270_get_acce_data(imu, &snapshot.ax, &snapshot.ay, &snapshot.az);
+            snapshot.valid = snapshot.error == ESP_OK;
+            if (snapshot.valid) {
+                snapshot.sampleUs = esp_timer_get_time(); snapshot.samples++;
+                if (model.sample(snapshot.ax, snapshot.ay, snapshot.az, snapshot.sampleUs / 1000)) snapshot.generation++;
+                snapshot.degrees = model.degrees;
+            } else { snapshot.readErrors++; model.resetPending(); }
+        }
+        portENTER_CRITICAL(&motion_mux); motion_snapshot = snapshot; portEXIT_CRITICAL(&motion_mux);
+        // Notifications wake on policy changes; locked task blocks indefinitely.
+        ulTaskNotifyTake(pdTRUE, idle && !enabled ? portMAX_DELAY : pdMS_TO_TICKS(80) + 1);
+        // A read failure is retried only on the next bounded sample, not a spin.
+        if (enabled && !motion_idle.load()) snapshot.error = ESP_OK;
+    }
+}
+
 void update_max(std::atomic<uint32_t>& maximum, uint32_t value)
 {
     uint32_t previous = maximum.load(std::memory_order_relaxed);
@@ -153,7 +243,7 @@ void observe_flush(lv_event_t* event)
 
 void read_touch(lv_indev_t*, lv_indev_data_t* data)
 {
-    if (touch_idle_polling.load(std::memory_order_relaxed)) {
+    if (touch_idle_polling.load(std::memory_order_relaxed) || !orientation_healthy.load()) {
         // Also protects against a forced/event-driven indev read while its
         // timer is paused. Software RELEASE only: no driver I2C or read count.
         data->state = LV_INDEV_STATE_RELEASED;
@@ -173,8 +263,16 @@ void read_touch(lv_indev_t*, lv_indev_data_t* data)
     }
     touch_wait_for_release = mosaico_touch_power::waitForPhysicalRelease(touch_wait_for_release, sample_valid, contact);
     if (touch_wait_for_release) point = {}; // No cached or LVGL phantom press before a proven release.
+    // LVGL rotates its raw point later in indev_pointer_proc. Cache separately
+    // transformed logical coordinates for main-button/diagnostic consumers.
+    auto logical = point;
+    if (point.num && display) {
+        lv_point_t rotated{point.x, point.y};
+        lv_display_rotate_point(display, &rotated);
+        logical.x = rotated.x; logical.y = rotated.y;
+    }
     portENTER_CRITICAL(&touch_mux);
-    cached_touch = point;
+    cached_touch = logical;
     portEXIT_CRITICAL(&touch_mux);
     data->state = point.num ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
     if (point.num) {
@@ -1386,6 +1484,10 @@ void Hal::lvgl_init()
     lvgl_port_display_cfg_t disp_config{};
     disp_config.io_handle = panel_io;
     disp_config.panel_handle = panel;
+    rotation_control.swap_xy = checked_swap;
+    rotation_control.mirror = checked_mirror;
+    rotation_result.reset();
+    disp_config.control_handle = &rotation_control;
     disp_config.buffer_size = Resolution * DisplayBufferRows;
     disp_config.double_buffer = true;
     disp_config.hres = Resolution;
@@ -1397,6 +1499,18 @@ void Hal::lvgl_init()
     disp_config.flags.swap_bytes = true;
     display = lvgl_port_add_disp(&disp_config);
     if (!display) ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    // The pinned port only registers its rotation callback at add_disp; it
+    // does not issue initial MADCTL writes. Establish portrait explicitly,
+    // through the same checked proxy while the panel is still dark and the
+    // LVGL mutex excludes every flush. Do not assume callback registration
+    // itself supplies these two calls.
+    rotation_result.reset();
+    checked_swap(&rotation_control, false);
+    checked_mirror(&rotation_control, false, false);
+    if (!rotation_result.ok()) {
+        orientation_healthy.store(false);
+        ESP_LOGE(Tag, "Initial rotation uncertain calls=%u error=%ld", rotation_result.calls, static_cast<long>(rotation_result.error));
+    }
     lv_display_add_event_cb(display, observe_refresh, LV_EVENT_REFR_START, nullptr);
     lv_display_add_event_cb(display, observe_refresh, LV_EVENT_REFR_READY, nullptr);
     lv_display_add_event_cb(display, observe_flush, LV_EVENT_FLUSH_FINISH, nullptr);
@@ -1417,6 +1531,9 @@ void Hal::lvgl_init()
     lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), LV_PART_MAIN);
     bootLogo = std::make_unique<BootLogo>();
     lvglUnlock();
+    if (xTaskCreate(motion_task, "motion-cache", 4096, _i2c_bus, 2, &motion_task_handle) != pdPASS) {
+        portENTER_CRITICAL(&motion_mux); motion_snapshot.error = ESP_ERR_NO_MEM; portEXIT_CRITICAL(&motion_mux);
+    }
     ESP_LOGI(Tag, "CO5300/CST9217 480x480; geometry requires physical acceptance");
 }
 
@@ -1628,4 +1745,64 @@ int Hal::getSpeakerVolume(bool loadFromSettings)
         _spk_volume = static_cast<int>(std::clamp<int32_t>(settings.GetInt("spk_vol", 80), 0, 100));
     }
     return _spk_volume;
+}
+
+Hal::MotionOrientation Hal::motionOrientation() const
+{
+    portENTER_CRITICAL(&motion_mux); auto snapshot = motion_snapshot; portEXIT_CRITICAL(&motion_mux);
+    snapshot.idle = motion_idle.load();
+    if (snapshot.idle) snapshot.valid = false;
+    return snapshot;
+}
+void Hal::setMotionIdle(bool idle)
+{
+    if (motion_idle.exchange(idle) != idle && motion_task_handle) xTaskNotifyGive(motion_task_handle);
+}
+uint16_t Hal::getDisplayOrientation() const { return display_degrees.load(); }
+bool Hal::isDisplayOrientationHealthy() const { return orientation_healthy.load(); }
+bool Hal::setDisplayOrientation(uint16_t degrees)
+{
+    if (degrees != 0 && degrees != 90 && degrees != 180 && degrees != 270) return false;
+    if (!display || !panel || !orientation_healthy.load() || !lvglLock()) return false;
+    if (display_degrees.load() != degrees) {
+        // tx_param drains the SPI color queue before MADCTL hardware rotation.
+        // Hold LVGL mutex throughout, excluding any new partial-buffer flush.
+        const esp_err_t drained = esp_lcd_panel_co5300_set_brightness(panel, panel_brightness < 0 ? 0 : panel_brightness);
+        if (drained != ESP_OK) { lvglUnlock(); return false; }
+        if (lvTouchpad) { lv_indev_reset(lvTouchpad, nullptr); lv_indev_wait_release(lvTouchpad); }
+        touch_wait_for_release = true;
+        portENTER_CRITICAL(&touch_mux); cached_touch = {}; portEXIT_CRITICAL(&touch_mux);
+        // esp_lvgl_port RESOLUTION_CHANGED handler applies CO5300 mirror/swap;
+        // flags.sw_rotate stays false: no full-frame software buffers.
+        const uint16_t oldDegrees = display_degrees.load();
+        rotation_result.reset();
+        lv_display_set_rotation(display, static_cast<lv_display_rotation_t>(degrees / 90));
+        const bool applied = rotation_result.ok();
+        if (!applied) {
+            const int32_t forwardError = rotation_result.error;
+            const unsigned forwardCalls = rotation_result.calls;
+            rotation_result.reset();
+            // LVGL has committed its target before firing the synchronous event;
+            // changing back triggers both checked hardware operations again.
+            lv_display_set_rotation(display, static_cast<lv_display_rotation_t>(oldDegrees / 90));
+            const auto outcome = mosaico_orientation::rotationOutcome(false, rotation_result.ok());
+            if (outcome == mosaico_orientation::RotationOutcome::Unsafe) {
+                orientation_healthy.store(false);
+                // No I2C from this point: subsequent indev reads release only.
+                if (lvTouchpad) {
+                    lv_timer_t* timer = lv_indev_get_read_timer(lvTouchpad);
+                    if (timer) lv_timer_pause(timer);
+                    lv_indev_read(lvTouchpad);
+                }
+            }
+            ESP_LOGE(Tag, "Rotation rejected error=%ld calls=%u rollback=%ld calls=%u healthy=%d",
+                     static_cast<long>(forwardError), forwardCalls,
+                     static_cast<long>(rotation_result.error), rotation_result.calls, orientation_healthy.load());
+            lv_obj_invalidate(lv_display_get_screen_active(display));
+            lvglUnlock(); return false;
+        }
+        display_degrees.store(degrees);
+        lv_obj_invalidate(lv_display_get_screen_active(display));
+    }
+    lvglUnlock(); return true;
 }

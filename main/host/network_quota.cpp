@@ -4,6 +4,7 @@
 #include "token_history.h"
 #ifdef MOSAICO_BOARD
 #include "quota_monitor.h"
+#include "system_clock.h"
 #include <ota/panic_capture.h>
 #include <hal/hal.h>
 #include <esp_heap_caps.h>
@@ -287,7 +288,11 @@ void NetworkQuota::run()
     }
     recordWifiRunning(true);
     esp_sntp_config_t timeConfig = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-    esp_netif_sntp_init(&timeConfig);
+#ifdef MOSAICO_BOARD
+    timeConfig.sync_cb = MosaicoClock::onSntpTime;
+#endif
+    const esp_err_t timeInit = esp_netif_sntp_init(&timeConfig);
+    if (timeInit != ESP_OK) ESP_LOGW("SystemClock", "SNTP init failed: %s", esp_err_to_name(timeInit));
     bool hadConnection = false;
     bool wasLocked = false, updateWindow = false;
     int64_t nextRefresh = 0, windowDeadline = 0;

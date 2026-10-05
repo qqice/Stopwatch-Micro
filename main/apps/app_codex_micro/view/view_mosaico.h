@@ -53,6 +53,12 @@ private:
     void refreshQuota(uint32_t now);
     void refreshHistory();
     void refreshBattery(uint32_t now);
+    void refreshClock(uint32_t tick, bool force = false);
+    void updateOrientation(bool touching);
+    void cancelOrientation();
+    void startOrientationFade(bool fadeIn);
+    static void orientationExec(void* owner, int32_t opacity);
+    static void orientationCompleted(lv_anim_t* anim);
     void updateAnimations(uint32_t tick);
     void stopAnimations();
     void updateHistoryHeader(bool force = false);
@@ -96,6 +102,15 @@ private:
     lv_obj_t* _wifiIcon = nullptr;
     lv_obj_t* _boltIcon = nullptr;
     lv_obj_t* _clockIcon = nullptr;
+    lv_obj_t* _clockDate = nullptr;
+    lv_obj_t* _rotationCurtain = nullptr;
+    enum class RotationPhase : uint8_t { Idle, FadeOut, WaitBlack, WaitRotated, FadeIn };
+    RotationPhase _rotationPhase = RotationPhase::Idle;
+    bool _rotationFault = false; // Sticky: never expose a direction-mismatched touch UI.
+    uint16_t _rotationTarget = 0;
+    uint32_t _motionGeneration = UINT32_MAX, _rotationGeneration = 0, _rotationFrame = 0;
+    uint32_t _clockReadTick = 0;
+    int64_t _clockMinute = -2;
     lv_obj_t* _bucketCount = nullptr;
     lv_obj_t* _lockBatteryIcon = nullptr;
     lv_obj_t* _resetCount = nullptr;

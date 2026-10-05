@@ -1,5 +1,5 @@
 """Offline OTA UI source/geometry checks; no display, device or network claims."""
-import json, re, subprocess, unittest
+import json, re, subprocess, tempfile, unittest
 from pathlib import Path
 R = Path(__file__).resolve().parents[1]
 V = R / 'main/apps/app_codex_micro/view'
@@ -264,6 +264,142 @@ class OtaUiTests(unittest.TestCase):
         self.assertIn('lv_obj_set_height(text, 24); lv_label_set_long_mode(text, LV_LABEL_LONG_MODE_DOTS)',CPP)
         failed=CPP.split('if (_ota.stage == S::Failed) {',1)[1].split('void CodexMicroView::touchEvent',1)[0]
         self.assertNotIn('_otaBytes',failed);self.assertIn('char safe[25]',failed)
+    def test_actual_swipe_source_constexpr_harness(self):
+        # The installed compiler has only embedded targets. constexpr assertions
+        # execute extracted production function bodies in the compiler, with
+        # deterministic LVGL/rendering stubs, not a Python navigation replica.
+        compilers=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+        if not compilers:self.skipTest('embedded C++ compiler unavailable')
+        names=('touchEvent','pagePanel','cancelPageSlide','slideExec','slideCompleted','navigatePage','togglePage')
+        methods=[]
+        for name in names:
+            match=re.search(r'^(?:void|lv_obj_t\*) CodexMicroView::'+name+r'\([^\n]*\) (?:const )?\{',CPP,re.M)
+            self.assertIsNotNone(match,name)
+            end=CPP.index('\n}',match.end())+2
+            body=CPP[match.start():end]
+            # void* conversion is not legal in C++17 constant evaluation. Only
+            # this adapter parameter is typed; all function bodies stay intact.
+            body=body.replace('void* owner','CodexMicroView* owner')
+            methods.append('constexpr '+body)
+        harness=r'''
+using int32_t = int; using uint32_t = unsigned;
+namespace std {
+constexpr int abs(int n) { return n < 0 ? -n : n; }
+template<class T> class initializer_list {
+ const T* p; unsigned n;
+ constexpr initializer_list(const T* a, unsigned b):p(a),n(b) {}
+ public: constexpr const T* begin() const { return p; }
+ constexpr const T* end() const { return p+n; }
+}; }
+struct CodexMicroView;
+struct lv_point_t { int x=0,y=0; };
+struct lv_obj_t { int x=20; bool hidden=false; };
+struct lv_indev_t { lv_point_t point; };
+enum { LV_EVENT_PRESSED,LV_EVENT_PRESSING,LV_EVENT_RELEASED,LV_EVENT_PRESS_LOST,
+       LV_INDEV_TYPE_POINTER,LV_OBJ_FLAG_HIDDEN };
+struct lv_event_t { int code; CodexMicroView* owner; lv_indev_t* input; };
+struct lv_anim_t { CodexMicroView* var=nullptr; int duration=0; };
+constexpr int lv_event_get_code(lv_event_t* e) { return e->code; }
+constexpr CodexMicroView* lv_event_get_user_data(lv_event_t* e) { return e->owner; }
+constexpr lv_indev_t* lv_event_get_indev(lv_event_t* e) { return e->input; }
+constexpr int lv_indev_get_type(lv_indev_t*) { return LV_INDEV_TYPE_POINTER; }
+constexpr void lv_indev_get_point(lv_indev_t* i,lv_point_t* p) { *p=i->point; }
+constexpr unsigned lv_tick_get() { return 1; }
+constexpr void lv_obj_set_x(lv_obj_t* o,int x) { o->x=x; }
+constexpr void lv_obj_add_flag(lv_obj_t* o,int) { o->hidden=true; }
+constexpr void lv_obj_remove_flag(lv_obj_t* o,int) { o->hidden=false; }
+constexpr void lv_anim_delete(CodexMicroView*,void(*)(CodexMicroView*,int)) {}
+constexpr void lv_anim_init(lv_anim_t* a) { *a={}; }
+constexpr void lv_anim_set_var(lv_anim_t* a,CodexMicroView* v) { a->var=v; }
+constexpr void lv_anim_set_exec_cb(lv_anim_t*,void(*)(CodexMicroView*,int)) {}
+constexpr void lv_anim_set_values(lv_anim_t*,int,int) {}
+constexpr void lv_anim_set_duration(lv_anim_t* a,int d) { a->duration=d; }
+constexpr void lv_anim_path_ease_out() {}
+constexpr void lv_anim_set_path_cb(lv_anim_t*,void(*)()) {}
+constexpr void lv_anim_set_completed_cb(lv_anim_t*,void(*)(lv_anim_t*)) {}
+constexpr void lv_anim_start(lv_anim_t*) {}
+struct CodexMicroView {
+ enum class Page { Command,History,Agent,OTA };
+ enum class RotationPhase { Idle,FadeOut,WaitBlack,WaitRotated,FadeIn };
+ RotationPhase _rotationPhase=RotationPhase::Idle;
+ bool _rotationFault=false;
+ Page _page=Page::Command; lv_obj_t panels[3]{};
+ lv_obj_t* _quotaPage=&panels[0]; lv_obj_t* _historyPage=&panels[1]; lv_obj_t* _otaPage=&panels[2];
+ lv_obj_t* _slideFrom=nullptr; lv_obj_t* _slideTo=nullptr;
+ int _slideDirection=1; bool _suppressed=false,_locked=false,busy=false;
+ bool _touchTracking=false,_swipeConsumed=false; lv_point_t _touchStart{};
+ unsigned _activity=0;
+ constexpr bool ready() { return true; }
+ constexpr bool otaBusy() { return busy; }
+ constexpr void wakeDisplay() { _locked=false; }
+ constexpr bool setPageForDebug(Page p) {
+  cancelPageSlide(); if (_touchTracking) _swipeConsumed=true; _touchTracking=false;
+  for(auto& panel:panels) panel.hidden=true;
+  _page=p; pagePanel(p)->hidden=false; return true;
+ }
+ static constexpr void touchEvent(lv_event_t*);
+ constexpr lv_obj_t* pagePanel(Page) const;
+ constexpr void cancelPageSlide();
+ static constexpr void slideExec(CodexMicroView*,int);
+ static constexpr void slideCompleted(lv_anim_t*);
+ constexpr void navigatePage(int);
+ constexpr void togglePage();
+};
+'''
+        harness+='\n'.join(methods)+r'''
+constexpr bool exercise(int direction, bool cancel) {
+ CodexMicroView v; lv_indev_t input{}; lv_event_t e{LV_EVENT_PRESSED,&v,&input};
+ for(int step=0;step<3;++step) {
+  input.point={240,200}; e.code=LV_EVENT_PRESSED; v.touchEvent(&e);
+  input.point={240-direction*120,200}; e.code=LV_EVENT_PRESSING; v.touchEvent(&e);
+  int target=direction>0?(step+1)%3:(2-step+3)%3;
+  if(v._page != (target==0?CodexMicroView::Page::Command:target==1?CodexMicroView::Page::History:CodexMicroView::Page::OTA)) return false;
+  if(!v._slideTo || v._touchTracking || !v._swipeConsumed) return false;
+  v.slideExec(&v,240);
+  if(v._slideFrom->x != 20-direction*240 || v._slideTo->x != 20+direction*240) return false;
+  if(cancel) v.cancelPageSlide(); else { lv_anim_t a{&v}; v.slideCompleted(&a); }
+  if(v._slideTo || v._slideFrom || v.pagePanel(v._page)->x!=20 || v.pagePanel(v._page)->hidden) return false;
+  // Same contact reverses after animation: no second navigation or click.
+  input.point={240+direction*130,200}; e.code=LV_EVENT_PRESSING; v.touchEvent(&e);
+  e.code=LV_EVENT_RELEASED; v.touchEvent(&e);
+  if(v._slideTo || !v._swipeConsumed) return false;
+  for(auto& panel:v.panels) if(panel.x!=20 || panel.hidden!=(&panel!=v.pagePanel(v._page))) return false;
+ }
+ return v._page==CodexMicroView::Page::Command;
+}
+constexpr bool edgeCases() {
+ CodexMicroView v; lv_indev_t input{{240,200}}; lv_event_t e{LV_EVENT_PRESSED,&v,&input};
+ v.touchEvent(&e); input.point={120,200}; e.code=LV_EVENT_PRESS_LOST; v.touchEvent(&e);
+ if(v._slideTo || v._touchTracking || !v._swipeConsumed) return false;
+ input.point={240,200}; e.code=LV_EVENT_PRESSED; v.touchEvent(&e);
+ if(v._swipeConsumed) return false;
+ input.point={120,200}; e.code=LV_EVENT_RELEASED; v.touchEvent(&e);
+ if(!v._slideTo || !v._swipeConsumed) return false;
+ v.cancelPageSlide();
+ for(int guard=0;guard<3;++guard) {
+  v._suppressed=guard==0; v._locked=guard==1; v.busy=guard==2;
+  input.point={240,200}; e.code=LV_EVENT_PRESSED; v.touchEvent(&e);
+  input.point={120,200}; e.code=LV_EVENT_PRESSING; v.touchEvent(&e);
+  e.code=LV_EVENT_RELEASED; v.touchEvent(&e);
+  if(v._slideTo || v._touchTracking || !v._swipeConsumed) return false;
+ }
+ v._suppressed=false; v.busy=false; v._locked=true; v.togglePage();
+ if(v._locked || v._slideTo) return false; // Function-only wake, no navigation.
+ v.togglePage(); if(!v._slideTo) return false;
+ return true;
+}
+static_assert(exercise(1,false),"forward completion");
+static_assert(exercise(-1,false),"reverse completion");
+static_assert(exercise(1,true),"forward cancellation");
+static_assert(exercise(-1,true),"reverse cancellation");
+static_assert(edgeCases(),"release fallback, press-lost, guards and Function");
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            source=Path(directory)/'swipe.cpp';source.write_text(harness,encoding='utf8')
+            result=subprocess.run([str(compilers[-1]),'-std=c++17','-fsyntax-only',str(source)],capture_output=True,text=True)
+            out=R/'.artifacts/mosaico/swipe-source-harness.log'
+            out.parent.mkdir(parents=True,exist_ok=True);out.write_text(result.stdout+result.stderr,encoding='utf8')
+            self.assertEqual(result.returncode,0,'actual source harness failed: '+str(out))
     def test_actual_target_syntax_when_configured(self):
         db=R/'.artifacts/mosaico/ota-build/compile_commands.json'
         if not db.exists(): self.skipTest('target configuration unavailable')
