@@ -51,6 +51,7 @@ private:
     void refreshDisplaySettings();
     void applyBurnInShift(bool touching);
     static void settingsEvent(lv_event_t* event);
+    static void historyChartEvent(lv_event_t* event);
     lv_obj_t* pagePanel(Page page) const;
     void navigatePage(int direction);
     void cancelPageSlide();
@@ -138,8 +139,6 @@ private:
     std::array<std::array<lv_obj_t*, 2>, 8> _resetTimes{}, _resetBars{}, _hourglassIcons{};
     lv_obj_t* _historyClock = nullptr;
     lv_obj_t* _historyAge = nullptr;
-    lv_obj_t* _qualityIcon = nullptr;
-    lv_obj_t* _qualityValue = nullptr;
     lv_obj_t* _footer = nullptr;
     lv_obj_t* _quotaStatus = nullptr;
     std::array<lv_obj_t*, 8> _cards{};
@@ -151,6 +150,9 @@ private:
     std::array<lv_obj_t*, 2> _modeButtons{};
     lv_obj_t* _range = nullptr;
     lv_obj_t* _details = nullptr;
+    lv_obj_t* _historyChart = nullptr;
+    lv_obj_t* _trendHint = nullptr;
+    uint32_t _trendAgeKey = UINT32_MAX;
     std::unique_ptr<QuotaMonitorSnapshot> _quota;
     std::unique_ptr<TokenHistorySnapshot> _history;
     Page _page = Page::Command;

@@ -2,6 +2,7 @@
 #include "view_mosaico.h"
 #include "dot_widgets.h"
 #include "reset_countdown.h"
+#include "quota_trend_geometry.h"
 #include <hal/hal.h>
 #include <host/network_quota.h>
 #include <host/tailscale_transport.h>
@@ -197,13 +198,20 @@ void CodexMicroView::init(lv_obj_t* parent) {
     }
     _historyClock = createIcon(_historyPage, Icon::Clock, 20, Gray); place(_historyClock, 330, 54);
     _historyAge = createText(_historyPage, 86, 20, 2); place(_historyAge, 354, 54);
-    auto* detail = lv_obj_create(_historyPage); panel(detail, 0, 296, 440, 112, 0);
+    _historyChart = lv_obj_create(_historyPage); lv_obj_remove_style_all(_historyChart);
+    lv_obj_set_pos(_historyChart, 0, 300); lv_obj_set_size(_historyChart, 440, 80);
+    lv_obj_remove_flag(_historyChart, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_add_flag(_historyChart, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(_historyChart, historyChartEvent, LV_EVENT_DRAW_MAIN, this);
+    label(_historyChart, 0, 0, 32, "100%", &lv_font_montserrat_12);
+    label(_historyChart, 8, 46, 24, "0%", &lv_font_montserrat_12);
+    _trendHint = label(_historyChart, 34, 62, 290, "7d --", &lv_font_montserrat_12);
+    auto* now = label(_historyChart, 392, 62, 48, "NOW", &lv_font_montserrat_12);
+    lv_obj_remove_flag(now, LV_OBJ_FLAG_CLICKABLE);
+    auto* detail = lv_obj_create(_historyPage); panel(detail, 0, 380, 440, 28, 0);
     lv_obj_add_flag(detail, LV_OBJ_FLAG_EVENT_BUBBLE);
-    _details = label(detail, 12, 8, 416, "", &lv_font_montserrat_20);
-    lv_obj_set_height(_details, 58); lv_obj_set_style_text_line_space(_details, 0, 0);
-    lv_label_set_long_mode(_details, LV_LABEL_LONG_MODE_DOTS);
-    _qualityIcon = createIcon(detail, Icon::Unknown, 28, Gray); place(_qualityIcon, 12, 76);
-    _qualityValue = createText(detail, 370, 36, 4); place(_qualityValue, 52, 68);
+    _details = label(detail, 12, 6, 416, "", &lv_font_montserrat_12);
+    lv_obj_set_height(_details, 18); lv_label_set_long_mode(_details, LV_LABEL_LONG_MODE_DOTS);
     initOta();
     initSettings();
     _lockPanel = lv_obj_create(_root); panel(_lockPanel, 0, 0, 480, 480, 0);
@@ -225,7 +233,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_style_radius(_rotationCurtain, 0, 0);
     lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
-    bool widgetsReady = _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _qualityIcon && _qualityValue && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    bool widgetsReady = _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
         widgetsReady = widgetsReady && _cardBadges[i] && _cardValues[i] && _secondValues[i] && _creditIcons[i];
@@ -933,11 +941,55 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     const uint32_t timeColor = lockResetKnown ? (_quota->stale ? dimCachedColor(Cyan) : Cyan) : Gray;
     setIcon(_lockResetIcon, Icon::Hourglass, timeColor); setText(_lockResetTime, lockReset, timeColor);
 }
+void CodexMicroView::historyChartEvent(lv_event_t* event) {
+    auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
+    if (!self || !self->_history) return;
+    lv_area_t area; lv_obj_get_content_coords(self->_historyChart, &area);
+    auto* layer = lv_event_get_layer(event);
+    lv_draw_line_dsc_t line; lv_draw_line_dsc_init(&line); line.width = 2;
+    const auto drawLine = [&](int x1, int y1, int x2, int y2, uint32_t color) {
+        line.color = lv_color_hex(color); line.p1.x = area.x1 + x1; line.p1.y = area.y1 + y1;
+        line.p2.x = area.x1 + x2; line.p2.y = area.y1 + y2; lv_draw_line(layer, &line);
+    };
+    drawLine(32, 6, 32, 54, Gray); drawLine(32, 54, 428, 54, Gray);
+    const auto& trend = self->_history->quotaTrend;
+    if (!trend.available) return; // Empty cold history is a gap, never a fabricated zero line.
+    const uint32_t start = self->_hourly ? trend.start24hEpoch : trend.start7dEpoch;
+    const auto* points = self->_hourly ? trend.hours.data() : trend.days.data();
+    const size_t count = self->_hourly ? trend.hours.size() : trend.days.size();
+    const uint64_t age = static_cast<uint64_t>(trend.ageSecondsAtReceipt) +
+        (GetHAL().millis() - trend.receivedAtMs) / 1000U;
+    const uint32_t color = age > 600 ? dimCachedColor(Cyan) : Cyan;
+    lv_draw_rect_dsc_t dot; lv_draw_rect_dsc_init(&dot); dot.bg_opa = LV_OPA_COVER; dot.radius = LV_RADIUS_CIRCLE;
+    for (size_t i = 0; i < count; ++i) {
+        const auto p = mosaico_trend::position(points[i], start, trend.endEpoch);
+        if (!p.valid) continue;
+        if (i && mosaico_trend::connects(points[i-1], points[i], start, trend.endEpoch)) {
+            const auto previous = mosaico_trend::position(points[i-1], start, trend.endEpoch);
+            drawLine(previous.x, previous.y, p.x, p.y, color);
+        }
+        dot.bg_color = lv_color_hex(points[i].resetBefore ? Gold : color);
+        const lv_area_t spot = {area.x1+p.x-2, area.y1+p.y-2, area.x1+p.x+1, area.y1+p.y+1};
+        lv_draw_rect(layer, &dot, &spot);
+    }
+}
 void CodexMicroView::refreshHistory() {
     if (_historyRevision == TokenHistoryRevision()) { updateHistoryHeader(); return; }
     if (CopyTokenHistory(*_history)) { _historyRevision = _history->revision; renderHistory(); }
 }
 void CodexMicroView::updateHistoryHeader(bool force) {
+    const auto& trend = _history->quotaTrend;
+    const uint64_t trendAge = static_cast<uint64_t>(trend.ageSecondsAtReceipt) + (GetHAL().millis() - trend.receivedAtMs) / 1000U;
+    const uint32_t trendKey = (trend.available ? 1U : 0U) | (trendAge > 600 ? 2U : 0U) | (_hourly ? 4U : 0U);
+    if (force || trendKey != _trendAgeKey) {
+        _trendAgeKey = trendKey;
+        char value[24] = "--", hint[48];
+        const auto* latest = _hourly ? mosaico_trend::latest(trend.hours) : mosaico_trend::latest(trend.days);
+        if (trend.available && latest) percent(latest->remainingBasisPoints, value, sizeof(value));
+        std::snprintf(hint, sizeof(hint), "%s %s%s", _hourly ? "24h" : "7d", value,
+            trend.capturedEpoch && trendAge > 600 ? " STALE" : "");
+        lv_label_set_text(_trendHint, hint); lv_obj_invalidate(_historyChart);
+    }
     if (!_history->available) { if (force) { lv_label_set_text(_range, "--"); setText(_historyAge, "?", Gray); } return; }
     const uint64_t age = static_cast<uint64_t>(_history->ageSecondsAtReceipt) + (GetHAL().millis() - _history->receivedAtMs) / 1000U;
     const bool stale = age > 600;
@@ -988,6 +1040,7 @@ void CodexMicroView::renderHistory() {
         lv_obj_set_style_border_color(_cells[i], lv_color_hex(boundary ? 0xDCE4F2 : (c.quality == TokenHistoryQuality::Partial ? Purple : Gray)), 0);
         lv_obj_set_style_border_width(_cells[i], boundary || c.quality == TokenHistoryQuality::Partial ? 2 : 0, 0);
     }
+    lv_obj_invalidate(_historyChart);
     renderSelection();
 }
 const TokenHistoryCell* CodexMicroView::selectedCell() const {
@@ -1002,19 +1055,15 @@ void CodexMicroView::historyDetails(char* out, size_t capacity) const {
 }
 void CodexMicroView::renderSelection() {
     char buf[160] = ""; const auto* c = selectedCell();
-    if (c && c->valid) std::snprintf(buf, sizeof(buf), "%s\n%llu tokens", c->label, static_cast<unsigned long long>(c->tokens));
-    else if (c) std::snprintf(buf, sizeof(buf), "%s", c->label);
-    lv_label_set_text(_details, buf);
-    if (c && (c->quality == TokenHistoryQuality::Gap || c->quality == TokenHistoryQuality::Correction)) {
+    if (c && c->valid) {
+        char amount[24]; compact(c->tokens, amount, sizeof(amount));
+        std::snprintf(buf, sizeof(buf), "%s %s tokens / %s", c->label, amount, quality(c->quality));
+    } else if (c && (c->quality == TokenHistoryQuality::Gap || c->quality == TokenHistoryQuality::Correction)) {
         const bool gap = c->quality == TokenHistoryQuality::Gap;
-        setIcon(_qualityIcon, gap ? Icon::Gap : Icon::Correction, gap ? Purple : Orange);
-        std::snprintf(buf, sizeof(buf), "%+lld", static_cast<long long>(gap ? c->gapDelta : c->correctionDelta));
-        setText(_qualityValue, buf, gap ? Purple : Orange);
-        lv_obj_remove_flag(_qualityIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_qualityValue, LV_OBJ_FLAG_HIDDEN);
-    } else if (!c || !c->valid || c->quality == TokenHistoryQuality::Partial || c->quality == TokenHistoryQuality::Local) {
-        setIcon(_qualityIcon, Icon::Unknown, c && c->quality == TokenHistoryQuality::Partial ? Purple : Gray);
-        lv_obj_remove_flag(_qualityIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_qualityValue, LV_OBJ_FLAG_HIDDEN);
-    } else { lv_obj_add_flag(_qualityIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_qualityValue, LV_OBJ_FLAG_HIDDEN); }
+        std::snprintf(buf, sizeof(buf), "%s %s %+lld", c->label, gap ? "gap" : "correction",
+            static_cast<long long>(gap ? c->gapDelta : c->correctionDelta));
+    } else if (c) std::snprintf(buf, sizeof(buf), "%s / %s", c->label, quality(c->quality));
+    lv_label_set_text(_details, buf);
     for (size_t i = 0; i < 30; ++i) { lv_obj_set_style_outline_color(_cells[i], lv_color_hex(Green), 0); lv_obj_set_style_outline_width(_cells[i], i == _selected ? 2 : 0, 0); }
 }
 bool CodexMicroView::selectHistory(size_t index) {

@@ -526,3 +526,36 @@ below-3mA or invalid telemetry clears both states. No USB signal, manual button,
 load probe or persisted supply flag is used. Static lightning remains visible
 for the supply hint, while battery charging animation still needs positive current.
 This is accepted inference, not a measured5V input, and never relaxes OTA safety.
+
+## 0.11.0 weekly quota trend implementation
+
+The history heatmaps remain30d/24h. The native line plot beneath them shows
+account-wide `codex` remaining weekly allowance: rolling7d below30d, rolling24h
+below24h. It uses a fixed0–100% scale, actual observation timestamps, and latest
+real percentage for the selected series. It does not normalize Token totals.
+Mode/tile interactions read the same local cache and perform no HTTP requests.
+The compact selection row remains below the plot; original tile touch areas stay.
+
+Mac collection now independently records successful official weekly10080-minute
+quota snapshots to an additive SQLite table in the existing private database.
+Onlycodex is accepted; no5h/model fallback. Retention90days, minute polling unchanged.
+There was no prior percentage table: unrecorded past periods remain empty. The
+projection keeps25 hourly/8 daily slots over exact rolling24h/168h bounds, selecting
+latest actual samples per bucket. Missing points and collection gaps break lines;
+weekly reset boundaries are broken and marked, not smoothed or converted to usage.
+This charts official quota as observed, not the exact time Tokens were consumed.
+
+Authenticated `/v2/history` combines independent Token history and quota trend
+with separate availability, capture and age. Legacy `/v1/history` is unchanged;
+Mosaico requestsv2 once per background refresh, StopWatch/S3 keepsv1. Malformed,
+contradictory or out-of-range trend documents leave firmware cache unchanged.
+Fresh percentage data does not make stale Token data look fresh; stale/missing
+Token history cannot suppress newer quota observations. Empty aged ranges clear
+expired graphs honestly. Optional new-table initialization failures disable only
+trend recording, without taking canonical quota/legacy history offline.
+
+Source/model/geometry/schema tests and code review are not physical display proof.
+After OTA, verify chart/selection layout,24h versus7d mapping, touch/rotation and
+no-data/single-point behavior. Initially a lone point is expected until more time
+buckets contain observations. Existing signing, healthy alternate slot, power
+thresholds, wake/idle guards, display settings and gauge profile are unchanged.

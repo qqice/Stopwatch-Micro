@@ -534,7 +534,12 @@ bool NetworkQuota::fetchHistory()
 {
     std::unique_ptr<char[]> body(new (std::nothrow) char[32769]);
     int used = 0;
-    return body && requestJson("/v1/history", body.get(), 32769, used) && ApplyTokenHistory(body.get(), used);
+#ifdef MOSAICO_BOARD
+    const char* path = "/v2/history";
+#else
+    const char* path = "/v1/history";
+#endif
+    return body && requestJson(path, body.get(), 32769, used) && ApplyTokenHistory(body.get(), used);
 }
 bool NetworkQuota::fetch()
 {
