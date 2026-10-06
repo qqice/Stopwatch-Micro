@@ -6,10 +6,12 @@ import datetime as dt
 import hashlib
 import json
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any
+from quota_trend import project, weekly_snapshot
 
 
 TIMEZONE_OFFSET_MINUTES = 480
@@ -40,8 +42,18 @@ class HistoryStore:
         self._db.execute("CREATE TABLE IF NOT EXISTS official_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self._db.execute("CREATE TABLE IF NOT EXISTS daily_revisions (label TEXT, observed_epoch INTEGER, tokens INTEGER, PRIMARY KEY(label,observed_epoch))")
         self._db.commit()
+        self._quota_enabled = False
+        try:
+            with self._db:
+                self._db.execute("CREATE TABLE IF NOT EXISTS quota_remaining (epoch INTEGER PRIMARY KEY, limit_id TEXT NOT NULL, bp INTEGER NOT NULL, reset INTEGER NOT NULL)")
+            self._quota_enabled = True
+        except sqlite3.Error:
+            # Additive trend migration is optional. Preserve the existing token
+            # store/service, never erase or repeatedly retry this failed DDL.
+            print("QUOTA TREND ERROR storage unavailable", file=sys.stderr)
         self._live_capture: int | None = None
         self._live_saved_monotonic: float | None = None
+        self._trend_ages: dict[int, tuple[int, float]] = {}
 
     def close(self) -> None:
         with self._lock:
@@ -107,6 +119,62 @@ class HistoryStore:
             self._db.executemany("INSERT OR IGNORE INTO local_events VALUES(?,?,?,?)", rows)
             self._db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("local_capture_" + source, now))
             self._db.execute("DELETE FROM local_events WHERE epoch < ?", (now - RETENTION_DAYS * 86400,))
+
+    def record_quota(self, dashboard: Any) -> bool:
+        if not self._quota_enabled:
+            return False
+        row = weekly_snapshot(dashboard)
+        if row is None:
+            return False
+        epoch = row[0]
+        now = int(self._now())
+        if not now - RETENTION_DAYS * 86400 <= epoch <= now:
+            return False
+        with self._lock, self._db:
+            existing = self._db.execute("SELECT epoch,limit_id,bp,reset FROM quota_remaining WHERE epoch=?", (epoch,)).fetchone()
+            if existing is not None:
+                return row == existing # Exact repeats never reset freshness.
+            latest = self._db.execute("SELECT epoch,limit_id,bp,reset FROM quota_remaining ORDER BY epoch DESC LIMIT 1").fetchone()
+            if latest is not None and epoch < latest[0]:
+                return False
+            self._db.execute("INSERT INTO quota_remaining VALUES(?,?,?,?)", row)
+            self._db.execute("DELETE FROM quota_remaining WHERE epoch < ?", (now - RETENTION_DAYS * 86400,))
+            self._trend_ages = {epoch: (max(0, now - epoch), self._monotonic_now())}
+        return True
+
+    def quota_response(self) -> dict[str, Any]:
+        now = int(self._now())
+        if not self._quota_enabled:
+            return project([], now)
+        with self._lock:
+            cutoff = now - RETENTION_DAYS * 86400
+            # Retained snapshots only, including a real predecessor for gap/reset
+            # detection at rolling edges. Never synthesize prior history.
+            start = now - 604800
+            prior = self._db.execute("SELECT epoch,limit_id,bp,reset FROM quota_remaining WHERE epoch >= ? AND epoch < ? ORDER BY epoch DESC LIMIT 1", (cutoff, start)).fetchone()
+            rows = self._db.execute("SELECT epoch,limit_id,bp,reset FROM quota_remaining WHERE epoch >= ? AND epoch <= ? ORDER BY epoch", (max(cutoff, start), now)).fetchall()
+            if prior is not None:
+                rows.insert(0, prior)
+            age = 0
+            if rows:
+                captured = rows[-1][0]
+                if captured not in self._trend_ages:
+                    self._trend_ages = {captured: (max(0, now - captured), self._monotonic_now())}
+                initial, saved = self._trend_ages[captured]
+                age = initial + max(0, int(self._monotonic_now() - saved))
+        return project(rows, now, age)
+
+    def response_v2(self) -> dict[str, Any]:
+        body = self.response() # Preserve every token field and its v1 semantics.
+        body.update(version=2, token_available=body["available"],
+                    token_captured_epoch=body["captured_epoch"], token_age_seconds=body["age_seconds"])
+        try:
+            body["quota_trend"] = self.quota_response()
+        except (sqlite3.Error, OSError, ValueError, OverflowError):
+            print("QUOTA TREND ERROR storage unavailable", file=sys.stderr)
+            body["quota_trend"] = project([], int(self._now()))
+        body["available"] = body["token_available"] or body["quota_trend"]["available"]
+        return body
 
     def response(self) -> dict[str, Any]:
         with self._lock:

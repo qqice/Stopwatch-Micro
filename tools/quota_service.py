@@ -26,6 +26,7 @@ from stopwatch_bridge import AppServerClient, BridgeError, UsageSnapshot, locate
 from history_store import HistoryStore, unavailable_response
 from quota_dashboard import DashboardStore, normalize_quota_dashboard
 from ota_release import ImmutableReleaseStore
+from quota_trend import project as unavailable_trend
 
 
 POLL_SECONDS = 60.0
@@ -162,7 +163,12 @@ class QuotaCollector:
             captured = int(time.time())
             # A v2 projection failure cannot affect canonical v1 collection.
             try:
-                self._dashboard.save(normalize_quota_dashboard(raw, captured))
+                dashboard = normalize_quota_dashboard(raw, captured)
+                self._dashboard.save(dashboard)
+                try:
+                    self._history.record_quota(dashboard)
+                except (sqlite3.Error, OSError, ValueError, OverflowError):
+                    print("QUOTA TREND ERROR storage unavailable", file=sys.stderr)
             except (ValueError, TypeError, OverflowError):
                 print("QUOTA DASHBOARD ERROR invalid quota metadata", file=sys.stderr)
             self._store.save(normalize_rate_limits(raw, captured_epoch=captured))
@@ -240,7 +246,7 @@ def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore 
                 self.end_headers()
                 self.wfile.write(payload)
                 return
-            if self.path not in {"/v1/status", "/v1/history", "/v2/status"}:
+            if self.path not in {"/v1/status", "/v1/history", "/v2/status", "/v2/history"}:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             authorization = self.headers.get("Authorization", "")
@@ -250,6 +256,18 @@ def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore 
             if self.path == "/v1/history":
                 body = history.response() if history is not None else unavailable_response(int(time.time()))
                 available = True
+            elif self.path == "/v2/history":
+                try:
+                    if history is not None:
+                        body = history.response_v2()
+                    else:
+                        body = unavailable_response(int(time.time()))
+                        body.update(version=2, token_available=False, token_captured_epoch=body["captured_epoch"], token_age_seconds=body["age_seconds"], quota_trend=unavailable_trend([], int(time.time())))
+                except (sqlite3.Error, OSError, ValueError, OverflowError):
+                    print("QUOTA TREND ERROR history unavailable", file=sys.stderr)
+                    self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
+                available = True # Honest cold/empty history is still a valid document.
             elif self.path == "/v2/status":
                 body, available = dashboard.status()
             else:
