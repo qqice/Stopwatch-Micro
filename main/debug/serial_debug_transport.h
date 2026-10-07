@@ -81,7 +81,7 @@ constexpr bool settingsInteger(const char* text, uint32_t maximum, uint32_t& val
 }
 inline bool uartAllowed(const char* command) {
     if (!command) return true;
-    const char* allowed[] = {"help", "ping", "status", "debug-transport", "ota-status", "ota-bypass", "panic", "sessions", "clock", "motion", "network", "idle-runtime", "display-settings", "settings", "display-idle-frequency", "display-clocks", "display-test-frequency", "gauge", "gauge-boot", "gauge-selftest", "dot-selftest", "quota-selftest", "quota", "tailscale", "tailscale-crypto", "network-selftest", "standby-dim", "display-lock", "display-wake", "display", "power", "power-refresh", "history", "history-selftest", "boot", "selftest", "controls", "protocol", "mic", "inputs", "ui", "transport", "perf", "cancel"};
+    const char* allowed[] = {"help", "ping", "status", "debug-transport", "ota-status", "ota-bypass", "panic", "sessions", "clock", "motion", "network", "idle-runtime", "display-settings", "settings", "standby-sleep", "display-idle-frequency", "display-clocks", "display-test-frequency", "gauge", "gauge-boot", "gauge-selftest", "dot-selftest", "quota-selftest", "quota", "tailscale", "tailscale-crypto", "network-selftest", "standby-dim", "display-lock", "display-wake", "display", "power", "power-refresh", "history", "history-selftest", "boot", "selftest", "controls", "protocol", "mic", "inputs", "ui", "transport", "perf", "cancel"};
     for (const char* item : allowed) if (!std::strcmp(command, item)) return true;
     return false;
 }

@@ -198,8 +198,17 @@ static_assert(partialAndBoundedTx());
         self.assertIn('UART_HW_FLOWCTRL_DISABLE',SOURCE)
         self.assertIn('uart_set_pin(UART_NUM_0, 58, 59,',SOURCE)
         self.assertIn('uart_driver_install(UART_NUM_0, 2048, 0, serial_debug_transport::UartEventCapacity, &events, 0)',SOURCE)
-        for forbidden in ('uart_write_bytes(', 'uart_wait_tx_done(', 'esp_pm_lock_acquire(', 'xTaskCreate(', 'uart_vfs_dev_use_driver('):
+        for forbidden in ('uart_write_bytes(', 'esp_pm_lock_acquire(', 'xTaskCreate(', 'uart_vfs_dev_use_driver('):
             self.assertNotIn(forbidden,SOURCE)
+        # Hardware-TX pending must block auto-LS, but never block this poll or
+        # add driver activity when the opt-in lease is disabled.
+        self.assertEqual(re.findall(r'uart_wait_tx_done\(([^)]*)\)',SOURCE),['UART_NUM_0,0'])
+        traffic=poll.split('if(_uart_active && StandbySleep::monitoring())',1)[1]
+        self.assertIn('uart_wait_tx_done(UART_NUM_0,0)',traffic)
+        self.assertIn('_uart_tx.pending() || _uart_line_length || _uart_line_overflow',traffic)
+        self.assertIn('event.type == UART_WAKEUP) StandbySleep::uartWake()',poll)
+        shutdown=method('end')
+        self.assertLess(shutdown.index('StandbySleep::off()'),shutdown.index('uart_driver_delete'))
         self.assertIn('#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31',method('drainUart'))
         self.assertIn('BootTracePrint(debugPrintf)',SOURCE)
         self.assertNotIn('std::printf(',SOURCE)

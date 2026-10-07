@@ -29,6 +29,9 @@
 #include <ctime>
 #include <esp_timer.h>
 #include <esp_pm.h>
+#ifdef MOSAICO_BOARD
+#include "standby_sleep.h"
+#endif
 #include <esp_private/esp_clk.h>
 #include <esp_log.h>
 #include <hal/ble/codex_micro_ble.h>
@@ -83,7 +86,7 @@ void NetworkQuota::setLocked(bool locked)
 #ifdef MOSAICO_BOARD
     // Boost synchronously BEFORE the view starts its full wake redraw, rather
     // than racing the network worker's eventual wake notification.
-    if (!locked) setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+    if (!locked) { StandbySleep::off(); setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ); }
 #endif
     if (changed && _task_handle) xTaskNotifyGive(_task_handle);
 #ifndef MOSAICO_BOARD
@@ -135,15 +138,45 @@ void NetworkQuota::setCpu(uint32_t mhz)
         mhz = _diagnostic_override.load() ? _diagnostic_idle_mhz.load() : _idle_cpu_mhz.load();
     else mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
 #endif
-    if (_cpu_target == mhz) return;
-    esp_pm_config_t config{};
-    config.max_freq_mhz       = mhz;
-    config.min_freq_mhz       = mhz;
-    config.light_sleep_enable = false;
-    const esp_err_t result    = esp_pm_configure(&config);
-    _clock_error              = result;
-    if (result == ESP_OK) _cpu_target = mhz;
+#ifdef MOSAICO_BOARD
+    const bool sleep=StandbySleep::allow(mhz,idleLocked(),_wifi_running.load());
+    applyCpuConfig(mhz,sleep);
+#else
+    applyCpuConfig(mhz,false);
+#endif
 }
+void NetworkQuota::applyCpuConfig(uint32_t mhz, bool lightSleep)
+{
+#ifdef MOSAICO_BOARD
+    if(_sleep_pm_fault)lightSleep=false;
+    if(_cpu_target==mhz && (_cpu_light_sleep==lightSleep || _sleep_pm_fault))return;
+    StandbySleep::beforeConfigure(lightSleep);
+#else
+    if(_cpu_target==mhz)return;
+#endif
+    esp_pm_config_t config{};
+    config.max_freq_mhz=mhz;config.min_freq_mhz=mhz;config.light_sleep_enable=lightSleep;
+    const esp_err_t result=esp_pm_configure(&config);
+    _clock_error=result;
+#ifdef MOSAICO_BOARD
+    if(result!=ESP_OK && (lightSleep || _cpu_light_sleep))_sleep_pm_fault=true;
+    StandbySleep::configured(lightSleep,result);
+    if(result==ESP_OK)_cpu_light_sleep=lightSleep;
+#endif
+    if(result==ESP_OK)_cpu_target=mhz;
+}
+#ifdef MOSAICO_BOARD
+void NetworkQuota::serviceStandbySleep()
+{
+    // Same PM serialization as the radio owner; never change its frequency,
+    // wake deadlines, Wi-Fi/BLE configuration or normal polling cadence.
+    std::lock_guard<std::mutex> clockLock(_cpu_mutex);
+    if(!_cpu_target)return;
+    const bool sleep=StandbySleep::allow(_cpu_target,idleLocked(),_wifi_running.load());
+    applyCpuConfig(_cpu_target,sleep);
+}
+#endif
+
 #ifdef MOSAICO_BOARD
 bool NetworkQuota::wifiSettingsSnapshot(WifiSettingsSnapshot& out)
 {
@@ -1154,6 +1187,7 @@ void NetworkQuota::updateFirmware()
 #ifdef MOSAICO_BOARD
 void NetworkQuota::wakeForFirmwareUpdate()
 {
+    StandbySleep::off();
     setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
     if (_task_handle) xTaskNotifyGive(_task_handle);
 }

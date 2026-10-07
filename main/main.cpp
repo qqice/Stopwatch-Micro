@@ -24,6 +24,7 @@ using namespace smooth_ui_toolkit;
 #include <ota/mosaico_ota.h>
 #include <host/mosaico_display_settings.h>
 #include <host/mosaico_session_monitor.h>
+#include <host/standby_sleep.h>
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
 #include <ota/panic_capture.h>
 #endif
@@ -105,6 +106,9 @@ extern "C" void app_main(void)
 #ifdef MOSAICO_BOARD
         MosaicoSessions::service(GetNetworkQuota().displayLocked(), MosaicoOta::busy() || MosaicoOta::healthPending());
         MosaicoOta::healthPoll(ota_app->otaReady());
+        const auto sleepBle=GetCodexMicroBle().diagnostics();
+        StandbySleep::service(MosaicoOta::busy() || MosaicoOta::healthPending(), sleepBle.advertising || sleepBle.connected);
+        GetNetworkQuota().serviceStandbySleep();
         // The monitor has no low-latency remote-control path. Keep its 10Hz
         // motion/100Hz touch responsive without a 1kHz application update loop.
         // Function is now the sole wake input: 20ms GPIO sampling avoids the

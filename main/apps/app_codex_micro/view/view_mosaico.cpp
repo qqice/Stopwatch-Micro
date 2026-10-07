@@ -9,6 +9,7 @@
 #include <host/network_quota.h>
 #include <host/tailscale_transport.h>
 #include <host/system_clock.h>
+#include <host/standby_sleep.h>
 #include <ota/mosaico_ota_power.h>
 #include <tusb.h>
 #include <algorithm>
@@ -1509,6 +1510,7 @@ void CodexMicroView::navigatePage(int direction) {
     lv_anim_set_completed_cb(&anim, slideCompleted); lv_anim_start(&anim);
 }
 void CodexMicroView::setInputSuppressed(bool suppressed) {
+    if(suppressed)StandbySleep::viewState(_locked,false,false);
     _suppressed = suppressed;
     if (suppressed) clearStandbyDim();
     refreshSessionsLease();
@@ -1523,6 +1525,7 @@ void CodexMicroView::togglePage() {
     navigatePage(1);
 }
 void CodexMicroView::wakeDisplay() {
+    StandbySleep::off();
     clearStandbyDim();
     if (_rotationFault) return;
     if (!ready()) return;
@@ -1562,6 +1565,7 @@ void CodexMicroView::lockDisplay() {
 }
 bool CodexMicroView::lockForDebug() { if (!ready()) return false; lockDisplay(); return _locked; }
 void CodexMicroView::update(const CodexMicroState& state) {
+    StandbySleep::viewState(_locked,ready() && standbyDimEligible() && !_settingsAnimating && !_slideTo,_rotationFault);
     if (!ready()) return;
     uint32_t tick = lv_tick_get();
     const bool networkReady = GetNetworkQuota().connected() && (!GetTailnetQuota().enabled() || GetTailnetQuota().ready());
@@ -1606,5 +1610,6 @@ void CodexMicroView::update(const CodexMicroState& state) {
     if (!_locked && GetHAL().millis() - _batteryReadTick >= 5000) refreshBattery(GetHAL().millis());
     applyBurnInShift(touching);
     updateAnimations(tick);
+    StandbySleep::viewState(_locked,standbyDimEligible() && !_settingsAnimating && !_slideTo,_rotationFault);
 }
 }

@@ -38,6 +38,7 @@ public:
     void refreshWhileLocked();
 #ifdef MOSAICO_BOARD
     void wakeForFirmwareUpdate();
+    void serviceStandbySleep(); // Existing main loop; preserves the current CPU/RF target.
 #if SOC_WIFI_HE_SUPPORT
     bool requestTwtTrial(MosaicoTwt::Mode mode);
     MosaicoTwt::Snapshot twtSnapshot() const;
@@ -116,6 +117,7 @@ private:
 #endif
     void wait(uint32_t milliseconds);
     void setCpu(uint32_t mhz);
+    void applyCpuConfig(uint32_t mhz, bool lightSleep);
     void recordWifiRunning(bool running);
     void setPhase(uint8_t phase);
     TaskHandle_t _task_handle = nullptr;
@@ -127,6 +129,7 @@ private:
     std::atomic<uint32_t> _diagnostic_idle_mhz{80};
     std::atomic<uint32_t> _idle_cpu_mhz{320};
     std::mutex _cpu_mutex;
+    bool _cpu_light_sleep=false, _sleep_pm_fault=false;
     std::mutex _wifi_settings_mutex;
     WifiSettingsSnapshot _wifi_settings;
     char _pending_ssid[33]{}, _pending_password[65]{};

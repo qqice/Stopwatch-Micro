@@ -932,3 +932,26 @@ power presence or mutate the gauge. Unconfirmed automatic runs still require
 external-power heuristic. Signature/hash/layout/rollback and fresh checks stay.
 The original completed0135manualinstall was anexception needed to bridge this
 old-policy limitation; no BOOT/wiring/power manipulation was used.
+
+### Single auto-light-sleep diagnostic candidate (0.13.7)
+
+Optional application overlay: `boards/mosaico/sdkconfig.standby-sleep-experiment`.
+Check the **generated** config, not merely input flags: tickless, profiling and
+sleep callbacks on; PSRAM halfsleep, flash DPD/powerdown, HP peripheral and CPU
+powerdown off. Keep PSRAM/XIP enabled. Runtime default remains OFF.
+
+`debug standby-sleep on 180` requests one 30–300 second RAM lease only while
+locked at 160 MHz, radio-off, display-safe, and outside OTA/boot-health work.
+`debug standby-sleep off` restores ordinary standby; `status` reports counters.
+Wake, OTA, expiry and faults disable it; no NVS settings are changed.
+Use `DebugClient(..., uart=True, wake_preamble=True)` or `--wake-preamble` for
+UART recovery: wake-only bytes precede the original CRC command, and firmware
+holds a bounded awake window. Only exact idempotent recovery commands retry;
+never automatically retry OTA requests, parameter writes or other actions.
+
+Compare same-version lease OFF/ON using one two-minute capture each, last-minute
+statistics, gauge/power checks and true SDK successful/rejected sleep counters.
+The callback field `framework_interval_us_including_overhead` includes rejected
+attempts and entry/exit overhead; it is **not** exact silicon sleep residency.
+Keep minute lock redraw, Function, radio intervals, and the healthy rollback
+slot. No benefit or physical visual acceptance is implied by compilation.

@@ -7,6 +7,7 @@
 #ifdef MOSAICO_BOARD
 #include <host/system_clock.h>
 #include <host/mosaico_display_settings.h>
+#include <host/standby_sleep.h>
 #include <host/mosaico_session_monitor.h>
 #endif
 
@@ -138,6 +139,7 @@ bool SerialDebug::begin()
             _uart_events = events;
         }
     } // Do not reconfigure a UART already owned by another subsystem.
+    StandbySleep::uartReady(_uart_active);
 #endif
     // TinyUSB console/VFS is initialized before board bring-up in app_main.
     setvbuf(stdin, nullptr, _IONBF, 0);
@@ -192,6 +194,7 @@ void SerialDebug::end()
     }
     cancelAsyncTest("shutdown", false);
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    StandbySleep::off(); StandbySleep::uartReady(false);
     if (_uart_active) uart_driver_delete(UART_NUM_0);
 #endif
     _uart_active = _usb_active = _active = false;
@@ -230,6 +233,7 @@ void SerialDebug::poll()
         for (unsigned i = 0; i < serial_debug_transport::UartEventCapacity; ++i) {
             if (saturated()) { invalidateUartInput(); break; }
             if (!xQueueReceive(static_cast<QueueHandle_t>(_uart_events), &event, 0)) break;
+            if (event.type == UART_WAKEUP) StandbySleep::uartWake();
             if (event.type == UART_FIFO_OVF || event.type == UART_BUFFER_FULL ||
                 event.type == UART_FRAME_ERR || event.type == UART_PARITY_ERR) {
                 invalidateUartInput();
@@ -242,6 +246,7 @@ void SerialDebug::poll()
             invalidateUartInput();
             bytes.fill(0);
         } else {
+            StandbySleep::uartTraffic(_uart_line_length || _uart_line_overflow || count>0 || _uart_tx.pending(),count>0);
             for (int i = 0; i < count; ++i) {
                 if (saturated()) { invalidateUartInput(); bytes.fill(0); break; }
                 consumeFrom(bytes[i], true);
@@ -255,6 +260,14 @@ void SerialDebug::poll()
     if (_async_test == AsyncTest::None) _async_uart = false;
     _reply_uart = false; _writer = previous;
     drainUart();
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    if(_uart_active && StandbySleep::monitoring()) {
+        size_t buffered=0;
+        const bool rxUnknown=uart_get_buffered_data_len(UART_NUM_0,&buffered)!=ESP_OK;
+        const bool txPending=uart_wait_tx_done(UART_NUM_0,0)!=ESP_OK; // Zero-tick query, no waits.
+        StandbySleep::uartTraffic(rxUnknown || buffered || txPending || _uart_tx.pending() || _uart_line_length || _uart_line_overflow,false);
+    }
+#endif
 }
 
 void SerialDebug::drainUart()
@@ -366,6 +379,31 @@ void SerialDebug::handleLine(char* line)
     }
 
 #ifdef MOSAICO_BOARD
+    if (command && !std::strcmp(command,"standby-sleep")) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        if(!action) { result(command,"FAIL","expected=on_lease30..300_or_off_or_status no_changes=1");return; }
+        if(!std::strcmp(action,"on")) {
+            const char* lease=::strtok_r(nullptr," \t",&save);uint32_t seconds=180;
+            const auto power=GetNetworkQuota().powerStats();const auto ble=GetCodexMicroBle().diagnostics();
+            const bool safe=_app.debugDisplayLocked() && power.cpuMHz==160 && !power.wifiRunning && !power.clockError &&
+                !ble.advertising && !ble.connected && !MosaicoOta::busy() && !MosaicoOta::healthPending();
+            const bool valid=(!lease || (serial_debug_transport::settingsInteger(lease,300,seconds) && seconds>=30)) &&
+                !::strtok_r(nullptr," \t",&save);
+            const bool ok=valid && safe && StandbySleep::request(seconds);
+            result(command,ok?"PASS":"FAIL",ok?"lease_ram_only=1 default_off=1 requires_uart_recovery=1":"reason=range_profile_or_safety_gate no_changes=1");return;
+        }
+        if(std::strcmp(action,"off") && std::strcmp(action,"status")) { result(command,"FAIL","reason=unknown_action no_changes=1");return; }
+        if(::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","reason=extra_arguments no_changes=1");return;}
+        if(!std::strcmp(action,"off")) { StandbySleep::off();GetNetworkQuota().serviceStandbySleep(); }
+        const auto s=StandbySleep::snapshot();char details[640]{};
+        std::snprintf(details,sizeof(details),
+            "supported=%d lease=%d remaining_s=%lu configured_ls=%d eligible=%d uart_ready=%d uart_blocked=%d successful_sleeps=%llu rejected_sleeps=%llu pm_counts_valid=%d framework_positive_intervals=%lu framework_interval_us_including_overhead=%llu no_ls_locks_created=%lu no_ls_locks_acquired=%lu error=%ld ram_only=1",
+            s.supported,s.lease,static_cast<unsigned long>(s.remainingSeconds),s.configured,s.eligible,s.uartReady,s.uartBlocked,
+            static_cast<unsigned long long>(s.successfulSleeps),static_cast<unsigned long long>(s.rejectedSleeps),s.pmCountsValid,
+            static_cast<unsigned long>(s.positiveIntervals),static_cast<unsigned long long>(s.frameworkIntervalUs),
+            static_cast<unsigned long>(s.lockCreated),static_cast<unsigned long>(s.lockAcquired),static_cast<long>(s.error));
+        result(command,s.error?"FAIL":"PASS",details);return;
+    }
     if (command && !std::strcmp(command, "settings")) {
         const char* action=::strtok_r(nullptr, " \t", &save);
         bool ok=false;
@@ -1107,6 +1145,7 @@ void SerialDebug::handleLine(char* line)
 void SerialDebug::printHelp()
 {
 #ifdef MOSAICO_BOARD
+    debugPrintf("DBG HELP standby-sleep on [lease_s=180,30..300] | standby-sleep off | standby-sleep status default_off=1 UART_wake_preamble_required=1\r\n");
     debugPrintf("DBG HELP settings get | settings set <field> <int> [lease_s=180,30..600] | settings restore | settings save CONFIRM\r\n");
 #endif
 

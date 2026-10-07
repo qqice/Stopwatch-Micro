@@ -1,0 +1,10 @@
+# Optional auto-light-sleep diagnostic profile, runtime lease defaults OFF.
+# Append to the existing Mosaico application defaults. Never modify the SDK.
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_PM_PROFILING=y
+CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
+# CONFIG_PM_SLP_SPIRAM_HALFSLEEP_ENABLED is not set
+# CONFIG_ESP_SLEEP_POWER_DOWN_FLASH is not set
+# CONFIG_ESP_SLEEP_SET_FLASH_DPD is not set
+# CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP is not set
+# CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP is not set

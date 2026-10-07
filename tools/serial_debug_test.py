@@ -66,11 +66,22 @@ def encode_command(text: str, uart: bool = False) -> bytes:
     return payload + b"\n"
 
 
+def recovery_retry_safe(text: str) -> bool:
+    tokens = text.split(" ")
+    if tokens[:1] not in (["debug"], ["dbg"]):
+        return False
+    return tuple(tokens[1:]) in {("ping",), ("settings", "get"), ("settings", "restore"),
+                                ("standby-sleep", "status"), ("standby-sleep", "off")}
+
+
 class DebugClient:
-    def __init__(self, port: str, uart: bool = False) -> None:
+    def __init__(self, port: str, uart: bool = False, wake_preamble: bool = False) -> None:
         # Configure control lines before opening so attaching diagnostics does
         # not create an avoidable DTR/RTS reset pulse.
+        if wake_preamble and not uart:
+            raise ValueError("wake preamble requires CRC-framed UART")
         self.uart = uart
+        self.wake_preamble = wake_preamble
         self.serial = serial.Serial(port=None, baudrate=115200, timeout=0.1, write_timeout=1)
         self.serial.dtr = False
         self.serial.rts = False
@@ -78,6 +89,11 @@ class DebugClient:
         self.serial.open()
 
     def handshake(self, timeout: float = 12.0) -> None:
+        if self.wake_preamble:
+            reply = self.command("debug ping", "ping", timeout=min(timeout / 3, 4.0))
+            if reply.status != "PASS":
+                raise TimeoutError("UART recovery handshake failed")
+            return
         deadline = time.monotonic() + timeout
         next_ping = time.monotonic()
         while time.monotonic() < deadline:
@@ -102,7 +118,26 @@ class DebugClient:
     def close(self) -> None:
         self.serial.close()
 
+    def _send_preamble(self) -> None:
+        # 576 characters take 50ms at 115200 8N1. Flush waits for transmission;
+        # the delimiter and 50ms gap let the existing 20ms consumer drain it.
+        self.serial.write(b"U" * 576 + b"\n")
+        self.serial.flush()
+        time.sleep(0.05)
+
     def command(self, text: str, expected: str, timeout: float = 5.0) -> Result:
+        attempts = 3 if self.wake_preamble and recovery_retry_safe(text) else 1
+        for attempt in range(attempts):
+            if self.wake_preamble:
+                self._send_preamble()
+            try:
+                return self._command_once(text, expected, timeout)
+            except TimeoutError:
+                if attempt + 1 == attempts:
+                    raise
+        raise AssertionError("unreachable")
+
+    def _command_once(self, text: str, expected: str, timeout: float) -> Result:
         self.serial.write(encode_command(text, self.uart))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -176,6 +211,7 @@ def run_interactive(client: DebugClient, failures: list[str]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", help="Serial port; USB Serial/JTAG auto-detected when unique")
+    parser.add_argument("--wake-preamble", action="store_true", help="UART auto-sleep recovery preamble; retry only exact idempotent diagnostics up to 3 times")
     parser.add_argument("--uart", action="store_true", help="CRC-framed UART diagnostics; requires explicit --port")
     parser.add_argument(
         "--allow-offline",
@@ -208,12 +244,14 @@ def main() -> int:
         expected_command = "ui-cycle" if tokens[1] == "ui" and (len(tokens) == 2 or tokens[2] == "cycle") else tokens[1]
     if args.uart and not args.port:
         parser.error("--uart requires --port; USB auto-detection is not used for UART")
+    if args.wake_preamble and not args.uart:
+        parser.error("--wake-preamble requires --uart")
     port = discover_port(args.port)
     print(f"HOST port={port}")
 
     client: DebugClient | None = None
     try:
-        client = DebugClient(port, uart=args.uart)
+        client = DebugClient(port, uart=args.uart, wake_preamble=True) if args.wake_preamble else DebugClient(port, uart=args.uart)
         client.handshake()
         if args.command is not None:
             result = client.command(args.command, expected_command, timeout=args.command_timeout)

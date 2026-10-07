@@ -1,0 +1,137 @@
+"""Offline auto-LS lease/safety and host recovery checks. No devices/builds."""
+from pathlib import Path
+import subprocess,tempfile,unittest
+from unittest.mock import patch
+from types import SimpleNamespace
+from tools import serial_debug_test as host
+R=Path(__file__).resolve().parents[1]
+C=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+
+def function(source,signature):
+    start=source.index(signature);opening=source.index('{',start);depth=1;end=opening+1
+    while depth:
+        depth+=(source[end]=='{')-(source[end]=='}');end+=1
+    return source[start:end]
+
+class StandbySleepTests(unittest.TestCase):
+    def compile(self,code,name):
+        if not C:self.skipTest('cross compiler unavailable')
+        with tempfile.TemporaryDirectory() as temp:
+            source=Path(temp)/(name+'.cpp');source.write_text(code)
+            result=subprocess.run([str(C[-1]),'-std=c++17','-fsyntax-only','-I'+str(R),str(source)],capture_output=True,text=True)
+            log=R/'.artifacts/mosaico'/('standby-sleep-'+name+'.log');log.write_text(result.stdout+result.stderr)
+            self.assertEqual(result.returncode,0,str(log))
+    def test_actual_cpp_lease_model(self):
+        self.compile(r'''
+#include "main/host/standby_sleep_model.h"
+using StandbySleep::Model;
+constexpr bool cases() {
+ Model m;
+ if(m.leaseUntil || m.eligible(0,160,true,false))return false;
+ m.viewLocked=true;m.displaySafe=true;
+ if(m.request(29,0)||m.request(301,0)||m.leaseUntil)return false;
+ if(!m.request(180,0)||!m.eligible(0,160,true,false))return false;
+ const auto until=m.leaseUntil;
+ if(m.request(4294967295U,0)||m.leaseUntil!=until)return false;
+ if(m.eligible(0,80,true,false)||m.eligible(0,320,true,false)||m.eligible(0,160,false,false)||m.eligible(0,160,true,true))return false;
+ m.displaySafe=false;if(m.eligible(0,160,true,false))return false;m.displaySafe=true;
+ m.wake(10);if(!m.uartBlocked(500009)||m.uartBlocked(500010))return false;
+ m.uartPending=true;if(!m.uartBlocked(1000000))return false;m.uartPending=false;
+ m.service(until-1,false);if(!m.leaseUntil)return false;
+ m.service(until,false);if(m.leaseUntil)return false;
+ if(!m.request(30,until))return false;m.viewLocked=false;m.service(until+1,false);if(m.leaseUntil)return false;
+ m.viewLocked=true;m.request(30,until);m.service(until,true);if(m.leaseUntil)return false;
+ m.request(30,until);m.fault=true;m.service(until,false);if(m.leaseUntil)return false;
+ m.fault=false;m.request(300,until);m.off();if(m.leaseUntil)return false;
+ m.wake(until);return !m.leaseUntil;
+}
+static_assert(cases(),"default off, strict bounded TTL, 160-only gates, UART hold, wake/OTA/fault cancellation");
+''','model')
+    def test_actual_pm_cache_includes_sleep_bit_and_fault_stops_retry(self):
+        source=(R/'main/host/network_quota.cpp').read_text()
+        body=function(source,'void NetworkQuota::applyCpuConfig(')
+        code=r'''
+#define MOSAICO_BOARD 1
+#include <cstdint>
+using esp_err_t=int;constexpr int ESP_OK=0;
+struct esp_pm_config_t {unsigned max_freq_mhz=0,min_freq_mhz=0;bool light_sleep_enable=false;};
+namespace StandbySleep {constexpr void beforeConfigure(bool){} constexpr void configured(bool,int){} }
+struct NetworkQuota {
+ unsigned _cpu_target=320;bool _cpu_light_sleep=false,_sleep_pm_fault=false;int _clock_error=0,calls=0,error=0;
+ esp_pm_config_t last{};
+ constexpr int esp_pm_configure(const esp_pm_config_t* p) {++calls;last=*p;return error;}
+ constexpr void applyCpuConfig(uint32_t,bool);
+};
+'''+body.replace('void NetworkQuota::','constexpr void NetworkQuota::')+r'''
+constexpr bool cases() {
+ NetworkQuota q;q.applyCpuConfig(320,false);if(q.calls)return false;
+ q.applyCpuConfig(320,true);if(q.calls!=1||!q._cpu_light_sleep||!q.last.light_sleep_enable)return false;
+ q.applyCpuConfig(320,true);if(q.calls!=1)return false;
+ q.applyCpuConfig(320,false);if(q.calls!=2||q._cpu_light_sleep)return false;
+ q.applyCpuConfig(160,true);if(q.calls!=3||q._cpu_target!=160||q.last.min_freq_mhz!=160)return false;
+ q.error=-1;q.applyCpuConfig(160,false);if(!q._sleep_pm_fault||!q._cpu_light_sleep||q._clock_error!=-1)return false;
+ q.applyCpuConfig(160,false);if(q.calls!=4)return false; // Fail closed, no autonomous busy retries.
+ return true;
+}
+static_assert(cases(),"same-frequency LS enable/disable is not hidden by cached MHz; faults do not busy retry");
+'''
+        self.compile(code,'pm-cache')
+    def test_callbacks_and_production_safety_source(self):
+        source=(R/'main/host/standby_sleep.cpp').read_text()
+        for signature in ('esp_err_t IRAM_ATTR enterSleep','esp_err_t IRAM_ATTR exitSleep'):
+            body=function(source,signature)
+            for forbidden in ('printf','ESP_LOG','mutex','lockRecovery','esp_pm_lock','GetHAL','uart_','gpio_','esp_timer','malloc'):
+                self.assertNotIn(forbidden,body)
+        self.assertIn('DRAM_ATTR std::atomic<uint32_t>',source)
+        self.assertIn('is_always_lock_free',source)
+        for config in ('CONFIG_PM_PROFILING','CONFIG_PM_LIGHT_SLEEP_CALLBACKS','!CONFIG_PM_SLP_SPIRAM_HALFSLEEP_ENABLED',
+                       '!CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP','!CONFIG_ESP_SLEEP_POWER_DOWN_FLASH','!CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP'):
+            self.assertIn(config,source)
+        for token in ('ESP_PD_DOMAIN_VDDSDIO,ESP_PD_OPTION_ON','gpio_wakeup_enable(GPIO_NUM_7,GPIO_INTR_LOW_LEVEL)',
+                      'UART_WK_MODE_ACTIVE_THRESH','uart.rx_edge_threshold=3','ESP_PM_NO_LIGHT_SLEEP','esp_pm_dump_locks(stream)'):
+            self.assertIn(token,source)
+        for forbidden in ('nvs_','xTaskCreate','vTaskDelay','esp_light_sleep_start','esp_timer_create'):
+            self.assertNotIn(forbidden,source)
+        serial=(R/'main/debug/serial_debug.cpp').read_text()
+        self.assertIn('event.type == UART_WAKEUP) StandbySleep::uartWake()',serial)
+        self.assertIn('uart_wait_tx_done(UART_NUM_0,0)',serial)
+        self.assertIn('_uart_tx.pending() || _uart_line_length || _uart_line_overflow',serial)
+        self.assertIn('!ble.advertising && !ble.connected && !MosaicoOta::busy() && !MosaicoOta::healthPending()',serial)
+        network=(R/'main/host/network_quota.cpp').read_text()
+        otaWake=function(network,'void NetworkQuota::wakeForFirmwareUpdate()')
+        self.assertLess(otaWake.index('StandbySleep::off()'),otaWake.index('setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ)'))
+        view=(R/'main/apps/app_codex_micro/view/view_mosaico.cpp').read_text()
+        self.assertIn('standbyDimEligible() && !_settingsAnimating && !_slideTo,_rotationFault',view)
+        self.assertIn('StandbySleep::off()',function(view,'void CodexMicroView::wakeDisplay()'))
+        self.assertIn('refreshElapsed >= 60000U',view)
+    def test_host_preamble_crc_and_default_unchanged(self):
+        for enabled in (False,True):
+            writes=[];flushes=[]
+            fake=SimpleNamespace(open=lambda:None,close=lambda:None,write=writes.append,flush=lambda:flushes.append(1),
+                readline=lambda:b'DBG RESULT command=ping status=PASS reply=pong\r\n')
+            with patch.object(host.serial,'Serial',return_value=fake),patch.object(host.time,'sleep') as sleep:
+                client=host.DebugClient('TEST-NO-DEVICE',uart=True,wake_preamble=enabled)
+                self.assertFalse(fake.dtr);self.assertFalse(fake.rts)
+                reply=client.command('debug ping','ping')
+                self.assertEqual(reply.status,'PASS')
+                self.assertEqual(writes,([b'U'*576+b'\n'] if enabled else [])+[host.encode_command('debug ping',True)])
+                self.assertEqual(len(flushes),int(enabled));self.assertEqual(sleep.call_count,int(enabled))
+                if enabled:sleep.assert_called_once_with(0.05)
+        with self.assertRaises(ValueError):host.DebugClient('TEST-NO-DEVICE',uart=False,wake_preamble=True)
+    def test_host_retry_exact_idempotent_only(self):
+        client=host.DebugClient.__new__(host.DebugClient);client.wake_preamble=True;client.uart=True
+        for text in ('debug ping','debug settings get','dbg settings restore','debug standby-sleep status','debug standby-sleep off'):
+            with patch.object(client,'_send_preamble') as preamble,patch.object(client,'_command_once',side_effect=[TimeoutError(),TimeoutError(),host.Result('x','PASS','')]) as once:
+                self.assertTrue(host.recovery_retry_safe(text));client.command(text,'x')
+                self.assertEqual(once.call_count,3);self.assertEqual(preamble.call_count,3)
+        for text in ('debug standby-sleep on 180','debug settings set burn_in 0','debug settings save CONFIRM','debug ota-reboot','debug ota-update CONFIRM_EXTERNAL_POWER','debug ping extra','debug  ping'):
+            with patch.object(client,'_send_preamble'),patch.object(client,'_command_once',side_effect=TimeoutError()) as once:
+                self.assertFalse(host.recovery_retry_safe(text))
+                with self.assertRaises(TimeoutError):client.command(text,'x')
+                self.assertEqual(once.call_count,1)
+        with patch.object(client,'_send_preamble'),patch.object(client,'_command_once',side_effect=TimeoutError()) as once:
+            with self.assertRaises(TimeoutError):client.command('debug standby-sleep off','standby-sleep')
+            self.assertEqual(once.call_count,3)
+        with patch.object(client,'_send_preamble'),patch.object(client,'_command_once',return_value=host.Result('x','FAIL','')) as once:
+            client.command('debug standby-sleep off','x');self.assertEqual(once.call_count,1)
+if __name__=='__main__':unittest.main()
