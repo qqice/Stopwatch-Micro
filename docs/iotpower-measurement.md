@@ -69,3 +69,21 @@ For another machine, obtain the official licensed Store package and use
 `tools/extract_iotpower_native.ps1` under PowerShell7. It reads metadata only and
 refuses replacing a differing DLL. Review the new ABI/provenance/hash before
 passing it to the loader; do not blindly trust a hash for an unknown binary.
+
+## Three-minute standby comparison procedure
+
+Every V1-powered run records three minutes; analyze the last60host-receipt seconds
+with `tools/analyze_iotpower_capture.py`. The first two minutes are a settling
+observation, NOT a guarantee the battery is full. Keep supply/wiring/brightness/
+wireless settings and charging state independently matched; record pulse content.
+The analyzer never overwrites captures, reports six10s sub-windows and preserves
+received-sample-only energy/loss caveats. It does not infer whole-wall Wh.
+
+Current Mosaico lock-brightness30 control:160MHz median62.853mA vs320 reversal
+71.353mA (~11.91% lower current plateau). Last-minute average powers314.675 vs
+364.429mW, but the320window had a larger pulse; raw13.65%average difference is not
+an isolated CPU-energy measurement. Userobservedno stripe/flower during160run.
+Locked160 is now persisted/readback; wake320 preserved, no80MHz/light-sleep change.
+Restore using USB `debug display-idle-frequency 320 CONFIRM` while awake inphase0.
+Measured board input remains~0.315W; this is not true system sleep or a proof of
+battery-runtime gain. Datasets/evidence are local ignored artifacts.
