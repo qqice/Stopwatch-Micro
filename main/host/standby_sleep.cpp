@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "standby_sleep.h"
 #include <main_idle_wait.h>
+#include "uart_fifo_recovery_model.h"
 #include "standby_sleep_model.h"
 #include <sdkconfig.h>
 #include <hal/hal.h>
@@ -69,6 +70,8 @@ void refreshRecovery(int64_t now) {
 }
 bool initialize() {
 #if STANDBY_SLEEP_SUPPORTED
+    // Wake/clock setup is boot-scoped. A closed SerialDebug owner invalidates
+    // the FIFO event-wait gate until reboot; never silently reconfigure clocks.
     if(initialized)return true;
     if(!ready || setupAttempted)return false;
     setupAttempted=true;
@@ -76,12 +79,22 @@ bool initialize() {
     if(err==ESP_OK)err=esp_sleep_pd_config(ESP_PD_DOMAIN_VDDSDIO,ESP_PD_OPTION_ON);
     if(err==ESP_OK)err=gpio_wakeup_enable(GPIO_NUM_7,GPIO_INTR_LOW_LEVEL);
     if(err==ESP_OK)err=esp_sleep_enable_gpio_wakeup();
-    uart_wakeup_cfg_t uart{};uart.wakeup_mode=UART_WK_MODE_ACTIVE_THRESH;uart.rx_edge_threshold=3;
+    uart_wakeup_cfg_t uart{};
+#if CONFIG_MOSAICO_UART_FIFO_RECOVERY && SOC_UART_WAKEUP_SUPPORT_FIFO_THRESH_MODE && SOC_PM_SUPPORT_PMU_CLK_ICG
+    uart.wakeup_mode=UART_WK_MODE_FIFO_THRESH;uart.rx_fifo_threshold=UartFifoRecovery::WakeThreshold;
+#elif CONFIG_MOSAICO_UART_FIFO_RECOVERY
+    err=ESP_ERR_NOT_SUPPORTED; // Never silently apply only part of the candidate.
+#else
+    uart.wakeup_mode=UART_WK_MODE_ACTIVE_THRESH;uart.rx_edge_threshold=3;
+#endif
     if(err==ESP_OK)err=uart_wakeup_setup(UART_NUM_0,&uart);
     if(err==ESP_OK)err=esp_sleep_enable_uart_wakeup(UART_NUM_0);
     esp_pm_sleep_cbs_register_config_t callbacks{};
     callbacks.enter_cb=enterSleep;callbacks.exit_cb=exitSleep;
     if(err==ESP_OK)err=esp_pm_light_sleep_register_cbs(&callbacks);
+    MainIdleWait::uartRecoveryConfigured(err==ESP_OK,err);
+    // Do not call uart_wakeup_clear: FIFO clear forces global XTAL OFF/IOMUX
+    // GATE, rather than restoring an earlier owner's policy. Boot-scoped only.
     if(err!=ESP_OK) { lastError=err;fatal=true;return false; }
     initialized=true;return true;
 #else

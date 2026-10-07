@@ -5,7 +5,11 @@
 #include <cstdint>
 #include <cstring>
 namespace serial_debug_transport {
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31 && CONFIG_MOSAICO_UART_FIFO_RECOVERY
+constexpr std::size_t UartEventCapacity = 32;
+#else
 constexpr std::size_t UartEventCapacity = 8;
+#endif
 constexpr bool uartQueueSaturated(std::size_t pending) { return pending >= UartEventCapacity; }
 // CRC-32/ISO-HDLC (same as Python zlib.crc32). Integrity check, not authentication.
 constexpr uint32_t crc32(const char* bytes, std::size_t length) {

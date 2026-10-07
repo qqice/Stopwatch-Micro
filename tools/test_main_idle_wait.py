@@ -53,19 +53,23 @@ static_assert(cases(),"all fallback gates, hold/release/short IRQ/wrap grace");
         source=source.replace('gpio_isr_handler_add(GPIO_NUM_7,gpioInterrupt,nullptr)','gpio_isr_handler_add(GPIO_NUM_7,0,nullptr)')
         source=source.replace('uart_set_select_notif_callback(UART_NUM_0,uartInterrupt)','uart_set_select_notif_callback(UART_NUM_0,1)')
         source=source.replace('uart_set_select_notif_callback(UART_NUM_0,nullptr)','uart_set_select_notif_callback(UART_NUM_0,0)')
-        source=source.replace('constexpr UBaseType_t NotifyIndex=1','static constexpr UBaseType_t NotifyIndex=1')
-        for name in ['gpioInterrupt','uartInterrupt','setEnabled','uartOwner','serialState','viewState','wait','snapshot']:
+        source=source.replace('constexpr UBaseType_t NotifyIndex=1','static constexpr UBaseType_t NotifyIndex=1').replace('constexpr bool fifoRecovery','static constexpr bool fifoRecovery')
+        for name in ['gpioInterrupt','uartInterrupt','uartComplete','setEnabled','uartRxConfigured','uartRecoveryConfigured','uartEvent','uartOwner','serialState','viewState','wait','snapshot']:
             source=re.sub(r'(?m)^(void|bool|Snapshot) '+name+r'\(',r'constexpr \1 '+name+'(',source)
         source=source.rstrip();assert source.endswith('}')
         source=source[:-1]+'};'
         helpers=r'''#include <cstdint>
 #include <atomic>
 #include "main/main_idle_wait.h"
+#include "main/host/uart_fifo_recovery_model.h"
 using namespace MainIdleWait;
 #define CONFIG_MOSAICO_EVENT_IDLE_WAIT 1
 #define CONFIG_IDF_TARGET_ESP32S31 1
 #define configTASK_NOTIFICATION_ARRAY_ENTRIES 2
 #define CONFIG_UART_ISR_IN_IRAM 0
+#define CONFIG_MOSAICO_UART_FIFO_RECOVERY 1
+#define SOC_UART_WAKEUP_SUPPORT_FIFO_THRESH_MODE 1
+#define SOC_PM_SUPPORT_PMU_CLK_ICG 1
 #define portMUX_INITIALIZER_UNLOCKED 0
 #define portENTER_CRITICAL_ISR(x) do{}while(0)
 #define portEXIT_CRITICAL_ISR(x) do{}while(0)
@@ -111,7 +115,9 @@ template<class T>struct Atom {
 constexpr bool actualCases(){
  Actual a;a.begin();
  if(!a.gpioReady||!a.masked6||a.setEnabled(true))return false;
- a.uartOwner(true);if(!a.callback||!a.setEnabled(true))return false;
+ a.uartOwner(true);if(a.setEnabled(true))return false;
+ a.uartRxConfigured(true,0);if(a.setEnabled(true))return false;
+ a.uartRecoveryConfigured(true,0);if(!a.callback||!a.setEnabled(true))return false;
  a.serialState(false,false);a.viewState(true);
  // IRQ before wait is latched, not erased by task-side eligibility sampling.
  int woken=0;a.uartInterrupt(0,UART_SELECT_READ_NOTIF,&woken);
@@ -133,7 +139,7 @@ constexpr bool actualCases(){
  // Unknown service or rearm errors never allow a long wait.
  Actual b;b.serviceError=23;b.begin();b.uartOwner(true);
  if(b.gpioReady||b.setEnabled(true)||b.error!=23)return false;b.end();
- Actual c;c.begin();c.uartOwner(true);c.setEnabled(true);c.serialState(false,false);c.viewState(true);
+ Actual c;c.begin();c.uartOwner(true);c.uartRxConfigured(true,0);c.uartRecoveryConfigured(true,0);c.setEnabled(true);c.serialState(false,false);c.viewState(true);
  c.enableError=24;c.wait(true,false,false,false,false);
  if(c.gpioReady||c.requestedMs!=20||c.error!=24)return false;c.end();
  if(c.handler||c.callback||c.mainTask||c.handlerInstalled)return false;

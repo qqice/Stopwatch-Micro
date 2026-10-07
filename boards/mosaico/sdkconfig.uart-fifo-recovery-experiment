@@ -1,0 +1,2 @@
+# Fixed UART receiver-preserving recovery candidate. Probe still starts OFF.
+CONFIG_MOSAICO_UART_FIFO_RECOVERY=y

@@ -5,7 +5,9 @@
 #include <freertos/task.h>
 #include <esp_timer.h>
 #include <atomic>
-#if CONFIG_MOSAICO_EVENT_IDLE_WAIT && CONFIG_IDF_TARGET_ESP32S31 && configTASK_NOTIFICATION_ARRAY_ENTRIES >= 2 && !CONFIG_UART_ISR_IN_IRAM
+#include <soc/soc_caps.h>
+#include <host/uart_fifo_recovery_model.h>
+#if CONFIG_MOSAICO_EVENT_IDLE_WAIT && CONFIG_IDF_TARGET_ESP32S31 && configTASK_NOTIFICATION_ARRAY_ENTRIES >= 2 && !CONFIG_UART_ISR_IN_IRAM && (!CONFIG_MOSAICO_UART_FIFO_RECOVERY || (SOC_UART_WAKEUP_SUPPORT_FIFO_THRESH_MODE && SOC_PM_SUPPORT_PMU_CLK_ICG))
 #define MAIN_IDLE_SUPPORTED 1
 #include <driver/gpio.h>
 #include <driver/uart_select.h>
@@ -24,6 +26,20 @@ int64_t serialAwakeUntil=0;
 int32_t error=0;
 Cause cause=Cause::Disabled;
 ButtonGrace grace;
+#if CONFIG_MOSAICO_UART_FIFO_RECOVERY && CONFIG_IDF_TARGET_ESP32S31
+constexpr bool fifoRecovery=true;
+#else
+constexpr bool fifoRecovery=false;
+#endif
+std::atomic<bool> rxReady{false}, recoveryReady{false};
+std::atomic<int32_t> recoveryError{0};
+std::atomic<uint32_t> readCount{0}, errorCount{0}, lastReadUs{0};
+uint32_t queuePeak=0, wakeEvents=0, dataEvents=0, lastWakeUs=0, lastDataUs=0;
+uint32_t lastWaitNotify=0, lastWaitUs=0, lastWaitMs=20, maxWaitMs=20;
+Cause lastWaitCause=Cause::Disabled, maxWaitCause=Cause::Disabled;
+bool uartComplete() {
+    return uartReady && (!fifoRecovery || (rxReady.load(std::memory_order_acquire) && recoveryReady.load(std::memory_order_acquire)));
+}
 #if MAIN_IDLE_SUPPORTED
 constexpr UBaseType_t NotifyIndex=1;
 TaskHandle_t mainTask=nullptr;
@@ -45,6 +61,10 @@ void gpioInterrupt(void*) {
 void uartInterrupt(uart_port_t port,uart_select_notif_t event,BaseType_t* woken) {
     if(port!=UART_NUM_0 || (event!=UART_SELECT_READ_NOTIF && event!=UART_SELECT_ERROR_NOTIF))return;
     uartCount.fetch_add(1,std::memory_order_relaxed);
+    if(event==UART_SELECT_READ_NOTIF) {
+        readCount.fetch_add(1,std::memory_order_relaxed);
+        lastReadUs.store(static_cast<uint32_t>(esp_timer_get_time()),std::memory_order_relaxed);
+    } else errorCount.fetch_add(1,std::memory_order_relaxed);
     // UART driver already holds its public selectlock and performs the yield.
     portENTER_CRITICAL_ISR(&taskLock);
     if(mainTask)vTaskNotifyGiveIndexedFromISR(mainTask,NotifyIndex,woken);
@@ -80,8 +100,20 @@ Lifetime::~Lifetime() {
     gpioReady=false;enabled=false;
 }
 bool setEnabled(bool value) {
-    if(value && (!MAIN_IDLE_SUPPORTED || !gpioReady || !uartReady))return false;
+    if(value && (!MAIN_IDLE_SUPPORTED || !gpioReady || !uartComplete()))return false;
     enabled=value;return true;
+}
+void uartRxConfigured(bool ready,int32_t rc) {
+    recoveryError.store(rc,std::memory_order_relaxed);rxReady.store(ready,std::memory_order_release);
+}
+void uartRecoveryConfigured(bool ready,int32_t rc) {
+    recoveryError.store(rc,std::memory_order_relaxed);recoveryReady.store(ready,std::memory_order_release);
+}
+void uartEvent(bool wake,bool data,uint32_t depth) {
+    if(depth>queuePeak)queuePeak=depth;
+    const auto now=(wake || data) ? static_cast<uint32_t>(esp_timer_get_time()) : 0;
+    if(wake) {++wakeEvents;lastWakeUs=now;}
+    if(data) {++dataEvents;lastDataUs=now;}
 }
 void uartOwner(bool owned) {
 #if MAIN_IDLE_SUPPORTED
@@ -107,7 +139,7 @@ void serialState(bool busy,bool activity) {
 void viewState(bool safe) {safeView.store(safe,std::memory_order_relaxed);}
 void wait(bool locked,bool ota,bool usb,bool wifi,bool ble) {
     Gates gates;gates.locked=locked;gates.enabled=enabled;gates.supported=MAIN_IDLE_SUPPORTED;
-    gates.gpio=gpioReady;gates.uart=uartReady;gates.ota=ota;gates.usb=usb;gates.wifi=wifi;gates.ble=ble;
+    gates.gpio=gpioReady;gates.uart=uartComplete();gates.ota=ota;gates.usb=usb;gates.wifi=wifi;gates.ble=ble;
     gates.serial=serialBusy.load(std::memory_order_relaxed) || esp_timer_get_time()<serialAwakeUntil;
     gates.view=safeView.load(std::memory_order_relaxed);
 #if MAIN_IDLE_SUPPORTED
@@ -122,22 +154,35 @@ void wait(bool locked,bool ota,bool usb,bool wifi,bool ble) {
 #endif
     cause=select(gates);requestedMs=waitMs(cause);
     const int64_t start=esp_timer_get_time();
+    lastWaitNotify=0;lastWaitCause=cause;lastWaitMs=requestedMs;
 #if MAIN_IDLE_SUPPORTED
     if(cause==Cause::Event) {
         ++eventWaits;
         // Do not clear before waiting: IRQs racing the eligibility sample are
         // latched. Index 0 belongs to startup/vendor tasks, never consume it.
-        ulTaskNotifyTakeIndexed(NotifyIndex,pdTRUE,pdMS_TO_TICKS(requestedMs));
+        lastWaitNotify=ulTaskNotifyTakeIndexed(NotifyIndex,pdTRUE,pdMS_TO_TICKS(requestedMs));
     } else
 #endif
     vTaskDelay(pdMS_TO_TICKS(requestedMs));
     const auto elapsed=esp_timer_get_time()-start;
-    if(elapsed>0 && static_cast<uint64_t>(elapsed)>maxWaitUs)
-        maxWaitUs=static_cast<uint64_t>(elapsed)>UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(elapsed);
+    lastWaitUs=elapsed<=0 ? 0 : static_cast<uint64_t>(elapsed)>UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(elapsed);
+    if(lastWaitUs>maxWaitUs) {maxWaitUs=lastWaitUs;maxWaitCause=lastWaitCause;maxWaitMs=lastWaitMs;}
 }
 Snapshot snapshot() {
     Snapshot s;s.supported=MAIN_IDLE_SUPPORTED;s.enabled=enabled;s.gpio=gpioReady;s.uart=uartReady;
     s.gpioWakes=gpioCount.load(std::memory_order_relaxed);s.uartWakes=uartCount.load(std::memory_order_relaxed);
+    s.rxReady=rxReady.load(std::memory_order_acquire);s.recoveryReady=recoveryReady.load(std::memory_order_acquire);
+    s.recoveryError=recoveryError.load(std::memory_order_relaxed);
+    s.requestedWakeMode=fifoRecovery ? 1 : 0;
+    s.appliedWakeMode=s.recoveryReady ? s.requestedWakeMode : -1;
+    s.wakeThreshold=fifoRecovery ? UartFifoRecovery::WakeThreshold : 3;
+    s.rxFullThreshold=fifoRecovery ? UartFifoRecovery::FullThreshold : 120;
+    s.queueCapacity=fifoRecovery ? UartFifoRecovery::QueueCapacity : 8;s.queuePeak=queuePeak;
+    s.wakeEvents=wakeEvents;s.dataEvents=dataEvents;s.lastWakeUs=lastWakeUs;s.lastDataUs=lastDataUs;
+    s.readNotifies=readCount.load(std::memory_order_relaxed);s.errorNotifies=errorCount.load(std::memory_order_relaxed);
+    s.lastReadUs=lastReadUs.load(std::memory_order_relaxed);
+    s.lastWaitNotify=lastWaitNotify;s.lastWaitUs=lastWaitUs;s.lastWaitMs=lastWaitMs;s.maxWaitMs=maxWaitMs;
+    s.lastWaitCause=lastWaitCause;s.maxWaitCause=maxWaitCause;
     s.eventWaits=eventWaits;s.maxWaitUs=maxWaitUs;s.requestedMs=requestedMs;s.error=error;s.cause=cause;return s;
 }
 }

@@ -1,4 +1,15 @@
 menu "Mosaico application power policy"
+    config MOSAICO_UART_FIFO_RECOVERY
+        bool "Experimental fixed FIFO UART recovery for interruptible idle waits"
+        depends on IDF_TARGET_ESP32S31
+        default n
+        help
+            Fixed UART0 wake FIFO=16, ordinary RXFULL=15, event queue/budget=32.
+            The public SDK keeps XTAL and UART0/IOMUX clocks active in sleep.
+            This is an experimental recovery candidate, not hardware acceptance.
+            No host preamble, GPIO routing, RX timeout or sleep-I/O change. Wake
+            configuration is boot-scoped: runtime off does not clear global clock
+            settings. Flag disabled preserves ACTIVE_THRESH and queue capacity 8.
     config MOSAICO_EVENT_IDLE_WAIT
         bool "Use interruptible 500 ms app_main waits while safely locked"
         depends on IDF_TARGET_ESP32S31

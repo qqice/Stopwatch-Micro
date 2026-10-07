@@ -9,6 +9,7 @@
 #include <host/mosaico_display_settings.h>
 #include <host/standby_sleep.h>
 #include <main_idle_wait.h>
+#include <host/uart_fifo_recovery_model.h>
 #include <host/mosaico_session_monitor.h>
 #endif
 
@@ -140,8 +141,18 @@ bool SerialDebug::begin()
             _uart_events = events;
         }
     } // Do not reconfigure a UART already owned by another subsystem.
-    StandbySleep::uartReady(_uart_active);
-    MainIdleWait::uartOwner(_uart_active);
+    bool recoveryRxReady=_uart_active;
+    int32_t recoveryRxError=0;
+#if CONFIG_MOSAICO_UART_FIFO_RECOVERY
+    // Only configure the freshly installed, exclusively owned UART0 driver.
+    if(recoveryRxReady) {
+        recoveryRxError=uart_set_rx_full_threshold(UART_NUM_0,UartFifoRecovery::FullThreshold);
+        recoveryRxReady=recoveryRxError==ESP_OK;
+    }
+#endif
+    MainIdleWait::uartRxConfigured(recoveryRxReady,recoveryRxError);
+    StandbySleep::uartReady(recoveryRxReady);
+    MainIdleWait::uartOwner(recoveryRxReady);
 #endif
     // TinyUSB console/VFS is initialized before board bring-up in app_main.
     setvbuf(stdin, nullptr, _IONBF, 0);
@@ -198,6 +209,8 @@ void SerialDebug::end()
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
     StandbySleep::cancelForActivity(); StandbySleep::uartReady(false);
     MainIdleWait::uartOwner(false);
+    MainIdleWait::uartRxConfigured(false,0);
+    MainIdleWait::uartRecoveryConfigured(false,0);
     MainIdleWait::serialState(true,false);
     if (_uart_active) uart_driver_delete(UART_NUM_0);
 #endif
@@ -228,8 +241,9 @@ void SerialDebug::poll()
     if (_uart_active) {
         uart_event_t event{};
         auto saturated = [this]() {
-            return serial_debug_transport::uartQueueSaturated(
-                uxQueueMessagesWaiting(static_cast<QueueHandle_t>(_uart_events)));
+            const auto depth=uxQueueMessagesWaiting(static_cast<QueueHandle_t>(_uart_events));
+            MainIdleWait::uartEvent(false,false,depth);
+            return serial_debug_transport::uartQueueSaturated(depth);
         };
         // A full event queue may have lost an error notification. Desynchronize,
         // rather than trusting a subsequently observed UART_DATA event.
@@ -237,6 +251,7 @@ void SerialDebug::poll()
         for (unsigned i = 0; i < serial_debug_transport::UartEventCapacity; ++i) {
             if (saturated()) { invalidateUartInput(); break; }
             if (!xQueueReceive(static_cast<QueueHandle_t>(_uart_events), &event, 0)) break;
+            MainIdleWait::uartEvent(event.type==UART_WAKEUP,event.type==UART_DATA,0);
             if (event.type == UART_WAKEUP) { StandbySleep::uartWake(); MainIdleWait::serialState(true,true); }
             if (event.type == UART_FIFO_OVF || event.type == UART_BUFFER_FULL ||
                 event.type == UART_FRAME_ERR || event.type == UART_PARITY_ERR) {
@@ -420,12 +435,19 @@ void SerialDebug::handleLine(char* line)
         if(std::strcmp(action,"status") && !MainIdleWait::setEnabled(!std::strcmp(action,"on"))) {
             result(command,"FAIL","reason=unsupported_or_wake_not_ready no_changes=1");return;
         }
-        const auto s=MainIdleWait::snapshot();char details[400]{};
-        std::snprintf(details,sizeof(details),
-            "supported=%d enabled=%d gpio_ready=%d uart_ready=%d gpio_wakes=%lu uart_wakes=%lu event_waits=%lu requested_ms=%lu actual_wait_max_us=%lu fallback=%s error=%ld ram_only=1 notification_index=1 usb_mounted_power_proof=0",
+        const auto s=MainIdleWait::snapshot();char details[1400]{};
+        const int count=std::snprintf(details,sizeof(details),
+            "supported=%d enabled=%d gpio_ready=%d uart_ready=%d gpio_wakes=%lu uart_wakes=%lu event_waits=%lu requested_ms=%lu actual_wait_max_us=%lu fallback=%s error=%ld ram_only=1 notification_index=1 usb_mounted_power_proof=0 requested_wake_mode=%ld applied_wake_mode=%ld wake_threshold=%lu rxfull_threshold=%lu rx_ready=%d recovery_ready=%d recovery_error=%ld queue_capacity=%lu queue_peak=%lu wake_events=%lu data_events=%lu read_notifies=%lu error_notifies=%lu last_wake_us32=%lu last_data_us32=%lu last_read_us32=%lu last_wait_notify=%lu last_wait_us=%lu last_wait_ms=%lu last_wait_cause=%s max_wait_ms=%lu max_wait_cause=%s clock_policy_requested=%s clock_gate_readback=0",
             s.supported,s.enabled,s.gpio,s.uart,static_cast<unsigned long>(s.gpioWakes),static_cast<unsigned long>(s.uartWakes),
             static_cast<unsigned long>(s.eventWaits),static_cast<unsigned long>(s.requestedMs),static_cast<unsigned long>(s.maxWaitUs),
-            MainIdleWait::causeName(s.cause),static_cast<long>(s.error));
+            MainIdleWait::causeName(s.cause),static_cast<long>(s.error),static_cast<long>(s.requestedWakeMode),static_cast<long>(s.appliedWakeMode),
+            static_cast<unsigned long>(s.wakeThreshold),static_cast<unsigned long>(s.rxFullThreshold),s.rxReady,s.recoveryReady,static_cast<long>(s.recoveryError),
+            static_cast<unsigned long>(s.queueCapacity),static_cast<unsigned long>(s.queuePeak),static_cast<unsigned long>(s.wakeEvents),static_cast<unsigned long>(s.dataEvents),
+            static_cast<unsigned long>(s.readNotifies),static_cast<unsigned long>(s.errorNotifies),static_cast<unsigned long>(s.lastWakeUs),static_cast<unsigned long>(s.lastDataUs),
+            static_cast<unsigned long>(s.lastReadUs),static_cast<unsigned long>(s.lastWaitNotify),static_cast<unsigned long>(s.lastWaitUs),static_cast<unsigned long>(s.lastWaitMs),
+            MainIdleWait::causeName(s.lastWaitCause),static_cast<unsigned long>(s.maxWaitMs),MainIdleWait::causeName(s.maxWaitCause),
+            s.requestedWakeMode==1 ? "sdk_xtal_on_uart0_iomux_ungate" : "active_thresh");
+        if(count<0 || static_cast<size_t>(count)>=sizeof(details)) {result(command,"FAIL","reason=diagnostic_capacity");return;}
         result(command,"PASS",details);return;
     }
     if (command && !std::strcmp(command,"standby-sleep")) {

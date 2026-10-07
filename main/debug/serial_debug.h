@@ -6,8 +6,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include "serial_debug_transport.h"
 #include <sdkconfig.h>
+#include "serial_debug_transport.h"
 
 class AppCodexMicro;
 
