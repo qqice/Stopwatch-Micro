@@ -62,7 +62,9 @@ def fingerprint(path):
     return info.st_size, info.st_mtime_ns
 
 
-def analyze(directory):
+def analyze(directory, minimum_seconds=180):
+    if minimum_seconds not in (120, 180):
+        raise ValueError("minimum duration must be 120 or 180 seconds")
     directory = Path(directory)
     if not directory.is_absolute() or not directory.is_dir():
         raise ValueError("input must be an existing absolute capture directory")
@@ -77,15 +79,15 @@ def analyze(directory):
         raise ValueError("capture is incomplete or has an error")
     elapsed = summary.get("host_elapsed_seconds")
     if (not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool)
-            or not math.isfinite(elapsed) or elapsed < 179):
-        raise ValueError("requires a completed three-minute capture (1s tolerance)")
+            or not math.isfinite(elapsed) or elapsed < minimum_seconds - 1):
+        raise ValueError("requires a completed requested-duration capture (1s tolerance)")
     count, first, last = 0, None, None
     for timestamp, _ in rows(csv_path):
         first = timestamp if first is None else first
         last = timestamp
         count += 1
-    if not count or last - first < 179:
-        raise ValueError("receipt coverage is shorter than three minutes (1s tolerance)")
+    if not count or last - first < minimum_seconds - 1:
+        raise ValueError("receipt coverage is shorter than requested duration (1s tolerance)")
     if (summary.get("samples") != count or summary.get("valid_samples") != count
             or summary.get("invalid_samples") != 0):
         raise ValueError("CSV counts do not match capture summary or invalid data exists")
@@ -140,7 +142,7 @@ def analyze(directory):
             "whole_wall_time_energy_Wh": None,
             "caveats": ["Energy covers received samples only at the source nominal rate; unknown rate means unknown energy.",
                         "V1 packet loss is unknown; receipt density is not packet-loss proof.",
-                        "First two minutes are excluded by last-minute receipt selection, not charging-state verification.",
+                        "Leading settling data is excluded by last-minute receipt selection, not charging-state verification.",
                         "Comparison requires independently matched 5V wiring/load, brightness 30, radio frequency/activity, CPU setting and charging state."]}
 
 
@@ -160,6 +162,8 @@ def main(argv=None):
     parser.add_argument("--input", type=Path, required=True, help="trial absolute capture directory")
     parser.add_argument("--baseline", type=Path, help="optional absolute baseline capture directory")
     parser.add_argument("--output", type=Path, required=True, help="new JSON file under an existing parent, outside inputs")
+    parser.add_argument("--minimum-seconds", type=int, choices=(120, 180), default=120,
+                        help="required observation duration; last60 seconds analyzed (default:120)")
     args = parser.parse_args(argv)
     try:
         output = args.output.resolve()
@@ -168,8 +172,8 @@ def main(argv=None):
         for source in (args.input, args.baseline):
             if source is not None and output.is_relative_to(source.resolve()):
                 raise ValueError("output must be outside input directories")
-        trial = analyze(args.input)
-        result = compare(analyze(args.baseline), trial) if args.baseline else trial
+        trial = analyze(args.input, args.minimum_seconds)
+        result = compare(analyze(args.baseline, args.minimum_seconds), trial) if args.baseline else trial
         # Serialize before creating a file, rejecting NaN/overflow without partial output.
         encoded = json.dumps(result, indent=2, allow_nan=False) + "\n"
         with output.open("x", encoding="utf-8") as destination:

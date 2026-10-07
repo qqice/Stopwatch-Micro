@@ -55,6 +55,18 @@ class AnalysisTests(unittest.TestCase):
         self.assertIsNone(result["energy_received_samples_Wh"])
         self.assertIsNone(result["observed_sample_seconds"])
 
+    def test_two_minute_observation(self):
+        path = self.capture / "samples.csv"
+        lines=path.read_text().splitlines()
+        path.write_text('\n'.join(lines[:122])+'\n')
+        self.summary.update(samples=121,valid_samples=121,host_elapsed_seconds=120)
+        self.save_summary()
+        result=analyzer.analyze(self.capture,120)
+        self.assertEqual(result['selection']['start_monotonic_s'],1060)
+        self.assertEqual(result['selection']['samples'],61)
+        with self.assertRaises(ValueError):analyzer.analyze(self.capture,180)
+        with self.assertRaises(ValueError):analyzer.analyze(self.capture,60)
+
     def test_partial_and_error_capture_rejected(self):
         for key, value in (("complete", False), ("error", "disconnected"),
                            ("host_elapsed_seconds", 170), ("samples", 182)):

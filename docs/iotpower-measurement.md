@@ -87,3 +87,12 @@ Locked160 is now persisted/readback; wake320 preserved, no80MHz/light-sleep chan
 Restore using USB `debug display-idle-frequency 320 CONFIRM` while awake inphase0.
 Measured board input remains~0.315W; this is not true system sleep or a proof of
 battery-runtime gain. Datasets/evidence are local ignored artifacts.
+
+## Updated fixed-wiring observation window
+
+With UART now available, subsequent runs record120seconds, with leading60seconds
+for stabilization observation and trailing60receipt seconds for statistics.
+The analyzer CLI defaults `--minimum-seconds120`; choose180 for older3minruns.
+The Python API keeps its180s default for backwards compatibility. Neither window
+length proves full charge or absence of packet loss. If the selected window drifts
+or has unmatched RF activity, do not report a pure steady-state savings percentage.
