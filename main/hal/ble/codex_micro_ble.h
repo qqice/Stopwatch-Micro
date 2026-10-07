@@ -48,6 +48,10 @@ struct CodexMicroState {
     uint8_t knownMask = 0;
     std::array<uint32_t, 6> lastThreadStatusMs{}; // First-known or last c/b/e change, never a heartbeat TTL.
     uint32_t connectionGeneration = 0;
+    uint32_t threadStatusReceiptSequence = 0;
+    std::array<uint32_t, 6> threadStatusCompleteReceiptSequence{};
+    std::array<uint32_t, 6> threadStatusCompleteReceiptMs{};
+    uint32_t lastThreadStatusReceiptMs = 0;
 #endif
 };
 

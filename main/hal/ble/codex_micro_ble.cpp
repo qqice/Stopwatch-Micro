@@ -1887,6 +1887,7 @@ bool CodexMicroBle::updateThreadLighting(const cJSON* values, uint32_t generatio
 #ifdef MOSAICO_BOARD
     if (completeMask || statusMask) {
         const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        uint8_t receiptMask = 0;
         for (unsigned slot = 0; slot < 6; ++slot) {
             const uint8_t bit = static_cast<uint8_t>(1U << slot);
             if ((completeMask & bit) || ((_state.knownMask & bit) && (statusMask & bit))) {
@@ -1895,8 +1896,10 @@ bool CodexMicroBle::updateThreadLighting(const cJSON* values, uint32_t generatio
                 const bool semanticChanged = before.color != after.color ||
                     before.brightness != after.brightness || before.effect != after.effect;
                 MosaicoSessions::markKnown(_state, slot, now, semanticChanged);
+                receiptMask |= bit;
             }
         }
+        MosaicoSessions::markReceipt(_state, receiptMask, completeMask, now);
         if (completeMask && !changed) ++_state.revision; // Receipt revision is not last-change age.
     }
 #endif

@@ -7,6 +7,7 @@
 #ifdef MOSAICO_BOARD
 #include <host/system_clock.h>
 #include <host/mosaico_display_settings.h>
+#include <host/mosaico_session_monitor.h>
 #endif
 
 #include <apps/app_codex_micro/app_codex_micro.h>
@@ -291,6 +292,21 @@ void SerialDebug::handleLine(char* line)
         return;
     }
 #ifdef MOSAICO_BOARD
+    if (command && std::strcmp(command, "sessions") == 0) {
+        const auto s = MosaicoSessions::snapshot();
+        char details[512];
+        const uint32_t windowMs = s.lockedWindowCount ?
+            ((s.lockedRefreshing ? s.nowMs : s.lockedWindowEndedMs) - s.lockedWindowStartedMs) : 0;
+        const uint32_t cacheAge = s.lockedCacheValid ? (s.nowMs - s.lockedCapturedMs) / 1000U : 0;
+        std::snprintf(details, sizeof(details),
+            "ready=%d failed=%d connected=%d radio_requested=%d known=%02x generation=%lu cache_valid=%d cache_known=%02x cache_age_s=%lu refreshing=%d fresh=%02x timed_out=%d error=%ld windows=%lu window_ms=%lu",
+            s.ready, s.failed, s.state.connected, s.radioRequestedEnabled, s.state.knownMask,
+            static_cast<unsigned long>(s.state.connectionGeneration), s.lockedCacheValid,
+            s.lockedState.knownMask, static_cast<unsigned long>(cacheAge), s.lockedRefreshing,
+            s.freshnessKnownMask, s.lockedRefreshTimedOut, static_cast<long>(s.lockedRefreshError),
+            static_cast<unsigned long>(s.lockedWindowCount), static_cast<unsigned long>(windowMs));
+        result("sessions", s.failed ? "FAIL" : "PASS", details); return;
+    }
     if (command && std::strcmp(command, "clock") == 0) {
         const auto clock = MosaicoClock::snapshot();
         std::tm local{}; char wall[32] = "uncalibrated";

@@ -57,6 +57,10 @@ private:
     void applyBurnInShift(bool touching);
     static void settingsEvent(lv_event_t* event);
     static void historyChartEvent(lv_event_t* event);
+    void initLockSessions();
+    void renderLockSessions();
+    void requestLockedSessions();
+    static void lockSessionBorderEvent(lv_event_t* event);
     lv_obj_t* pagePanel(Page page) const;
     void navigatePage(int direction);
     void cancelPageSlide();
@@ -131,6 +135,11 @@ private:
     lv_obj_t* _lockResetTime = nullptr;
     lv_obj_t* _lockResetIcon = nullptr;
     lv_obj_t* _lockBattery = nullptr;
+    std::array<lv_obj_t*,6> _lockSessionCards{}, _lockSessionNumbers{};
+    std::array<Hit,6> _lockSessionHits{};
+    std::array<uint32_t,6> _lockSessionColors{};
+    lv_obj_t* _lockSessionsAge = nullptr;
+    uint32_t _lockSessionsRevision = UINT32_MAX;
     lv_obj_t* _battery = nullptr;
     lv_obj_t* _batteryIcon = nullptr;
     lv_obj_t* _wifiIcon = nullptr;

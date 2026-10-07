@@ -103,7 +103,7 @@ extern "C" void app_main(void)
         }
 #endif
 #ifdef MOSAICO_BOARD
-        MosaicoSessions::service(GetNetworkQuota().idleLocked(), MosaicoOta::busy() || MosaicoOta::healthPending());
+        MosaicoSessions::service(GetNetworkQuota().displayLocked(), MosaicoOta::busy() || MosaicoOta::healthPending());
         MosaicoOta::healthPoll(ota_app->otaReady());
         // The monitor has no low-latency remote-control path. Keep its 10Hz
         // motion/100Hz touch responsive without a 1kHz application update loop.

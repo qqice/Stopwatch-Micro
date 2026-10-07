@@ -39,7 +39,8 @@ constexpr const cJSON* objectItem(const cJSON* n,const char* key) {
 EFFECT_FUNCTION
 constexpr bool validThreadStatus(VALIDATOR_BODY
 constexpr cJSON number(double value) { cJSON n; n.type=Num; n.valuedouble=value; n.valueint=value>=0 && value<=2147483647 ? static_cast<int>(value):0; return n; }
-struct State { uint8_t knownMask=0; std::array<uint32_t,6> lastThreadStatusMs{}; uint32_t connectionGeneration=0; };
+struct State { uint8_t knownMask=0; std::array<uint32_t,6> lastThreadStatusMs{}; uint32_t connectionGeneration=0;
+ uint32_t threadStatusReceiptSequence=0,lastThreadStatusReceiptMs=0; std::array<uint32_t,6> threadStatusCompleteReceiptSequence{},threadStatusCompleteReceiptMs{}; };
 constexpr bool test() {
  cJSON id=number(0),c=number(0xffffff),b=number(0),e=number(6),m=number(0),s=number(1),flag=number(1);
  cJSON node; node.type=Obj; node.id=&id; node.c=&c; node.b=&b; node.e=&e;
@@ -101,7 +102,7 @@ static_assert(test());
         setter=MODULE.split('void setEnabled(',1)[1].split('bool enabled()',1)[0]
         for forbidden in ('GetCodexMicroBle','nvs_','GetHAL','esp_ble_'): self.assertNotIn(forbidden,setter)
         network=(ROOT/'main/host/network_quota.cpp').read_text()
-        self.assertIn('locked || !MosaicoSessions::enabled() || MosaicoOta::busy()',network)
+        self.assertIn('!MosaicoSessions::enabled() || MosaicoOta::busy()',network)
         self.assertIn('GetCodexMicroBle().requestRadioIdle(true);',network)
 
     def test_invalid_batch_and_generation_are_all_or_nothing(self):
@@ -131,7 +132,7 @@ static_assert(test());
             self.assertNotIn(forbidden,fail)
         self.assertIn('if (_link_failed.load()) requested = true;',BLE)
         self.assertIn('if (failed) effective.store(false);',MODULE)
-        self.assertIn('next.radioRequestedEnabled = allow && !failed;',MODULE)
+        self.assertIn('next.radioRequestedEnabled = finalAllow;',MODULE)
 
     def test_configured_target_syntax(self):
         db=ROOT/'.artifacts/mosaico/ota-build/compile_commands.json'

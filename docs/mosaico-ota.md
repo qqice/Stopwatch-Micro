@@ -615,3 +615,40 @@ rollback-compatible assets and avoid re-uploading unchanged resources per app OT
 NAND should be introduced only when capacity actually demands it, with explicit
 mount/data-preservation and power-state validation. No NOR/NAND asset writes were
 performed for this release.
+
+## 0.12.1 lock-screen slot indicators and bounded refresh
+
+The lock screen adds six non-interactive rounded dashed cards with dot digits1–6,
+centred as a384px row. Working hints are purple; unread-completion hints orange;
+unknown/idle/other states are neutral. Cache validity, receipt freshness and age are
+explicit: unavailable or expired data is not shown as a fresh coloured state.
+Battery icon plus actual percent text are centred using measured font metrics,
+including `?`, `0%`, `100%*`; the clock/quota/reset groups remain centred. Existing
+±2px burn-in movement and Function-only wake remain unchanged.
+
+Lock entry and the existing minute refresh queue a RAM-only request. The main
+owner briefly enables BLE, waits for real complete post-request per-slot frames,
+and closes early when all six slots are refreshed. Requests are at least60s apart;
+the owner deadline is8s. Requests arriving slightly before that cooldown expires
+remain pending, rather than being lost due to UI/owner scheduling drift. Active
+requests coalesce. Wake, OTA/boot-health or terminal failure cancels the window.
+No new GUI radio call, timer, HTTP request, key event, controller initialization or
+NVS operation was added. Radio ownership is still main-only; network power policy
+may not close an admitted lock refresh window. Raw display lock state, rather than
+radio profile state, admits requests even in diagnostic power-profile0.
+
+Complete-frame receipt sequence/time is independent of `LAST` lighting-change
+time. Handshake, unrelated metadata and an old known63 cannot prove a refresh.
+Timeout with partial complete evidence caches only those slots; no fresh evidence
+keeps prior cache marked cached, without advancing its capture time. Generations
+are isolated; a newly connected host cannot inherit another host's coloured slots.
+Cached sample state survives the intentional physical disconnect, but actual HCI
+connection reporting is not falsified. `debug sessions` reads cached ready/link,
+known/cache/fresh masks, window counts, intent duration and errors without waking
+or querying radios. The8s deadline is cooperative owner intent; actual radio stop
+latency and power consumption need physical measurement and are not claimed.
+
+After OTA, temporarily set the active supply profile to a finite idle timeout if
+it is normally NEVER. Verify the card row and battery centring, then watch two or
+more minute reconnect windows with a changed slot on the PC. Confirm normal
+brightness/lock remains, Function wakes only once, and OTA still prevents sleep.

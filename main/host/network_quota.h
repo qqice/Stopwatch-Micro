@@ -22,6 +22,7 @@ public:
     void begin();
     bool configure(const char* base64);
     void setLocked(bool locked);
+    bool displayLocked() const { return _locked.load(); } // Actual UI state, independent of radio power profile.
     bool idleLocked() const
     {
         return _locked.load() && _power_profile.load() != 0

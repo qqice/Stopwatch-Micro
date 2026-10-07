@@ -4,6 +4,7 @@
 #include "reset_countdown.h"
 #include "quota_trend_geometry.h"
 #include "session_status_model.h"
+#include "lock_session_geometry.h"
 #include <hal/hal.h>
 #include <host/network_quota.h>
 #include <host/tailscale_transport.h>
@@ -224,7 +225,9 @@ void CodexMicroView::init(lv_obj_t* parent) {
     _lockResetIcon = createIcon(_lockPanel, Icon::Hourglass, 28, Cyan);
     _lockResetTime = createText(_lockPanel, 340, 48, 6, Cyan);
     _lockBatteryIcon = createIcon(_lockPanel, Icon::Battery, 36); place(_lockBatteryIcon, 152, 334);
-    _lockBattery = label(_lockPanel, 204, 338, 200, "?", &lv_font_montserrat_20);
+    _lockBattery = label(_lockPanel, 0, 334, 1, "?", &lv_font_montserrat_20);
+    lv_obj_set_size(_lockBattery, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    initLockSessions();
     lv_obj_add_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN);
     _overlay = lv_obj_create(_root); panel(_overlay, 0, 0, 480, 480, 0);
     lv_obj_set_style_bg_opa(_overlay, LV_OPA_TRANSP, 0);
@@ -236,7 +239,8 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_style_radius(_rotationCurtain, 0, 0);
     lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
-    bool widgetsReady = _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    bool widgetsReady = _lockSessionNumbers[5] && _lockSessionsAge && _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    for (auto* number : _lockSessionNumbers) widgetsReady = widgetsReady && number;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
         widgetsReady = widgetsReady && _cardBadges[i] && _cardValues[i] && _secondValues[i] && _creditIcons[i];
@@ -350,6 +354,66 @@ void CodexMicroView::applyBurnInShift(bool touching) {
     } else { _shiftIndex = 0; lv_obj_set_pos(_root, 0, 0); }
     _shiftPending = false;
 }
+void CodexMicroView::initLockSessions() {
+    for (size_t i=0;i<6;++i) {
+        const auto box=mosaico_lock_sessions::card(i);
+        auto* obj=lv_obj_create(_lockPanel); lv_obj_remove_style_all(obj);
+        lv_obj_set_pos(obj,box.x,box.y); lv_obj_set_size(obj,box.w,box.h);
+        lv_obj_remove_flag(obj,static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+        _lockSessionCards[i]=obj; _lockSessionHits[i]={this,i}; _lockSessionColors[i]=Gray;
+        lv_obj_add_event_cb(obj,lockSessionBorderEvent,LV_EVENT_DRAW_MAIN,&_lockSessionHits[i]);
+        _lockSessionNumbers[i]=createText(obj,29,35,5,Gray); place(_lockSessionNumbers[i],12,6);
+        char number[2]={static_cast<char>('1'+i),0}; setText(_lockSessionNumbers[i],number,Gray);
+    }
+    _lockSessionsAge=label(_lockPanel,20,448,440,"CACHED --",&lv_font_montserrat_12);
+    lv_obj_set_height(_lockSessionsAge,18); lv_obj_set_style_text_align(_lockSessionsAge,LV_TEXT_ALIGN_CENTER,0);
+    lv_obj_remove_flag(_lockSessionsAge,LV_OBJ_FLAG_CLICKABLE);
+}
+void CodexMicroView::lockSessionBorderEvent(lv_event_t* event) {
+    auto* hit=static_cast<Hit*>(lv_event_get_user_data(event));
+    if (!hit || !hit->owner || hit->index>=6) return;
+    auto* obj=lv_event_get_current_target_obj(event);lv_area_t area;lv_obj_get_coords(obj,&area);
+    auto* layer=lv_event_get_layer(event);
+    const auto color=lv_color_hex(hit->owner->_lockSessionColors[hit->index]);
+    lv_draw_line_dsc_t line;lv_draw_line_dsc_init(&line);line.color=color;line.width=2;line.dash_width=5;line.dash_gap=3;
+    const auto edge=[&](int x1,int y1,int x2,int y2) {
+        line.p1={static_cast<lv_value_precise_t>(area.x1+x1),static_cast<lv_value_precise_t>(area.y1+y1)};
+        line.p2={static_cast<lv_value_precise_t>(area.x1+x2),static_cast<lv_value_precise_t>(area.y1+y2)};lv_draw_line(layer,&line);
+    };
+    edge(9,1,44,1);edge(52,9,52,38);edge(44,46,9,46);edge(1,38,1,9);
+    lv_draw_arc_dsc_t arc;lv_draw_arc_dsc_init(&arc);arc.color=color;arc.width=2;arc.radius=8;arc.rounded=1;
+    // True native quarter-circle dash segments, not square corners or a canvas.
+    for (unsigned i=0;i<4;++i) {
+        const auto corner=mosaico_lock_sessions::corner(i);arc.center={area.x1+corner.x,area.y1+corner.y};
+        for (int angle=0;angle<90;angle+=45) {
+            arc.start_angle=corner.angle+angle;arc.end_angle=corner.angle+angle+22;lv_draw_arc(layer,&arc);
+        }
+    }
+}
+void CodexMicroView::requestLockedSessions() {
+    if (_locked && !_suppressed && !_rotationFault && !otaKeepAwake() && ready()) MosaicoSessions::requestLockedRefresh();
+}
+void CodexMicroView::renderLockSessions() {
+    const auto& cache=_sessionBackend.lockedState;
+    const uint32_t now=GetHAL().millis();
+    const bool valid=_sessionBackend.lockedCacheValid && !_sessionBackend.failed && cache.ready && cache.protocolReady && cache.connectionGeneration;
+    for (size_t i=0;i<6;++i) {
+        const bool known=valid && (cache.knownMask & (1U<<i));
+        const bool fresh=_sessionBackend.freshnessKnownMask & (1U<<i);
+        const auto status=known ? mosaico_sessions_ui::classify(cache.threads[i]) : mosaico_sessions_ui::Status::Unknown;
+        const uint32_t color=mosaico_lock_sessions::color(status,known,fresh,now,_sessionBackend.lockedCapturedMs);
+        if (color!=_lockSessionColors[i]) { _lockSessionColors[i]=color;lv_obj_invalidate(_lockSessionCards[i]); }
+        char number[2]={static_cast<char>('1'+i),0};setText(_lockSessionNumbers[i],number,color);
+    }
+    char text[64];
+    if (_sessionBackend.lockedCacheValid) {
+        const uint32_t age=mosaico_sessions_ui::ageSeconds(now,_sessionBackend.lockedCapturedMs);
+        std::snprintf(text,sizeof(text),"CACHED %lus%s",static_cast<unsigned long>(age),
+            _sessionBackend.lockedRefreshing ? " / SYNC" : age>60 ? " / STALE" : "");
+    } else std::snprintf(text,sizeof(text),"CACHED --%s",_sessionBackend.lockedRefreshing ? " / SYNC" : "");
+    lv_label_set_text(_lockSessionsAge,text);
+    _lockSessionsRevision=_sessionBackend.lockedRefreshRevision;
+}
 void CodexMicroView::initSessions() {
     _sessionsPage = lv_obj_create(_root); panel(_sessionsPage, 20, 64, 440, 402, 0);
     lv_obj_add_flag(_sessionsPage, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
@@ -383,9 +447,10 @@ void CodexMicroView::refreshSessions(const CodexMicroState& state) {
     // combine its lighting/known mask with the module's previous-loop state.
     const bool linkChanged=state.ready!=_sessionState.ready || state.connected!=_sessionState.connected || state.protocolReady!=_sessionState.protocolReady;
     _sessionState=state;
+    if (_locked && (_lockSessionsRevision!=_sessionBackend.lockedRefreshRevision || previousFailed!=_sessionBackend.failed)) renderLockSessions();
     _sessionsHadStatus=_sessionsHadStatus || (state.knownMask!=0 && state.connected && state.protocolReady);
     const uint32_t second=GetHAL().millis()/1000U;
-    if (_page == Page::Sessions && (state.revision!=_sessionsRevision || state.connectionGeneration!=_sessionsGeneration ||
+    if (_page == Page::Sessions && !_locked && (state.revision!=_sessionsRevision || state.connectionGeneration!=_sessionsGeneration ||
         state.knownMask!=_sessionsKnownMask || linkChanged || second!=_sessionsAgeSecond || previousReady!=_sessionBackend.ready ||
         previousStarting!=_sessionBackend.starting || previousFailed!=_sessionBackend.failed)) {
         _sessionsRevision=state.revision; _sessionsGeneration=state.connectionGeneration;
@@ -738,6 +803,9 @@ void CodexMicroView::refreshBattery(uint32_t now) {
     const uint32_t color = telemetry.valid ? levelColor(static_cast<uint16_t>(telemetry.reportedSoc) * 100) : Gray;
     if (_locked) {
         lv_label_set_text(_lockBattery, text);
+        lv_point_t size;lv_text_get_size(&size,text,&lv_font_montserrat_20,0,0,480,LV_TEXT_FLAG_NONE);
+        const auto row=mosaico_lock_sessions::batteryRow(size.x,size.y);
+        lv_obj_set_size(_lockBattery,size.x,size.y);place(_lockBatteryIcon,row.iconX,334);place(_lockBattery,row.textX,row.textY);
         lv_obj_set_style_text_color(_lockBattery, lv_color_hex(color), 0);
         setIcon(_lockBatteryIcon, Icon::Battery, color, telemetry.reportedSoc, telemetry.valid);
     } else {
@@ -1275,6 +1343,7 @@ void CodexMicroView::lockDisplay() {
     refreshClock(lv_tick_get(), true);
     lv_obj_invalidate(_lockPanel); // Also redraw an unchanged minute on lock entry.
     refreshQuota(GetHAL().millis()); ++_lockRefreshCount; _refresh = lv_tick_get();
+    requestLockedSessions();renderLockSessions();
     GetHAL().setBackLightBrightness(_displaySettings.config.lockBrightness, false);
     _appliedBrightness = _displaySettings.config.lockBrightness;
 }
@@ -1309,7 +1378,7 @@ void CodexMicroView::update(const CodexMicroState& state) {
     if (refreshElapsed >= 60000U && refreshElapsed < 0x80000000U) {
         _refresh = tick; refreshQuota(GetHAL().millis());
         if (!_locked) refreshHistory();
-        if (_locked) ++_lockRefreshCount;
+        if (_locked) { ++_lockRefreshCount;requestLockedSessions();renderLockSessions(); }
         _shiftPending = true;
     } else if (!_locked) {
         if (_quotaRevision != QuotaMonitorRevision()) refreshQuota(GetHAL().millis());

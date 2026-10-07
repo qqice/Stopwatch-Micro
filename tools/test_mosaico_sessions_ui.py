@@ -52,7 +52,7 @@ struct CodexMicroState {
  uint8_t knownMask=0;std::array<uint32_t,6> lastThreadStatusMs{};
  uint32_t revision=0,connectionGeneration=1;
 };
-namespace MosaicoSessions { struct Snapshot { CodexMicroState state{};bool ready=true,starting=false,failed=false; }; }
+namespace MosaicoSessions { struct Snapshot { CodexMicroState state{};bool ready=true,starting=false,failed=false; uint32_t lockedRefreshRevision=0; }; }
 constexpr Light light(uint32_t c,uint8_t effect=1,float brightness=1) { return {c,brightness,effect,0,0}; }
 constexpr bool classification() {
  if(classify(light(0xffffff))!=Status::Idle || classify(light(0xb0b0b0))!=Status::Idle)return false;
@@ -95,12 +95,14 @@ struct CodexMicroView {
  Page _page=Page::Sessions;bool _locked=false,_suppressed=false,_rotationFault=false,busy=false,lease=false,validSnapshot=true;
  CodexMicroState _sessionState{};MosaicoSessions::Snapshot _sessionBackend{},bank{};
  uint32_t _sessionsRevision=UINT32_MAX,_sessionsGeneration=UINT32_MAX,_sessionsAgeSecond=UINT32_MAX,now=1000;
- uint8_t _sessionsKnownMask=0;bool _sessionsHadStatus=false;int renders=0;Counts rendered{};
+ uint32_t _lockSessionsRevision=UINT32_MAX;
+ uint8_t _sessionsKnownMask=0;bool _sessionsHadStatus=false;int renders=0,lockRenders=0;Counts rendered{};
  constexpr bool ready(){return true;}
  constexpr bool otaKeepAwake(){return busy || _page==Page::OTA;}
  constexpr void setLease(bool v){lease=v;}
  constexpr bool snapshot(MosaicoSessions::Snapshot& out){if(!validSnapshot)return false;out=bank;return true;}
  constexpr void renderSessions(){++renders;rendered=counts(_sessionState,_sessionBackend.ready && !_sessionBackend.failed && !_sessionBackend.starting);}
+ constexpr void renderLockSessions(){++lockRenders;_lockSessionsRevision=_sessionBackend.lockedRefreshRevision;}
  constexpr void refreshSessionsLease();
  constexpr void refreshSessions(const CodexMicroState&);
 };
@@ -126,6 +128,10 @@ constexpr bool cacheAndLease() {
  v.refreshSessions(supplied);if(v.rendered.known || v.rendered.running)return false; // New generation needs fresh per-slot evidence.
  v.validSnapshot=true;v.bank.ready=true;v.bank.failed=true;supplied.knownMask=1;supplied.threads[0]=light(0x0000ff);
  v.refreshSessions(supplied);if(v.rendered.live || v.rendered.running)return false;
+ v._locked=true;v.bank.lockedRefreshRevision=10;v.refreshSessions(supplied);if(v.lockRenders!=1)return false;
+ v.refreshSessions(supplied);if(v.lockRenders!=1)return false;
+ v.bank.lockedRefreshRevision=11;v.refreshSessions(supplied);if(v.lockRenders!=2)return false;
+ v._locked=false;v.bank.lockedRefreshRevision=12;v.refreshSessions(supplied);if(v.lockRenders!=2)return false;
  return true;
 }
 static_assert(classification(),"default palette/brightness/effects/invalid floats and per-slot evidence are conservative");

@@ -350,7 +350,7 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
         // Network/OTA can close the lease, never reopen a stale GUI request.
         // Main-loop Sessions service is the sole advertising-enable owner.
-        if (locked || !MosaicoSessions::enabled() || MosaicoOta::busy() || MosaicoOta::healthPending())
+        if (!MosaicoSessions::enabled() || MosaicoOta::busy() || MosaicoOta::healthPending())
             GetCodexMicroBle().requestRadioIdle(true);
 #else
         GetCodexMicroBle().requestRadioIdle(locked);
