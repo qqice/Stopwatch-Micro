@@ -733,3 +733,55 @@ not LVGL screenshots; keyboard font/key composition is illustrative. Root viewed
 tiles, all four detail groups and keyboard layout to check overlap, then ran
 actual-source gesture/control and owner fault traces. Physical touch, glyph
 readability, radio timing and NVS power-loss recovery still need board acceptance.
+
+## Experimental iTWT comparison (0.13.1, default disabled)
+
+ESP32-S31 and the installed IDF6.1 support station iTWT. The existing driver
+protocol default on this HE target already permits802.11ax alongside legacy
+modes, but this application previously created no TWT agreement. An AX router
+is not sufficient evidence: it must accept an individualTWT request. See the
+[official IDF6.1 example](https://raw.githubusercontent.com/espressif/esp-idf/v6.1/examples/wifi/itwt/README.md)
+and [iTWT API](https://raw.githubusercontent.com/espressif/esp-idf/v6.1/components/esp_wifi/include/esp_wifi_he.h).
+
+This experiment uses modem sleep only: no tickless/light/deep sleep, CPU clock,
+SPI/display/PSRAM, BLE schedule, SDK, NVS, endpoint or router changes. Existing
+lock radio-off remains the default and is a separate third control. Keeping
+association can reduce wake reconnection delay, but might use MORE energy than
+minutes-long radio-off, especially with an active Tailscale control connection.
+TWT's negotiated nominal wake duration is not measured RF duty cycle or watts.
+
+Runtime USB commands (no persistent opt-in):
+
+- `debug display-lock`, then `debug twt baseline`: retained association with
+  ordinary `WIFI_PS_MIN_MODEM`, without negotiated TWT.
+- `debug display-lock`, then `debug twt on`: request non-triggered, unannounced
+  iTWT SUGGEST (512*2^11 microseconds interval,64*256microseconds minimum wake).
+  Only actual accepted status1 and valid returned parameters enable retention;
+  ESP_OK from setup merely means submission. AP may change parameters.
+- `debug twt status`: read RAM-only negotiated PHY/actual interval/wake duration,
+  state/reason, cleanup status, fetch statistics. No credentials/AP identifiers.
+- `debug twt off`: restore original policy. Unlock and OTA also end the trial.
+
+Both arms require locked display, leave brightness/CPU/BLE/refresh intervals
+unchanged and have a ten-minute RAM lease. The owner checks lease/cancellation
+between existing synchronous network requests, not a hard real-time timer;
+commands do not interrupt an in-flight HTTP operation. Setup/connect stage is
+limited to10seconds and starts no HTTP/tailnet setup while negotiating. Unsupported
+PHY, rejection, loss or timeout falls back without automatic negotiation retries.
+Restart resets default OFF. Only event-scalar copying occurs in callbacks; WiFi
+calls and cleanup belong to the network owner.
+
+Each trial uses a distinct echoed twt_id. Cleanup must prove an established local
+flow bitmap empty, or confirm STA stop; cancelling a still-pending setup requires
+STA stop because an empty bitmap cannot disprove a late acceptance. Prior PS is
+restored; failed cleanup is retained as debt with at most two attempts and blocks
+new trials/OTA rather than pretending success. OTA discovery/download/install/
+reboot paths are guarded. No automatic reboot on experiment failure.
+
+Acceptance proceeds first with USB for AP negotiation/normal service/rollback,
+then with matched pure-battery conditions for energy. USB charging/zero-current
+readings cannot establish a saving. Gauge current/capacity are observations, not
+an externally calibrated power analyzer. Compare OFF, BASELINE and TWT at matched
+SOC/brightness/display/CPU/BLE/server workload; also compare time from Function
+wake to a fresh quota response, failure rate and lock connectivity. Do not enable
+TWT by default without actual AP compatibility and net energy/latency evidence.

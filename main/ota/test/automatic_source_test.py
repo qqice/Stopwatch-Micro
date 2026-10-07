@@ -173,7 +173,9 @@ class AutomaticOtaSourceTests(unittest.TestCase):
         self.assertIn('std::strcmp(expectedSha, ui.sha256)', install_queue)
         due = body('bool automaticCheckDue()', 'bool discoverManifest(')
         self.assertIn('imageReady || selected.load()', due)
-        owner = (ROOT / 'main/host/network_quota.cpp').read_text().split('while (true) {', 1)[1]
+        # A bounded TWT event-drain loop precedes run(); only the actual network
+        # owner loop is relevant to offline INSTALL/REBOOT ordering.
+        owner = (ROOT / 'main/host/network_quota.cpp').read_text().split('void NetworkQuota::run()', 1)[1].split('while (true) {', 1)[1]
         self.assertLess(owner.index('processLocalRequests()'), owner.index('esp_wifi_start()'))
         self.assertLess(owner.index('processLocalRequests()'), owner.index('GetTailnetQuota().start()'))
 

@@ -392,6 +392,36 @@ void SerialDebug::handleLine(char* line)
                ok ? "saved_readback_verified active_cpu320=1 reversible=1" : "settings_commit_or_readback_failed");
         return;
     }
+#if SOC_WIFI_HE_SUPPORT
+    if (std::strcmp(command, "twt") == 0) {
+        const char* mode = ::strtok_r(nullptr, " \t", &save);
+        if (!mode || ::strtok_r(nullptr, " \t", &save)) {
+            result("twt", "FAIL", "expected=baseline_on_off_status ram_only=1"); return;
+        }
+        if (!std::strcmp(mode, "status")) {
+            const auto t = GetNetworkQuota().twtSnapshot();
+            char details[640]{};
+            std::snprintf(details, sizeof(details),
+                "mode=%u stage=%u stop=%u id=%u expiry_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u ram_only=1",
+                unsigned(t.requested), unsigned(t.stage), unsigned(t.stop), unsigned(t.id),
+                static_cast<long long>(t.expiryUs), static_cast<long long>(t.setupDeadlineUs), t.associated, t.apAx, t.phy,
+                t.actual.status, unsigned(t.actual.reason), unsigned(t.actual.flow),
+                static_cast<unsigned long long>(t.intervalUs), static_cast<unsigned long long>(t.durationUs),
+                static_cast<unsigned long long>(t.actual.targetWakeUs), static_cast<unsigned long>(t.fetchAttempts),
+                static_cast<unsigned long>(t.fetchOk), static_cast<unsigned long long>(t.fetchUs),
+                static_cast<unsigned long>(t.losses), static_cast<unsigned long>(t.lateEvents), t.error, t.restoreError, t.teardownError,
+                t.cleanupPending, t.cleanupFailed, unsigned(t.lastFailure));
+            result("twt", "PASS", details); return;
+        }
+        MosaicoTwt::Mode requested;
+        if (!std::strcmp(mode, "baseline")) requested = MosaicoTwt::Mode::Baseline;
+        else if (!std::strcmp(mode, "on")) requested = MosaicoTwt::Mode::On;
+        else if (!std::strcmp(mode, "off")) requested = MosaicoTwt::Mode::Off;
+        else { result("twt", "FAIL", "expected=baseline_on_off_status"); return; }
+        result("twt", GetNetworkQuota().requestTwtTrial(requested) ? "QUEUED" : "FAIL",
+               "lease_s=600 setup_cap_s=10 locked_trial_only=1 no_nvs=1 no_power_claim=1"); return;
+    }
+#endif
     if (std::strcmp(command, "display-clocks") == 0) {
         const auto clocks = GetHAL().displayClockDiagnostics();
         char details[260]{};

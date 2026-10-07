@@ -5,6 +5,8 @@
 #ifdef MOSAICO_BOARD
 #include <mutex>
 #include "mosaico_wifi_settings_model.h"
+#include "mosaico_twt_model.h"
+#include <soc/soc_caps.h>
 #include <ota/mosaico_ota.h>
 #endif
 #include <freertos/FreeRTOS.h>
@@ -36,6 +38,10 @@ public:
     void refreshWhileLocked();
 #ifdef MOSAICO_BOARD
     void wakeForFirmwareUpdate();
+#if SOC_WIFI_HE_SUPPORT
+    bool requestTwtTrial(MosaicoTwt::Mode mode);
+    MosaicoTwt::Snapshot twtSnapshot() const;
+#endif
     bool requestWifiCredentials(const char* ssid, const char* password);
     bool wifiSettingsSnapshot(WifiSettingsSnapshot& out);
     bool requestWifiRestart();
@@ -87,6 +93,25 @@ private:
 #ifdef MOSAICO_BOARD
     void updateFirmware();
     void serviceWifiSettings();
+#if SOC_WIFI_HE_SUPPORT
+    static void twtEvent(void* arg, const char* base, int32_t event, void* data);
+    void serviceTwtTrial(int64_t now, bool locked);
+    void cancelTwtTrial(MosaicoTwt::Stop reason);
+    void cleanupTwtTrial();
+    void publishTwt();
+    MosaicoTwt::Model _twt;
+    MosaicoTwt::Snapshot _twt_cache;
+    struct TwtEvent { uint8_t kind = 0, flow = 0; MosaicoTwt::Result setup{}; };
+    TwtEvent _twt_events[8]{};
+    uint8_t _twt_event_read = 0, _twt_event_write = 0;
+    bool _twt_event_overflow = false, _twt_handler_ready = false;
+    mutable portMUX_TYPE _twt_mux = portMUX_INITIALIZER_UNLOCKED;
+    std::atomic<int> _twt_request{-1};
+    int _twt_saved_ps = 0;
+    bool _twt_ps_saved = false, _twt_submitted = false, _twt_negotiation_pending = false;
+    uint8_t _twt_cleanup_attempts = 0;
+    bool _twt_cleanup_failed = false;
+#endif
 #endif
     void wait(uint32_t milliseconds);
     void setCpu(uint32_t mhz);

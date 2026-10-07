@@ -11,7 +11,10 @@ class BootIntegrationTests(unittest.TestCase):
   self.assertIn('#ifdef MOSAICO_BOARD',init.split('gaugeBootReload(',1)[0])
  def test_idle_deferred_only_and_rate_limited(self):
   source=(ROOT/'main/host/network_quota.cpp').read_text(encoding='utf8')
-  idle=source.split('setPhase(2);',1)[1].split('continue;',1)[0]
+  # TWT retained-association also reports phase2, but must not perform the
+  # radio-off-only gauge reload. Select the original deferred-gauge branch.
+  prefix,tail=source.split('// Deferred preconditions',1)
+  idle=prefix.rsplit('setPhase(2);',1)[1]+tail.split('continue;',1)[0]
   self.assertIn('GaugeBootReloadStatus::Deferred',idle)
   self.assertIn('esp_timer_get_time() >= nextGaugeCheckUs',idle)
   self.assertIn('60LL * 1000000',idle)
