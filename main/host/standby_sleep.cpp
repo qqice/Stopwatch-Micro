@@ -2,6 +2,7 @@
 #include "standby_sleep.h"
 #include "standby_sleep_model.h"
 #include <sdkconfig.h>
+#include <hal/hal.h>
 #include <esp_attr.h>
 #include <esp_pm.h>
 #include <esp_timer.h>
@@ -17,7 +18,7 @@
 #include <cstdlib>
 
 // Neither diagnostic nor normal policy can accidentally activate in an ordinary/unsafe profile.
-#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_PM_ENABLE && CONFIG_FREERTOS_USE_TICKLESS_IDLE && CONFIG_PM_PROFILING && CONFIG_PM_LIGHT_SLEEP_CALLBACKS && !CONFIG_PM_SLP_SPIRAM_HALFSLEEP_ENABLED && !CONFIG_ESP_SLEEP_POWER_DOWN_FLASH && !CONFIG_ESP_SLEEP_SET_FLASH_DPD && !CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP && !CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP && !CONFIG_PM_ESP_SLEEP_POWER_DOWN_CPU && !CONFIG_ESP_SYSTEM_PM_POWER_DOWN_CPU
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_PM_ENABLE && CONFIG_FREERTOS_USE_TICKLESS_IDLE && CONFIG_PM_PROFILING && CONFIG_PM_LIGHT_SLEEP_CALLBACKS && !CONFIG_PM_SLP_SPIRAM_HALFSLEEP_ENABLED && !CONFIG_ESP_SLEEP_POWER_DOWN_FLASH && !CONFIG_ESP_SLEEP_SET_FLASH_DPD && !CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP && !CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP && !CONFIG_PM_ESP_SLEEP_POWER_DOWN_CPU && !CONFIG_ESP_SYSTEM_PM_POWER_DOWN_CPU && (!(CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND || CONFIG_PM_SLP_DISABLE_GPIO) || CONFIG_MOSAICO_SLEEP_IO_RETENTION)
 #define STANDBY_SLEEP_SUPPORTED 1
 #else
 #define STANDBY_SLEEP_SUPPORTED 0
@@ -143,13 +144,13 @@ void service(bool ota, bool activeBle) {
 }
 bool request(uint32_t seconds) {
     std::lock_guard<std::mutex> guard(mutex);
-    if(seconds<30 || seconds>300 || !ready || !model.viewLocked || !model.displaySafe || model.fault || bleActive || model.otaBlocked || MosaicoOta::busy() || MosaicoOta::healthPending())return false;
+    if(!GetHAL().sleepIoRetentionReady() || seconds<30 || seconds>300 || !ready || !model.viewLocked || !model.displaySafe || model.fault || bleActive || model.otaBlocked || MosaicoOta::busy() || MosaicoOta::healthPending())return false;
     if(fatal || !initialize() || !model.request(seconds,esp_timer_get_time()))return false;
     wanted=false;refreshRecovery(esp_timer_get_time());return true;
 }
 bool enableAutomatic(bool confirmed) {
     std::lock_guard<std::mutex> guard(mutex);
-    if(!confirmed || !STANDBY_SLEEP_SUPPORTED || !ready || fatal)return false;
+    if(!GetHAL().sleepIoRetentionReady() || !confirmed || !STANDBY_SLEEP_SUPPORTED || !ready || fatal)return false;
     // Unlike a diagnostic trial, policy activation can be requested while awake.
     // Wake sources/PM callbacks are initialized only when allow() sees ALL gates.
     model.enableAutomatic(true);wanted=false;refreshRecovery(esp_timer_get_time());return true;
@@ -170,9 +171,10 @@ bool allow(uint32_t cpu, bool locked, bool wifi) {
     // allow() never clears the stored OTA gate; only the authoritative service
     // may release it after observing actual busy/health atomics both false.
     if(MosaicoOta::busy() || MosaicoOta::healthPending())model.otaBlocked=true;
-    if(wifi || bleActive)model.pause();
+    const bool ioSafe=GetHAL().sleepIoRetentionReady();
+    if(!ioSafe || wifi || bleActive)model.pause();
     model.service(now);
-    const bool safe=!fatal && ready && model.eligible(now,cpu,locked,wifi || bleActive);
+    const bool safe=ioSafe && !fatal && ready && model.eligible(now,cpu,locked,wifi || bleActive);
     wanted=safe && (initialized || initialize());
     refreshRecovery(now);return wanted;
 }

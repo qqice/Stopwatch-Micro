@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #pragma once
+#include "mosaico/mosaico_sleep_io_model.h"
 #include "utils/button/Button_Class.hpp"
 #include <system_config.h>
 #include <memory>
@@ -229,6 +230,15 @@ public:
 #else
     void setTouchIdlePolling(bool) {}
     TouchPollingInfo touchPollingInfo() const { return {}; }
+#endif
+
+    using SleepIoInfo=mosaico_sleep_io::Snapshot;
+#ifdef MOSAICO_BOARD
+    SleepIoInfo sleepIoRetentionInfo() const; // Reads registered role pins only; no GPIO writes; inconsistency synchronously blocks LS.
+    bool sleepIoRetentionReady() const; // Cached; no driver calls in the PM admission path.
+#else
+    SleepIoInfo sleepIoRetentionInfo() const { return {}; }
+    bool sleepIoRetentionReady() const { return true; }
 #endif
 
     struct MotionOrientation {

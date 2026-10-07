@@ -1,0 +1,4 @@
+# Targeted sleep IO retention diagnostic. First boot must keep LS OFF.
+# Preserve all safe PM/PSRAM/flash settings and accurate LVGL timebase.
+CONFIG_MOSAICO_SLEEP_IO_RETENTION=y
+# CONFIG_MOSAICO_STANDBY_AUTO_LIGHT_SLEEP is not set

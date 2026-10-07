@@ -33,6 +33,8 @@
 #include "mosaico_orientation_model.h"
 #include "bmi270.h"
 #include "driver/gpio.h"
+#include "soc/io_mux_reg.h"
+#include "soc/gpio_sig_map.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "esp_lcd_co5300.h"
@@ -44,6 +46,7 @@
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
+#include <host/standby_sleep.h>
 #include "esp_clk_tree.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
@@ -85,6 +88,37 @@ uint32_t monotonic_lvgl_tick() {
 #endif
 std::atomic<bool> touch_idle_polling{false};
 bool touch_wait_for_release = false; // LVGL mutex owned; blocks pre-wake held fingers in cache too.
+std::mutex sleep_io_mutex;
+mosaico_sleep_io::Model sleep_io_model;
+std::atomic<bool> sleep_io_ready{false};
+mosaico_sleep_io::Read read_sleep_io(int pin) {
+    gpio_io_config_t io{};
+    const esp_err_t error=gpio_get_io_config(static_cast<gpio_num_t>(pin),&io);
+    return {error,{static_cast<uint16_t>(io.fun_sel),static_cast<uint16_t>(io.sig_out),static_cast<uint8_t>(io.drv),
+        bool(io.ie),bool(io.oe),bool(io.oe_ctrl_by_periph),bool(io.oe_inv),bool(io.od),bool(io.pu),bool(io.pd)},bool(io.slp_sel)};
+}
+#if CONFIG_MOSAICO_SLEEP_IO_RETENTION && CONFIG_IDF_TARGET_ESP32S31
+void apply_sleep_io(mosaico_sleep_io::Role role,int pin,uint16_t signal,bool peripheral) {
+    std::lock_guard<std::mutex> guard(sleep_io_mutex);
+    sleep_io_model.state.enabled=true;sleep_io_model.gpioFunction=PIN_FUNC_GPIO;
+    if(sleep_io_model.add(role,pin,signal,peripheral,ESP_ERR_INVALID_ARG)) {
+        if(!GPIO_IS_VALID_OUTPUT_GPIO(pin)) {
+            sleep_io_model.state.unsafe|=mosaico_sleep_io::bit(pin);sleep_io_model.failure(ESP_ERR_INVALID_ARG);
+        } else sleep_io_model.apply(role,read_sleep_io,[](int configuredPin) {
+            return gpio_sleep_sel_dis(static_cast<gpio_num_t>(configuredPin));
+        },ESP_ERR_INVALID_STATE);
+    }
+    sleep_io_ready.store(false,std::memory_order_release); // Final readback after all HAL configuration.
+}
+#endif
+void refresh_sleep_io_locked() {
+    for(unsigned index=0;index<mosaico_sleep_io::Count;++index) {
+        const int pin=sleep_io_model.state.pins[index].pin;
+        if(pin>=0)sleep_io_model.observe(index,read_sleep_io(pin),ESP_ERR_INVALID_STATE);
+    }
+    sleep_io_model.state.ready=sleep_io_model.ready();
+    sleep_io_ready.store(sleep_io_model.state.ready,std::memory_order_release);
+}
 std::atomic<bool> unused_gates_off{false};
 // Serialized by the LVGL port mutex once it exists. Keep physical brightness
 // separate from the requested setting while a wake redraw is pending.
@@ -843,6 +877,15 @@ void Hal::i2c_init()
     rail.mode = GPIO_MODE_OUTPUT;
     ESP_ERROR_CHECK(gpio_config(&rail));
     ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_60, 0));
+#if CONFIG_MOSAICO_SLEEP_IO_RETENTION && CONFIG_IDF_TARGET_ESP32S31
+    // Preserve the ALREADY configured outputs, including the original rail LOW.
+    // Role collection uses the original cfg masks; no new normal-level writes.
+    unsigned roleIndex=0;
+    for(unsigned pin=0;pin<64;++pin) if(unused.pin_bit_mask & mosaico_sleep_io::bit(pin))
+        apply_sleep_io(static_cast<mosaico_sleep_io::Role>(roleIndex++),pin,SIG_GPIO_OUT_IDX,false);
+    for(unsigned pin=0;pin<64;++pin) if(rail.pin_bit_mask & mosaico_sleep_io::bit(pin))
+        apply_sleep_io(mosaico_sleep_io::Role::Rail,pin,SIG_GPIO_OUT_IDX,false);
+#endif
     delay(100);
     i2c_master_bus_config_t config{};
     config.i2c_port = I2C_NUM_0;
@@ -1449,6 +1492,16 @@ void Hal::display_init()
     panel_brightness = 0;
     pending_boot_display = true;
     pending_wake_brightness = getBackLightBrightness(true);
+#if CONFIG_MOSAICO_SLEEP_IO_RETENTION && CONFIG_IDF_TARGET_ESP32S31
+    // Exact SPI2 matrix signals are validated; unknown mux/role modes fail closed.
+    apply_sleep_io(mosaico_sleep_io::Role::Reset,config.reset_gpio_num,SIG_GPIO_OUT_IDX,false);
+    apply_sleep_io(mosaico_sleep_io::Role::CS,io.cs_gpio_num,SPI2_CS_PAD_OUT_IDX,true);
+    apply_sleep_io(mosaico_sleep_io::Role::Clock,spi.sclk_io_num,SPI2_CK_PAD_OUT_IDX,true);
+    apply_sleep_io(mosaico_sleep_io::Role::Data0,spi.data0_io_num,SPI2_D_PAD_OUT_IDX,true);
+    apply_sleep_io(mosaico_sleep_io::Role::Data1,spi.data1_io_num,SPI2_Q_PAD_OUT_IDX,true);
+    apply_sleep_io(mosaico_sleep_io::Role::Data2,spi.data2_io_num,SPI2_WP_PAD_OUT_IDX,true);
+    apply_sleep_io(mosaico_sleep_io::Role::Data3,spi.data3_io_num,SPI2_HOLD_PAD_OUT_IDX,true);
+#endif
 }
 
 bool Hal::display_ready() const { return panel && display; }
@@ -1562,6 +1615,9 @@ void Hal::lvgl_init()
         portENTER_CRITICAL(&motion_mux); motion_snapshot.error = ESP_ERR_NO_MEM; portEXIT_CRITICAL(&motion_mux);
     }
     ESP_LOGI(Tag, "CO5300/CST9217 480x480; geometry requires physical acceptance");
+#if CONFIG_MOSAICO_SLEEP_IO_RETENTION && CONFIG_IDF_TARGET_ESP32S31
+    { std::lock_guard<std::mutex> guard(sleep_io_mutex);refresh_sleep_io_locked(); }
+#endif
 }
 
 bool Hal::lvglLock() { return port_ready && lvgl_port_lock(0); }
@@ -1610,6 +1666,23 @@ void Hal::setTouchIdlePolling(bool idle)
     lvglUnlock();
 }
 
+Hal::SleepIoInfo Hal::sleepIoRetentionInfo() const {
+    SleepIoInfo info;
+    { std::lock_guard<std::mutex> guard(sleep_io_mutex);refresh_sleep_io_locked();info=sleep_io_model.state; }
+    // No GPIO mutation in this report. A detected inconsistency does immediately
+    // block LS through the existing recovery lock AFTER releasing our mutex.
+    if(info.enabled && !info.ready)StandbySleep::cancelForActivity();
+    return info;
+}
+bool Hal::sleepIoRetentionReady() const {
+#if CONFIG_MOSAICO_SLEEP_IO_RETENTION
+    return sleep_io_ready.load(std::memory_order_acquire);
+#elif CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND || CONFIG_PM_SLP_DISABLE_GPIO
+    return false;
+#else
+    return true;
+#endif
+}
 Hal::TouchPollingInfo Hal::touchPollingInfo() const
 {
     const bool idle = touch_idle_polling.load(std::memory_order_relaxed);

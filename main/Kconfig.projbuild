@@ -19,4 +19,14 @@ menu "Mosaico application power policy"
             existing port tick timer runs every 1000 ms; no new task or timer is
             created. Touch polling, LVGL handler deadlines, animation, main-loop
             and wireless scheduling are unchanged. Disabled keeps the 10 ms tick.
+    config MOSAICO_SLEEP_IO_RETENTION
+        bool "Retain only the configured Mosaico panel and control outputs in light sleep"
+        depends on IDF_TARGET_ESP32S31
+        default n
+        help
+            After normal HAL setup, disable sleep-mode selection only on validated
+            current panel/rail/unused-shutdown output roles. No levels, directions,
+            holds, IOMUX functions, shared rails or SDK workaround are changed.
+            Readback or role validation failure blocks light sleep. This is not a
+            full port of the board 1.2.1 wiring or a generic GPIO-control interface.
 endmenu

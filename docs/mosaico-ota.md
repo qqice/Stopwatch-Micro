@@ -990,3 +990,27 @@ unchanged. This does not claim minute-long uninterrupted HP sleep or eliminate
 all wake producers. Inspect `idle-runtime` for the actual period and time source.
 Acceptance requires clock/minute redraw, UI/animation, Function/touch recovery,
 UART and OTA checks plus a matched two-minute input-current comparison.
+
+### Sleep IO retention diagnostic (0.13.10)
+
+After the 1000 ms tick candidate, the user observed row-brightness flicker; only
+turning light-sleep off stopped it. The exact build enabled the IDF GPIO sleep
+isolation workaround. This is a concrete hypothesis, not a measured reset or
+rail-drop diagnosis.
+
+`boards/mosaico/sdkconfig.sleep-io-experiment` enables targeted application IO
+retention while keeping automatic LS off on first boot. After each output is
+configured normally, only `gpio_sleep_sel_dis()` is used for registered actual
+panel/reset/QSPI, peripheral rail and V1.0 shutdown roles. No output level,
+direction, remux, pad hold, reset, GPIO57, charger or global SDK workaround change.
+GPIO60 retains its existing rail-on LOW rather than being switched or held.
+
+`debug sleep-io` reports cached before/after and live public GPIO readback for
+these registered targets only. It accepts no arbitrary pin arguments. Any
+configuration/readback inconsistency fails closed and immediately inhibits LS.
+The 42/44 role swap can be supplied by board configuration; this is not a claim
+that the rest of CoreBoard 1.2.1 is already ported.
+
+First verify readback, then use a bounded `debug standby-sleep on 30` and visual
+observation. Only a stable display qualifies for normal policy and power A/B.
+Preserve accurate time, minute refresh, Function/UART, and the rollback image.
