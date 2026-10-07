@@ -31,6 +31,8 @@ public:
     bool otaBusy() const;
     bool locked() const { return _locked; }
     bool lockForDebug();
+    bool standbyDimForDebug(int brightness, uint32_t leaseSeconds);
+    void standbyDimDetails(char* out, std::size_t capacity);
     uint32_t lockRefreshCount() const { return _lockRefreshCount; }
     bool showHistory(bool hourly);
     bool selectHistory(std::size_t index);
@@ -63,6 +65,8 @@ private:
     void renderSessions();
     void renderSettings();
     void refreshDisplaySettings();
+    bool standbyDimEligible() const;
+    void clearStandbyDim();
     void applyBurnInShift(bool touching);
     static void settingsEvent(lv_event_t* event);
     static void historyChartEvent(lv_event_t* event);
@@ -201,6 +205,8 @@ private:
     std::unique_ptr<QuotaMonitorSnapshot> _quota;
     std::unique_ptr<TokenHistorySnapshot> _history;
     Page _page = Page::Command;
+    int _standbyDimBrightness = -1; // RAM-only lease; zero is valid.
+    uint32_t _standbyDimDeadline = 0;
     bool _hourly = false, _locked = false, _suppressed = false;
     bool _touchTracking = false, _swipeConsumed = false;
     lv_point_t _touchStart{};

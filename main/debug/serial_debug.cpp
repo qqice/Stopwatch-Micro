@@ -799,6 +799,24 @@ void SerialDebug::handleLine(char* line)
         result("network-selftest", ok ? "PASS" : "FAIL", "cases=7 source_sequence_and_freshness=1");
         return;
     }
+    if (std::strcmp(command, "standby-dim") == 0) {
+        const char* value = ::strtok_r(nullptr, " \t", &save);
+        const char* lease = ::strtok_r(nullptr, " \t", &save);
+        uint32_t brightness = 0, seconds = 180;
+        const bool statusOnly = !value || !std::strcmp(value, "status");
+        const bool off = value && !std::strcmp(value, "off");
+        if (::strtok_r(nullptr, " \t", &save) || ((statusOnly || off) && lease) ||
+            (!statusOnly && !off && (!parseUnsignedStrict(value, 0, 100, brightness) ||
+                (lease && !parseUnsignedStrict(lease, 30, 300, seconds))))) {
+            result(command, "FAIL", "expected=status|off|brightness_0..100_lease_s_30..300 default_lease_s=180");
+            return;
+        }
+        const bool ok = statusOnly || _app.debugStandbyDim(off ? -1 : static_cast<int>(brightness), seconds);
+        char details[160]{};
+        _app.debugStandbyDimDetails(details, sizeof(details));
+        result(command, ok ? "PASS" : "FAIL", details);
+        return;
+    }
     if (std::strcmp(command, "display-lock") == 0) {
         result("display-lock", _app.debugLockDisplay() ? "PASS" : "FAIL");
         return;

@@ -43,6 +43,8 @@ public:
     DebugInputState debugInputState();
     bool debugDisplayLocked();
     bool debugLockDisplay();
+    bool debugStandbyDim(int brightness, uint32_t leaseSeconds = 180);
+    void debugStandbyDimDetails(char* out, size_t capacity);
     void debugWakeDisplay();
     uint32_t debugLockRefreshCount();
     bool debugShowHistory(bool hourly);

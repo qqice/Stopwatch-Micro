@@ -102,6 +102,7 @@ void formatCountdown(mosaico_time::Countdown time, char* out, size_t size, bool 
 }
 namespace view {
 CodexMicroView::~CodexMicroView() {
+    clearStandbyDim();
     MosaicoSessions::setEnabled(false);
     closeSettings(false);
     cancelOrientation();
@@ -489,6 +490,35 @@ void CodexMicroView::settingsEvent(lv_event_t* event) {
     self->refreshDisplaySettings(); // Accepted RAM config applies immediately, persistence is worker-owned.
     self->renderSettings();
 }
+bool CodexMicroView::standbyDimEligible() const {
+    return ready() && _locked && !_suppressed && !_rotationFault &&
+        _rotationPhase == RotationPhase::Idle && !otaKeepAwake();
+}
+void CodexMicroView::clearStandbyDim() {
+    if (_standbyDimBrightness < 0) return;
+    _standbyDimBrightness = -1; _standbyDimDeadline = 0;
+    // Restore even under a rotation fault: safety must not leave a leased black screen.
+    GetHAL().setBackLightBrightness(_locked ? _displaySettings.config.lockBrightness : _brightness, false);
+    _appliedBrightness = _locked ? _displaySettings.config.lockBrightness : _brightness;
+}
+bool CodexMicroView::standbyDimForDebug(int brightness, uint32_t leaseSeconds) {
+    if (brightness == -1) { clearStandbyDim(); refreshDisplaySettings(); return true; }
+    if (brightness < 0 || brightness > 100 || leaseSeconds < 30 || leaseSeconds > 300 ||
+        !standbyDimEligible()) return false;
+    _standbyDimBrightness = brightness;
+    _standbyDimDeadline = lv_tick_get() + leaseSeconds * 1000U;
+    refreshDisplaySettings();
+    return true;
+}
+void CodexMicroView::standbyDimDetails(char* out, std::size_t capacity) {
+    const uint32_t now = lv_tick_get();
+    if (_standbyDimBrightness >= 0 && (!standbyDimEligible() ||
+        static_cast<int32_t>(now - _standbyDimDeadline) >= 0)) clearStandbyDim();
+    const uint32_t remaining = _standbyDimBrightness < 0 ? 0 : _standbyDimDeadline - now;
+    std::snprintf(out, capacity, "override=%d actual=%d config=%u expires_ms=%lu locked=%d ready=%d eligible=%d",
+        _standbyDimBrightness, GetHAL().getBackLightBrightness(), _displaySettings.config.lockBrightness,
+        static_cast<unsigned long>(remaining), _locked, ready(), standbyDimEligible());
+}
 void CodexMicroView::refreshDisplaySettings() {
     MosaicoDisplay::Snapshot next{};
     if (MosaicoDisplay::snapshot(next)) {
@@ -505,7 +535,9 @@ void CodexMicroView::refreshDisplaySettings() {
     }
     const auto& c = _displaySettings.config;
     _brightness = _chargeProfile ? c.chargeBrightness : c.batteryBrightness;
-    const int target = _locked ? c.lockBrightness : _brightness;
+    if (_standbyDimBrightness >= 0 && (!standbyDimEligible() ||
+        static_cast<int32_t>(lv_tick_get() - _standbyDimDeadline) >= 0)) clearStandbyDim();
+    const int target = _locked ? (_standbyDimBrightness >= 0 ? _standbyDimBrightness : c.lockBrightness) : _brightness;
     if (!_rotationFault && target != _appliedBrightness) {
         GetHAL().setBackLightBrightness(target, false); _appliedBrightness = target;
     }
@@ -1472,6 +1504,7 @@ void CodexMicroView::navigatePage(int direction) {
 }
 void CodexMicroView::setInputSuppressed(bool suppressed) {
     _suppressed = suppressed;
+    if (suppressed) clearStandbyDim();
     refreshSessionsLease();
     if (suppressed) { closeSettings(false); _touchTracking = false; _swipeConsumed = true; cancelOrientation(); GetHAL().setMotionIdle(true); cancelPageSlide(); stopAnimations(); }
 }
@@ -1484,6 +1517,7 @@ void CodexMicroView::togglePage() {
     navigatePage(1);
 }
 void CodexMicroView::wakeDisplay() {
+    clearStandbyDim();
     if (_rotationFault) return;
     if (!ready()) return;
     GetNetworkQuota().setLocked(false); _activity = lv_tick_get(); _locked = false;

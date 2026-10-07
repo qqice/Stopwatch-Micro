@@ -881,3 +881,17 @@ Two-minute host captures are now the default CLI acceptance window: first minute
 observes stabilization, last60receipt seconds are analyzed. `--minimum-seconds180`
 still analyzes older3minruns, and the Python API retains its conservative180s
 default. Charge/loss caveats and exclusive artifact output remain unchanged.
+
+## RAM-only display contribution probe (0.13.5)
+
+`debug standby-dim <0..100> [30..300 seconds]` temporarily overrides ONLY locked
+brightness, with180s default lease. `status`/noargs reads lease state; `off` clears.
+It uses existing view update/LVGL mutex, no extra timer/task or NVS change. Expiry,
+wake, OTA, suppression, rotation fault and destruction restore configured value.
+A requested brightness reported by HAL is not a physical measurement. Brightness0
+is for a short explicit contribution experiment, not a retained invisible lock UI.
+No panel reset, unknowntouch sleep or sharedrail operation occurs. Preservelocked
+CPU160/brightness30baseline/normalwirelesscadence while comparing one variable.
+Only firmware/software acceptance is available before actual lease/wake/current
+checks. Every verified and retained optimization will be reported with its exact
+measured current and regression status; TWT stays disabled during this phase.

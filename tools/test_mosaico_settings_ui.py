@@ -44,7 +44,7 @@ class SettingsUiTests(unittest.TestCase):
                       'requestWifiCredentials(ssid, self->_wifiOpenNetwork ? "" : password)',
                       'lv_textarea_set_text(_wifiPassword, "")', 'SAVE ERROR'):
             self.assertIn(token,CPP)
-        callback=CPP.split('void CodexMicroView::settingsEvent(',1)[1].split('void CodexMicroView::refreshDisplaySettings()',1)[0]
+        callback=CPP.split('void CodexMicroView::settingsEvent(',1)[1].split('\n}',1)[0]
         for forbidden in ('nvs_', 'setBackLightBrightness', 'service()', 'batteryTelemetry', 'lv_timer_create'):
             self.assertNotIn(forbidden,callback)
         toggle=CPP.split('void CodexMicroView::togglePage()',1)[1].split('void CodexMicroView::wakeDisplay()',1)[0]
@@ -90,9 +90,18 @@ struct CodexMicroView {
  bool _shiftPending=false,_touchTracking=false,_usb=false,snapshotReady=true,accept=true;
  unsigned _activity=0,_now=123,_shiftIndex=0;
  int _brightness=80,_appliedBrightness=-1,renders=0,requests=0;
+ int _standbyDimBrightness=-1; uint32_t _standbyDimDeadline=0; // Inactive RAM probe preserves original fixture behavior.
  MosaicoDisplay::Snapshot _displaySettings{},bank{};
  Hal _hal; lv_obj_t root{};lv_obj_t* _root=&root;lv_obj_t* _slideTo=nullptr;lv_obj_t* _settingsPage=&root;
  constexpr bool otaBusy() { return busy; }
+ constexpr bool standbyDimEligible() const {
+  return _root && _locked && !_suppressed && !_rotationFault && _rotationPhase==RotationPhase::Idle && _page!=Page::OTA && !busy;
+ }
+ constexpr void clearStandbyDim() {
+  _standbyDimBrightness=-1;_standbyDimDeadline=0;
+  _appliedBrightness=_locked?_displaySettings.config.lockBrightness:_brightness;
+  _hal.setBackLightBrightness(_appliedBrightness,false);
+ }
  constexpr void renderSettings() { ++renders; }
  constexpr bool _snapshot(MosaicoDisplay::Snapshot& out) { if(!snapshotReady)return false;out=bank;return true; }
  constexpr bool _request(MosaicoDisplay::Config c) {

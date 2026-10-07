@@ -253,6 +253,26 @@ bool AppCodexMicro::debugLockDisplay()
     return _view != nullptr && _view->lockForDebug();
 }
 
+bool AppCodexMicro::debugStandbyDim(int brightness, uint32_t leaseSeconds)
+{
+    LvglLockGuard lock;
+#ifdef MOSAICO_BOARD
+    return _view != nullptr && _view->standbyDimForDebug(brightness, leaseSeconds);
+#else
+    (void)brightness; (void)leaseSeconds;
+    return false;
+#endif
+}
+
+void AppCodexMicro::debugStandbyDimDetails(char* out, size_t capacity)
+{
+    LvglLockGuard lock;
+#ifdef MOSAICO_BOARD
+    if (_view != nullptr) { _view->standbyDimDetails(out, capacity); return; }
+#endif
+    std::snprintf(out, capacity, "override=-1 ready=0 supported=0");
+}
+
 void AppCodexMicro::debugWakeDisplay()
 {
     LvglLockGuard lock;
