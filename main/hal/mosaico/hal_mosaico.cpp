@@ -100,7 +100,7 @@ mosaico_sleep_io::Read read_sleep_io(int pin) {
 #if CONFIG_MOSAICO_SLEEP_IO_RETENTION && CONFIG_IDF_TARGET_ESP32S31
 void apply_sleep_io(mosaico_sleep_io::Role role,int pin,uint16_t signal,bool peripheral) {
     std::lock_guard<std::mutex> guard(sleep_io_mutex);
-    sleep_io_model.state.enabled=true;sleep_io_model.gpioFunction=PIN_FUNC_GPIO;
+    sleep_io_model.state.enabled=true;sleep_io_model.gpioFunction=PIN_FUNC_GPIO;sleep_io_model.gpioSignal=SIG_GPIO_OUT_IDX;
     if(sleep_io_model.add(role,pin,signal,peripheral,ESP_ERR_INVALID_ARG)) {
         if(!GPIO_IS_VALID_OUTPUT_GPIO(pin)) {
             sleep_io_model.state.unsafe|=mosaico_sleep_io::bit(pin);sleep_io_model.failure(ESP_ERR_INVALID_ARG);
