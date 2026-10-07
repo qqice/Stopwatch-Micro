@@ -110,7 +110,8 @@ private:
     int _twt_saved_ps = 0;
     bool _twt_ps_saved = false, _twt_submitted = false, _twt_negotiation_pending = false;
     uint8_t _twt_cleanup_attempts = 0;
-    bool _twt_cleanup_failed = false;
+    bool _twt_cleanup_failed = false, _twt_teardown_sent = false, _twt_teardown_ack = false;
+    bool _twt_cleanup_barrier_needed = false;
 #endif
 #endif
     void wait(uint32_t milliseconds);

@@ -15,11 +15,14 @@ class TwtTests(unittest.TestCase):
         code = r'''
 #include "main/host/mosaico_twt_model.h"
 using esp_err_t=int; using wifi_ps_type_t=int;
-constexpr int ESP_OK=0,FLOW_ID_ALL=8;
+constexpr int ESP_OK=0,FLOW_ID_ALL=8,ESP_ERR_INVALID_STATE=-2;
 struct Owner {
  MosaicoTwt::Model _twt;
  bool _twt_submitted=false,_twt_ps_saved=false,_twt_negotiation_pending=false;
  bool _twt_cleanup_failed=false,_wifi_running=true,_connected=true;
+ bool _twt_teardown_sent=false,_twt_teardown_ack=false,_twt_cleanup_barrier_needed=false;
+ int64_t now=1;
+ constexpr int64_t esp_timer_get_time(){return now;}
  uint8_t _twt_cleanup_attempts=0;
  int _twt_saved_ps=2;
  int bitmap=0,queryError=0,teardownError=0,stopError=0,restoreError=0;
@@ -38,22 +41,34 @@ struct Owner {
 constexpr bool cleanupTraces(){
  Owner accepted;accepted._twt_submitted=true;accepted.bitmap=0;
  accepted.cancelTwtTrial(MosaicoTwt::Stop::Explicit);
+ if(!accepted._twt_submitted||accepted.teardowns!=1||accepted.restores||!accepted._twt.state.cleanupPending)return false;
+ accepted.cleanupTwtTrial();if(accepted.teardowns!=1||accepted.stops)return false;
+ accepted._twt_teardown_ack=true;accepted.cleanupTwtTrial();
  if(accepted._twt_submitted||accepted.stops||accepted._twt.state.cleanupPending)return false;
  Owner pending;pending._twt_submitted=pending._twt_negotiation_pending=true;pending.bitmap=0;
  pending.cancelTwtTrial(MosaicoTwt::Stop::Ota);
- if(pending.stops!=1||pending._wifi_running||pending._twt_submitted||pending._twt_negotiation_pending)return false;
- Owner failed;failed._twt_submitted=failed._twt_negotiation_pending=true;failed.stopError=-1;
- failed.cancelTwtTrial(MosaicoTwt::Stop::Timeout);
- if(!failed._twt.state.cleanupPending||failed._twt_cleanup_failed)return false;
- failed.cleanupTwtTrial();
- if(!failed._twt_cleanup_failed||!failed._twt_submitted||failed.stops!=2)return false;
- failed.cleanupTwtTrial();if(failed.stops!=2)return false;
+ if(pending.stops||pending.teardowns||!pending._twt.state.cleanupPending||pending._twt.state.cleanupStage!=1)return false;
+ pending._twt_negotiation_pending=false;pending.cleanupTwtTrial();
+ if(pending.teardowns!=1||pending.stops||!pending._twt_submitted)return false;
+ pending._twt_teardown_ack=true;pending.cleanupTwtTrial();
+ if(pending._twt_submitted||pending.stops||pending._twt.state.cleanupPending)return false;
+ Owner timeout;timeout._twt_submitted=true;
+ timeout.cancelTwtTrial(MosaicoTwt::Stop::Timeout);
+ timeout.now=timeout._twt.state.cleanupDeadlineUs;timeout.cleanupTwtTrial();
+ if(!timeout._twt_cleanup_failed||!timeout._twt_submitted||timeout.stops||timeout.teardowns!=1)return false;
+ timeout.cleanupTwtTrial();if(timeout.teardowns!=1)return false;
+ Owner barrier;barrier._twt_submitted=true;barrier.bitmap=1;
+ barrier.cancelTwtTrial(MosaicoTwt::Stop::Explicit);barrier._twt_teardown_ack=true;barrier.cleanupTwtTrial();
+ if(!barrier._twt_cleanup_failed||barrier.stops||barrier.disconnects||!barrier._twt_submitted)return false;
  Owner ps;ps._twt_ps_saved=true;ps.restoreError=-1;
  ps.cancelTwtTrial(MosaicoTwt::Stop::Explicit);
- if(!ps._twt_ps_saved||ps.stops!=1||!ps._twt.state.cleanupPending)return false;
+ if(!ps._twt_ps_saved||ps.stops||!ps._twt.state.cleanupPending)return false;
  ps.cleanupTwtTrial();
- if(!ps._twt_ps_saved||!ps._twt_cleanup_failed||ps.restores!=2)return false;
+ if(!ps._twt_ps_saved||!ps._twt_cleanup_failed||ps.restores!=2||ps.stops)return false;
  ps.cleanupTwtTrial();if(ps.restores!=2)return false;
+ Owner rejected;rejected._twt_cleanup_barrier_needed=rejected._twt_ps_saved=true;
+ rejected.cancelTwtTrial(MosaicoTwt::Stop::Rejected);
+ if(rejected.teardowns||rejected.stops||rejected._twt.state.cleanupPending||rejected.restores!=1)return false;
  Owner recovered;recovered._twt_ps_saved=true;recovered.restoreError=-1;
  recovered.cancelTwtTrial(MosaicoTwt::Stop::Explicit);recovered.restoreError=0;
  recovered.cleanupTwtTrial();
@@ -140,6 +155,10 @@ static_assert(traces(), "trial safety traces");
         self.assertNotIn('esp_wifi_set_twt_config', source)
         cancel = source.split('void NetworkQuota::cancelTwtTrial', 1)[1].split('void NetworkQuota::serviceTwtTrial', 1)[0]
         self.assertIn('esp_wifi_sta_itwt_teardown(FLOW_ID_ALL)', cancel)
+        self.assertNotIn('esp_wifi_disconnect(', cancel)
+        self.assertNotIn('esp_wifi_stop(', cancel)
+        self.assertLess(cancel.index('if (_twt_submitted && !_twt_teardown_ack)'), cancel.index('esp_wifi_sta_itwt_get_flow_id_status'))
+        self.assertIn('_twt_teardown_sent = true', cancel)
         self.assertIn('esp_wifi_set_ps(static_cast<wifi_ps_type_t>(_twt_saved_ps))', cancel)
         ota = source.split('void NetworkQuota::updateFirmware()', 1)[1]
         self.assertLess(ota.index('cancelTwtTrial'), ota.index('requestJson'))
@@ -148,8 +167,24 @@ static_assert(traces(), "trial safety traces");
         self.assertNotIn('GetTailnetQuota().pause', idle)
         self.assertIn('GetTailnetQuota().ready()', idle)
         self.assertIn('SOC_WIFI_HE_SUPPORT', source)
+        self.assertIn('_twt.state.cleanupPending && !_twt_cleanup_failed', source)
+        self.assertIn('copied.setup.status = e.status', event)
+        self.assertIn('_twt_teardown_sent && e.flow == FLOW_ID_ALL', service)
+        self.assertIn('if (e.setup.status == ITWT_TEARDOWN_SUCCESS) _twt_teardown_ack = true', service)
+        overflow = service.split('if (overflow)', 1)[1].split('while (true)', 1)[0]
+        self.assertNotIn('esp_wifi_', overflow)
+        self.assertIn('_twt_cleanup_failed', overflow)
         run = source.split('while (true) {\n#ifdef MOSAICO_BOARD', 1)[1]
         self.assertLess(run.index('serviceTwtTrial('), run.index('MosaicoOta::processLocalRequests()'))
+        cleanup_gate = run.split('if (_twt.state.cleanupPending || _twt_cleanup_failed)', 1)[1].split('if (ownsDisplaySettings)', 1)[0]
+        self.assertIn('continue;', cleanup_gate)
+        # OTA can change after the entry gate. Every same-iteration cleanup
+        # gate must exit before the radio-off path, not only skip installation.
+        gates = run.split('if (_twt.state.cleanupPending || _twt_cleanup_failed)')[1:]
+        self.assertGreaterEqual(len(gates), 2)
+        for gate in gates:
+            self.assertIn('continue;', gate.split('}', 1)[0])
+        self.assertIn('wait(_twt_cleanup_failed ? 1000 : 50)', cleanup_gate)
         self.assertIn('if (_twt.state.cleanupPending || _twt_cleanup_failed)', run)
         self.assertLess(run.index('wait(50); continue;'), run.index('GetTailnetQuota().start()'))
         transfers = run.split('const bool quotaOk = fetch();', 1)[1]

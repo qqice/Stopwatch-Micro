@@ -114,9 +114,10 @@ void NetworkQuota::wait(uint32_t milliseconds)
     if (wifiSettingsSnapshot(wifi) && (wifi.pending || wifi.restartPending) && milliseconds > 250) milliseconds=250;
 #endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
-    if (_twt.live()) {
+    if (_twt.live() || (_twt.state.cleanupPending && !_twt_cleanup_failed)) {
         const int64_t now = esp_timer_get_time();
-        const int64_t deadline = _twt.state.setupDeadlineUs ? std::min(_twt.state.setupDeadlineUs, _twt.state.expiryUs) : _twt.state.expiryUs;
+        const int64_t deadline = _twt.state.cleanupPending ? _twt.state.cleanupDeadlineUs :
+            (_twt.state.setupDeadlineUs ? std::min(_twt.state.setupDeadlineUs, _twt.state.expiryUs) : _twt.state.expiryUs);
         const uint32_t remaining = static_cast<uint32_t>(std::max<int64_t>(1, (deadline - now) / 1000));
         milliseconds = std::min(milliseconds, std::min<uint32_t>(remaining, 1000));
     }
@@ -255,8 +256,7 @@ void NetworkQuota::twtEvent(void* arg, const char*, int32_t event, void* data)
     } else if (event == WIFI_EVENT_STA_DISCONNECTED) copied.kind = 2;
     else if (event == WIFI_EVENT_ITWT_TEARDOWN && data) {
         const auto& e = *static_cast<const wifi_event_sta_itwt_teardown_t*>(data);
-        if (e.status != ITWT_TEARDOWN_SUCCESS) return;
-        copied.kind = 3; copied.flow = e.flow_id;
+        copied.kind = 3; copied.flow = e.flow_id; copied.setup.status = e.status;
     } else return; // No per-wake logging, APIs, allocations, NVS or HAL calls.
     portENTER_CRITICAL(&owner._twt_mux);
     const uint8_t next = (owner._twt_event_write + 1) % 8;
@@ -273,50 +273,70 @@ void NetworkQuota::cancelTwtTrial(MosaicoTwt::Stop reason)
 }
 void NetworkQuota::cleanupTwtTrial()
 {
-    // Submission success is not teardown completion. Prove the local bitmap
-    // empty, or stop the STA radio. Keep restoration debt on any driver error.
+    // S31 incident: teardown ESP_OK/bitmap0 did not mean TX callback drained.
+    // SUCCESS is posted before he_twt_teardown_txcb's final accesses. In this
+    // installed SDK, post-ack get_flow_id_status is a synchronous PP-task ioctl;
+    // it runs after that same PP-task TX callback returns. Require BOTH proofs.
+    // Never disconnect/stop a STA with a pending setup/teardown callback.
     if (_twt_cleanup_failed) return;
-    if (!_twt_submitted && !_twt_ps_saved) return;
-    ++_twt_cleanup_attempts;
-    // A confirmed stop invalidates that Wi-Fi epoch, even if its queued setup
-    // result is delivered afterwards. No driver query on an already-stopped STA.
-    if (!_wifi_running) _twt_submitted = _twt_negotiation_pending = false;
-    if (_twt_submitted) {
+    if (!_twt_submitted && !_twt_ps_saved && !_twt_cleanup_barrier_needed) return;
+    _twt.state.cleanupPending = true;
+    const int64_t now = esp_timer_get_time();
+    if (!_twt.state.cleanupDeadlineUs) _twt.state.cleanupDeadlineUs = now + 10LL * 1000000;
+    if (now >= _twt.state.cleanupDeadlineUs) {
+        _twt_cleanup_failed = _twt.state.cleanupFailed = true;
+        _twt.state.cleanupStage = 5;
+        return; // Keep radio and restoration debt; reboot/manual diagnosis only.
+    }
+    if (_twt_negotiation_pending) {
+        _twt.state.cleanupStage = 1;
+        return; // Await the original twt_id result; no teardown while setup TX pending.
+    }
+    if (_twt_submitted && !_twt_teardown_sent) {
+        _twt.state.cleanupStage = 2;
+        _twt_teardown_sent = true; // One submission per cleanup, even if API fails.
+        _twt_teardown_ack = false;
         _twt.state.teardownError = esp_wifi_sta_itwt_teardown(FLOW_ID_ALL);
+        return;
+    }
+    if (_twt_submitted && !_twt_teardown_ack) {
+        _twt.state.cleanupStage = 2;
+        return; // Bitmap0 alone can precede TX completion; no driver query yet.
+    }
+    if (_twt_submitted || _twt_cleanup_barrier_needed) {
+        _twt.state.cleanupStage = 3;
         int bitmap = -1;
         const esp_err_t queried = esp_wifi_sta_itwt_get_flow_id_status(&bitmap);
-        if (!_twt_negotiation_pending && queried == ESP_OK && bitmap == 0) _twt_submitted = false;
-        else {
-            esp_wifi_disconnect();
-            if (esp_wifi_stop() == ESP_OK) {
-                _twt_submitted = false;
-                _twt_negotiation_pending = false;
-                recordWifiRunning(false);
-                _connected = false;
-                _twt.state.associated = false;
-            }
+        if (queried != ESP_OK || bitmap != 0) {
+            _twt.state.teardownError = queried != ESP_OK ? queried : ESP_ERR_INVALID_STATE;
+            _twt_cleanup_failed = _twt.state.cleanupFailed = true;
+            _twt.state.cleanupStage = 5;
+            return; // No stop fallback and no repeated ioctl/teardown attempts.
         }
+        _twt_submitted = _twt_cleanup_barrier_needed = false;
+        _twt_teardown_sent = _twt_teardown_ack = false;
     }
     if (_twt_ps_saved) {
+        _twt.state.cleanupStage = 4;
+        ++_twt_cleanup_attempts;
         _twt.state.restoreError = esp_wifi_set_ps(static_cast<wifi_ps_type_t>(_twt_saved_ps));
         if (_twt.state.restoreError == ESP_OK) _twt_ps_saved = false;
-        else if (_wifi_running && esp_wifi_stop() == ESP_OK) {
-            recordWifiRunning(false);
-            _connected = false;
-            _twt.state.associated = false;
-            _twt_submitted = false;
-            _twt_negotiation_pending = false;
+        else if (_twt_cleanup_attempts >= 2) {
+            _twt_cleanup_failed = _twt.state.cleanupFailed = true;
+            _twt.state.cleanupStage = 5;
+            return;
         }
     }
-    _twt.state.cleanupPending = _twt_submitted || _twt_ps_saved;
-    if (_twt.state.cleanupPending && _twt_cleanup_attempts >= 2)
-        _twt_cleanup_failed = _twt.state.cleanupFailed = true;
-    if (!_twt.state.cleanupPending) _twt_cleanup_attempts = 0;
+    _twt.state.cleanupPending = _twt_submitted || _twt_ps_saved || _twt_cleanup_barrier_needed;
+    if (!_twt.state.cleanupPending) {
+        _twt_cleanup_attempts = 0;
+        _twt.state.cleanupDeadlineUs = 0;
+        _twt.state.cleanupStage = 0;
+    }
 }
 void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
 {
     using namespace MosaicoTwt;
-    if (_twt.state.cleanupPending) cleanupTwtTrial();
     // Expiry/OTA/unlock wins over an already queued setup success.
     if (_twt.live() && !_twt.check(now, twtOtaBlocked(), locked))
         cancelTwtTrial(_twt.state.stop);
@@ -324,7 +344,13 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
     portENTER_CRITICAL(&_twt_mux);
     overflow = _twt_event_overflow; _twt_event_overflow = false;
     portEXIT_CRITICAL(&_twt_mux);
-    if (overflow) { _twt_submitted = _twt_negotiation_pending = true; cancelTwtTrial(Stop::Lost); }
+    if (overflow) {
+        // Lost callback identity cannot be reconstructed from a bitmap. Freeze
+        // the owner without sending another frame or stopping the driver.
+        _twt_cleanup_failed = _twt.state.cleanupFailed = true;
+        _twt.state.cleanupPending = true; _twt.state.cleanupStage = 5;
+        _twt.end(Stop::Lost);
+    }
     while (true) {
         TwtEvent e{};
         portENTER_CRITICAL(&_twt_mux);
@@ -334,9 +360,21 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
         if (!available) break;
         if (e.kind == 1) {
             const bool current = _twt.state.stage == Stage::Negotiating && e.setup.id == _twt.state.id;
-            if (current) _twt_negotiation_pending = false;
+            const bool draining = _twt_negotiation_pending && e.setup.id == _twt.state.id;
+            if (draining) {
+                _twt_negotiation_pending = false;
+                if (!current) {
+                    _twt_cleanup_barrier_needed = true;
+                    _twt_submitted = e.setup.status == 1;
+                    _twt.state.actual = e.setup;
+                }
+            }
             const bool accepted = _twt.accept(e.setup);
-            if (!accepted && current) cancelTwtTrial(_twt.state.stop);
+            if (!accepted && current) {
+                _twt_cleanup_barrier_needed = true;
+                _twt_submitted = e.setup.status == 1;
+                cancelTwtTrial(_twt.state.stop);
+            }
             if (!current && e.setup.status == 1) {
                 // SDK carries no request generation except echoed twt_id. Never stamp current generation.
                 // A late accepted flow colliding with a live trial invalidates that trial too.
@@ -345,10 +383,24 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
             }
         } else if (e.kind == 2 && _twt.live()) {
             ++_twt.state.losses; cancelTwtTrial(Stop::Lost);
-        } else if (e.kind == 3 && _twt.state.stage == Stage::Active && e.flow == _twt.state.actual.flow) {
-            ++_twt.state.losses; cancelTwtTrial(Stop::Lost);
+        } else if (e.kind == 3) {
+            if (_twt_teardown_sent && e.flow == FLOW_ID_ALL) {
+                if (e.setup.status == ITWT_TEARDOWN_SUCCESS) _twt_teardown_ack = true;
+                else {
+                    _twt_cleanup_failed = _twt.state.cleanupFailed = true;
+                    _twt.state.cleanupPending = true; _twt.state.cleanupStage = 5;
+                }
+            } else if (e.setup.status == ITWT_TEARDOWN_SUCCESS && _twt.state.stage == Stage::Active &&
+                       e.flow == _twt.state.actual.flow) {
+                // AP initiated per-flow teardown: event + ioctl drain barrier,
+                // no additional transmitted teardown that could race a stop.
+                ++_twt.state.losses;
+                _twt_submitted = false; _twt_cleanup_barrier_needed = true;
+                cancelTwtTrial(Stop::Lost);
+            }
         }
     }
+    if (_twt.state.cleanupPending) cleanupTwtTrial();
     const int request = _twt_request.exchange(-1);
     if (request >= 0) {
         cancelTwtTrial(Stop::Explicit);
@@ -397,6 +449,8 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
                     _twt.state.error = esp_wifi_sta_itwt_setup(&config);
                     if (_twt.state.error != ESP_OK) {
                         _twt_negotiation_pending = false;
+                        _twt_submitted = false;
+                        _twt_cleanup_barrier_needed = true;
                         cancelTwtTrial(Stop::Driver);
                     }
                 }
@@ -655,6 +709,13 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
 #if SOC_WIFI_HE_SUPPORT
         serviceTwtTrial(esp_timer_get_time(), idleLocked());
+        if (_twt.state.cleanupPending || _twt_cleanup_failed) {
+            if (MosaicoOta::busy()) MosaicoOta::fail("twt_cleanup_not_ready");
+            setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+            setPhase(4);
+            wait(_twt_cleanup_failed ? 1000 : 50);
+            continue; // No OTA, radio stop, restart or new network request while TX is uncertain.
+        }
 #endif
         if (ownsDisplaySettings) MosaicoDisplay::service();
         serviceWifiSettings();
@@ -662,6 +723,7 @@ void NetworkQuota::run()
         if (twtOtaBlocked() && _twt.live()) cancelTwtTrial(MosaicoTwt::Stop::Ota);
         if (_twt.state.cleanupPending || _twt_cleanup_failed) {
             if (MosaicoOta::busy()) MosaicoOta::fail("twt_cleanup_not_ready");
+            wait(1000); continue; // A late OTA cancellation must not fall into radio stop.
         } else
 #endif
             MosaicoOta::processLocalRequests(); // INSTALL/REBOOT do not require network readiness.

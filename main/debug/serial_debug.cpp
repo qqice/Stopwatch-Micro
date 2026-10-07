@@ -402,7 +402,7 @@ void SerialDebug::handleLine(char* line)
             const auto t = GetNetworkQuota().twtSnapshot();
             char details[640]{};
             std::snprintf(details, sizeof(details),
-                "mode=%u stage=%u stop=%u id=%u expiry_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u ram_only=1",
+                "mode=%u stage=%u stop=%u id=%u expiry_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld ram_only=1",
                 unsigned(t.requested), unsigned(t.stage), unsigned(t.stop), unsigned(t.id),
                 static_cast<long long>(t.expiryUs), static_cast<long long>(t.setupDeadlineUs), t.associated, t.apAx, t.phy,
                 t.actual.status, unsigned(t.actual.reason), unsigned(t.actual.flow),
@@ -410,7 +410,8 @@ void SerialDebug::handleLine(char* line)
                 static_cast<unsigned long long>(t.actual.targetWakeUs), static_cast<unsigned long>(t.fetchAttempts),
                 static_cast<unsigned long>(t.fetchOk), static_cast<unsigned long long>(t.fetchUs),
                 static_cast<unsigned long>(t.losses), static_cast<unsigned long>(t.lateEvents), t.error, t.restoreError, t.teardownError,
-                t.cleanupPending, t.cleanupFailed, unsigned(t.lastFailure));
+                t.cleanupPending, t.cleanupFailed, unsigned(t.lastFailure), unsigned(t.cleanupStage),
+                static_cast<long long>(t.cleanupDeadlineUs));
             result("twt", "PASS", details); return;
         }
         MosaicoTwt::Mode requested;

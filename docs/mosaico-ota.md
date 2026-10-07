@@ -734,7 +734,7 @@ tiles, all four detail groups and keyboard layout to check overlap, then ran
 actual-source gesture/control and owner fault traces. Physical touch, glyph
 readability, radio timing and NVS power-loss recovery still need board acceptance.
 
-## Experimental iTWT comparison (0.13.1, default disabled)
+## Experimental iTWT comparison (0.13.2 controlled trial, default disabled)
 
 ESP32-S31 and the installed IDF6.1 support station iTWT. The existing driver
 protocol default on this HE target already permits802.11ax alongside legacy
@@ -771,7 +771,7 @@ PHY, rejection, loss or timeout falls back without automatic negotiation retries
 Restart resets default OFF. Only event-scalar copying occurs in callbacks; WiFi
 calls and cleanup belong to the network owner.
 
-Each trial uses a distinct echoed twt_id. Cleanup must prove an established local
+Each trial uses a distinct echoed twt_id. The0131 cleanup race failed on hardware; the following old policy is NOT the current cleanup contract. Cleanup previously attempted to prove an established local
 flow bitmap empty, or confirm STA stop; cancelling a still-pending setup requires
 STA stop because an empty bitmap cannot disprove a late acceptance. Prior PS is
 restored; failed cleanup is retained as debt with at most two attempts and blocks
@@ -785,3 +785,34 @@ an externally calibrated power analyzer. Compare OFF, BASELINE and TWT at matche
 SOC/brightness/display/CPU/BLE/server workload; also compare time from Function
 wake to a fresh quota response, failure rate and lock connectivity. Do not enable
 TWT by default without actual AP compatibility and net energy/latency evidence.
+
+### 0.13.2 callback-drain incident correction and current acceptance
+
+The0131 teardown/stop sequence caused a real load fault in
+`he_twt_teardown_txcb`. An empty local flow bitmap did not prove its asynchronous
+TX callback had returned.0132 never directly disconnects/stops from cleanup:
+wait for setup outcome, submit teardownALL once, wait for matchingSUCCESS, then
+use the same PP task's synchronous ioctl to establish a callback-drain barrier
+and empty flow bitmap before restoring PS/allowing the original radio-off path.
+Both same-iteration OTA cleanup gates exit before any normal radio stop. Lost
+ACK, overflow or restoration failure retains cleanup debt and blocks new trials,
+OTA and normal radio-off; there is no unsafe timed-sleep/forced-stop fallback.
+The10s deadline belongs to the owner state machine. The SDK ioctl uses an
+unbounded semaphore wait, so this is NOT a hard driver-call timeout guarantee.
+The ordering argument was checked against the installed S31 library binaries;
+it is not a guarantee for an unreviewed future SDK version.
+
+Controlled networkOTA installed0132 intoota_0 withVALID state, boot76;0131ota_1
+is the rollback app and remains defaultOFF. Two acceptedTWT trials completed
+unlock/off cleanup and normalradio-off without increasing boot76. A baseline
+associated modem-sleep trial also exited. The saved panic record is historical
+boot75/current reset3, not a new panic. No long-term stability claim is made.
+
+However, a forced refresh underTWT recorded zero data-fetch attempts in an80s
+observation while tailnetMap startup completed near its end. Same-experience
+service/QoS and net energy have NOT passed acceptance. ExplicitOFF during a
+pending cleanup also briefly reports Driver259 despite successful later drain
+(a diagnostic command-state quirk, not evidence of a new crash). The device is
+left OFF; stable server publication is restored0130, with controlled0132 retained
+privately. Do not enable this prototype by default or infer saving percentages.
+IoTPowerV1 capture is separately ready; see `docs/iotpower-measurement.md`.
