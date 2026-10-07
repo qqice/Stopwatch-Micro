@@ -106,17 +106,26 @@ static_assert(cases(),"same-frequency LS enable/disable is not hidden by cached 
         self.assertIn('refreshElapsed >= 60000U',view)
     def test_host_preamble_crc_and_default_unchanged(self):
         for enabled in (False,True):
-            writes=[];flushes=[]
-            fake=SimpleNamespace(open=lambda:None,close=lambda:None,write=writes.append,flush=lambda:flushes.append(1),
+            writes=[];flushes=[];events=[]
+            def write(data):
+                writes.append(data);events.append(('write',data))
+            def flush():
+                flushes.append(1);events.append(('flush',))
+            fake=SimpleNamespace(open=lambda:None,close=lambda:None,write=write,flush=flush,
                 readline=lambda:b'DBG RESULT command=ping status=PASS reply=pong\r\n')
-            with patch.object(host.serial,'Serial',return_value=fake),patch.object(host.time,'sleep') as sleep:
+            with patch.object(host.serial,'Serial',return_value=fake),patch.object(host.time,'sleep',side_effect=lambda seconds:events.append(('sleep',seconds))) as sleep:
                 client=host.DebugClient('TEST-NO-DEVICE',uart=True,wake_preamble=enabled)
                 self.assertFalse(fake.dtr);self.assertFalse(fake.rts)
                 reply=client.command('debug ping','ping')
                 self.assertEqual(reply.status,'PASS')
-                self.assertEqual(writes,([b'U'*576+b'\n'] if enabled else [])+[host.encode_command('debug ping',True)])
-                self.assertEqual(len(flushes),int(enabled));self.assertEqual(sleep.call_count,int(enabled))
-                if enabled:sleep.assert_called_once_with(0.05)
+                burst=b'U'*32+b'\n';frame=host.encode_command('debug ping',True)
+                self.assertEqual(writes,([burst]*3 if enabled else [])+[frame])
+                self.assertEqual(len(flushes),3*int(enabled));self.assertEqual(sleep.call_count,3*int(enabled))
+                self.assertEqual(events,([('write',burst),('flush',),('sleep',0.02)]*3 if enabled else [])+[('write',frame)])
+                # Burst lines stay tiny and intentionally cannot be bare commands.
+                self.assertEqual(len(burst),33);self.assertFalse(burst.startswith(b'uart '))
+                nominal_seconds=3*(len(burst)*10/115200+0.02)
+                self.assertGreaterEqual(nominal_seconds,0.05);self.assertLessEqual(nominal_seconds,0.07)
         with self.assertRaises(ValueError):host.DebugClient('TEST-NO-DEVICE',uart=False,wake_preamble=True)
     def test_host_retry_exact_idempotent_only(self):
         client=host.DebugClient.__new__(host.DebugClient);client.wake_preamble=True;client.uart=True

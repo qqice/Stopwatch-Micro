@@ -119,11 +119,13 @@ class DebugClient:
         self.serial.close()
 
     def _send_preamble(self) -> None:
-        # 576 characters take 50ms at 115200 8N1. Flush waits for transmission;
-        # the delimiter and 50ms gap let the existing 20ms consumer drain it.
-        self.serial.write(b"U" * 576 + b"\n")
-        self.serial.flush()
-        time.sleep(0.05)
+        # Three short invalid lines: ~9ms wire time plus 60ms of gaps at
+        # 115200 8N1. Each delimiter lets the existing 20ms consumer drain/reset;
+        # firmware RX activity keeps the 500ms wake window open for the CRC frame.
+        for _ in range(3):
+            self.serial.write(b"U" * 32 + b"\n")
+            self.serial.flush()
+            time.sleep(0.02)
 
     def command(self, text: str, expected: str, timeout: float = 5.0) -> Result:
         attempts = 3 if self.wake_preamble and recovery_retry_safe(text) else 1
