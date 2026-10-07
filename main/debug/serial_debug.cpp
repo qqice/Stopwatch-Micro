@@ -366,6 +366,38 @@ void SerialDebug::handleLine(char* line)
     }
 
 #ifdef MOSAICO_BOARD
+    if (command && !std::strcmp(command, "settings")) {
+        const char* action=::strtok_r(nullptr, " \t", &save);
+        bool ok=false;
+        if (action && !std::strcmp(action,"get")) {
+            if (::strtok_r(nullptr, " \t", &save)) { result(command,"FAIL","reason=arguments no_changes=1"); return; }
+            const auto s=MosaicoDisplay::snapshot(); const auto& c=s.effectiveConfig;
+            char details[512]{};
+            std::snprintf(details,sizeof(details),
+                "charge_timeout=%lu battery_timeout=%lu charge_brightness=%u battery_brightness=%u lock_brightness=%u burn_in=%d lock_wifi_minutes=%u lock_ble_minutes=%u temporary=%d lease_remaining_s=%lu runtime_revision=%lu revision=%lu saved_revision=%lu pending=%d error=%ld",
+                static_cast<unsigned long>(c.chargeTimeoutSeconds),static_cast<unsigned long>(c.batteryTimeoutSeconds),
+                c.chargeBrightness,c.batteryBrightness,c.lockBrightness,c.burnIn,c.lockWifiMinutes,c.lockBleMinutes,s.temporary,
+                static_cast<unsigned long>(s.remainingLeaseSeconds),static_cast<unsigned long>(s.runtimeRevision),
+                static_cast<unsigned long>(s.revision),static_cast<unsigned long>(s.savedRevision),s.pending,static_cast<long>(s.error));
+            result(command,"PASS",details); return;
+        } else if (action && !std::strcmp(action,"set")) {
+            const char* field=::strtok_r(nullptr, " \t", &save);
+            const char* text=::strtok_r(nullptr, " \t", &save);
+            const char* lease=::strtok_r(nullptr, " \t", &save);
+            uint32_t value=0,seconds=180;
+            if (field && serial_debug_transport::settingsInteger(text,600,value) &&
+                (!lease || (serial_debug_transport::settingsInteger(lease,600,seconds) && seconds>=30)) &&
+                !::strtok_r(nullptr, " \t", &save)) ok=MosaicoDisplay::setTemporary(field,value,seconds);
+        } else if (action && !std::strcmp(action,"restore")) {
+            if (!::strtok_r(nullptr, " \t", &save)) ok=MosaicoDisplay::restoreTemporary();
+        } else if (action && !std::strcmp(action,"save")) {
+            const char* confirm=::strtok_r(nullptr, " \t", &save);
+            if (confirm && !std::strcmp(confirm,"CONFIRM") && !::strtok_r(nullptr, " \t", &save)) ok=MosaicoDisplay::saveTemporary(true);
+        }
+        result(command,ok?"PASS":"FAIL",ok?
+            (!std::strcmp(action,"save") ? "accepted_persist_pending=1 verify_saved_revision=1" : "accepted_ram_only=1 use_get_for_state=1"):
+            "reason=arguments_range_busy_or_contention no_changes=1"); return;
+    }
     if (command && std::strcmp(command, "display-settings") == 0) {
         const auto s = MosaicoDisplay::snapshot();
         char details[256];
@@ -419,7 +451,7 @@ void SerialDebug::handleLine(char* line)
         }
         const bool ok = MosaicoOta::request();
         if (ok) GetNetworkQuota().wakeForFirmwareUpdate();
-        result(command, ok ? "PASS" : "FAIL", "external_power=human_confirmed_not_measured SOC_not_used=1");
+        result(command, ok ? "PASS" : "FAIL", "external_power=human_confirmed_not_measured install_policy=manual_battery_floor safety_gates_retained=1");
         return;
     }
     if (command && std::strcmp(command, "ota-rollback-test") == 0) {
@@ -1074,6 +1106,10 @@ void SerialDebug::handleLine(char* line)
 
 void SerialDebug::printHelp()
 {
+#ifdef MOSAICO_BOARD
+    debugPrintf("DBG HELP settings get | settings set <field> <int> [lease_s=180,30..600] | settings restore | settings save CONFIRM\r\n");
+#endif
+
     debugPrintf("DBG HELP commands=ping,status,selftest,controls,protocol,debug-transport\r\n");
 #ifdef MOSAICO_BOARD
     debugPrintf("DBG HELP ota=ota-status,ota-update_CONFIRM_EXTERNAL_POWER,ota-rollback-test_CONFIRM\r\n");

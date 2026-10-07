@@ -10,7 +10,7 @@ HDR = (V / 'view_mosaico.h').read_text(encoding='utf8')
 class SettingsUiTests(unittest.TestCase):
     def test_default_config_is_not_permanently_pending(self):
         render = CPP.split('void CodexMicroView::renderSettings()', 1)[1].split('void CodexMicroView::settingsEvent', 1)[0]
-        self.assertIn('const bool pending = _displaySettings.pending;', render)
+        self.assertIn('const bool pending = _displaySettings.pending || _displaySettings.temporary;', render)
         self.assertIn('_displaySettings.savedRevision == _displaySettings.revision ? Green : Gray', render)
         self.assertIn('"NEVER"', render)
 
@@ -63,7 +63,7 @@ class SettingsUiTests(unittest.TestCase):
             body=CPP[start:CPP.index('\n}',start)+2]
             body=body.replace('lv_event_t* event','Hit* event')
             body=body.replace('MosaicoDisplay::snapshot(next)','_snapshot(next)')
-            body=body.replace('MosaicoDisplay::request(config)','self->_request(config)')
+            body=body.replace('MosaicoDisplay::requestPersistentField(fields[row], values[row])','self->_requestField(fields[row], values[row])')
             body=body.replace('GetHAL()', '_hal').replace('tud_mounted()', '_usb')
             body=body.replace('lv_tick_get()', 'self->_now' if name=='settingsEvent' else '_now')
             body=body.replace('static constexpr', 'constexpr') # C++17 constexpr adapter: identical constant tables.
@@ -99,14 +99,15 @@ struct CodexMicroView {
  }
  constexpr void clearStandbyDim() {
   _standbyDimBrightness=-1;_standbyDimDeadline=0;
-  _appliedBrightness=_locked?_displaySettings.config.lockBrightness:_brightness;
+  _appliedBrightness=_locked?_displaySettings.effectiveConfig.lockBrightness:_brightness;
   _hal.setBackLightBrightness(_appliedBrightness,false);
  }
  constexpr void renderSettings() { ++renders; }
  constexpr bool _snapshot(MosaicoDisplay::Snapshot& out) { if(!snapshotReady)return false;out=bank;return true; }
- constexpr bool _request(MosaicoDisplay::Config c) {
+ constexpr bool _requestField(const char* field, int64_t value) {
+  auto c=bank.config;if(!MosaicoDisplay::patch(c,field,value))return false;
   ++requests;if(!accept)return false;
-  bank.config=MosaicoDisplay::sanitize(c);++bank.revision;bank.pending=true;return true;
+  bank.config=MosaicoDisplay::sanitize(c);bank.effectiveConfig=bank.config;++bank.revision;bank.pending=true;bank.temporary=false;return true;
  }
  static constexpr void settingsEvent(Hit*);
  constexpr void refreshDisplaySettings();
@@ -120,13 +121,13 @@ constexpr bool controls() {
   CodexMicroView::Hit h{&v,size_t(row*2+1)};
   for(int repeat=0;repeat<25;++repeat) {
    v.settingsEvent(&h);
-   auto c=v._displaySettings.config;
+   auto c=v._displaySettings.effectiveConfig;
    if(c.batteryTimeoutSeconds>60 || !c.batteryTimeoutSeconds || c.chargeBrightness<10 || c.chargeBrightness>100 ||
       c.batteryBrightness<10 || c.batteryBrightness>100 || c.lockBrightness>100 || c.lockWifiMinutes<1 || c.lockWifiMinutes>60 || c.lockBleMinutes<1 || c.lockBleMinutes>60)return false;
   }
   h.index=row*2;for(int repeat=0;repeat<25;++repeat)v.settingsEvent(&h);
  }
- if(v._displaySettings.config.burnIn || v._displaySettings.config.lockBrightness!=0)return false;
+ if(v._displaySettings.effectiveConfig.burnIn || v._displaySettings.effectiveConfig.lockBrightness!=0)return false;
  CodexMicroView::Hit h{&v,5};
  for(int guard=0;guard<7;++guard) {
   v._locked=guard==0;v._suppressed=guard==1;v._swipeConsumed=guard==2;
@@ -140,19 +141,19 @@ constexpr bool profiles() {
  CodexMicroView v;v.refreshDisplaySettings();
  if(v._hal.brightness!=80 || v._activity!=123)return false;
  v._now=124;v.refreshDisplaySettings();if(v._activity!=123 || v._hal.calls!=1)return false;
- v._usb=true;v.bank.config.chargeBrightness=95;++v.bank.revision;v.refreshDisplaySettings();
+ v._usb=true;v.bank.effectiveConfig.chargeBrightness=95;++v.bank.revision;v.refreshDisplaySettings();
  if(v._hal.brightness!=80 || v._activity!=123 || v._chargeProfile)return false; // USB is not charge-profile evidence.
  v._chargeSupply.update(true,4,99);v.refreshDisplaySettings();
  if(v._hal.brightness!=95 || v._activity!=124 || !v._chargeProfile)return false;
  v._now=125;v.refreshDisplaySettings();if(v._activity!=124)return false;
  v._usb=false;v._chargeSupply.update(true,0,100);v.refreshDisplaySettings();if(v._activity!=124 || !v._chargeProfile)return false;
- v._chargeSupply.update(true,-4,100);v.bank.config.batteryBrightness=35;++v.bank.revision;v.refreshDisplaySettings();
+ v._chargeSupply.update(true,-4,100);v.bank.effectiveConfig.batteryBrightness=35;++v.bank.revision;v.refreshDisplaySettings();
  if(v._hal.brightness!=35 || v._activity!=125 || v._chargeProfile)return false;
- v._locked=true;v.bank.config.lockBrightness=0;++v.bank.revision;v.refreshDisplaySettings();
+ v._locked=true;v.bank.effectiveConfig.lockBrightness=0;++v.bank.revision;v.refreshDisplaySettings();
  if(v._hal.brightness!=0)return false;
  v._locked=false;v.refreshDisplaySettings();if(v._hal.brightness!=35)return false;
- v.bank.config.batteryTimeoutSeconds=999;v.refreshDisplaySettings();if(v._displaySettings.config.batteryTimeoutSeconds!=60)return false;
- v.snapshotReady=false;v.bank.config.batteryBrightness=99;v.refreshDisplaySettings();
+ v.bank.effectiveConfig.batteryTimeoutSeconds=999;v.refreshDisplaySettings();if(v._displaySettings.effectiveConfig.batteryTimeoutSeconds!=60)return false;
+ v.snapshotReady=false;v.bank.effectiveConfig.batteryBrightness=99;v.refreshDisplaySettings();
  return v._hal.brightness==35 && !v._hal.saved;
 }
 constexpr bool shift() {
@@ -171,7 +172,7 @@ constexpr bool shift() {
  }
  v._touchTracking=false;v._slideTo=nullptr;v._rotationPhase=CodexMicroView::RotationPhase::Idle;
  v._rotationFault=false;v._suppressed=false;v.busy=false;v._locked=true;
- v._displaySettings.config.burnIn=false;v.applyBurnInShift(false);
+ v._displaySettings.effectiveConfig.burnIn=false;v.applyBurnInShift(false);
  return !v.root.x && !v.root.y && !v._shiftPending;
 }
 static_assert(controls(),"eight controls stay bounded and reject suppressed input");

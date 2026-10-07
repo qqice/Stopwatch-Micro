@@ -31,7 +31,10 @@ class SessionsUiTests(unittest.TestCase):
             self.assertIn('refreshSessionsLease()',body)
         self.assertIn('MosaicoSessions::setEnabled(false)',CPP)
         self.assertIn('refreshSessions(state)',CPP)
-        self.assertIn('std::min<uint32_t>(60, _displaySettings.config.batteryTimeoutSeconds)',CPP)
+        self.assertIn('std::min<uint32_t>(60, _displaySettings.effectiveConfig.batteryTimeoutSeconds)',CPP)
+        # Timeout consumption must not silently fall back to the persistent BASE.
+        update=CPP.split('void CodexMicroView::update(',1)[1]
+        self.assertNotIn('_displaySettings.config.batteryTimeoutSeconds',update)
 
     def test_actual_classifier_cache_and_ram_lease(self):
         compilers=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))

@@ -35,11 +35,12 @@ class StandbyDimTests(unittest.TestCase):
             'void CodexMicroView::clearStandbyDim()',
             'bool CodexMicroView::standbyDimForDebug(',
             'void CodexMicroView::refreshDisplaySettings()'])
+        functions = functions.replace('MosaicoDisplay::snapshot(next)', '_snapshot(next)')
         fixture = r'''
 #include <cstdint>
 namespace MosaicoDisplay {
 struct Config { bool burnIn=false; int chargeBrightness=70, batteryBrightness=40, lockBrightness=30; };
-struct Snapshot { Config config; unsigned revision=1, savedRevision=1; bool pending=false,error=false; };
+struct Snapshot { Config config{}, effectiveConfig{}; unsigned revision=1, savedRevision=1, runtimeRevision=1; bool pending=false,error=false,temporary=false; };
 constexpr bool snapshot(Snapshot&) { return false; }
 constexpr Config sanitize(Config c) { return c; }
 }
@@ -52,13 +53,15 @@ struct CodexMicroView {
  struct { bool external=false; } _chargeSupply;
  unsigned tick=0,_standbyDimDeadline=0,_activity=0;
  int _standbyDimBrightness=-1,_brightness=40,_appliedBrightness=30;
- MosaicoDisplay::Snapshot _displaySettings;
+ MosaicoDisplay::Snapshot _displaySettings, bank;
+ bool snapshotReady=false; unsigned renders=0;
+ constexpr bool _snapshot(MosaicoDisplay::Snapshot& out) { if(!snapshotReady)return false;out=bank;return true; }
  bool _settingsPage=false; Hal hal;
  constexpr Hal& GetHAL(){return hal;}
  constexpr bool ready()const{return root;}
  constexpr bool otaKeepAwake()const{return ota;}
  constexpr unsigned lv_tick_get()const{return tick;}
- constexpr void renderSettings(){}
+ constexpr void renderSettings(){++renders;}
  constexpr bool standbyDimEligible()const;
  constexpr void clearStandbyDim();
  constexpr bool standbyDimForDebug(int,uint32_t);
@@ -69,7 +72,7 @@ struct CodexMicroView {
 constexpr bool check() {
  CodexMicroView v;
  if(v.standbyDimForDebug(0,29)||v.standbyDimForDebug(0,301)||v.standbyDimForDebug(-2,180)||v.standbyDimForDebug(101,180))return false;
- if(!v.standbyDimForDebug(0,30)||v.hal.brightness!=0||v._displaySettings.config.lockBrightness!=30)return false;
+ if(!v.standbyDimForDebug(0,30)||v.hal.brightness!=0||v._displaySettings.config.lockBrightness!=30||v._displaySettings.effectiveConfig.lockBrightness!=30)return false;
  v.tick=29999;v.refreshDisplaySettings();if(v.hal.brightness!=0)return false;
  v.tick=30000;v.refreshDisplaySettings();if(v.hal.brightness!=30||v._standbyDimBrightness!=-1)return false;
  if(!v.standbyDimForDebug(100,300))return false;
@@ -81,6 +84,17 @@ constexpr bool check() {
  v.standbyDimForDebug(0,180);if(!v.standbyDimForDebug(-1,180)||v.hal.brightness!=30)return false;
  v.root=false;if(v.standbyDimForDebug(0,180))return false;
  v.root=true;v._rotationPhase=CodexMicroView::RotationPhase::Other;if(v.standbyDimForDebug(0,180))return false;
+ // Generic temporary settings take precedence over the legacy dim lease.
+ v._rotationPhase=CodexMicroView::RotationPhase::Idle;v._settingsPage=true;v.snapshotReady=true;
+ v.bank.temporary=true;v.bank.effectiveConfig.lockBrightness=12;++v.bank.runtimeRevision;
+ if(!v.standbyDimForDebug(0,180)||v.hal.brightness!=12||v.renders!=1||v._displaySettings.config.lockBrightness!=30)return false;
+ // Runtime-only changes redraw and apply despite unchanged persistent revision.
+ v.bank.effectiveConfig.lockBrightness=16;v.bank.effectiveConfig.burnIn=true;++v.bank.runtimeRevision;
+ v.refreshDisplaySettings();if(v.hal.brightness!=16||v.renders!=2||!v._shiftPending||v._displaySettings.config.burnIn)return false;
+ // Generic restore changes effective values only; legacy override remains bounded independently.
+ v.bank.temporary=false;v.bank.effectiveConfig=v.bank.config;++v.bank.runtimeRevision;
+ v.refreshDisplaySettings();if(v.hal.brightness!=0||v.renders!=3||v._displaySettings.effectiveConfig.lockBrightness!=30)return false;
+ v.clearStandbyDim();if(v.hal.brightness!=30)return false;
  return v._displaySettings.config.lockBrightness==30&&v._displaySettings.config.chargeBrightness==70&&v._displaySettings.config.batteryBrightness==40;
 }
 static_assert(check(), "actual-source lease safety");

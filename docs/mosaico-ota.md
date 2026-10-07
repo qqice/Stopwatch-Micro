@@ -895,3 +895,40 @@ CPU160/brightness30baseline/normalwirelesscadence while comparing one variable.
 Only firmware/software acceptance is available before actual lease/wake/current
 checks. Every verified and retained optimization will be reported with its exact
 measured current and regression status; TWT stays disabled during this phase.
+
+## Generic runtime settings reused for experiments (0.13.6)
+
+Use the existing display-settings Config/validators and NVS owner, rather than
+new firmware for each parameter experiment. UART and USB support:
+
+- `debug settings get`: BASE and effective values, temporary/runtime revision,
+  lease remaining, persistence pending/error/saved revision.
+- `debug settings set <field> <value> [lease_s]`: temporary RAM-only patch to the
+  current effectiveConfig, 30..600s lease (default180s).
+- `debug settings restore`: remove the runtime overlay and restore BASE.
+- `debug settings save CONFIRM`: intentionally promote all effective values to
+  BASE and queue normal owner persistence; confirm `saved_revision` afterwards.
+
+Fields: `charge_timeout`, `battery_timeout`, `charge_brightness`,
+`battery_brightness`, `lock_brightness`, `burn_in`, `lock_wifi_minutes`,
+`lock_ble_minutes`. Exact existing ranges/options apply; no silent narrowing,
+wrap or out-of-range clamp. No credential/gauge/register field is exposed.
+CPU160/320 commands already exist and remain separate. A GUI edit persists only
+its selected field from BASE, not unrelated temporary experiment values. Overlay
+expiry or OTA/health clears runtime state; BASE v2 CRC blob/writer gates unchanged.
+WiFi/BLE owners read effectiveConfig, so temporary wireless intervals take effect
+without new firmware. Legacy standby-dim remains compatible but generic settings
+are preferred; do not run two overlays simultaneously.
+
+### Confirmed physical bypass power policy
+
+The0134 bypasstoken skipped screen confirmation but still chose unconfirmed
+automatic external-power detection. On full V1 zero-current/non-enumeratedUSB it
+stopped after verified download in waiting_power.0136 explicitlyconfirmed local
+bypass selects the EXISTING manual battery-floor policy for install AND reboot:
+valid/sealed/not-critical gauge, >=3900mV, and existing capacity/SOC>=60% conditions
+when noUSB/positivecharge current is observed. It does not fabricate external
+power presence or mutate the gauge. Unconfirmed automatic runs still require
+external-power heuristic. Signature/hash/layout/rollback and fresh checks stay.
+The original completed0135manualinstall was anexception needed to bridge this
+old-policy limitation; no BOOT/wiring/power manipulation was used.

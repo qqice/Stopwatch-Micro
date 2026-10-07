@@ -44,7 +44,7 @@ void service(bool locked, bool otaBusy) {
     const bool hidReady = beginSucceeded && GetCodexMicroBle().diagnostics().hidReady;
     bool failed = !beginSucceeded || GetCodexMicroBle().diagnostics().linkFailed;
     MosaicoDisplay::Snapshot display;
-    if (MosaicoDisplay::snapshot(display)) window.intervalMs = MosaicoDisplay::lockIntervalMs(display.config.lockBleMinutes, 1);
+    if (MosaicoDisplay::snapshot(display)) window.intervalMs = MosaicoDisplay::lockIntervalMs(display.effectiveConfig.lockBleMinutes, 1);
     const bool asked = lockedRefreshRequested.exchange(false);
     if (!locked || otaBusy || failed) {
         if (!locked || failed) lockedRefreshRequested.store(false);

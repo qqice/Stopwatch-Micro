@@ -438,7 +438,7 @@ void CodexMicroView::wifiActionEvent(lv_event_t* event) {
     }
 }
 void CodexMicroView::renderSettings() {
-    const auto& c = _displaySettings.config;
+    const auto& c = _displaySettings.effectiveConfig;
     const uint32_t values[] = {c.chargeTimeoutSeconds, c.batteryTimeoutSeconds, c.chargeBrightness, c.batteryBrightness, c.lockBrightness};
     for (size_t row = 0; row < 5; ++row) {
         char text[16];
@@ -452,7 +452,7 @@ void CodexMicroView::renderSettings() {
         lv_label_set_text(_settingsValues[row], text);
     }
     const bool error = _settingsRequestFailed || _displaySettings.error;
-    const bool pending = _displaySettings.pending;
+    const bool pending = _displaySettings.pending || _displaySettings.temporary;
     setIcon(_settingsStatus, error ? Icon::Unknown : pending ? Icon::Hourglass : Icon::Check,
             error ? Orange : pending ? Gold : _displaySettings.savedRevision == _displaySettings.revision ? Green : Gray);
 }
@@ -462,7 +462,7 @@ void CodexMicroView::settingsEvent(lv_event_t* event) {
     auto* self = hit->owner;
     if (self->_rotationFault || self->_locked || self->_suppressed || self->_swipeConsumed || self->_slideTo ||
         self->_rotationPhase != RotationPhase::Idle || self->otaBusy() || !self->_settingsOpen || self->_settingsAnimating) return;
-    auto config = self->_displaySettings.config;
+    auto config = self->_displaySettings.effectiveConfig;
     const size_t row = hit->index / 2;
     const bool up = hit->index % 2;
     if (row < 2) {
@@ -485,7 +485,12 @@ void CodexMicroView::settingsEvent(lv_event_t* event) {
         size_t index = 0; while (index + 1 < 7 && minutes[index] != value) ++index;
         value = minutes[(index + (up ? 1 : 6)) % 7];
     }
-    self->_settingsRequestFailed = !MosaicoDisplay::request(config);
+    static constexpr const char* fields[] = {"charge_timeout", "battery_timeout", "charge_brightness", "battery_brightness",
+        "lock_brightness", "burn_in", "lock_wifi_minutes", "lock_ble_minutes"};
+    const uint32_t values[] = {config.chargeTimeoutSeconds, config.batteryTimeoutSeconds, config.chargeBrightness,
+        config.batteryBrightness, config.lockBrightness, config.burnIn, config.lockWifiMinutes, config.lockBleMinutes};
+    // Persist the selected visible field only; unrelated lease fields stay RAM-only.
+    self->_settingsRequestFailed = !MosaicoDisplay::requestPersistentField(fields[row], values[row]);
     self->_activity = lv_tick_get();
     self->refreshDisplaySettings(); // Accepted RAM config applies immediately, persistence is worker-owned.
     self->renderSettings();
@@ -498,8 +503,8 @@ void CodexMicroView::clearStandbyDim() {
     if (_standbyDimBrightness < 0) return;
     _standbyDimBrightness = -1; _standbyDimDeadline = 0;
     // Restore even under a rotation fault: safety must not leave a leased black screen.
-    GetHAL().setBackLightBrightness(_locked ? _displaySettings.config.lockBrightness : _brightness, false);
-    _appliedBrightness = _locked ? _displaySettings.config.lockBrightness : _brightness;
+    GetHAL().setBackLightBrightness(_locked ? _displaySettings.effectiveConfig.lockBrightness : _brightness, false);
+    _appliedBrightness = _locked ? _displaySettings.effectiveConfig.lockBrightness : _brightness;
 }
 bool CodexMicroView::standbyDimForDebug(int brightness, uint32_t leaseSeconds) {
     if (brightness == -1) { clearStandbyDim(); refreshDisplaySettings(); return true; }
@@ -516,16 +521,17 @@ void CodexMicroView::standbyDimDetails(char* out, std::size_t capacity) {
         static_cast<int32_t>(now - _standbyDimDeadline) >= 0)) clearStandbyDim();
     const uint32_t remaining = _standbyDimBrightness < 0 ? 0 : _standbyDimDeadline - now;
     std::snprintf(out, capacity, "override=%d actual=%d config=%u expires_ms=%lu locked=%d ready=%d eligible=%d",
-        _standbyDimBrightness, GetHAL().getBackLightBrightness(), _displaySettings.config.lockBrightness,
+        _standbyDimBrightness, GetHAL().getBackLightBrightness(), _displaySettings.effectiveConfig.lockBrightness,
         static_cast<unsigned long>(remaining), _locked, ready(), standbyDimEligible());
 }
 void CodexMicroView::refreshDisplaySettings() {
     MosaicoDisplay::Snapshot next{};
     if (MosaicoDisplay::snapshot(next)) {
-        next.config = MosaicoDisplay::sanitize(next.config);
-        if (next.config.burnIn != _displaySettings.config.burnIn) _shiftPending = true;
+        next.effectiveConfig = MosaicoDisplay::sanitize(next.effectiveConfig);
+        if (next.effectiveConfig.burnIn != _displaySettings.effectiveConfig.burnIn) _shiftPending = true;
         const bool statusChanged = next.revision != _displaySettings.revision || next.savedRevision != _displaySettings.savedRevision ||
-            next.pending != _displaySettings.pending || next.error != _displaySettings.error;
+            next.pending != _displaySettings.pending || next.error != _displaySettings.error ||
+            next.runtimeRevision != _displaySettings.runtimeRevision || next.temporary != _displaySettings.temporary;
         _displaySettings = next;
         if (statusChanged && _settingsPage) renderSettings();
     }
@@ -533,11 +539,11 @@ void CodexMicroView::refreshDisplaySettings() {
     if (!_profileSeen || chargeProfile != _chargeProfile) {
         _profileSeen = true; _chargeProfile = chargeProfile; _activity = lv_tick_get();
     }
-    const auto& c = _displaySettings.config;
+    const auto& c = _displaySettings.effectiveConfig;
     _brightness = _chargeProfile ? c.chargeBrightness : c.batteryBrightness;
     if (_standbyDimBrightness >= 0 && (!standbyDimEligible() ||
         static_cast<int32_t>(lv_tick_get() - _standbyDimDeadline) >= 0)) clearStandbyDim();
-    const int target = _locked ? (_standbyDimBrightness >= 0 ? _standbyDimBrightness : c.lockBrightness) : _brightness;
+    const int target = _locked ? (_standbyDimBrightness >= 0 && !_displaySettings.temporary ? _standbyDimBrightness : c.lockBrightness) : _brightness;
     if (!_rotationFault && target != _appliedBrightness) {
         GetHAL().setBackLightBrightness(target, false); _appliedBrightness = target;
     }
@@ -547,7 +553,7 @@ void CodexMicroView::applyBurnInShift(bool touching) {
         _rotationFault || _suppressed || otaBusy()) return;
     // Bounded two-pixel scan, including the centre; no new timer or touch offsets.
     static constexpr int offsets[9][2] = {{0, 0}, {2, 0}, {2, 2}, {0, 2}, {-2, 2}, {-2, 0}, {-2, -2}, {0, -2}, {2, -2}};
-    if (_displaySettings.config.burnIn) {
+    if (_displaySettings.effectiveConfig.burnIn) {
         _shiftIndex = (_shiftIndex + 1) % 9;
         lv_obj_set_pos(_root, offsets[_shiftIndex][0], offsets[_shiftIndex][1]);
     } else { _shiftIndex = 0; lv_obj_set_pos(_root, 0, 0); }
@@ -1551,8 +1557,8 @@ void CodexMicroView::lockDisplay() {
     lv_obj_invalidate(_lockPanel); // Also redraw an unchanged minute on lock entry.
     refreshQuota(GetHAL().millis()); ++_lockRefreshCount; _refresh = lv_tick_get();
     requestLockedSessions();renderLockSessions();
-    GetHAL().setBackLightBrightness(_displaySettings.config.lockBrightness, false);
-    _appliedBrightness = _displaySettings.config.lockBrightness;
+    GetHAL().setBackLightBrightness(_displaySettings.effectiveConfig.lockBrightness, false);
+    _appliedBrightness = _displaySettings.effectiveConfig.lockBrightness;
 }
 bool CodexMicroView::lockForDebug() { if (!ready()) return false; lockDisplay(); return _locked; }
 void CodexMicroView::update(const CodexMicroState& state) {
@@ -1581,8 +1587,8 @@ void CodexMicroView::update(const CodexMicroState& state) {
     const bool keepAwake = otaKeepAwake();
     if (!_locked && (interacting || keepAwake)) _activity = tick;
     const uint32_t idleElapsed = tick - _activity;
-    const uint32_t timeoutSeconds = _chargeProfile ? _displaySettings.config.chargeTimeoutSeconds :
-        std::min<uint32_t>(60, _displaySettings.config.batteryTimeoutSeconds);
+    const uint32_t timeoutSeconds = _chargeProfile ? _displaySettings.effectiveConfig.chargeTimeoutSeconds :
+        std::min<uint32_t>(60, _displaySettings.effectiveConfig.batteryTimeoutSeconds);
     if (!_locked && !interacting && !keepAwake && timeoutSeconds && idleElapsed >= timeoutSeconds * 1000U && idleElapsed < 0x80000000U) lockDisplay();
     // Revision checks are local memory only; no touch or UI path performs HTTP.
     // lockDisplay records a fresh refresh timestamp; never compare it to an older tick.

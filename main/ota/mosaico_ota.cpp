@@ -521,7 +521,11 @@ bool installVerified()
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !imageReady || selected.load()) return false;
     if ((usbBypass || automaticMode) && esp_timer_get_time() - readySince < 1500000) return false;
-    const bool manual = !(usbBypass || automaticMode);
+    // The physical bypass is explicitly confirmed by a local human/operator.
+    // Use the existing manual battery-floor safety policy even when a full
+    // V1-fed cell has zero charging current. Unconfirmed automatic runs retain
+    // the charging/enumerated-USB policy.
+    const bool manual = useManualInstallPolicy(usbBypass, automaticMode);
     if (!currentReady() || !installPowerSafe(manual)) {
         active.store(false); installSince = 0;
         publish(UiStage::WaitingPower, manual ? "install_power_required" : "install_external_power_required"); return false;
@@ -580,7 +584,7 @@ bool requestReboot()
 }
 bool rebootWithFreshPower()
 {
-    if (!installPowerSafe(!(usbBypass || automaticMode))) {
+    if (!installPowerSafe(useManualInstallPolicy(usbBypass, automaticMode))) {
         active.store(false);
         // Boot selection is already committed; never erase the retained image
         // or selector just because power changed while waiting for reboot.

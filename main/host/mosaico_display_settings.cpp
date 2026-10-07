@@ -20,6 +20,11 @@ bool loaded = false;
 enum class Owner { None, Network, Fallback };
 std::atomic<Owner> owner{Owner::None};
 std::atomic<TaskHandle_t> ownerTask{nullptr};
+void notifyOwner() {
+    const TaskHandle_t task=ownerTask.load(); if (task) xTaskNotifyGive(task);
+}
+bool unsafeRuntime() { return MosaicoOta::busy() || MosaicoOta::healthPending(); }
+void expireLocked(int64_t now) { if (model.expire(now,unsafeRuntime())) notifyOwner(); }
 }
 void init() {
     std::lock_guard<std::mutex> guard(mutex);
@@ -43,23 +48,62 @@ void init() {
 bool snapshot(Snapshot& out) {
     std::unique_lock<std::mutex> guard(mutex, std::try_to_lock);
     if (!guard.owns_lock() || !loaded) return false;
-    out = model.state; return true;
+    const int64_t now=esp_timer_get_time(); expireLocked(now);
+    out = model.snapshot(now); return true;
 }
 Snapshot snapshot() {
     // Read-only diagnostics may briefly wait on RAM copies, never on flash.
     std::lock_guard<std::mutex> guard(mutex);
-    return model.state;
+    const int64_t now=esp_timer_get_time(); expireLocked(now);
+    return model.snapshot(now);
 }
 bool request(Config config) {
     std::unique_lock<std::mutex> guard(mutex, std::try_to_lock);
     if (!guard.owns_lock() || !loaded) return false;
-    const uint32_t before = model.state.revision;
+    const uint32_t before = model.runtimeRevision;
     model.request(config, esp_timer_get_time());
     const TaskHandle_t task = ownerTask.load();
-    if (task && before != model.state.revision) xTaskNotifyGive(task);
+    if (task && before != model.runtimeRevision) xTaskNotifyGive(task);
+    return true;
+}
+bool requestPersistentField(const char* field, int64_t value) {
+    std::unique_lock<std::mutex> guard(mutex, std::try_to_lock);
+    if (!guard.owns_lock() || !loaded) return false;
+    const uint32_t before=model.runtimeRevision;
+    if (!model.requestPersistentField(field,value,esp_timer_get_time())) return false;
+    if (before!=model.runtimeRevision) notifyOwner();
+    return true;
+}
+bool setTemporary(const char* field, int64_t value, uint32_t leaseSeconds) {
+    std::unique_lock<std::mutex> guard(mutex, std::try_to_lock);
+    if (!guard.owns_lock() || !loaded) return false;
+    const int64_t now=esp_timer_get_time(); expireLocked(now);
+    if (unsafeRuntime() || !model.setTemporary(field,value,leaseSeconds,now)) return false;
+    notifyOwner(); return true;
+}
+bool restoreTemporary() {
+    std::unique_lock<std::mutex> guard(mutex, std::try_to_lock);
+    if (!guard.owns_lock() || !loaded) return false;
+    if (model.restore()) notifyOwner();
+    return true;
+}
+bool saveTemporary(bool confirmed) {
+    if (!confirmed) return false;
+    std::unique_lock<std::mutex> guard(mutex, std::try_to_lock);
+    if (!guard.owns_lock() || !loaded) return false;
+    const int64_t now=esp_timer_get_time(); expireLocked(now);
+    if (unsafeRuntime()) return false;
+    const uint32_t before=model.runtimeRevision;
+    model.saveTemporary(true,now);
+    if (before!=model.runtimeRevision) notifyOwner();
     return true;
 }
 void service() {
+    // Lease expiry and safety rollback are RAM-only even when flash is gated.
+    {
+        std::unique_lock<std::mutex> guard(mutex, std::try_to_lock);
+        if (guard.owns_lock() && loaded) expireLocked(esp_timer_get_time());
+    }
     std::unique_lock<std::mutex> writer(writerMutex, std::try_to_lock);
     if (!writer.owns_lock() || ownerTask.load() != xTaskGetCurrentTaskHandle()) return;
     if (MosaicoOta::busy() || MosaicoOta::healthPending()) return;

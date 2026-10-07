@@ -2,6 +2,9 @@
 #include <cstdint>
 
 namespace MosaicoOta {
+constexpr bool useManualInstallPolicy(bool confirmedPhysicalBypass, bool automaticMode) {
+    return confirmedPhysicalBypass || !automaticMode;
+}
 // Pure policy shared by cached UI evidence and fresh backend telemetry.
 // USB enumeration/positive current is the existing external-power heuristic,
 // not measured VBUS. Capacity checks are needed only for manual battery install.

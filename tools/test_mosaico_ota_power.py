@@ -25,6 +25,7 @@ struct Telemetry {
  int16_t currentMa=-20;
 };
 using MosaicoOta::manualInstallPowerSafe;
+using MosaicoOta::useManualInstallPolicy;
 constexpr bool automatic(const Telemetry& b, bool external, bool critical) {
  if(critical) return false;
  return AUTOMATIC_EXPRESSION;
@@ -59,7 +60,8 @@ constexpr bool test() {
  b.remainingMah=39321; if(!manualInstallPowerSafe(b,false,false)) return false;
  b.remainingMah=65535; if(!manualInstallPowerSafe(b,false,false)) return false;
  for(bool usb : {false,true}) for(bool autoMode : {false,true}) {
-  const bool manual=!(usb||autoMode);
+  const bool manual=useManualInstallPolicy(usb,autoMode);
+  if(manual != (usb || !autoMode)) return false;
   if((manual ? manualInstallPowerSafe(b,false,false) : automatic(b,false,false)) != manual) return false;
  }
  return true;
@@ -77,7 +79,7 @@ static_assert(test());
 
     def test_fresh_gate_twice_and_manual_mode_only(self):
         install = CPP.split('bool installVerified()', 1)[1].split('bool requestCheck()', 1)[0]
-        self.assertIn('const bool manual = !(usbBypass || automaticMode);', install)
+        self.assertIn('const bool manual = useManualInstallPolicy(usbBypass, automaticMode);', install)
         self.assertIn('!installPowerSafe(manual)', install)
         self.assertIn('!installPowerSafe(manual, &power)', install)
         self.assertLess(install.index('!installPowerSafe(manual, &power)'), install.index('recordAttempt(power)'))
@@ -98,7 +100,7 @@ static_assert(test());
 
     def test_reboot_fresh_gate_retains_selector_and_image(self):
         reboot = CPP.split('bool rebootWithFreshPower()', 1)[1].split('void processLocalRequests()', 1)[0]
-        self.assertIn('installPowerSafe(!(usbBypass || automaticMode))', reboot)
+        self.assertIn('installPowerSafe(useManualInstallPolicy(usbBypass, automaticMode))', reboot)
         self.assertLess(reboot.index('installPowerSafe('), reboot.index('esp_restart()'))
         self.assertIn('publish(UiStage::ReadyReboot, "reboot_power_required")', reboot)
         for forbidden in ('selected.store', 'imageReady', 'fail(', 'reject(', 'esp_ota_set_boot_partition'):

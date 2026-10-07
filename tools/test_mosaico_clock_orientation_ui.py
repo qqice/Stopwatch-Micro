@@ -115,7 +115,7 @@ struct View {
  uint32_t now=100, _activity=100, _refresh=100;
  bool _chargeProfile=false;
  struct Config { uint32_t chargeTimeoutSeconds=60,batteryTimeoutSeconds=60; };
- struct Display { Config config; } _displaySettings;
+ struct Display { Config config{}, effectiveConfig{}; uint32_t runtimeRevision=1; bool temporary=false; } _displaySettings;
  bool _locked=false; int lockCount=0, refreshCount=0;
  constexpr bool otaKeepAwake() { return false; }
  constexpr uint32_t lv_tick_get() { return now; }
@@ -148,17 +148,19 @@ constexpr bool cases() {
  View wrapRefresh;wrapRefresh._locked=true;wrapRefresh._refresh=0xfffffff0U;
  wrapRefresh.now=wrapRefresh._refresh+60000U;wrapRefresh.compare();
  if(wrapRefresh.refreshCount!=1)return false;
- View never;never._chargeProfile=true;never._displaySettings.config.chargeTimeoutSeconds=0;
+ View never;never._chargeProfile=true;never._displaySettings.effectiveConfig.chargeTimeoutSeconds=0;
  never.now=600100;never.compare();if(never._locked)return false;
- View longCharge;longCharge._chargeProfile=true;longCharge._displaySettings.config.chargeTimeoutSeconds=600;
+ View longCharge;longCharge._chargeProfile=true;longCharge._displaySettings.effectiveConfig.chargeTimeoutSeconds=600;
  longCharge.now=600099;longCharge.compare();if(longCharge._locked)return false;
  longCharge.now=600100;longCharge.compare();if(!longCharge._locked)return false;
- View shortBattery;shortBattery._displaySettings.config.batteryTimeoutSeconds=45;
+ View shortBattery;shortBattery._displaySettings.effectiveConfig.batteryTimeoutSeconds=45;
  shortBattery.now=45099;shortBattery.compare();if(shortBattery._locked)return false;
  shortBattery.now=45100;shortBattery.compare();if(!shortBattery._locked)return false;
- View corruptBattery;corruptBattery._displaySettings.config.batteryTimeoutSeconds=600;
+ View corruptBattery;corruptBattery._displaySettings.effectiveConfig.batteryTimeoutSeconds=600;
  corruptBattery.now=60100;corruptBattery.compare();
- return corruptBattery._locked;
+ return corruptBattery._locked && never._displaySettings.config.chargeTimeoutSeconds==60 &&
+  longCharge._displaySettings.config.chargeTimeoutSeconds==60 && shortBattery._displaySettings.config.batteryTimeoutSeconds==60 &&
+  corruptBattery._displaySettings.config.batteryTimeoutSeconds==60; // Effective timeouts never mutate the BASE fixture.
 }
 static_assert(cases(), "fresh callback ticks cannot cause instant lock or duplicate refresh; real minute and wrap work");
 """

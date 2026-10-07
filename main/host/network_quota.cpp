@@ -737,7 +737,7 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
         MosaicoDisplay::Snapshot display;
         if (MosaicoDisplay::snapshot(display)) {
-            const uint32_t interval=MosaicoDisplay::lockIntervalMs(display.config.lockWifiMinutes,5);
+            const uint32_t interval=MosaicoDisplay::lockIntervalMs(display.effectiveConfig.lockWifiMinutes,5);
             if (interval!=refreshIntervalMs) { refreshIntervalMs=interval; nextRefresh=refreshBaseUs+int64_t(interval)*1000; }
         }
         refreshIntervalUs=int64_t(refreshIntervalMs)*1000;

@@ -39,7 +39,7 @@ struct CodexMicroView {
  enum class Page { Command,History,Agent,OTA,Settings,Sessions };
  struct Snapshot { MosaicoOta::UiStage stage=MosaicoOta::UiStage::Idle; } _ota;
  struct Config { uint32_t chargeTimeoutSeconds=15,batteryTimeoutSeconds=15; };
- struct Settings { Config config; } _displaySettings;
+ struct Settings { Config config{}, effectiveConfig{}; uint32_t runtimeRevision=1; bool temporary=false; } _displaySettings;
  struct Quota { bool truncated=false; } quota;
  Quota* _quota=&quota;
  Page _page=Page::Command,_otaReturn=Page::Command;
@@ -102,12 +102,13 @@ constexpr bool cases() {
  left._now+=14999;left.compare();if(left._locked)return false;
  ++left._now;left.compare();if(!left._locked || left.lockCount!=1)return false;
  for(uint32_t seconds : {15U,30U,45U,60U}) {
-  CodexMicroView battery;battery._page=P::Sessions;battery._displaySettings.config.batteryTimeoutSeconds=seconds;
+  CodexMicroView battery;battery._page=P::Sessions;battery._displaySettings.effectiveConfig.batteryTimeoutSeconds=seconds;
+  battery._displaySettings.temporary=true;++battery._displaySettings.runtimeRevision;
   battery._now=battery._activity+seconds*1000-1;battery.compare();if(battery._locked)return false;
-  ++battery._now;battery.compare();if(!battery._locked)return false;
+  ++battery._now;battery.compare();if(!battery._locked || battery._displaySettings.config.batteryTimeoutSeconds!=15)return false;
  }
- CodexMicroView never;never._chargeProfile=true;never._displaySettings.config.chargeTimeoutSeconds=0;
- never._now=1000000;never.compare();if(never._locked)return false;
+ CodexMicroView never;never._chargeProfile=true;never._displaySettings.effectiveConfig.chargeTimeoutSeconds=0;never._displaySettings.temporary=true;
+ never._now=1000000;never.compare();if(never._locked || never._displaySettings.config.chargeTimeoutSeconds!=15)return false;
  CodexMicroView wrap;wrap._activity=0xfffffff0U;wrap._now=wrap._activity+14999U;
  wrap.compare();if(wrap._locked)return false;
  ++wrap._now;wrap.compare();if(!wrap._locked)return false;

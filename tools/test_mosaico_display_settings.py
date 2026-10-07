@@ -73,7 +73,7 @@ static_assert(test());
             self.assertIn('std::try_to_lock',callback)
             for forbidden in ('nvs_', 'GetHAL(', 'MosaicoOta::', 'vTaskDelay'):
                 self.assertNotIn(forbidden,callback)
-        self.assertLess(snapshot.index('return false'),snapshot.index('out = model.state'))
+        self.assertLess(snapshot.index('return false'),snapshot.index('out = model.snapshot(now)'))
 
     def test_load_never_writes_or_erases(self):
         init=BACKEND.split('void init()',1)[1].split('bool snapshot(',1)[0]

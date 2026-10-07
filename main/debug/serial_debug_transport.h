@@ -67,9 +67,21 @@ private:
     std::array<char, Capacity> data_{};
     std::size_t head_ = 0, used_ = 0;
 };
+// Strict decimal input; no signed wrap, partial parse, clamping or defaults.
+constexpr bool settingsInteger(const char* text, uint32_t maximum, uint32_t& value) {
+    if (!text || !*text) return false;
+    uint32_t parsed=0;
+    for (; *text; ++text) {
+        if (*text<'0' || *text>'9') return false;
+        const uint32_t digit=static_cast<uint32_t>(*text-'0');
+        if (digit>maximum || parsed>(maximum-digit)/10) return false;
+        parsed=parsed*10+digit;
+    }
+    value=parsed; return true;
+}
 inline bool uartAllowed(const char* command) {
     if (!command) return true;
-    const char* allowed[] = {"help", "ping", "status", "debug-transport", "ota-status", "ota-bypass", "panic", "sessions", "clock", "motion", "network", "idle-runtime", "display-settings", "display-idle-frequency", "display-clocks", "display-test-frequency", "gauge", "gauge-boot", "gauge-selftest", "dot-selftest", "quota-selftest", "quota", "tailscale", "tailscale-crypto", "network-selftest", "standby-dim", "display-lock", "display-wake", "display", "power", "power-refresh", "history", "history-selftest", "boot", "selftest", "controls", "protocol", "mic", "inputs", "ui", "transport", "perf", "cancel"};
+    const char* allowed[] = {"help", "ping", "status", "debug-transport", "ota-status", "ota-bypass", "panic", "sessions", "clock", "motion", "network", "idle-runtime", "display-settings", "settings", "display-idle-frequency", "display-clocks", "display-test-frequency", "gauge", "gauge-boot", "gauge-selftest", "dot-selftest", "quota-selftest", "quota", "tailscale", "tailscale-crypto", "network-selftest", "standby-dim", "display-lock", "display-wake", "display", "power", "power-refresh", "history", "history-selftest", "boot", "selftest", "controls", "protocol", "mic", "inputs", "ui", "transport", "perf", "cancel"};
     for (const char* item : allowed) if (!std::strcmp(command, item)) return true;
     return false;
 }

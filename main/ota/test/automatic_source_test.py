@@ -159,7 +159,7 @@ class AutomaticOtaSourceTests(unittest.TestCase):
         install = body('bool installVerified()', 'bool requestCheck()')
         self.assertIn('!installPowerSafe(manual)', install)
         self.assertIn('!installPowerSafe(manual, &power)', install)
-        self.assertIn('const bool manual = !(usbBypass || automaticMode)', install)
+        self.assertIn('const bool manual = useManualInstallPolicy(usbBypass, automaticMode)', install)
         self.assertNotIn('esp_restart', install)
         self.assertIn('publish(UiStage::ReadyReboot)', install)
         self.assertIn('active.store(false)', install)
