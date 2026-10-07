@@ -208,7 +208,7 @@ static_assert(partialAndBoundedTx());
         self.assertIn('_uart_tx.pending() || _uart_line_length || _uart_line_overflow',traffic)
         self.assertIn('event.type == UART_WAKEUP) StandbySleep::uartWake()',poll)
         shutdown=method('end')
-        self.assertLess(shutdown.index('StandbySleep::off()'),shutdown.index('uart_driver_delete'))
+        self.assertLess(shutdown.index('StandbySleep::cancelForActivity()'),shutdown.index('uart_driver_delete'))
         self.assertIn('#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31',method('drainUart'))
         self.assertIn('BootTracePrint(debugPrintf)',SOURCE)
         self.assertNotIn('std::printf(',SOURCE)

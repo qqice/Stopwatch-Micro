@@ -2,6 +2,7 @@
 #include "mosaico_ota_power.h"
 #include "ota_public_key.h"
 #include <hal/hal.h>
+#include <host/standby_sleep.h>
 #include <cJSON.h>
 #include <esp_ota_ops.h>
 #include <esp_app_desc.h>
@@ -248,7 +249,7 @@ bool requestLocked(bool automatic, bool preserveAge = false)
     std::snprintf(reason, sizeof(reason), "requested");
     cachedRunning.store(esp_ota_get_running_partition());
     if (!preserveAge) requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    active.store(true);
+    active.store(true); StandbySleep::otaActivity();
     return true;
 }
 bool validateDescriptor(const char* json, Descriptor& out, const char*& error)
@@ -410,7 +411,7 @@ bool approveUpdate(const char* expectedSha)
     // Only a short in-memory copy and atomic queue; network owner performs all work.
     std::memcpy(approvedHash, ui.sha256, 65);
     requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    approvedRequest.store(true); return true;
+    approvedRequest.store(true); StandbySleep::otaActivity(); return true;
 }
 void deferUpdate()
 {
@@ -554,12 +555,12 @@ bool requestCheck()
         ui.stage == UiStage::ReadyInstall || ui.stage == UiStage::ReadyReboot ||
         (ui.stage == UiStage::WaitingPower && imageReady.load())) return false;
     requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    checkQueued.store(true); return true;
+    checkQueued.store(true); StandbySleep::otaActivity(); return true;
 }
 bool takeCheckRequest()
 {
     if (!checkQueued.exchange(false)) return false;
-    checking.store(true); publish(UiStage::Checking); return true;
+    checking.store(true); StandbySleep::otaActivity(); publish(UiStage::Checking); return true;
 }
 void finishCheck(bool transportOk)
 {
@@ -574,13 +575,13 @@ bool approveInstall(const char* expectedSha)
         !ui.signatureVerified || !ui.imageVerified || !imageReady.load() || selected.load() ||
         (ui.stage != UiStage::ReadyInstall && ui.stage != UiStage::WaitingPower)) return false;
     requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    installQueued.store(true); return true;
+    installQueued.store(true); StandbySleep::otaActivity(); return true;
 }
 bool requestReboot()
 {
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || ui.stage != UiStage::ReadyReboot || !selected.load()) return false;
-    rebootQueued.store(true); return true;
+    rebootQueued.store(true); StandbySleep::otaActivity(); return true;
 }
 bool rebootWithFreshPower()
 {
@@ -591,13 +592,13 @@ bool rebootWithFreshPower()
         publish(UiStage::ReadyReboot, "reboot_power_required");
         return false;
     }
-    active.store(true); esp_restart(); return true;
+    active.store(true); StandbySleep::otaActivity(); esp_restart(); return true;
 }
 void processLocalRequests()
 {
     if (rebootQueued.exchange(false) && selected.load()) { rebootWithFreshPower(); return; }
     if (installQueued.exchange(false)) {
-        automaticMode = usbBypass = false; installSince = 0; active.store(true);
+        automaticMode = usbBypass = false; installSince = 0; active.store(true); StandbySleep::otaActivity();
     }
     // Only bounded install work is polled here, never download or network work.
     const UiStage stage = statusStage.load();
@@ -683,7 +684,7 @@ void healthPoll(bool appLoopReady)
         esp_ota_img_states_t state;
         const auto* running = esp_ota_get_running_partition();
         if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) return;
-        bootPending.store(true);
+        bootPending.store(true); StandbySleep::otaActivity();
         char ver[32] = "-", sha[65]{}, fingerprint[17]{}; int8_t candidate = -1;
         if (nvs_open("mosaico_ota", NVS_READONLY, &h) == ESP_OK) {
             size_t vl = sizeof(ver), sl = sizeof(sha);

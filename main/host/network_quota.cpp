@@ -86,7 +86,7 @@ void NetworkQuota::setLocked(bool locked)
 #ifdef MOSAICO_BOARD
     // Boost synchronously BEFORE the view starts its full wake redraw, rather
     // than racing the network worker's eventual wake notification.
-    if (!locked) { StandbySleep::off(); setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ); }
+    if (!locked) { StandbySleep::cancelForActivity(); setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ); }
 #endif
     if (changed && _task_handle) xTaskNotifyGive(_task_handle);
 #ifndef MOSAICO_BOARD
@@ -1187,7 +1187,7 @@ void NetworkQuota::updateFirmware()
 #ifdef MOSAICO_BOARD
 void NetworkQuota::wakeForFirmwareUpdate()
 {
-    StandbySleep::off();
+    StandbySleep::cancelForActivity();
     setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
     if (_task_handle) xTaskNotifyGive(_task_handle);
 }

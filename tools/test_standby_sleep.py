@@ -37,16 +37,53 @@ constexpr bool cases() {
  m.displaySafe=false;if(m.eligible(0,160,true,false))return false;m.displaySafe=true;
  m.wake(10);if(!m.uartBlocked(500009)||m.uartBlocked(500010))return false;
  m.uartPending=true;if(!m.uartBlocked(1000000))return false;m.uartPending=false;
- m.service(until-1,false);if(!m.leaseUntil)return false;
- m.service(until,false);if(m.leaseUntil)return false;
- if(!m.request(30,until))return false;m.viewLocked=false;m.service(until+1,false);if(m.leaseUntil)return false;
- m.viewLocked=true;m.request(30,until);m.service(until,true);if(m.leaseUntil)return false;
- m.request(30,until);m.fault=true;m.service(until,false);if(m.leaseUntil)return false;
+ m.service(until-1);if(!m.leaseUntil)return false;
+ m.service(until);if(m.leaseUntil)return false;
+ if(!m.request(30,until))return false;m.viewLocked=false;m.service(until+1);if(m.leaseUntil)return false;
+ m.viewLocked=true;m.request(30,until);m.otaBlocked=true;m.service(until);if(m.leaseUntil)return false;
+ m.request(30,until);m.fault=true;m.service(until);if(m.leaseUntil)return false;
  m.fault=false;m.request(300,until);m.off();if(m.leaseUntil)return false;
  m.wake(until);return !m.leaseUntil;
 }
 static_assert(cases(),"default off, strict bounded TTL, 160-only gates, UART hold, wake/OTA/fault cancellation");
 ''','model')
+    def test_actual_automatic_pause_relock_and_explicit_modes(self):
+        self.compile(r'''
+#include "main/host/standby_sleep_model.h"
+using namespace StandbySleep;
+constexpr bool cases() {
+ auto fallback=initialModel(false,true);if(fallback.automaticPolicy || fallback.requested(0))return false;
+ if(fallback.enableAutomatic(true)||fallback.request(30,0)||fallback.leaseUntil||fallback.automaticPolicy)return false;
+ auto old=initialModel(true,false);if(old.automaticPolicy || old.requested(0))return false;
+ auto m=initialModel(true,true);m.viewLocked=true;m.displaySafe=true;
+ if(!m.automaticPolicy || !m.eligible(0,160,true,false) || m.mode(0)!=Mode::Automatic)return false;
+ m.wake(0);if(!m.uartBlocked(499999) || m.uartBlocked(500000))return false;
+ m.pause();m.viewLocked=false;
+ if(!m.automaticPolicy || m.leaseUntil || m.eligible(500000,160,false,false))return false;
+ m.viewLocked=true;m.displaySafe=true;if(!m.eligible(500000,160,true,false))return false;
+ // Immediate OTA entry pause preserves normal policy, and ordinary service
+ // or repeated allow checks cannot accidentally clear the stored OTA gate.
+ m.otaBlocked=true;m.pause();m.displaySafe=true;m.service(500001);
+ if(!m.automaticPolicy || m.eligible(500001,160,true,false) || !m.otaBlocked)return false;
+ m.service(500002);if(!m.otaBlocked)return false;
+ m.otaBlocked=false;if(!m.eligible(500003,160,true,false))return false;
+ if(m.eligible(500003,320,true,false)||m.eligible(500003,80,true,false)||m.eligible(500003,160,true,true))return false;
+ m.fault=true;m.service(500004);if(!m.automaticPolicy || m.eligible(500004,160,true,false))return false;m.fault=false;
+ // A successful finite on replaces auto; expiration MUST NOT resurrect auto.
+ if(m.request(29,600000)||!m.automaticPolicy)return false;
+ if(!m.request(30,600000)||m.automaticPolicy||m.mode(600000)!=Mode::Diagnostic)return false;
+ m.service(30600000);if(m.requested(30600000)||m.automaticPolicy||m.mode(30600000)!=Mode::Off)return false;
+ m.request(30,31000000);m.pause();if(m.leaseUntil||m.automaticPolicy)return false;
+ if(m.enableAutomatic(false)||m.automaticPolicy)return false;
+ if(!m.enableAutomatic(true)||!m.automaticPolicy||m.leaseUntil)return false;
+ m.off();m.viewLocked=true;m.displaySafe=true;m.service(99999999);
+ if(m.automaticPolicy||m.requested(99999999)||m.eligible(99999999,160,true,false))return false;
+ if(!m.enableAutomatic(true))return false;
+ m.request(30,100000000);m.otaBlocked=true;m.service(100000001);
+ return !m.leaseUntil && !m.automaticPolicy;
+}
+static_assert(cases(),"auto pauses/resumes, finite cannot become permanent, explicit off is sticky, unsupported profile stays off");
+''','automatic-model')
     def test_actual_pm_cache_includes_sleep_bit_and_fault_stops_retry(self):
         source=(R/'main/host/network_quota.cpp').read_text()
         body=function(source,'void NetworkQuota::applyCpuConfig(')
@@ -99,11 +136,34 @@ static_assert(cases(),"same-frequency LS enable/disable is not hidden by cached 
         self.assertIn('!ble.advertising && !ble.connected && !MosaicoOta::busy() && !MosaicoOta::healthPending()',serial)
         network=(R/'main/host/network_quota.cpp').read_text()
         otaWake=function(network,'void NetworkQuota::wakeForFirmwareUpdate()')
-        self.assertLess(otaWake.index('StandbySleep::off()'),otaWake.index('setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ)'))
+        self.assertLess(otaWake.index('StandbySleep::cancelForActivity()'),otaWake.index('setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ)'))
         view=(R/'main/apps/app_codex_micro/view/view_mosaico.cpp').read_text()
         self.assertIn('standbyDimEligible() && !_settingsAnimating && !_slideTo,_rotationFault',view)
-        self.assertIn('StandbySleep::off()',function(view,'void CodexMicroView::wakeDisplay()'))
+        self.assertIn('StandbySleep::cancelForActivity()',function(view,'void CodexMicroView::wakeDisplay()'))
         self.assertIn('refreshElapsed >= 60000U',view)
+    def test_automatic_source_and_ota_atomic_entry_gates(self):
+        source=(R/'main/host/standby_sleep.cpp').read_text()
+        allow=function(source,'bool allow(')
+        self.assertIn('if(MosaicoOta::busy() || MosaicoOta::healthPending())model.otaBlocked=true',allow)
+        self.assertNotIn('model.otaBlocked=false',allow)
+        self.assertLess(allow.index('model.eligible('),allow.index('initialize()'))
+        service=function(source,'void service(')
+        self.assertIn('model.otaBlocked=ota || MosaicoOta::busy() || MosaicoOta::healthPending()',service)
+        cancel=function(source,'void cancelForActivity()')
+        self.assertIn('model.pause()',cancel);self.assertNotIn('model.off()',cancel)
+        ota=(R/'main/ota/mosaico_ota.cpp').read_text()
+        for flag in ('active','approvedRequest','checkQueued','checking','installQueued','rebootQueued','bootPending'):
+            self.assertIn(flag+'.store(true); StandbySleep::otaActivity();',ota)
+        action=function(source,'void otaActivity()')
+        self.assertIn('model.otaBlocked=true',action);self.assertIn('refreshRecovery(',action)
+        serial=(R/'main/debug/serial_debug.cpp').read_text()
+        auto=serial.split('if(!std::strcmp(action,"auto"))',1)[1].split('if(std::strcmp(action,"off")',1)[0]
+        self.assertIn('!std::strcmp(confirm,"CONFIRM") && !::strtok_r',auto)
+        self.assertIn('valid && StandbySleep::enableAutomatic(true)',auto)
+        self.assertFalse(host.recovery_retry_safe('debug standby-sleep auto CONFIRM'))
+        kconfig=(R/'main/Kconfig.projbuild').read_text()
+        self.assertIn('config MOSAICO_STANDBY_AUTO_LIGHT_SLEEP',kconfig);self.assertIn('default n',kconfig)
+        self.assertIn('initialModel(STANDBY_SLEEP_SUPPORTED,true)',source)
     def test_host_preamble_crc_and_default_unchanged(self):
         for enabled in (False,True):
             writes=[];flushes=[];events=[]

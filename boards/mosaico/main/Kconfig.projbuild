@@ -1,0 +1,2 @@
+# Share the application-owned Kconfig with the board component entry point.
+rsource "../../../main/Kconfig.projbuild"

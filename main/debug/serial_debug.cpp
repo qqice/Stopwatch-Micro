@@ -194,7 +194,7 @@ void SerialDebug::end()
     }
     cancelAsyncTest("shutdown", false);
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
-    StandbySleep::off(); StandbySleep::uartReady(false);
+    StandbySleep::cancelForActivity(); StandbySleep::uartReady(false);
     if (_uart_active) uart_driver_delete(UART_NUM_0);
 #endif
     _uart_active = _usb_active = _active = false;
@@ -381,7 +381,7 @@ void SerialDebug::handleLine(char* line)
 #ifdef MOSAICO_BOARD
     if (command && !std::strcmp(command,"standby-sleep")) {
         const char* action=::strtok_r(nullptr," \t",&save);
-        if(!action) { result(command,"FAIL","expected=on_lease30..300_or_off_or_status no_changes=1");return; }
+        if(!action) { result(command,"FAIL","expected=on_lease30..300_or_auto_CONFIRM_or_off_or_status no_changes=1");return; }
         if(!std::strcmp(action,"on")) {
             const char* lease=::strtok_r(nullptr," \t",&save);uint32_t seconds=180;
             const auto power=GetNetworkQuota().powerStats();const auto ble=GetCodexMicroBle().diagnostics();
@@ -390,15 +390,21 @@ void SerialDebug::handleLine(char* line)
             const bool valid=(!lease || (serial_debug_transport::settingsInteger(lease,300,seconds) && seconds>=30)) &&
                 !::strtok_r(nullptr," \t",&save);
             const bool ok=valid && safe && StandbySleep::request(seconds);
-            result(command,ok?"PASS":"FAIL",ok?"lease_ram_only=1 default_off=1 requires_uart_recovery=1":"reason=range_profile_or_safety_gate no_changes=1");return;
+            result(command,ok?"PASS":"FAIL",ok?"lease_ram_only=1 automatic_policy=0 finite_trial=1 requires_uart_recovery=1":"reason=range_profile_or_safety_gate no_changes=1");return;
+        }
+        if(!std::strcmp(action,"auto")) {
+            const char* confirm=::strtok_r(nullptr," \t",&save);
+            const bool valid=confirm && !std::strcmp(confirm,"CONFIRM") && !::strtok_r(nullptr," \t",&save);
+            const bool ok=valid && StandbySleep::enableAutomatic(true);
+            result(command,ok?"PASS":"FAIL",ok?"automatic_policy=1 finite_lease=0 ram_only=1 strict_runtime_gates=1":"reason=CONFIRM_profile_or_uart_required no_changes=1");return;
         }
         if(std::strcmp(action,"off") && std::strcmp(action,"status")) { result(command,"FAIL","reason=unknown_action no_changes=1");return; }
         if(::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","reason=extra_arguments no_changes=1");return;}
         if(!std::strcmp(action,"off")) { StandbySleep::off();GetNetworkQuota().serviceStandbySleep(); }
         const auto s=StandbySleep::snapshot();char details[640]{};
         std::snprintf(details,sizeof(details),
-            "supported=%d lease=%d remaining_s=%lu configured_ls=%d eligible=%d uart_ready=%d uart_blocked=%d successful_sleeps=%llu rejected_sleeps=%llu pm_counts_valid=%d framework_positive_intervals=%lu framework_interval_us_including_overhead=%llu no_ls_locks_created=%lu no_ls_locks_acquired=%lu error=%ld ram_only=1",
-            s.supported,s.lease,static_cast<unsigned long>(s.remainingSeconds),s.configured,s.eligible,s.uartReady,s.uartBlocked,
+            "supported=%d automatic_policy=%d policy_mode=%s active_mode=%s lease=%d remaining_s=%lu configured_ls=%d eligible=%d uart_ready=%d uart_blocked=%d successful_sleeps=%llu rejected_sleeps=%llu pm_counts_valid=%d framework_positive_intervals=%lu framework_interval_us_including_overhead=%llu no_ls_locks_created=%lu no_ls_locks_acquired=%lu error=%ld ram_only=1",
+            s.supported,s.automaticPolicy,StandbySleep::modeName(s.policyMode),StandbySleep::modeName(s.activeMode),s.lease,static_cast<unsigned long>(s.remainingSeconds),s.configured,s.eligible,s.uartReady,s.uartBlocked,
             static_cast<unsigned long long>(s.successfulSleeps),static_cast<unsigned long long>(s.rejectedSleeps),s.pmCountsValid,
             static_cast<unsigned long>(s.positiveIntervals),static_cast<unsigned long long>(s.frameworkIntervalUs),
             static_cast<unsigned long>(s.lockCreated),static_cast<unsigned long>(s.lockAcquired),static_cast<long>(s.error));
@@ -1145,7 +1151,7 @@ void SerialDebug::handleLine(char* line)
 void SerialDebug::printHelp()
 {
 #ifdef MOSAICO_BOARD
-    debugPrintf("DBG HELP standby-sleep on [lease_s=180,30..300] | standby-sleep off | standby-sleep status default_off=1 UART_wake_preamble_required=1\r\n");
+    debugPrintf("DBG HELP standby-sleep on [lease_s=180,30..300] | standby-sleep off | standby-sleep auto CONFIRM | standby-sleep status automatic_default=profile UART_wake_preamble_required=1\r\n");
     debugPrintf("DBG HELP settings get | settings set <field> <int> [lease_s=180,30..600] | settings restore | settings save CONFIRM\r\n");
 #endif
 

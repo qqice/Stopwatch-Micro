@@ -1,0 +1,2 @@
+# Optional normal lock-screen policy. Requires the safe sleep-experiment overlay.
+CONFIG_MOSAICO_STANDBY_AUTO_LIGHT_SLEEP=y

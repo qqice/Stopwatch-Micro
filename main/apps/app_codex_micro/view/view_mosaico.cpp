@@ -1525,7 +1525,7 @@ void CodexMicroView::togglePage() {
     navigatePage(1);
 }
 void CodexMicroView::wakeDisplay() {
-    StandbySleep::off();
+    StandbySleep::cancelForActivity();
     clearStandbyDim();
     if (_rotationFault) return;
     if (!ready()) return;

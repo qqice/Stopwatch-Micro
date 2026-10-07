@@ -6,6 +6,7 @@
 #include <esp_pm.h>
 #include <esp_timer.h>
 #include <esp_sleep.h>
+#include <ota/mosaico_ota.h>
 #include <driver/gpio.h>
 #include <driver/uart.h>
 #include <driver/uart_wakeup.h>
@@ -15,8 +16,8 @@
 #include <cstring>
 #include <cstdlib>
 
-// This diagnostic cannot accidentally activate in an ordinary/unsafe profile.
-#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_PM_ENABLE && CONFIG_FREERTOS_USE_TICKLESS_IDLE && CONFIG_PM_PROFILING && CONFIG_PM_LIGHT_SLEEP_CALLBACKS && !CONFIG_PM_SLP_SPIRAM_HALFSLEEP_ENABLED && !CONFIG_ESP_SLEEP_POWER_DOWN_FLASH && !CONFIG_ESP_SLEEP_SET_FLASH_DPD && !CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP && !CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP
+// Neither diagnostic nor normal policy can accidentally activate in an ordinary/unsafe profile.
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_PM_ENABLE && CONFIG_FREERTOS_USE_TICKLESS_IDLE && CONFIG_PM_PROFILING && CONFIG_PM_LIGHT_SLEEP_CALLBACKS && !CONFIG_PM_SLP_SPIRAM_HALFSLEEP_ENABLED && !CONFIG_ESP_SLEEP_POWER_DOWN_FLASH && !CONFIG_ESP_SLEEP_SET_FLASH_DPD && !CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP && !CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP && !CONFIG_PM_ESP_SLEEP_POWER_DOWN_CPU && !CONFIG_ESP_SYSTEM_PM_POWER_DOWN_CPU
 #define STANDBY_SLEEP_SUPPORTED 1
 #else
 #define STANDBY_SLEEP_SUPPORTED 0
@@ -24,7 +25,11 @@
 namespace StandbySleep {
 namespace {
 std::mutex mutex;
-Model model;
+#if CONFIG_MOSAICO_STANDBY_AUTO_LIGHT_SLEEP
+Model model=initialModel(STANDBY_SLEEP_SUPPORTED,true);
+#else
+Model model=initialModel(STANDBY_SLEEP_SUPPORTED,false);
+#endif
 bool ready=false, initialized=false, setupAttempted=false, fatal=false, applied=false, wanted=false, bleActive=false, held=false;
 int32_t lastError=0;
 esp_pm_lock_handle_t recoveryLock=nullptr;
@@ -52,12 +57,13 @@ esp_err_t IRAM_ATTR exitSleep(int64_t us, void*) {
 void lockRecovery(bool need) {
     if(!recoveryLock || need==held)return;
     const esp_err_t err=need ? esp_pm_lock_acquire(recoveryLock) : esp_pm_lock_release(recoveryLock);
-    if(err!=ESP_OK) { lastError=err;fatal=true;model.off();wanted=false;return; }
+    if(err!=ESP_OK) { lastError=err;fatal=true;model.pause();wanted=false;return; }
     held=need;
 }
 void refreshRecovery(int64_t now) {
     // Off requests block immediately until the existing PM owner disables LS.
-    lockRecovery((applied || model.leaseUntil) && (!wanted || model.uartBlocked(now) || !model.leaseUntil));
+    const bool requested=model.requested(now);
+    lockRecovery((applied || requested) && (!wanted || model.uartBlocked(now) || !requested));
 }
 bool initialize() {
 #if STANDBY_SLEEP_SUPPORTED
@@ -102,10 +108,10 @@ void captureCounts() {
 #endif
 }
 }
-bool monitoring() { std::lock_guard<std::mutex> guard(mutex);return model.leaseUntil || applied; }
+bool monitoring() { std::lock_guard<std::mutex> guard(mutex);return model.automaticPolicy || model.leaseUntil || applied; }
 void uartReady(bool value) {
     std::lock_guard<std::mutex> guard(mutex);ready=value;
-    if(!ready) { model.off();wanted=false;refreshRecovery(esp_timer_get_time()); }
+    if(!ready) { model.pause();wanted=false;refreshRecovery(esp_timer_get_time()); }
 }
 void uartWake() {
     std::lock_guard<std::mutex> guard(mutex);model.wake(esp_timer_get_time());refreshRecovery(esp_timer_get_time());
@@ -120,21 +126,40 @@ void uartTraffic(bool pending, bool activity) {
 void viewState(bool locked, bool safe, bool fault) {
     std::lock_guard<std::mutex> guard(mutex);
     model.viewLocked=locked;model.displaySafe=safe;model.fault=fault;
-    model.service(esp_timer_get_time(),false);
+    model.service(esp_timer_get_time());
     if(!locked || !safe || fault)wanted=false;
     refreshRecovery(esp_timer_get_time());
 }
 void service(bool ota, bool activeBle) {
     std::lock_guard<std::mutex> guard(mutex);bleActive=activeBle;
-    const int64_t now=esp_timer_get_time();model.service(now,ota);
-    if(ota || activeBle || !model.leaseUntil)wanted=false;
+    // Re-read the actual atomics under our mutex: a stale false main-loop sample
+    // must not clear an OTA gate published concurrently by the OTA owner.
+    model.otaBlocked=ota || MosaicoOta::busy() || MosaicoOta::healthPending();
+    const int64_t now=esp_timer_get_time();
+    if(activeBle)model.pause();
+    model.service(now);
+    if(model.otaBlocked || activeBle || !model.requested(now))wanted=false;
     refreshRecovery(now);
 }
 bool request(uint32_t seconds) {
     std::lock_guard<std::mutex> guard(mutex);
-    if(seconds<30 || seconds>300 || !ready || !model.viewLocked || !model.displaySafe || model.fault || bleActive)return false;
+    if(seconds<30 || seconds>300 || !ready || !model.viewLocked || !model.displaySafe || model.fault || bleActive || model.otaBlocked || MosaicoOta::busy() || MosaicoOta::healthPending())return false;
     if(fatal || !initialize() || !model.request(seconds,esp_timer_get_time()))return false;
     wanted=false;refreshRecovery(esp_timer_get_time());return true;
+}
+bool enableAutomatic(bool confirmed) {
+    std::lock_guard<std::mutex> guard(mutex);
+    if(!confirmed || !STANDBY_SLEEP_SUPPORTED || !ready || fatal)return false;
+    // Unlike a diagnostic trial, policy activation can be requested while awake.
+    // Wake sources/PM callbacks are initialized only when allow() sees ALL gates.
+    model.enableAutomatic(true);wanted=false;refreshRecovery(esp_timer_get_time());return true;
+}
+void cancelForActivity() {
+    std::lock_guard<std::mutex> guard(mutex);model.pause();wanted=false;refreshRecovery(esp_timer_get_time());
+}
+void otaActivity() {
+    std::lock_guard<std::mutex> guard(mutex);
+    model.otaBlocked=true;model.pause();wanted=false;refreshRecovery(esp_timer_get_time());
 }
 void off() {
     std::lock_guard<std::mutex> guard(mutex);model.off();wanted=false;refreshRecovery(esp_timer_get_time());
@@ -142,8 +167,13 @@ void off() {
 bool allow(uint32_t cpu, bool locked, bool wifi) {
     std::lock_guard<std::mutex> guard(mutex);
     const int64_t now=esp_timer_get_time();
-    model.service(now,false);
-    wanted=initialized && !fatal && ready && model.eligible(now,cpu,locked,wifi || bleActive);
+    // allow() never clears the stored OTA gate; only the authoritative service
+    // may release it after observing actual busy/health atomics both false.
+    if(MosaicoOta::busy() || MosaicoOta::healthPending())model.otaBlocked=true;
+    if(wifi || bleActive)model.pause();
+    model.service(now);
+    const bool safe=!fatal && ready && model.eligible(now,cpu,locked,wifi || bleActive);
+    wanted=safe && (initialized || initialize());
     refreshRecovery(now);return wanted;
 }
 void beforeConfigure(bool lightSleep) {
@@ -151,15 +181,20 @@ void beforeConfigure(bool lightSleep) {
 }
 void configured(bool lightSleep, int32_t error) {
     std::lock_guard<std::mutex> guard(mutex);
-    if(error) { lastError=error;fatal=true;model.off();wanted=false; }
+    if(error) { lastError=error;fatal=true;model.pause();wanted=false; }
     else applied=lightSleep;
     refreshRecovery(esp_timer_get_time());
 }
 Snapshot snapshot() {
     std::lock_guard<std::mutex> guard(mutex);captureCounts();
-    Snapshot out{};const int64_t now=esp_timer_get_time();model.service(now,false);
+    Snapshot out{};const int64_t now=esp_timer_get_time();
+    if(MosaicoOta::busy() || MosaicoOta::healthPending())model.otaBlocked=true;
+    model.service(now);
     out.supported=STANDBY_SLEEP_SUPPORTED;out.lease=model.leaseUntil!=0;out.configured=applied;
-    out.eligible=wanted;out.uartBlocked=model.uartBlocked(now);out.uartReady=ready;
+    out.eligible=wanted && model.requested(now) && model.displaySafe && !model.otaBlocked && !model.fault;
+    out.uartBlocked=model.uartBlocked(now);out.uartReady=ready;
+    out.automaticPolicy=model.automaticPolicy;out.policyMode=model.mode(now);
+    out.activeMode=out.configured && out.eligible && !out.uartBlocked ? out.policyMode : Mode::Off;
     out.remainingSeconds=model.leaseUntil ? static_cast<uint32_t>((model.leaseUntil-now+999999)/1000000) : 0;
     out.error=lastError;out.successfulSleeps=successes;out.rejectedSleeps=rejects;out.pmCountsValid=pmCountsValid;
     for(unsigned attempt=0;attempt<8;++attempt) {

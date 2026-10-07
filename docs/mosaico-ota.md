@@ -955,3 +955,24 @@ The callback field `framework_interval_us_including_overhead` includes rejected
 attempts and entry/exit overhead; it is **not** exact silicon sleep residency.
 Keep minute lock redraw, Function, radio intervals, and the healthy rollback
 slot. No benefit or physical visual acceptance is implied by compilation.
+
+### Normal automatic standby policy (0.13.8)
+
+Combine the safe sleep-experiment overlay with
+`boards/mosaico/sdkconfig.standby-sleep-normal` to enable the application-owned
+`CONFIG_MOSAICO_STANDBY_AUTO_LIGHT_SLEEP`. It defaults off in other builds.
+Normal policy does not depend on a diagnostic lease or host renewal. The same
+validated display/radio/160 MHz/OTA-health/UART gates remain mandatory.
+Wake and OTA pause normal sleeping; the next safe lock may resume it.
+
+* `debug standby-sleep off`: disable automatic policy and finite lease for this
+  run, until explicit re-enable or reboot. This is the emergency baseline switch.
+* `debug standby-sleep auto CONFIRM`: re-enable the normal RAM policy.
+* `debug standby-sleep on 180`: switch exclusively to a bounded diagnostic lease;
+  expiry does **not** silently re-enable automatic policy.
+* `debug standby-sleep status`: reports automatic policy and effective mode,
+  actual SDK accepted/rejected counts and recovery blockers.
+
+No NVS setting or battery gauge value is written by these commands. Unsupported
+profiles cannot initialize the sleep machinery. Future power experiments must
+change one factor at a time; keep the known-good automatic policy unchanged.

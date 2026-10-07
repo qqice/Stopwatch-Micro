@@ -1,0 +1,12 @@
+menu "Mosaico application power policy"
+    config MOSAICO_STANDBY_AUTO_LIGHT_SLEEP
+        bool "Automatically use validated light sleep while Mosaico is locked"
+        depends on IDF_TARGET_ESP32S31 && PM_ENABLE
+        default n
+        help
+            Enable the RAM-only normal locked-screen policy. Runtime still requires
+            the complete validated safe sleep profile, UART recovery, fixed 160 MHz,
+            a stable locked display, no OTA or boot-health work, and radio inactivity.
+            Awake/OTA pause the policy; explicit debug standby-sleep off disables it
+            until auto CONFIRM or reboot. No NVS setting is written.
+endmenu
