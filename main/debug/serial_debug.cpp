@@ -410,7 +410,7 @@ void SerialDebug::handleLine(char* line)
     if (command && (!std::strcmp(command, "ota-update") || !std::strcmp(command, "ota-bypass"))) {
         const char* confirm = ::strtok_r(nullptr, " \t", &save);
         if (!confirm || std::strcmp(confirm, "CONFIRM_EXTERNAL_POWER") || ::strtok_r(nullptr, " \t", &save)) {
-            result(command, "FAIL", "expected=CONFIRM_EXTERNAL_POWER manual_USB_external_power_confirmation_required=1");
+            result(command, "FAIL", "expected=CONFIRM_EXTERNAL_POWER manual_external_power_confirmation_required=1");
             return;
         }
         if (_async_test != AsyncTest::None) {

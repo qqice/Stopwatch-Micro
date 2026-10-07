@@ -863,3 +863,21 @@ runs only the selected command, not the full intrusive diagnostic suite.
 `ui`/`ui cycle` map to the asynchronous `ui-cycle` completion; longer operations
 can select a bounded response timeout. PhysicalCOM17 acceptance remains pending
 manual installation. Build/software checks are not a successful hardware link.
+
+## UART external-power bypass (0.13.4, explicit user authorization)
+
+The user explicitly authorized physical UART upgrade confirmation in the fixed
+V1-powered setup. Only `debug ota-bypass CONFIRM_EXTERNAL_POWER` is additionally
+allowed over the existing CRC32 UART channel. This queues the SAME verified
+pipeline as the prior USB bypass; it does not bypass signature/hash/image/power/
+health/rollback checks or make UART presence a power detector. The literal is a
+human-established external-supply precondition, not inferred from a COM port.
+Other OTA mutation aliases, runtime reboot, gauge/credential/pairing mutations
+remain denied. Default screen confirmation stays unchanged for ordinary use.
+0133 cannot use this newly authorized UART path, so one manual screen update is
+needed to0134. No bypass command is sent until the updated firmware is installed.
+
+Two-minute host captures are now the default CLI acceptance window: first minute
+observes stabilization, last60receipt seconds are analyzed. `--minimum-seconds180`
+still analyzes older3minruns, and the Python API retains its conservative180s
+default. Charge/loss caveats and exclusive artifact output remain unchanged.

@@ -170,10 +170,16 @@ static_assert(partialAndBoundedTx());
     def test_sensitive_policy(self):
         # Evaluate actual allowlist, not a mirrored policy.
         text=HEADER.read_text(); allowed=set(re.findall(r'"([a-z0-9-]+)"',text.split('allowed[] =',1)[1]))
-        for command in ('ota-check','ota-download','ota-install','ota-reboot','ota-update','ota-bypass','ota-rollback-test','runtime-restart','gauge-access','gauge-reconcile','gauge-nominal','network-config','tailscale-config','pairing-reset','host-usage'):
+        for command in ('ota-check','ota-download','ota-install','ota-reboot','ota-update','ota-rollback-test','runtime-restart','gauge-access','gauge-reconcile','gauge-nominal','network-config','tailscale-config','pairing-reset','host-usage'):
             self.assertNotIn(command,allowed)
         for command in ('status','power','gauge','display-lock','display-wake','display-test-frequency','display-idle-frequency','boot','mic','inputs','cancel'):
             self.assertIn(command,allowed)
+        self.assertIn('ota-bypass',allowed)
+        bypass=SOURCE.split('if (command && (!std::strcmp(command, "ota-update")',1)[1].split('if (command && std::strcmp(command, "ota-rollback-test")',1)[0]
+        self.assertIn('"CONFIRM_EXTERNAL_POWER"',bypass)
+        self.assertIn('MosaicoOta::request()',bypass)
+        self.assertIn('_async_test != AsyncTest::None',bypass)
+        self.assertNotIn('esp_ota_set_boot_partition',bypass)
         gate=SOURCE.split('char* command =',1)[1].split('#ifdef MOSAICO_BOARD',1)[0]
         self.assertIn('uartAllowed(command)',gate)
         self.assertIn('std::strcmp(value, "160") && std::strcmp(value, "320")',gate)
