@@ -204,6 +204,8 @@ const char* AppCodexMicro::debugScreenName()
             return "ota";
         case view::CodexMicroView::Page::Settings:
             return "settings";
+        case view::CodexMicroView::Page::Sessions:
+            return "sessions";
 #endif
         case view::CodexMicroView::Page::Agent:
             return "agent";

@@ -23,6 +23,7 @@ using namespace smooth_ui_toolkit;
 #ifdef MOSAICO_BOARD
 #include <ota/mosaico_ota.h>
 #include <host/mosaico_display_settings.h>
+#include <host/mosaico_session_monitor.h>
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
 #include <ota/panic_capture.h>
 #endif
@@ -49,8 +50,10 @@ extern "C" void app_main(void)
 #endif
     BootTraceStage(6);
 
-    // The standalone Mosaico monitor has no remote-control or pairing surface.
-#ifndef MOSAICO_BOARD
+    // BLE monitor startup is synchronous, before the network/OTA owner exists.
+#ifdef MOSAICO_BOARD
+    MosaicoSessions::init();
+#else
     // BLE is a system service and remains available for the device lifetime.
     if (!GetCodexMicroBle().begin()) {
         mclog::tagError("Codex Micro", "BLE initialization failed; restarting");
@@ -100,6 +103,7 @@ extern "C" void app_main(void)
         }
 #endif
 #ifdef MOSAICO_BOARD
+        MosaicoSessions::service(GetNetworkQuota().idleLocked(), MosaicoOta::busy() || MosaicoOta::healthPending());
         MosaicoOta::healthPoll(ota_app->otaReady());
         // The monitor has no low-latency remote-control path. Keep its 10Hz
         // motion/100Hz touch responsive without a 1kHz application update loop.

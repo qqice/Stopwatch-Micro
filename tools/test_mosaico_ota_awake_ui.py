@@ -36,7 +36,7 @@ struct lv_obj_t { bool hidden=false; };
 constexpr void lv_obj_add_flag(lv_obj_t* o,int) { o->hidden=true; }
 constexpr void lv_obj_remove_flag(lv_obj_t* o,int) { o->hidden=false; }
 struct CodexMicroView {
- enum class Page { Command,History,Agent,OTA,Settings };
+ enum class Page { Command,History,Agent,OTA,Settings,Sessions };
  struct Snapshot { MosaicoOta::UiStage stage=MosaicoOta::UiStage::Idle; } _ota;
  struct Config { uint32_t chargeTimeoutSeconds=15,batteryTimeoutSeconds=15; };
  struct Settings { Config config; } _displaySettings;
@@ -47,7 +47,7 @@ struct CodexMicroView {
  bool _touchTracking=false,_swipeConsumed=false;
  uint32_t _now=100,_activity=100; int64_t _clockMinute=0;
  int lockCount=0,wakeCount=0;lv_obj_t root;
- lv_obj_t* _otaPage=&root;lv_obj_t* _settingsPage=&root;lv_obj_t* _quotaPage=&root;
+ lv_obj_t* _sessionsPage=&root;lv_obj_t* _otaPage=&root;lv_obj_t* _settingsPage=&root;lv_obj_t* _quotaPage=&root;
  lv_obj_t* _historyPage=&root;lv_obj_t* _footer=&root;lv_obj_t* _clockIcon=&root;
  lv_obj_t* _bucketCount=&root;lv_obj_t* _clockDate=&root;
  constexpr bool ready() const { return true; }
@@ -55,6 +55,8 @@ struct CodexMicroView {
  constexpr void cancelPageSlide() {}
  constexpr void renderOta() {}
  constexpr void renderSettings() {}
+ constexpr void renderSessions() {}
+ constexpr void refreshSessionsLease() {}
  constexpr void stopAnimations() {}
  constexpr void refreshHistory() {}
  constexpr void wakeDisplay() { ++wakeCount;_locked=false;_activity=_now; }
@@ -98,7 +100,7 @@ constexpr bool cases() {
  left._now+=14999;left.compare();if(left._locked)return false;
  ++left._now;left.compare();if(!left._locked || left.lockCount!=1)return false;
  for(uint32_t seconds : {15U,30U,45U,60U}) {
-  CodexMicroView battery;battery._displaySettings.config.batteryTimeoutSeconds=seconds;
+  CodexMicroView battery;battery._page=P::Sessions;battery._displaySettings.config.batteryTimeoutSeconds=seconds;
   battery._now=battery._activity+seconds*1000-1;battery.compare();if(battery._locked)return false;
   ++battery._now;battery.compare();if(!battery._locked)return false;
  }

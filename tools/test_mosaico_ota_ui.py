@@ -145,7 +145,7 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         wake=CPP.split('void CodexMicroView::wakeDisplay()',1)[1].split('void CodexMicroView::lockDisplay()',1)[0]
         self.assertIn('if (_otaPending) { _otaPending = false; setPageForDebug(Page::OTA); }',wake)
         self.assertIn('if (_page == Page::OTA) renderOta();',wake)
-        pages=('Command','History','OTA','Settings')
+        pages=('Command','History','OTA','Settings','Sessions')
         for start in pages:
             for locked,busy,pending in ((False,False,False),(True,False,False),(True,False,True),(False,True,False)):
                 page=start
@@ -153,7 +153,7 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
                     if pending: page='OTA'
                 elif not busy:
                     page=pages[(pages.index(page)+1)%len(pages)]
-                expected='OTA' if locked and pending else start if locked or busy else pages[(pages.index(start)+1)%4]
+                expected='OTA' if locked and pending else start if locked or busy else pages[(pages.index(start)+1)%5]
                 self.assertEqual(page,expected)
         setpage=CPP.split('bool CodexMicroView::setPageForDebug(',1)[1].split('void CodexMicroView::togglePage()',1)[0]
         self.assertIn('if (_page != Page::OTA) _otaReturn = _page;',setpage)
@@ -364,12 +364,12 @@ constexpr void lv_anim_set_path_cb(lv_anim_t*,void(*)()) {}
 constexpr void lv_anim_set_completed_cb(lv_anim_t*,void(*)(lv_anim_t*)) {}
 constexpr void lv_anim_start(lv_anim_t*) {}
 struct CodexMicroView {
- enum class Page { Command,History,Agent,OTA,Settings };
+ enum class Page { Command,History,Agent,OTA,Settings,Sessions };
  enum class RotationPhase { Idle,FadeOut,WaitBlack,WaitRotated,FadeIn };
  RotationPhase _rotationPhase=RotationPhase::Idle;
  bool _rotationFault=false;
- Page _page=Page::Command; lv_obj_t panels[4]{};
- lv_obj_t* _quotaPage=&panels[0]; lv_obj_t* _historyPage=&panels[1]; lv_obj_t* _otaPage=&panels[2]; lv_obj_t* _settingsPage=&panels[3];
+ Page _page=Page::Command; lv_obj_t panels[5]{};
+ lv_obj_t* _quotaPage=&panels[0]; lv_obj_t* _historyPage=&panels[1]; lv_obj_t* _otaPage=&panels[2]; lv_obj_t* _settingsPage=&panels[3]; lv_obj_t* _sessionsPage=&panels[4];
  lv_obj_t* _slideFrom=nullptr; lv_obj_t* _slideTo=nullptr;
  int _slideDirection=1; bool _suppressed=false,_locked=false,busy=false;
  bool _touchTracking=false,_swipeConsumed=false; lv_point_t _touchStart{};
@@ -394,11 +394,11 @@ struct CodexMicroView {
         harness+='\n'.join(methods)+r'''
 constexpr bool exercise(int direction, bool cancel) {
  CodexMicroView v; lv_indev_t input{}; lv_event_t e{LV_EVENT_PRESSED,&v,&input};
- for(int step=0;step<4;++step) {
+ for(int step=0;step<5;++step) {
   input.point={240,200}; e.code=LV_EVENT_PRESSED; v.touchEvent(&e);
   input.point={240-direction*120,200}; e.code=LV_EVENT_PRESSING; v.touchEvent(&e);
-  int target=direction>0?(step+1)%4:(3-step+4)%4;
-  if(v._page != (target==0?CodexMicroView::Page::Command:target==1?CodexMicroView::Page::History:target==2?CodexMicroView::Page::OTA:CodexMicroView::Page::Settings)) return false;
+  int target=direction>0?(step+1)%5:(4-step+5)%5;
+  if(v._page != (target==0?CodexMicroView::Page::Command:target==1?CodexMicroView::Page::History:target==2?CodexMicroView::Page::OTA:target==3?CodexMicroView::Page::Settings:CodexMicroView::Page::Sessions)) return false;
   if(!v._slideTo || v._touchTracking || !v._swipeConsumed) return false;
   v.slideExec(&v,240);
   if(v._slideFrom->x != 20-direction*240 || v._slideTo->x != 20+direction*240) return false;

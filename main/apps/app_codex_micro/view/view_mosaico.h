@@ -9,12 +9,13 @@
 #include <lvgl.h>
 #include <ota/mosaico_ota.h>
 #include <host/mosaico_display_settings.h>
+#include <host/mosaico_session_monitor.h>
 #include "charge_supply_state.h"
 
 namespace view {
 class CodexMicroView {
 public:
-    enum class Page : uint8_t { Command = 0, History, Agent, OTA, Settings };
+    enum class Page : uint8_t { Command = 0, History, Agent, OTA, Settings, Sessions };
     ~CodexMicroView();
     void init(lv_obj_t* parent);
     void update(const CodexMicroState& state);
@@ -47,6 +48,10 @@ private:
     void renderOtaAction();
     void initOta();
     void initSettings();
+    void initSessions();
+    void refreshSessionsLease();
+    void refreshSessions(const CodexMicroState& state);
+    void renderSessions();
     void renderSettings();
     void refreshDisplaySettings();
     void applyBurnInShift(bool touching);
@@ -107,6 +112,15 @@ private:
     bool _shiftPending = false;
     unsigned _shiftIndex = 0;
     int _appliedBrightness = -1;
+    lv_obj_t* _sessionsPage = nullptr;
+    lv_obj_t* _sessionsCounts = nullptr;
+    lv_obj_t* _sessionsLink = nullptr;
+    std::array<lv_obj_t*,6> _sessionCards{}, _sessionNumbers{}, _sessionNames{}, _sessionAges{};
+    CodexMicroState _sessionState{};
+    MosaicoSessions::Snapshot _sessionBackend{};
+    uint32_t _sessionsRevision = UINT32_MAX, _sessionsGeneration = UINT32_MAX, _sessionsAgeSecond = UINT32_MAX;
+    uint8_t _sessionsKnownMask = 0;
+    bool _sessionsHadStatus = false;
     lv_obj_t* _root = nullptr;
     lv_obj_t* _quotaPage = nullptr;
     lv_obj_t* _historyPage = nullptr;

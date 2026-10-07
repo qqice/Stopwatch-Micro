@@ -559,3 +559,59 @@ After OTA, verify chart/selection layout,24h versus7d mapping, touch/rotation an
 no-data/single-point behavior. Initially a lone point is expected until more time
 buckets contain observations. Existing signing, healthy alternate slot, power
 thresholds, wake/idle guards, display settings and gauge profile are unchanged.
+
+## 0.12.0 native Bluetooth session monitor
+
+A fifth Sessions page follows the currently Bluetooth-connected client's six
+Micro Agent-key slots. Function/swipe cycle Quota -> History -> OTA -> Settings ->
+Sessions. It shows native default-palette status hints: idle, working, unread
+completion, attention (approval or input), error, unassigned, or unknown. Counts
+are explicitly bounded to these six slots, never claimed as all client threads.
+Unknown semantic colors do not yield fake zero-running totals; partial evidence
+uses `+?`/`--`. Brightness zero remains a preference; Off with nonzero color is
+ambiguous, not proof of an empty chat. Opaque magic values do not erase clear hues.
+
+The implementation follows the behavior in the
+[official Micro documentation](https://learn.chatgpt.com/docs/features/codex-micro).
+No official Micro firmware source was verified. This repository's existing BLE
+vendor compatibility layer is community reverse-engineered, not OpenAI firmware
+or a stable public API. Public
+[Codex App Server](https://learn.chatgpt.com/docs/app-server)
+supports runtime events and user-input replies, but those belong to the owning
+live connection. The independent quota process is not the desktop client's live
+session source, and is deliberately not used to impersonate that runtime.
+
+Observed `v.oai.thstatus` lighting messages contain slot/light parameters, not
+question text, choices or a pending request ID. This release is read-only: no
+Agent-key focus, Approve/Decline, joystick, keyboard or answer controls are sent.
+Amber cannot safely be treated as an answerable choice prompt. Supporting actual
+choice replies later requires explicit request identity and a verified owner reply
+transport; generic approval keys would not satisfy that safety boundary.
+
+Known-slot metadata requires complete valid frames and the current generation;
+partial metadata/handshake cannot invent zero idle sessions. Malformed batches
+are rejected before mutation. Disconnect/failure clears live-known status. `LAST`
+is the slot's first known state or actual c/b/e change, not periodic packet age;
+there is no TTL that turns a long-running live chat into a stale/dead one.
+
+BLE initializes before network/UI on Mosaico; failure is nonfatal to quota. The
+main owner performs radio work outside GUI locks. GUI publishes RAM-only leases;
+BLE is active only on awake Sessions, and paused on leaving it, lock, suppression
+or OTA. Network power management may close, never spuriously reopen, that lease.
+Terminal monitor faults do not reboot the quota monitor or reset bonds. Partial
+SDK resources can remain allocated until ordinary restart; no claim of full
+controller teardown or measured battery savings is made. Existing S3 control and
+recovery behavior is preserved. Hardware pairing, vendor interoperability, radio
+quiescence and Wi-Fi/heap coexistence still need physical verification.
+
+### Static resource planning
+
+The user authorized larger fonts/assets on existing SPI NOR or NAND. This first
+monitor page has no received chat titles/question text and uses existing Latin
+and dot widgets, so it does not require a new font asset, partition change or NAND
+activation. Prefer a separately versioned/hash-verified asset bundle in the
+existing NOR resource area if multilingual content becomes available; retain
+rollback-compatible assets and avoid re-uploading unchanged resources per app OTA.
+NAND should be introduced only when capacity actually demands it, with explicit
+mount/data-preservation and power-state validation. No NOR/NAND asset writes were
+performed for this release.

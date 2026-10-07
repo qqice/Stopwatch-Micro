@@ -17,7 +17,7 @@ class SettingsUiTests(unittest.TestCase):
     def test_geometry_and_async_boundary(self):
         self.assertIn('Command = 0, History, Agent, OTA, Settings', HDR)
         self.assertIn('Page::Command, Page::History, Page::OTA, Page::Settings', CPP)
-        self.assertIn('(index + (direction > 0 ? 1 : 3)) % 4', CPP)
+        self.assertIn('(index + (direction > 0 ? 1 : 4)) % 5', CPP)
         self.assertIn('panel(_settingsPage, 20, 64, 440, 402, 0)', CPP)
         self.assertIn('panel(button, 300 + static_cast<int>(side) * 70, y, 60, 54)', CPP)
         # All controls, numeric labels and the save icon stay within the panel,

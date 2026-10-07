@@ -3,6 +3,7 @@
 #include "dot_widgets.h"
 #include "reset_countdown.h"
 #include "quota_trend_geometry.h"
+#include "session_status_model.h"
 #include <hal/hal.h>
 #include <host/network_quota.h>
 #include <host/tailscale_transport.h>
@@ -97,6 +98,7 @@ void formatCountdown(mosaico_time::Countdown time, char* out, size_t size, bool 
 }
 namespace view {
 CodexMicroView::~CodexMicroView() {
+    MosaicoSessions::setEnabled(false);
     cancelOrientation();
     GetHAL().setMotionIdle(true);
     cancelPageSlide();
@@ -214,6 +216,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_height(_details, 18); lv_label_set_long_mode(_details, LV_LABEL_LONG_MODE_DOTS);
     initOta();
     initSettings();
+    initSessions();
     _lockPanel = lv_obj_create(_root); panel(_lockPanel, 0, 0, 480, 480, 0);
     _lockClock = createText(_lockPanel, 240, 64, 8, Orange); place(_lockClock, 120, 64);
     setText(_lockClock, "--:--", Orange);
@@ -233,7 +236,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_style_radius(_rotationCurtain, 0, 0);
     lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
-    bool widgetsReady = _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    bool widgetsReady = _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
         widgetsReady = widgetsReady && _cardBadges[i] && _cardValues[i] && _secondValues[i] && _creditIcons[i];
@@ -346,6 +349,87 @@ void CodexMicroView::applyBurnInShift(bool touching) {
         lv_obj_set_pos(_root, offsets[_shiftIndex][0], offsets[_shiftIndex][1]);
     } else { _shiftIndex = 0; lv_obj_set_pos(_root, 0, 0); }
     _shiftPending = false;
+}
+void CodexMicroView::initSessions() {
+    _sessionsPage = lv_obj_create(_root); panel(_sessionsPage, 20, 64, 440, 402, 0);
+    lv_obj_add_flag(_sessionsPage, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
+    _sessionsCounts = label(_sessionsPage, 0, 2, 440, "6 SLOTS / RUN -- WAIT -- ERR --", &lv_font_montserrat_14);
+    lv_obj_set_height(_sessionsCounts, 22);
+    _sessionsLink = label(_sessionsPage, 0, 30, 440, "--", &lv_font_montserrat_16);
+    lv_obj_set_height(_sessionsLink, 24);
+    for (size_t i=0; i<6; ++i) {
+        const int x=static_cast<int>(i%2)*224, y=70+static_cast<int>(i/2)*108;
+        _sessionCards[i]=lv_obj_create(_sessionsPage); panel(_sessionCards[i], x, y, 216, 98);
+        lv_obj_remove_flag(_sessionCards[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(_sessionCards[i], LV_OBJ_FLAG_EVENT_BUBBLE);
+        _sessionNumbers[i]=createText(_sessionCards[i], 52, 50, 7, Gray); place(_sessionNumbers[i], 10, 12);
+        char number[2]={static_cast<char>('1'+i),0}; setText(_sessionNumbers[i],number,Gray);
+        _sessionNames[i]=label(_sessionCards[i],72,18,134,"UNKNOWN",&lv_font_montserrat_16);
+        lv_obj_set_height(_sessionNames[i],24);
+        _sessionAges[i]=label(_sessionCards[i],72,52,134,"--",&lv_font_montserrat_12);
+        lv_obj_set_height(_sessionAges[i],20);
+    }
+    renderSessions();
+}
+void CodexMicroView::refreshSessionsLease() {
+    MosaicoSessions::setEnabled(_page == Page::Sessions && !_locked && !_suppressed && !_rotationFault &&
+        !otaKeepAwake() && ready());
+}
+void CodexMicroView::refreshSessions(const CodexMicroState& state) {
+    const bool previousReady=_sessionBackend.ready, previousStarting=_sessionBackend.starting, previousFailed=_sessionBackend.failed;
+    MosaicoSessions::Snapshot next{};
+    if (MosaicoSessions::snapshot(next)) _sessionBackend=next;
+    // The application already passed one coherent native BLE snapshot; do not
+    // combine its lighting/known mask with the module's previous-loop state.
+    const bool linkChanged=state.ready!=_sessionState.ready || state.connected!=_sessionState.connected || state.protocolReady!=_sessionState.protocolReady;
+    _sessionState=state;
+    _sessionsHadStatus=_sessionsHadStatus || (state.knownMask!=0 && state.connected && state.protocolReady);
+    const uint32_t second=GetHAL().millis()/1000U;
+    if (_page == Page::Sessions && (state.revision!=_sessionsRevision || state.connectionGeneration!=_sessionsGeneration ||
+        state.knownMask!=_sessionsKnownMask || linkChanged || second!=_sessionsAgeSecond || previousReady!=_sessionBackend.ready ||
+        previousStarting!=_sessionBackend.starting || previousFailed!=_sessionBackend.failed)) {
+        _sessionsRevision=state.revision; _sessionsGeneration=state.connectionGeneration;
+        _sessionsKnownMask=state.knownMask; _sessionsAgeSecond=second; renderSessions();
+    }
+}
+void CodexMicroView::renderSessions() {
+    using S=mosaico_sessions_ui::Status;
+    const auto summary=mosaico_sessions_ui::counts(_sessionState,_sessionBackend.ready && !_sessionBackend.failed && !_sessionBackend.starting);
+    const uint32_t now=GetHAL().millis();
+    char text[96];
+    if (summary.live && summary.known) {
+        const auto running=mosaico_sessions_ui::counterLabel(summary.running,summary.known);
+        const auto waiting=mosaico_sessions_ui::counterLabel(summary.waiting,summary.known);
+        const auto errors=mosaico_sessions_ui::counterLabel(summary.errors,summary.known);
+        std::snprintf(text,sizeof(text),"KNOWN %u/6  RUN %s WAIT %s ERR %s",summary.known,running.data(),waiting.data(),errors.data());
+    }
+    else std::snprintf(text,sizeof(text),"6 SLOTS / RUN -- WAIT -- ERR --");
+    lv_label_set_text(_sessionsCounts,text);
+    lv_obj_set_style_text_color(_sessionsCounts,lv_color_hex(summary.live && summary.known ? 0xE9EDF2 : Gray),0);
+    uint32_t youngest=UINT32_MAX;
+    for (size_t i=0;i<6;++i) {
+        const bool known=summary.live && (_sessionState.knownMask & (1U<<i));
+        const S status=known ? mosaico_sessions_ui::classify(_sessionState.threads[i]) : S::Unknown;
+        const char* name=status==S::Idle ? "IDLE" : status==S::Thinking ? "THINKING" : status==S::Complete ? "UNREAD" :
+            status==S::Wait ? "NEEDS INPUT" : status==S::Error ? "ERROR" : status==S::Unassigned ? "OFF" : "UNKNOWN";
+        const uint32_t color=status==S::Idle ? 0xE9EDF2 : status==S::Thinking ? Blue : status==S::Complete ? Green :
+            status==S::Wait ? Orange : status==S::Error ? 0xE87575 : Gray;
+        char number[2]={static_cast<char>('1'+i),0}; setText(_sessionNumbers[i],number,color);
+        lv_label_set_text(_sessionNames[i],name); lv_obj_set_style_text_color(_sessionNames[i],lv_color_hex(color),0);
+        lv_obj_set_style_border_width(_sessionCards[i],2,0); lv_obj_set_style_border_color(_sessionCards[i],lv_color_hex(color),0);
+        if (known) {
+            const uint32_t age=mosaico_sessions_ui::ageSeconds(now,_sessionState.lastThreadStatusMs[i]); youngest=std::min(youngest,age);
+            std::snprintf(text,sizeof(text),"LAST %lus",static_cast<unsigned long>(age));
+        } else std::snprintf(text,sizeof(text),"--");
+        lv_label_set_text(_sessionAges[i],text); lv_obj_set_style_text_color(_sessionAges[i],lv_color_hex(Gray),0);
+    }
+    if (_sessionBackend.failed) std::snprintf(text,sizeof(text),"BT ERROR");
+    else if (_sessionBackend.starting || !_sessionBackend.ready) std::snprintf(text,sizeof(text),"BT START");
+    else if (!_sessionState.connected) std::snprintf(text,sizeof(text),"BT OFF%s",_sessionsHadStatus ? " / STALE" : " / --");
+    else if (!summary.live || !summary.known) std::snprintf(text,sizeof(text),"BT LINK / --");
+    else std::snprintf(text,sizeof(text),"BT LINK / LAST %lus",static_cast<unsigned long>(youngest));
+    lv_label_set_text(_sessionsLink,text);
+    lv_obj_set_style_text_color(_sessionsLink,lv_color_hex(summary.live && summary.known ? Blue : Gray),0);
 }
 // All OTA widgets are children of this 440x402 panel; the shared status bar survives.
 void CodexMicroView::initOta() {
@@ -1079,7 +1163,7 @@ bool CodexMicroView::showHistory(bool hourly) {
 }
 bool CodexMicroView::setPageForDebug(Page page) {
     if (_rotationFault) return false;
-    if (!ready() || page == Page::Agent || (page != Page::Command && page != Page::History && page != Page::OTA && page != Page::Settings)) return false;
+    if (!ready() || page == Page::Agent || (page != Page::Command && page != Page::History && page != Page::OTA && page != Page::Settings && page != Page::Sessions)) return false;
     if (otaBusy() && page != Page::OTA) return false;
     cancelOrientation();
     cancelPageSlide();
@@ -1092,11 +1176,14 @@ bool CodexMicroView::setPageForDebug(Page page) {
     if (page == Page::OTA) lv_obj_remove_flag(_otaPage, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaPage, LV_OBJ_FLAG_HIDDEN);
     if (page == Page::Settings) { renderSettings(); lv_obj_remove_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN); }
     else lv_obj_add_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN);
+    if (page == Page::Sessions) { renderSessions(); lv_obj_remove_flag(_sessionsPage, LV_OBJ_FLAG_HIDDEN); }
+    else lv_obj_add_flag(_sessionsPage, LV_OBJ_FLAG_HIDDEN);
     if (page != Page::Command) stopAnimations();
     _page = page; _activity = lv_tick_get();
+    refreshSessionsLease();
     if (page == Page::Command) { lv_obj_remove_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); }
     else if (page == Page::History) { refreshHistory(); lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN); }
-    if (page == Page::OTA || page == Page::Settings) { lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN); }
+    if (page == Page::OTA || page == Page::Settings || page == Page::Sessions) { lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_historyPage, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_footer, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_clockIcon, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN); }
     if (page == Page::Command && _quota->truncated) lv_obj_remove_flag(_bucketCount, LV_OBJ_FLAG_HIDDEN);
     if (page == Page::Command && _clockMinute >= 0 && !_quota->truncated) lv_obj_remove_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
@@ -1104,7 +1191,7 @@ bool CodexMicroView::setPageForDebug(Page page) {
     return true;
 }
 lv_obj_t* CodexMicroView::pagePanel(Page page) const {
-    return page == Page::Command ? _quotaPage : page == Page::History ? _historyPage : page == Page::Settings ? _settingsPage : _otaPage;
+    return page == Page::Command ? _quotaPage : page == Page::History ? _historyPage : page == Page::Settings ? _settingsPage : page == Page::Sessions ? _sessionsPage : _otaPage;
 }
 void CodexMicroView::cancelPageSlide() {
     lv_anim_delete(this, slideExec);
@@ -1131,10 +1218,10 @@ void CodexMicroView::slideCompleted(lv_anim_t* anim) {
 }
 void CodexMicroView::navigatePage(int direction) {
     if (_rotationFault || _suppressed || _locked || !ready() || otaBusy() || _slideTo || _rotationPhase != RotationPhase::Idle) return;
-    const Page pages[] = {Page::Command, Page::History, Page::OTA, Page::Settings};
-    const int index = _page == Page::Command ? 0 : _page == Page::History ? 1 : _page == Page::OTA ? 2 : 3;
+    const Page pages[] = {Page::Command, Page::History, Page::OTA, Page::Settings, Page::Sessions};
+    const int index = _page == Page::Command ? 0 : _page == Page::History ? 1 : _page == Page::OTA ? 2 : _page == Page::Settings ? 3 : 4;
     auto* from = pagePanel(_page);
-    if (!setPageForDebug(pages[(index + (direction > 0 ? 1 : 3)) % 4])) return;
+    if (!setPageForDebug(pages[(index + (direction > 0 ? 1 : 4)) % 5])) return;
     _slideFrom = from; _slideTo = pagePanel(_page); _slideDirection = direction > 0 ? 1 : -1;
     lv_obj_remove_flag(_slideFrom, LV_OBJ_FLAG_HIDDEN);
     // Executed by LVGL's existing timer under its single port mutex; no screen/snapshot allocations.
@@ -1146,6 +1233,7 @@ void CodexMicroView::navigatePage(int direction) {
 }
 void CodexMicroView::setInputSuppressed(bool suppressed) {
     _suppressed = suppressed;
+    refreshSessionsLease();
     if (suppressed) { _touchTracking = false; _swipeConsumed = true; cancelOrientation(); GetHAL().setMotionIdle(true); cancelPageSlide(); stopAnimations(); }
 }
 void CodexMicroView::togglePage() {
@@ -1170,6 +1258,7 @@ void CodexMicroView::wakeDisplay() {
     lv_obj_invalidate(_root);
     if (_page == Page::OTA) renderOta(); // Apply snapshots cached while locked without changing pages.
     if (_otaPending) { _otaPending = false; setPageForDebug(Page::OTA); }
+    refreshSessionsLease();
 }
 void CodexMicroView::lockDisplay() {
     if (_rotationFault) return;
@@ -1178,6 +1267,7 @@ void CodexMicroView::lockDisplay() {
     cancelPageSlide(); _touchTracking = false; _swipeConsumed = true;
     stopAnimations();
     _locked = true; GetNetworkQuota().setLocked(true);
+    refreshSessionsLease();
     GetHAL().setTouchIdlePolling(true);
     lv_obj_remove_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_lockPanel);
     // Function-only wake needs no overlay above custom DRAW_MAIN clock dots.
@@ -1189,12 +1279,14 @@ void CodexMicroView::lockDisplay() {
     _appliedBrightness = _displaySettings.config.lockBrightness;
 }
 bool CodexMicroView::lockForDebug() { if (!ready()) return false; lockDisplay(); return _locked; }
-void CodexMicroView::update(const CodexMicroState&) {
+void CodexMicroView::update(const CodexMicroState& state) {
     if (!ready()) return;
     uint32_t tick = lv_tick_get();
     const bool networkReady = GetNetworkQuota().connected() && (!GetTailnetQuota().enabled() || GetTailnetQuota().ready());
     if (networkReady != _otaNetworkReady) { _otaNetworkReady = networkReady; if (!_locked) renderOtaAction(); }
     refreshOta(tick);
+    refreshSessionsLease();
+    refreshSessions(state);
     bool interacting = lv_obj_is_scrolling(_quotaPage), touching = false;
     for (auto* input = lv_indev_get_next(nullptr); input; input = lv_indev_get_next(input))
         touching = touching || lv_indev_get_state(input) == LV_INDEV_STATE_PRESSED;

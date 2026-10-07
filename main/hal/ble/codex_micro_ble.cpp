@@ -7,6 +7,7 @@
 #include "codex_micro_ble.h"
 #ifdef MOSAICO_BOARD
 #include <hal/hal.h>
+#include <host/mosaico_session_model.h>
 #endif
 
 #include <host/host_bridge.h>
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <memory>
 #include <new>
 
@@ -199,6 +201,35 @@ bool jsonFlag(const cJSON* value)
     return cJSON_IsTrue(value) || (cJSON_IsNumber(value) && value->valueint != 0);
 }
 
+#ifdef MOSAICO_BOARD
+// Validate the complete batch before touching lights or freshness metadata.
+// Partial native updates remain compatible but cannot establish a known slot.
+bool validThreadStatus(const cJSON* value, bool& complete)
+{
+    complete = false;
+    if (!cJSON_IsObject(value)) return false;
+    const cJSON* id = objectItem(value, "id");
+    if (!cJSON_IsNumber(id) || !MosaicoSessions::integerInRange(id->valuedouble, 5)) return false;
+    const cJSON* c = objectItem(value, "c");
+    const cJSON* b = objectItem(value, "b");
+    const cJSON* e = objectItem(value, "e");
+    if (c && (!cJSON_IsNumber(c) || !MosaicoSessions::integerInRange(c->valuedouble, 0xffffff))) return false;
+    if (b && (!cJSON_IsNumber(b) || !std::isfinite(b->valuedouble) || b->valuedouble < 0 || b->valuedouble > 1)) return false;
+    if (e && ((cJSON_IsNumber(e) && !MosaicoSessions::integerInRange(e->valuedouble, 6)) ||
+        (!cJSON_IsNumber(e) && parseLightEffect(e, static_cast<CodexMicroLightEffect>(255)) == static_cast<CodexMicroLightEffect>(255)))) return false;
+    const cJSON* m = objectItem(value, "m");
+    if (m && (!cJSON_IsNumber(m) || !MosaicoSessions::integerInRange(m->valuedouble, UINT32_MAX))) return false;
+    const cJSON* s = objectItem(value, "s");
+    if (s && (!cJSON_IsNumber(s) || !std::isfinite(s->valuedouble) || s->valuedouble < 0 || s->valuedouble > 1e6)) return false;
+    for (const char* key : {"sk", "sa"}) {
+        const cJSON* flag = objectItem(value, key);
+        if (flag && !cJSON_IsBool(flag) && (!cJSON_IsNumber(flag) || !MosaicoSessions::integerInRange(flag->valuedouble, 1))) return false;
+    }
+    complete = c && b && e;
+    return true;
+}
+#endif
+
 enum class RpcObjectState : uint8_t {
     Incomplete,
     Complete,
@@ -281,8 +312,10 @@ void addResponseId(cJSON* response, const cJSON* id)
 
 void restartAfterPairingReset(void*)
 {
+#ifndef MOSAICO_BOARD
     vTaskDelay(pdMS_TO_TICKS(250));
     esp_restart();
+#endif
 }
 
 }  // namespace
@@ -298,7 +331,11 @@ bool CodexMicroBle::begin()
     codex_micro_hid_gatt_compat_link_anchor();
     bool expected = false;
     if (!_initialized.compare_exchange_strong(expected, true)) {
+#ifdef MOSAICO_BOARD
+        return _begin_succeeded.load();
+#else
         return _hid_device != nullptr;
+#endif
     }
 
     _state_mutex = xSemaphoreCreateMutex();
@@ -355,6 +392,9 @@ bool CodexMicroBle::begin()
     }
 
     ESP_LOGI(Tag, "initializing vendor HID VID=%04X PID=%04X usage=FF00 report=%u", VendorId, ProductId, ReportId);
+#ifdef MOSAICO_BOARD
+    _begin_succeeded.store(true);
+#endif
     return true;
 }
 
@@ -376,8 +416,13 @@ void CodexMicroBle::poll()
     if (link_state == ProtocolLinkState::Recovering) {
         const uint32_t deadline = _half_open_recovery_deadline_ms.load(std::memory_order_relaxed);
         if (deadline != 0 && static_cast<int32_t>(now - deadline) >= 0) {
+#ifdef MOSAICO_BOARD
+            ESP_LOGE(Tag, "BLE disconnect watchdog expired; monitor disabled");
+            failMonitorLink();
+#else
             ESP_LOGE(Tag, "BLE disconnect watchdog expired; restarting transport");
             esp_restart();
+#endif
         }
         return;
     }
@@ -632,6 +677,9 @@ void CodexMicroBle::maybeStartAdvertising()
 
 void CodexMicroBle::requestRadioIdle(bool requested)
 {
+#ifdef MOSAICO_BOARD
+    if (_link_failed.load()) requested = true;
+#endif
     _radio_idle_requested.store(requested, std::memory_order_release);
     if (!requested) {
         maybeStartAdvertising();
@@ -741,6 +789,9 @@ void CodexMicroBle::onConnected(bool connectedValue)
     xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _state.connected     = connectedValue;
     _state.protocolReady = false;
+#ifdef MOSAICO_BOARD
+    MosaicoSessions::clearKnown(_state, _connection_generation.load());
+#endif
     if (!connectedValue) {
         _state.threads       = {};
         _state.ambient       = {};
@@ -826,9 +877,34 @@ void CodexMicroBle::recoverHalfOpenConnection()
         ESP_LOGE(Tag, "BLE disconnect request failed: %s", esp_err_to_name(error));
     }
 
+#ifdef MOSAICO_BOARD
+    ESP_LOGE(Tag, "current BLE peer unavailable; monitor disabled");
+    failMonitorLink();
+#else
     ESP_LOGE(Tag, "current BLE peer unavailable; restarting transport");
     esp_restart();
+#endif
 }
+
+#ifdef MOSAICO_BOARD
+void CodexMicroBle::failMonitorLink()
+{
+    if (_link_failed.exchange(true)) return;
+    _radio_idle_requested.store(true);
+    _link_state.store(ProtocolLinkState::Recovering);
+    _half_open_recovery_deadline_ms.store(0);
+    // Actual HCI connection truth remains untouched. Failure is not evidence
+    // that Bluetooth stopped or that low-power/OTA coexistence was achieved.
+    const uint32_t generation = _connection_generation.fetch_add(1) + 1;
+    if (_state_mutex) {
+        xSemaphoreTake(_state_mutex, portMAX_DELAY);
+        _state.protocolReady = false;
+        MosaicoSessions::clearKnown(_state, generation);
+        ++_state.revision;
+        xSemaphoreGive(_state_mutex);
+    }
+}
+#endif
 
 bool CodexMicroBle::connected()
 {
@@ -855,6 +931,9 @@ CodexMicroBleDiagnostics CodexMicroBle::diagnostics() const
         .connected             = _connected.load(std::memory_order_acquire),
         .protocolReady         = _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Ready,
         .advertising           = _advertising.load(),
+#ifdef MOSAICO_BOARD
+        .linkFailed            = _link_failed.load(),
+#endif
         .inputQueued           = _input_queued.load(),
         .inputDropped          = _input_dropped.load(),
         .inputProcessed        = _input_processed.load(),
@@ -941,6 +1020,10 @@ void CodexMicroBle::setBattery(uint8_t percentage, bool charging)
 
 bool CodexMicroBle::resetPairing()
 {
+#ifdef MOSAICO_BOARD
+    // Read-only monitor firmware never deletes existing host bonds.
+    return false;
+#else
     if (!_initialized.load()) {
         return false;
     }
@@ -989,6 +1072,7 @@ bool CodexMicroBle::resetPairing()
 
     ESP_LOGW(Tag, "pairing reset requested; no stored bonds");
     return schedulePairingRestart();
+#endif
 }
 
 bool CodexMicroBle::schedulePairingRestart()
@@ -1004,6 +1088,9 @@ bool CodexMicroBle::schedulePairingRestart()
 
 bool CodexMicroBle::sendKey(CodexMicroControl control, CodexMicroKeyAction action, int8_t agent)
 {
+#ifdef MOSAICO_BOARD
+    return false;
+#else
     const InputEvent event = {
         .kind    = InputEventKind::Key,
         .control = control,
@@ -1011,20 +1098,28 @@ bool CodexMicroBle::sendKey(CodexMicroControl control, CodexMicroKeyAction actio
         .agent   = agent,
     };
     return queueInput(event);
+#endif
 }
 
 bool CodexMicroBle::sendJoystick(float angle, float distance)
 {
+#ifdef MOSAICO_BOARD
+    return false;
+#else
     const InputEvent event = {
         .kind     = InputEventKind::Joystick,
         .angle    = angle,
         .distance = distance,
     };
     return queueInput(event);
+#endif
 }
 
 bool CodexMicroBle::sendJoystickButton(float angle, bool pressed)
 {
+#ifdef MOSAICO_BOARD
+    return false;
+#else
     const InputEvent event = {
         .kind     = InputEventKind::Joystick,
         .angle    = angle,
@@ -1032,10 +1127,14 @@ bool CodexMicroBle::sendJoystickButton(float angle, bool pressed)
         .ordered  = true,
     };
     return queueInput(event);
+#endif
 }
 
 bool CodexMicroBle::sendEncoderSteps(int direction, uint16_t steps)
 {
+#ifdef MOSAICO_BOARD
+    return false;
+#else
     if (steps == 0) {
         return true;
     }
@@ -1052,6 +1151,7 @@ bool CodexMicroBle::sendEncoderSteps(int direction, uint16_t steps)
         .repeat  = steps,
     };
     return queueInput(event);
+#endif
 }
 
 void CodexMicroBle::inputTaskEntry(void* context)
@@ -1092,7 +1192,11 @@ void CodexMicroBle::runInputTask()
                 } else if (connected() && event_is_current(event)) {
                     ++_input_dropped;
                     ESP_LOGE(Tag, "critical input delivery failed; restarting to release host controls");
+#ifdef MOSAICO_BOARD
+                    failMonitorLink();
+#else
                     esp_restart();
+#endif
                 }
             } else if (xQueueReceive(_rpc_queue, &queued_rpc_request, 0) == pdTRUE) {
                 std::unique_ptr<RpcRequest> rpc_request(queued_rpc_request);
@@ -1167,7 +1271,11 @@ void CodexMicroBle::runInputTask()
                     ++_input_dropped;
                     if (ordered_control) {
                         ESP_LOGE(Tag, "encoder control delivery failed; restarting to release host control");
+#ifdef MOSAICO_BOARD
+                        failMonitorLink();
+#else
                         esp_restart();
+#endif
                     }
                 }
                 if (encoder_batch.repeat > 0) {
@@ -1256,7 +1364,11 @@ bool CodexMicroBle::queueInput(const InputEvent& event)
             queued_event.generation == _connection_generation.load(std::memory_order_acquire) &&
             _link_state.load(std::memory_order_acquire) == ProtocolLinkState::Ready) {
             ESP_LOGE(Tag, "critical input was not queued; restarting to release host controls");
+#ifdef MOSAICO_BOARD
+            failMonitorLink();
+#else
             esp_restart();
+#endif
         }
         return false;
     }
@@ -1566,6 +1678,9 @@ bool CodexMicroBle::queueRpcRequest(const char* json, std::size_t length)
 
 void CodexMicroBle::handleRpc(const cJSON* request, uint32_t generation)
 {
+#ifdef MOSAICO_BOARD
+    if (_link_failed.load()) return;
+#endif
     if (!connected() || generation != _connection_generation.load(std::memory_order_acquire)) {
         return;
     }
@@ -1699,6 +1814,18 @@ bool CodexMicroBle::sendSuccess(const cJSON* id, uint32_t generation)
 
 bool CodexMicroBle::updateThreadLighting(const cJSON* values, uint32_t generation)
 {
+#ifdef MOSAICO_BOARD
+    uint8_t completeMask = 0, statusMask = 0;
+    if (!cJSON_IsArray(values)) return false;
+    const cJSON* candidate = nullptr;
+    cJSON_ArrayForEach(candidate, values) {
+        bool complete;
+        if (!validThreadStatus(candidate, complete)) { ++_rpc_errors; return false; }
+        const uint8_t bit = static_cast<uint8_t>(1U << objectItem(candidate, "id")->valueint);
+        if (complete) completeMask |= bit;
+        if (objectItem(candidate, "c") || objectItem(candidate, "b") || objectItem(candidate, "e")) statusMask |= bit;
+    }
+#endif
     xSemaphoreTake(_state_mutex, portMAX_DELAY);
     const ProtocolLinkState link_state = _link_state.load(std::memory_order_acquire);
     if (!connected() || generation != _connection_generation.load(std::memory_order_acquire) ||
@@ -1757,6 +1884,22 @@ bool CodexMicroBle::updateThreadLighting(const cJSON* values, uint32_t generatio
         ++_state.revision;
         ++_state.attentionRevision;
     }
+#ifdef MOSAICO_BOARD
+    if (completeMask || statusMask) {
+        const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        for (unsigned slot = 0; slot < 6; ++slot) {
+            const uint8_t bit = static_cast<uint8_t>(1U << slot);
+            if ((completeMask & bit) || ((_state.knownMask & bit) && (statusMask & bit))) {
+                const auto& before = previous_threads[slot];
+                const auto& after = _state.threads[slot];
+                const bool semanticChanged = before.color != after.color ||
+                    before.brightness != after.brightness || before.effect != after.effect;
+                MosaicoSessions::markKnown(_state, slot, now, semanticChanged);
+            }
+        }
+        if (completeMask && !changed) ++_state.revision; // Receipt revision is not last-change age.
+    }
+#endif
     xSemaphoreGive(_state_mutex);
     return true;
 }

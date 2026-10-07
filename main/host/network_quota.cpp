@@ -5,6 +5,7 @@
 #ifdef MOSAICO_BOARD
 #include "quota_monitor.h"
 #include "mosaico_display_settings.h"
+#include "mosaico_session_monitor.h"
 #include "system_clock.h"
 #include <ota/panic_capture.h>
 #include <hal/hal.h>
@@ -70,13 +71,17 @@ void NetworkQuota::setLocked(bool locked)
     if (!locked) setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
 #endif
     if (changed && _task_handle) xTaskNotifyGive(_task_handle);
+#ifndef MOSAICO_BOARD
     GetCodexMicroBle().requestRadioIdle(idleLocked());
+#endif
 }
 void NetworkQuota::setPowerProfile(uint8_t profile)
 {
     if (profile > 2) return;
     _power_profile = profile;
+#ifndef MOSAICO_BOARD
     GetCodexMicroBle().requestRadioIdle(idleLocked());
+#endif
     if (_task_handle) xTaskNotifyGive(_task_handle);
 }
 void NetworkQuota::refreshWhileLocked()
@@ -342,7 +347,14 @@ void NetworkQuota::run()
 #endif
         const bool locked = idleLocked();
         const int64_t now = esp_timer_get_time();
+#ifdef MOSAICO_BOARD
+        // Network/OTA can close the lease, never reopen a stale GUI request.
+        // Main-loop Sessions service is the sole advertising-enable owner.
+        if (locked || !MosaicoSessions::enabled() || MosaicoOta::busy() || MosaicoOta::healthPending())
+            GetCodexMicroBle().requestRadioIdle(true);
+#else
         GetCodexMicroBle().requestRadioIdle(locked);
+#endif
         if (locked && !wasLocked) {
             nextRefresh  = now + RefreshIntervalUs;
             updateWindow = false;

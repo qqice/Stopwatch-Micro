@@ -44,6 +44,11 @@ struct CodexMicroState {
     bool charging              = false;
     uint32_t revision          = 0;
     uint32_t attentionRevision = 0;
+#ifdef MOSAICO_BOARD
+    uint8_t knownMask = 0;
+    std::array<uint32_t, 6> lastThreadStatusMs{}; // First-known or last c/b/e change, never a heartbeat TTL.
+    uint32_t connectionGeneration = 0;
+#endif
 };
 
 struct CodexMicroBleDiagnostics {
@@ -52,6 +57,9 @@ struct CodexMicroBleDiagnostics {
     bool connected                 = false;
     bool protocolReady             = false;
     bool advertising               = false;
+#ifdef MOSAICO_BOARD
+    bool linkFailed                = false;
+#endif
     uint32_t inputQueued           = 0;
     uint32_t inputDropped          = 0;
     uint32_t inputProcessed        = 0;
@@ -147,6 +155,9 @@ private:
     void onConnected(bool connected);
     bool markProtocolReady(uint32_t generation);
     void recoverHalfOpenConnection();
+#ifdef MOSAICO_BOARD
+    void failMonitorLink();
+#endif
     void onOutput(const uint8_t* data, std::size_t length);
     bool queueRpcRequest(const char* json, std::size_t length);
     void handleRpc(const cJSON* request, uint32_t generation);
@@ -179,12 +190,20 @@ private:
     int8_t _ambient_sync_thread                                 = -1;
     int8_t _keys_sync_thread                                    = -1;
     std::atomic_bool _initialized                               = false;
+#ifdef MOSAICO_BOARD
+    std::atomic_bool _begin_succeeded                           = false;
+    std::atomic_bool _link_failed                               = false;
+#endif
     std::atomic_bool _adv_data_ready                            = false;
     std::atomic_bool _scan_rsp_ready                            = false;
     std::atomic_bool _hid_ready                                 = false;
     std::atomic_bool _connected                                 = false;
     std::atomic_bool _advertising                               = false;
+#ifdef MOSAICO_BOARD
+    std::atomic_bool _radio_idle_requested                      = true;
+#else
     std::atomic_bool _radio_idle_requested                      = false;
+#endif
     std::atomic_bool _radio_idle_stop_in_flight                 = false;
     std::atomic_bool _radio_idle_disconnect_in_flight           = false;
     std::atomic_bool _peer_address_valid                        = false;
