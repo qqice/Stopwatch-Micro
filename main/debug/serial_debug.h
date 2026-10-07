@@ -6,6 +6,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include "serial_debug_transport.h"
+#include <sdkconfig.h>
 
 class AppCodexMicro;
 
@@ -31,6 +33,30 @@ private:
     static constexpr std::size_t LineCapacity = 1536;
 
     void consume(char value);
+    void consumeFrom(char value, bool uart);
+    void drainUart();
+    void invalidateUartInput();
+    static int debugPrintf(const char* format, ...);
+    static SerialDebug* _writer;
+    bool _reply_uart = false;
+    bool _async_uart = false;
+    bool _usb_active = false;
+    bool _uart_active = false;
+    void* _uart_events = nullptr;
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    static constexpr std::size_t UartLineCapacity = LineCapacity;
+    static constexpr std::size_t UartTxCapacity = 8192;
+#else
+    // No UART storage penalty on the existing StopWatch/S3 path.
+    static constexpr std::size_t UartLineCapacity = 1;
+    static constexpr std::size_t UartTxCapacity = 1;
+#endif
+    std::array<char, UartLineCapacity> _uart_line{};
+    std::size_t _uart_line_length = 0;
+    bool _uart_line_overflow = false;
+    serial_debug_transport::TxRing<UartTxCapacity> _uart_tx;
+    uint32_t _format_overflow = 0;
+    uint32_t _uart_read_errors = 0;
     void handleLine(char* line);
     void updateAsyncTest();
     void cancelAsyncTest(const char* reason, bool report);

@@ -35,6 +35,7 @@ extern "C" esp_err_t ml_derp_patch_selftest(void);
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstdarg>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -49,6 +50,9 @@ extern "C" esp_err_t ml_derp_patch_selftest(void);
 #include <freertos/task.h>
 #include <lvgl.h>
 #include <sdkconfig.h>
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+#include <driver/uart.h>
+#endif
 
 namespace {
 
@@ -92,6 +96,24 @@ bool parseUnsignedStrict(const char* value, uint32_t minimum, uint32_t maximum, 
 
 }  // namespace
 
+SerialDebug* SerialDebug::_writer = nullptr;
+int SerialDebug::debugPrintf(const char* format, ...)
+{
+    char bytes[1536];
+    va_list args; va_start(args, format);
+    const int count = std::vsnprintf(bytes, sizeof(bytes), format, args);
+    va_end(args);
+    if (count < 0) return count;
+    if (static_cast<std::size_t>(count) >= sizeof(bytes)) {
+        if (_writer) ++_writer->_format_overflow;
+        return -1; // Do not emit a misleading truncated result or secret fragment.
+    }
+    if (_writer && _writer->_reply_uart) {
+        return _writer->_uart_tx.enqueue(bytes, count) ? count : -1;
+    }
+    return static_cast<int>(std::fwrite(bytes, 1, count, stdout));
+}
+
 SerialDebug::SerialDebug(AppCodexMicro& app) : _app(app)
 {
 }
@@ -99,17 +121,37 @@ SerialDebug::SerialDebug(AppCodexMicro& app) : _app(app)
 bool SerialDebug::begin()
 {
 #ifdef MOSAICO_BOARD
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (!uart_is_driver_installed(UART_NUM_0)) {
+        uart_config_t config{};
+        QueueHandle_t events = nullptr;
+        config.baud_rate = 115200;
+        config.data_bits = UART_DATA_8_BITS;
+        config.parity = UART_PARITY_DISABLE;
+        config.stop_bits = UART_STOP_BITS_1;
+        config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+        config.source_clk = UART_SCLK_XTAL; // Independent of CPU 160/320 MHz changes.
+        if (uart_param_config(UART_NUM_0, &config) == ESP_OK &&
+            uart_set_pin(UART_NUM_0, 58, 59, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) == ESP_OK &&
+            uart_driver_install(UART_NUM_0, 2048, 0, serial_debug_transport::UartEventCapacity, &events, 0) == ESP_OK) {
+            _uart_active = true;
+            _uart_events = events;
+        }
+    } // Do not reconfigure a UART already owned by another subsystem.
+#endif
     // TinyUSB console/VFS is initialized before board bring-up in app_main.
     setvbuf(stdin, nullptr, _IONBF, 0);
     setvbuf(stdout, nullptr, _IONBF, 0);
     const int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
     if (flags < 0 || fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) < 0) {
         result("init", "FAIL", "reason=nonblocking_cdc_stdin");
-        return false;
+        _active = _uart_active;
+        return _active;
     }
+    _usb_active = true;
     _active = true;
-    std::printf("DBG READY version=%s transport=tinyusb-cdc mode=nonblocking\r\n", system_config::FirmwareVersion);
-    std::fflush(stdout);
+    debugPrintf("DBG READY version=%s transport=tinyusb-cdc mode=nonblocking\r\n", system_config::FirmwareVersion);
+    if (!_writer || !_writer->_reply_uart) std::fflush(stdout);
     return true;
 #elif !CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
     result("init", "FAIL", "reason=usb_serial_jtag_not_primary");
@@ -135,9 +177,10 @@ bool SerialDebug::begin()
         result("init", "FAIL", "reason=nonblocking_stdin");
         return false;
     }
+    _usb_active = true;
     _active = true;
-    std::printf("DBG READY version=%s transport=usb-serial-jtag mode=nonblocking\r\n", system_config::FirmwareVersion);
-    std::fflush(stdout);
+    debugPrintf("DBG READY version=%s transport=usb-serial-jtag mode=nonblocking\r\n", system_config::FirmwareVersion);
+    if (!_writer || !_writer->_reply_uart) std::fflush(stdout);
     return true;
 #endif
 }
@@ -148,7 +191,15 @@ void SerialDebug::end()
         return;
     }
     cancelAsyncTest("shutdown", false);
-    _active = false;
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    if (_uart_active) uart_driver_delete(UART_NUM_0);
+#endif
+    _uart_active = _usb_active = _active = false;
+    _uart_events = nullptr;
+    _line.fill(0); _uart_line.fill(0); _uart_tx.clear();
+    _line_length = _uart_line_length = 0;
+    _line_overflow = _uart_line_overflow = false;
+    _async_uart = false;
 }
 
 void SerialDebug::poll()
@@ -157,53 +208,127 @@ void SerialDebug::poll()
         return;
     }
 
-    std::array<char, 64> bytes = {};
-    while (true) {
+    drainUart();
+    std::array<char, 128> bytes{};
+    // One read per source and fixed RX/TX budgets: a flood cannot starve its peer.
+    if (_usb_active) {
         const ssize_t count = read(STDIN_FILENO, bytes.data(), bytes.size());
-        if (count > 0) {
-            for (ssize_t index = 0; index < count; ++index) {
-                consume(bytes[static_cast<std::size_t>(index)]);
-            }
-            continue;
-        }
-        if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        for (ssize_t i = 0; i < count; ++i) consumeFrom(bytes[i], false);
+        if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
             result("read", "FAIL", "reason=stdin_error");
-        }
-        break;
     }
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    if (_uart_active) {
+        uart_event_t event{};
+        auto saturated = [this]() {
+            return serial_debug_transport::uartQueueSaturated(
+                uxQueueMessagesWaiting(static_cast<QueueHandle_t>(_uart_events)));
+        };
+        // A full event queue may have lost an error notification. Desynchronize,
+        // rather than trusting a subsequently observed UART_DATA event.
+        if (saturated()) invalidateUartInput();
+        for (unsigned i = 0; i < serial_debug_transport::UartEventCapacity; ++i) {
+            if (saturated()) { invalidateUartInput(); break; }
+            if (!xQueueReceive(static_cast<QueueHandle_t>(_uart_events), &event, 0)) break;
+            if (event.type == UART_FIFO_OVF || event.type == UART_BUFFER_FULL ||
+                event.type == UART_FRAME_ERR || event.type == UART_PARITY_ERR) {
+                invalidateUartInput();
+                break;
+            }
+        }
+        if (saturated()) invalidateUartInput();
+        const int count = uart_read_bytes(UART_NUM_0, bytes.data(), bytes.size(), 0);
+        if (count < 0 || saturated()) {
+            invalidateUartInput();
+            bytes.fill(0);
+        } else {
+            for (int i = 0; i < count; ++i) {
+                if (saturated()) { invalidateUartInput(); bytes.fill(0); break; }
+                consumeFrom(bytes[i], true);
+            }
+        }
+    }
+#endif
+    SerialDebug* previous = _writer;
+    _writer = this; _reply_uart = _async_uart;
     updateAsyncTest();
+    if (_async_test == AsyncTest::None) _async_uart = false;
+    _reply_uart = false; _writer = previous;
+    drainUart();
+}
+
+void SerialDebug::drainUart()
+{
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    if (_uart_active) _uart_tx.drain([](const char* bytes, std::size_t count) {
+        return uart_tx_chars(UART_NUM_0, bytes, count);
+    }, 128);
+#endif
+}
+
+void SerialDebug::invalidateUartInput()
+{
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    ++_uart_read_errors;
+    uart_flush_input(UART_NUM_0);
+    xQueueReset(static_cast<QueueHandle_t>(_uart_events));
+    _uart_line.fill(0); _uart_line_length = 0;
+    _uart_line_overflow = true; // Drop through a fresh delimiter, never execute a damaged tail.
+#endif
+}
+
+void SerialDebug::consumeFrom(char value, bool uart)
+{
+    SerialDebug* previous = _writer;
+    _writer = this; _reply_uart = uart;
+    const auto before = _async_test;
+    consume(value);
+    if (before == AsyncTest::None && _async_test != AsyncTest::None) _async_uart = uart;
+    if (_async_test == AsyncTest::None) _async_uart = false;
+    _reply_uart = false; _writer = previous;
 }
 
 void SerialDebug::consume(char value)
 {
+    char* line = _reply_uart ? _uart_line.data() : _line.data();
+    const auto capacity = _reply_uart ? _uart_line.size() : _line.size();
+    auto& length = _reply_uart ? _uart_line_length : _line_length;
+    auto& overflow = _reply_uart ? _uart_line_overflow : _line_overflow;
     if (value == '\r' || value == '\n') {
-        if (_line_length == 0 && !_line_overflow) {
+        if (length == 0 && !overflow) {
             return;
         }
-        if (_line_overflow) {
+        if (overflow) {
             result("parse", "FAIL", "reason=line_too_long");
         } else {
-            _line[_line_length] = '\0';
-            handleLine(_line.data());
+            line[length] = '\0';
+            char* command = _reply_uart ? serial_debug_transport::decodeUartLine(line, length) : line;
+            if (command) handleLine(command);
+            else result("parse", "FAIL", "reason=uart_crc_frame_required no_changes=1");
         }
-        _line_length   = 0;
-        _line_overflow = false;
+        std::fill_n(line, capacity, 0); // Scrub credentials and completed command text.
+        length   = 0;
+        overflow = false;
+        return;
+    }
+    if (_reply_uart && (value < 0x20 || value > 0x7E)) {
+        overflow = true;
         return;
     }
     if (value == '\b' || value == 0x7F) {
-        if (_line_length > 0) {
-            --_line_length;
+        if (length > 0) {
+            line[--length] = '\0';
         }
         return;
     }
     if (value < 0x20 || value > 0x7E) {
         return;
     }
-    if (_line_length + 1 >= _line.size()) {
-        _line_overflow = true;
+    if (length + 1 >= capacity) {
+        overflow = true;
         return;
     }
-    _line[_line_length++] = value;
+    line[length++] = value;
 }
 
 void SerialDebug::handleLine(char* line)
@@ -219,6 +344,27 @@ void SerialDebug::handleLine(char* line)
     }
 
     char* command = ::strtok_r(nullptr, " \t", &save);
+    if (_reply_uart && !serial_debug_transport::uartAllowed(command)) {
+        result(command, "FAIL", "reason=uart_requires_extended_authorization no_changes=1"); return;
+    }
+    if (_reply_uart && command && !std::strcmp(command, "display-test-frequency")) {
+        char value[8]{};
+        if (!save || std::sscanf(save, "%7s", value) != 1 || (std::strcmp(value, "160") && std::strcmp(value, "320"))) {
+            result(command, "FAIL", "reason=uart_frequency_allowed_160_320_only no_changes=1"); return;
+        }
+    }
+    if (command && !std::strcmp(command, "debug-transport")) {
+        char details[256];
+        std::snprintf(details, sizeof(details), "usb=%d uart=%d uart_rx_errors=%lu tx_pending=%u tx_overflow=%lu tx_stalls=%lu format_overflow=%lu rx_budget=128 tx_budget=256 uart_usb_power_proof=0",
+            _usb_active, _uart_active, static_cast<unsigned long>(_uart_read_errors), unsigned(_uart_tx.pending()),
+            static_cast<unsigned long>(_uart_tx.overflow), static_cast<unsigned long>(_uart_tx.stalls), static_cast<unsigned long>(_format_overflow));
+        result(command, "PASS", details); return;
+    }
+    if (_async_test != AsyncTest::None && command && (!std::strcmp(command, "mic") || !std::strcmp(command, "inputs") ||
+        !std::strcmp(command, "ui") || !std::strcmp(command, "transport") || !std::strcmp(command, "perf") || !std::strcmp(command, "selftest"))) {
+        result(command, "FAIL", "reason=async_diagnostic_active cancel_first=1"); return;
+    }
+
 #ifdef MOSAICO_BOARD
     if (command && std::strcmp(command, "display-settings") == 0) {
         const auto s = MosaicoDisplay::snapshot();
@@ -519,7 +665,7 @@ void SerialDebug::handleLine(char* line)
             return;
         }
         result("runtime-restart", "PASS", "action=normal_application_restart");
-        std::fflush(stdout);
+        if (!_writer || !_writer->_reply_uart) std::fflush(stdout);
         GetHAL().delay(250);
         GetHAL().reboot();
         return;
@@ -602,10 +748,10 @@ void SerialDebug::handleLine(char* line)
         }
         for (std::size_t i = 0; i < quota->bucketCount; ++i) {
             const auto& bucket = quota->buckets[i];
-            std::printf("DBG QUOTA bucket=%s plan=%s credits_known=%d balance=%s unlimited=%d\r\n",
+            debugPrintf("DBG QUOTA bucket=%s plan=%s credits_known=%d balance=%s unlimited=%d\r\n",
                         bucket.id, bucket.plan, bucket.creditsKnown, bucket.creditBalance, bucket.creditsUnlimited);
             for (std::size_t w = 0; w < 2; ++w)
-                if (bucket.windows[w].available) std::printf("DBG QUOTA window=%u remaining_bp=%u duration_minutes=%lu reset_epoch=%lu\r\n",
+                if (bucket.windows[w].available) debugPrintf("DBG QUOTA window=%u remaining_bp=%u duration_minutes=%lu reset_epoch=%lu\r\n",
                     static_cast<unsigned>(w), bucket.windows[w].remainingBasisPoints,
                     static_cast<unsigned long>(bucket.windows[w].durationMinutes),
                     static_cast<unsigned long>(bucket.windows[w].resetEpoch));
@@ -737,7 +883,7 @@ void SerialDebug::handleLine(char* line)
         return;
     }
     if (std::strcmp(command, "boot") == 0) {
-        BootTracePrint();
+        BootTracePrint(debugPrintf);
         return;
     }
     if (std::strcmp(command, "selftest") == 0) {
@@ -910,16 +1056,16 @@ void SerialDebug::handleLine(char* line)
 
 void SerialDebug::printHelp()
 {
-    std::printf("DBG HELP commands=ping,status,selftest,controls,protocol\r\n");
+    debugPrintf("DBG HELP commands=ping,status,selftest,controls,protocol,debug-transport\r\n");
 #ifdef MOSAICO_BOARD
-    std::printf("DBG HELP ota=ota-status,ota-update_CONFIRM_EXTERNAL_POWER,ota-rollback-test_CONFIRM\r\n");
+    debugPrintf("DBG HELP ota=ota-status,ota-update_CONFIRM_EXTERNAL_POWER,ota-rollback-test_CONFIRM\r\n");
 #endif
-    std::printf(
+    debugPrintf(
         "DBG HELP commands=ui_[command|agent|mic|cycle],transport,perf_[ms],trace_[ms],mic_[ms],inputs_[ms]\r\n");
-    std::printf("DBG HELP commands=tone_[hz]_[ms],vibrate_[ms]_[strength],backlight_[10-100],cancel\r\n");
-    std::printf("DBG HELP bridge=host-usage_[seq]_[remaining_bp]_[reset_epoch]_[captured_epoch]_[credits]\r\n");
-    std::printf("DBG HELP destructive=pairing-reset_CONFIRM\r\n");
-    std::fflush(stdout);
+    debugPrintf("DBG HELP commands=tone_[hz]_[ms],vibrate_[ms]_[strength],backlight_[10-100],cancel\r\n");
+    debugPrintf("DBG HELP bridge=host-usage_[seq]_[remaining_bp]_[reset_epoch]_[captured_epoch]_[credits]\r\n");
+    debugPrintf("DBG HELP destructive=pairing-reset_CONFIRM\r\n");
+    if (!_writer || !_writer->_reply_uart) std::fflush(stdout);
     result("help", "PASS");
 }
 
@@ -928,17 +1074,17 @@ void SerialDebug::printStatus()
     const Hal::Diagnostics hal         = GetHAL().diagnostics();
     const CodexMicroState state        = GetCodexMicroBle().snapshot();
     const CodexMicroBleDiagnostics ble = GetCodexMicroBle().diagnostics();
-    std::printf("DBG STATUS firmware=%s battery=%u charging=%s ui=%s heap_free=%lu heap_min=%lu\r\n",
+    debugPrintf("DBG STATUS firmware=%s battery=%u charging=%s ui=%s heap_free=%lu heap_min=%lu\r\n",
                 system_config::FirmwareVersion, static_cast<unsigned>(GetHAL().getBatteryLevel()),
                 onOff(GetHAL().isBatteryCharging()), _app.debugScreenName(),
                 static_cast<unsigned long>(esp_get_free_heap_size()),
                 static_cast<unsigned long>(esp_get_minimum_free_heap_size()));
-    std::printf(
+    debugPrintf(
         "DBG STATUS hal_i2c=%s hal_pmic=%s hal_ioe=%s hal_display=%s hal_touch=%s hal_audio=%s hal_vibrator=%s "
         "hal_buttons=%s\r\n",
         onOff(hal.i2c), onOff(hal.pmic), onOff(hal.ioExpander), onOff(hal.display), onOff(hal.touch), onOff(hal.audio),
         onOff(hal.vibrator), onOff(hal.buttons));
-    std::printf(
+    debugPrintf(
         "DBG STATUS ble_ready=%s ble_connected=%s ble_protocol=%s advertising=%s revision=%lu queued=%lu dropped=%lu "
         "processed=%lu tx_messages=%lu tx_reports=%lu tx_failures=%lu rx_reports=%lu rpc=%lu rpc_errors=%lu "
         "wireless_usage_accepted=%lu wireless_usage_rejected=%lu pending=%lu half_open_recoveries=%lu\r\n",
@@ -951,7 +1097,7 @@ void SerialDebug::printStatus()
         static_cast<unsigned long>(ble.wirelessUsageAccepted), static_cast<unsigned long>(ble.wirelessUsageRejected),
         static_cast<unsigned long>(ble.queuePending), static_cast<unsigned long>(ble.halfOpenRecoveries));
     const Hal::PerformanceDiagnostics performance = GetHAL().performanceDiagnostics();
-    std::printf(
+    debugPrintf(
         "DBG STATUS perf_lvgl_core=%d perf_tx_core=%d lvgl_calls=%lu lvgl_max_us=%lu touch_reads=%lu "
         "touch_gap_max_us=%lu queue_high=%lu tx_max_us=%lu tx_total_us=%lu\r\n",
         static_cast<int>(performance.lvglTaskCore), static_cast<int>(ble.inputTaskCore),
@@ -960,13 +1106,13 @@ void SerialDebug::printStatus()
         static_cast<unsigned long>(performance.touchMaxGapUs), static_cast<unsigned long>(ble.queueHighWater),
         static_cast<unsigned long>(ble.txMaxUs), static_cast<unsigned long>(ble.txTotalUs));
     const HostBridgeSnapshot host = GetHostBridge().snapshot(GetHAL().millis());
-    std::printf(
+    debugPrintf(
         "DBG STATUS host_bridge=%s usage_available=%s usage_stale=%s remaining_bp=%u reset_seconds=%lu "
         "reset_credits=%u usage_seq=%lu\r\n",
         onOff(host.online), onOff(host.usageAvailable), onOff(host.usageStale),
         static_cast<unsigned>(host.remainingBasisPoints), static_cast<unsigned long>(host.resetSeconds),
         static_cast<unsigned>(host.resetCredits), static_cast<unsigned long>(GetHostBridge().lastUsageSequence()));
-    std::fflush(stdout);
+    if (!_writer || !_writer->_reply_uart) std::fflush(stdout);
     result("status", "PASS");
 }
 
@@ -1094,10 +1240,10 @@ void SerialDebug::printControls()
         const char* code = CodexMicroControlCodes[index];
         const bool valid = code != nullptr && code[0] != '\0';
         all_valid        = all_valid && valid;
-        std::printf("DBG CONTROL index=%u code=%s status=%s\r\n", static_cast<unsigned>(index),
+        debugPrintf("DBG CONTROL index=%u code=%s status=%s\r\n", static_cast<unsigned>(index),
                     valid ? code : "invalid", valid ? "PASS" : "FAIL");
     }
-    std::fflush(stdout);
+    if (!_writer || !_writer->_reply_uart) std::fflush(stdout);
     result("controls", all_valid ? "PASS" : "FAIL", "physical=13");
 }
 
@@ -1158,11 +1304,11 @@ void SerialDebug::updateInputTest(uint32_t now)
     const AppCodexMicro::DebugInputState state = _app.debugInputState();
     if (state.buttonA && !_input_previous_a) {
         _input_seen_a = true;
-        std::printf("DBG INPUT event=button_a_pressed\r\n");
+        debugPrintf("DBG INPUT event=button_a_pressed\r\n");
     }
     if (state.buttonB && !_input_previous_b) {
         _input_seen_b = true;
-        std::printf("DBG INPUT event=button_b_pressed\r\n");
+        debugPrintf("DBG INPUT event=button_b_pressed\r\n");
     }
     if (state.touch) {
         _input_seen_touch = true;
@@ -1171,15 +1317,15 @@ void SerialDebug::updateInputTest(uint32_t now)
         _input_max_x      = std::max(_input_max_x, state.x);
         _input_max_y      = std::max(_input_max_y, state.y);
         if (!_input_previous_touch) {
-            std::printf("DBG INPUT event=touch_pressed x=%d y=%d\r\n", state.x, state.y);
+            debugPrintf("DBG INPUT event=touch_pressed x=%d y=%d\r\n", state.x, state.y);
         }
     } else if (_input_previous_touch) {
-        std::printf("DBG INPUT event=touch_released\r\n");
+        debugPrintf("DBG INPUT event=touch_released\r\n");
     }
     _input_previous_a     = state.buttonA;
     _input_previous_b     = state.buttonB;
     _input_previous_touch = state.touch;
-    std::fflush(stdout);
+    if (!_writer || !_writer->_reply_uart) std::fflush(stdout);
 
     if (!elapsed(now, _test_deadline_ms) && !(_input_seen_a && _input_seen_b && _input_seen_touch)) {
         return;
@@ -1236,9 +1382,9 @@ void SerialDebug::updateUiCycle(uint32_t now)
     }
 #endif
     ok = ok && std::strcmp(_app.debugScreenName(), expected) == 0;
-    std::printf("DBG UI stage=%u expected=%s actual=%s status=%s\r\n", static_cast<unsigned>(_ui_cycle_stage + 1),
+    debugPrintf("DBG UI stage=%u expected=%s actual=%s status=%s\r\n", static_cast<unsigned>(_ui_cycle_stage + 1),
                 expected, _app.debugScreenName(), ok ? "PASS" : "FAIL");
-    std::fflush(stdout);
+    if (!_writer || !_writer->_reply_uart) std::fflush(stdout);
     if (!ok || _ui_cycle_stage >= 2) {
         _async_test = AsyncTest::None;
         result("ui-cycle", ok ? "PASS" : "FAIL", "final=command verify=visible");
@@ -1442,11 +1588,8 @@ uint32_t SerialDebug::parseUnsigned(const char* value, uint32_t fallback, uint32
 
 void SerialDebug::result(const char* command, const char* status, const char* details)
 {
-    std::printf("DBG RESULT command=%s status=%s", command == nullptr ? "unknown" : command,
-                status == nullptr ? "FAIL" : status);
-    if (details != nullptr && details[0] != '\0') {
-        std::printf(" %s", details);
-    }
-    std::printf("\r\n");
-    std::fflush(stdout);
+    debugPrintf("DBG RESULT command=%s status=%s%s%s\r\n", command == nullptr ? "unknown" : command,
+                status == nullptr ? "FAIL" : status, details && details[0] ? " " : "",
+                details && details[0] ? details : "");
+    if (!_writer || !_writer->_reply_uart) std::fflush(stdout);
 }

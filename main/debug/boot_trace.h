@@ -2,4 +2,5 @@
 #include <cstdint>
 void BootTraceBegin();
 void BootTraceStage(uint32_t stage);
-void BootTracePrint();
+using BootTraceWriter = int (*)(const char*, ...);
+void BootTracePrint(BootTraceWriter writer = nullptr);

@@ -42,12 +42,13 @@ void BootTraceStage(uint32_t stage) {
     e.elapsedMs = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     save();
 }
-void BootTracePrint() {
+void BootTracePrint(BootTraceWriter writer) {
+    if (!writer) writer = std::printf;
     for (const auto& e : trace.entries)
-        if (e.boot) std::printf("DBG BOOT boot=%lu reset=%lu stage=%lu elapsed_ms=%lu\r\n",
+        if (e.boot) writer("DBG BOOT boot=%lu reset=%lu stage=%lu elapsed_ms=%lu\r\n",
             static_cast<unsigned long>(e.boot), static_cast<unsigned long>(e.reset),
             static_cast<unsigned long>(e.stage), static_cast<unsigned long>(e.elapsedMs));
-    std::printf("DBG RESULT command=boot status=%s count=%lu nvs_error=%d uptime_ms=%lld\r\n",
+    writer("DBG RESULT command=boot status=%s count=%lu nvs_error=%d uptime_ms=%lld\r\n",
         ready && error == ESP_OK ? "PASS" : "FAIL", static_cast<unsigned long>(trace.count), error,
         static_cast<long long>(esp_timer_get_time()/1000));
 }

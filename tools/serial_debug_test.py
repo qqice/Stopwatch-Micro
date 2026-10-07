@@ -7,6 +7,8 @@ import argparse
 import re
 import sys
 import time
+import math
+import zlib
 from dataclasses import dataclass
 
 try:
@@ -52,10 +54,23 @@ def discover_port(explicit: str | None) -> str:
     )
 
 
+def encode_command(text: str, uart: bool = False) -> bytes:
+    payload = text.encode("ascii")
+    if any(value < 0x20 or value > 0x7E for value in payload):
+        raise ValueError("debug command must be a single printable ASCII line")
+    if uart:
+        framed = f"uart {zlib.crc32(payload):08x} ".encode("ascii") + payload
+        if len(framed) >= 1536:
+            raise ValueError("UART debug frame exceeds device line capacity")
+        return framed + b"\n"
+    return payload + b"\n"
+
+
 class DebugClient:
-    def __init__(self, port: str) -> None:
+    def __init__(self, port: str, uart: bool = False) -> None:
         # Configure control lines before opening so attaching diagnostics does
         # not create an avoidable DTR/RTS reset pulse.
+        self.uart = uart
         self.serial = serial.Serial(port=None, baudrate=115200, timeout=0.1, write_timeout=1)
         self.serial.dtr = False
         self.serial.rts = False
@@ -68,7 +83,7 @@ class DebugClient:
         while time.monotonic() < deadline:
             now = time.monotonic()
             if now >= next_ping:
-                self.serial.write(b"debug ping\n")
+                self.serial.write(encode_command("debug ping", self.uart))
                 next_ping = now + 1.0
             raw = self.serial.readline()
             if not raw:
@@ -88,7 +103,7 @@ class DebugClient:
         self.serial.close()
 
     def command(self, text: str, expected: str, timeout: float = 5.0) -> Result:
-        self.serial.write((text + "\n").encode("ascii"))
+        self.serial.write(encode_command(text, self.uart))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             raw = self.serial.readline()
@@ -116,7 +131,7 @@ def run_automated(client: DebugClient, allow_offline: bool) -> tuple[list[Result
         ("debug perf 3000", "perf", 6.0, {"PASS"}),
         ("debug mic 500", "mic", 3.0, {"PASS"}),
         ("debug status", "status", 3.0, {"PASS"}),
-        ("debug pairing-reset", "pairing-reset", 3.0, {"SKIP"}),
+        ("debug pairing-reset", "pairing-reset", 3.0, {"FAIL"} if getattr(client, "uart", False) else {"SKIP"}),
     ]
     results: list[Result] = []
     failures: list[str] = []
@@ -160,12 +175,16 @@ def run_interactive(client: DebugClient, failures: list[str]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", help="USB Serial/JTAG port; auto-detected when unique")
+    parser.add_argument("--port", help="Serial port; USB Serial/JTAG auto-detected when unique")
+    parser.add_argument("--uart", action="store_true", help="CRC-framed UART diagnostics; requires explicit --port")
     parser.add_argument(
         "--allow-offline",
         action="store_true",
         help="permit SKIP/OBSERVE results during hardware bring-up before Codex is connected",
     )
+    parser.add_argument("--command", help="run one exact debug/dbg command instead of the automated suite")
+    parser.add_argument("--command-timeout", type=float, default=30.0,
+                        help="single-command response timeout seconds (default: 30)")
     parser.add_argument("--interactive", action="store_true", help="also run physical observation checks")
     parser.add_argument(
         "--trace-seconds",
@@ -173,14 +192,34 @@ def main() -> int:
         help="capture real A/B/Command/reasoning-arc transport performance instead of the automated suite",
     )
     args = parser.parse_args()
+    expected_command = None
+    if args.command is not None:
+        try:
+            encode_command(args.command, args.uart)
+        except (ValueError, UnicodeEncodeError) as exc:
+            parser.error(str(exc))
+        tokens = args.command.split(" ")
+        if len(tokens) < 2 or tokens[0] not in {"debug", "dbg"} or not re.fullmatch(r"[a-z][a-z0-9-]*", tokens[1]):
+            parser.error("--command requires 'debug <command> [arguments]' or 'dbg <command> [arguments]'")
+        if args.interactive or args.trace_seconds is not None:
+            parser.error("--command cannot be combined with --interactive or --trace-seconds")
+        if not math.isfinite(args.command_timeout) or not 0 < args.command_timeout <= 600:
+            parser.error("--command-timeout must be finite, >0 and <=600 seconds")
+        expected_command = "ui-cycle" if tokens[1] == "ui" and (len(tokens) == 2 or tokens[2] == "cycle") else tokens[1]
+    if args.uart and not args.port:
+        parser.error("--uart requires --port; USB auto-detection is not used for UART")
     port = discover_port(args.port)
     print(f"HOST port={port}")
 
     client: DebugClient | None = None
     try:
-        client = DebugClient(port)
+        client = DebugClient(port, uart=args.uart)
         client.handshake()
-        if args.trace_seconds is not None:
+        if args.command is not None:
+            result = client.command(args.command, expected_command, timeout=args.command_timeout)
+            results = [result]
+            failures = [] if result.status in {"PASS", "SKIP", "OBSERVE"} else [f"{result.command}: {result.status} {result.details}"]
+        elif args.trace_seconds is not None:
             duration = max(1, min(args.trace_seconds, 60))
             print(f"HOST TRACE duration={duration}s; operate the physical controls now")
             time.sleep(1.0)

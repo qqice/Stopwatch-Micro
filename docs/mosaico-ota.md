@@ -816,3 +816,50 @@ pending cleanup also briefly reports Driver259 despite successful later drain
 left OFF; stable server publication is restored0130, with controlled0132 retained
 privately. Do not enable this prototype by default or infer saving percentages.
 IoTPowerV1 capture is separately ready; see `docs/iotpower-measurement.md`.
+## UART0 diagnostics (0.13.3)
+
+Mosaico's right H1 expansion UART is GPIO58 TX0/Pin15 and GPIO59 RX0/Pin13,
+GND/Pin20. Use a3.3V TTL adapter with crossedTX/RX and commonGND; leave adapter
+VCC,DTR,RTS disconnected. V1 remains the single5V supply path. Current host
+identity: FT4232HL channelB `COM17`, VID:PID0403:6011, serial123456B; channelsC/D
+areCOM18/19 andA isJTAG. No EEPROM/channel/driver configuration is changed.
+Verify port identities again after re-enumeration; never probe theJTAG channel.
+
+App UART0 is1152008N1/no flow control, clocked fromXTAL so160/320MHz CPU changes
+do not change baud. USB CDC is retained. UART commands additionally require CRC32 framing: `uart <8-hex CRC32> <exact ASCII debug command>\n`. The host DebugClient UART option encodes this automatically; bare UART commands are refused. USB command syntax is unchanged. CRC32 detects damaged/lost-byte frames, not malicious physical access. Each path has a separate1536-byte line
+buffer; replies go only to the command's originating path. Debug multiline and
+boot-history output are included; ordinary firmware/ESP_LOG output is NOT mirrored
+toUART, to avoid power overhead and unnecessary logging. Asynchronous diagnostics
+retain their original reply path. Queue saturation is also treated as lost synchronization; UART driver error events alone can be dropped when its queue fills. Polling has bounded per-port RX and FIFO TX
+budgets; overflows/framing errors scrub/discard a damaged line until newline.
+
+UART permits diagnostics such as `debug ping`, `debug status`, `debug power`,
+`debug gauge`, `debug boot`, `debug ota-status`, `debug display-lock/wake`, and
+`debug display-test-frequency 160/320`. Existing persistent160/320 commands still
+requireCONFIRM. `debug debug-transport` reports transport/queue/error counters.
+USB-only provisioning, gauge mutations, pairing reset, runtime restart and OTA
+bypass/install controls are refused overUART; UART presence does not prove USB
+or external power. Existing screenOTA confirmation and battery/safety gates stay.
+
+With both interfaces connected, partial lines cannot combine across transports.
+No new free-running logging task or global stdout replacement is installed.
+On StopWatch/S3 no UART GPIO is configured and disabled UART storage is minimal.
+Software tests/syntax are not physical UART acceptance: verify the new firmware
+responds onCOM17 after manualOTA before unattended power experiments. Then keep
+wiring fixed and capture three-minute V1 windows without USB power reconnection.
+TX/RXIO leakage/back-power remains a consideration for future microamp-level
+measurements; do not drive an unpowered DUT.
+
+Host single-command example after upgrade:
+
+```powershell
+& C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe `
+  C:\Workspace\Stopwatch-Micro\tools\serial_debug_test.py `
+  --uart --port COM17 --command "debug power" --command-timeout 30
+```
+
+The client computes UART CRC32 automatically, leaves DTR/RTS deasserted and
+runs only the selected command, not the full intrusive diagnostic suite.
+`ui`/`ui cycle` map to the asynchronous `ui-cycle` completion; longer operations
+can select a bounded response timeout. PhysicalCOM17 acceptance remains pending
+manual installation. Build/software checks are not a successful hardware link.
