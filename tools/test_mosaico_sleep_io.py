@@ -16,13 +16,13 @@ using namespace mosaico_sleep_io;
 struct Rig {
  Model m;std::array<Read,64> io{};std::array<unsigned,64> reads{};uint64_t writes=0;
  int badBefore=-1,badAfter=-1,badDisable=-1,mutate=-1;
- constexpr Rig(bool swap=false) {
+ constexpr Rig(bool swap=false,bool sdkPlainSelector=true) {
   m.state.enabled=true;
   const int pins[Count]={8,45,56,60,swap?44:42,50,swap?42:44,36,51,35,9};
   const uint16_t signals[Count]={256,256,256,256,256,62,53,55,54,57,56};
   for(unsigned i=0;i<Count;++i) {
    m.add(static_cast<Role>(i),pins[i],signals[i],i>=5,-100);
-   io[pins[i]]={0,{1,signals[i],2,false,i<5,i>=5,false,false,false,false},true};
+   io[pins[i]]={0,{1,signals[i],2,false,i<5,i>=5 || sdkPlainSelector,false,false,false,false},true};
   }
  }
  constexpr void apply() {
@@ -38,9 +38,19 @@ struct Rig {
 constexpr bool test() {
  if(isolationSafe(true,false,false)||isolationSafe(false,true,false)||isolationSafe(true,true,false))return false;
  if(!isolationSafe(false,false,false)||!isolationSafe(true,false,true)||!isolationSafe(false,true,true))return false;
+ if(normalSummary(Normal{255,65535,255,true,true,true,true,true,true,true})!=0x7fffffffffULL)return false;
  Rig good;good.apply();if(!good.m.ready() || good.writes!=good.m.state.target || good.m.state.beforeSelected!=good.m.state.target || good.m.state.afterSelected || good.m.state.normalSame!=good.m.state.target)return false;
  if(good.m.state.target & (bit(57)|bit(58)|bit(59)|bit(7)|bit(0)|bit(1)))return false;
  // This proves configuration-role plumbing only, not a full physical board-1.2.1 port.
+ // Source-derived SDK representation: GPIO OE register=1, SIG256/function1,
+ // IE=0 and untouched OEN_SEL=0 yields raw peripheralOE=true, not an input pin.
+ if(!good.m.state.pins[3].beforeNormal || !(good.m.state.pins[3].beforeNormal&(uint64_t(1)<<34)))return false;
+ if(good.m.state.pins[3].beforeNormal!=good.m.state.pins[3].afterNormal || good.m.state.pins[3].beforeNormal!=good.m.state.pins[3].currentNormal)return false;
+ Rig registerSelector(false,false);registerSelector.apply();if(!registerSelector.m.ready())return false;
+ Rig fakePlainSignal;fakePlainSignal.m.state.pins[3].signal=55;fakePlainSignal.io[60].normal.signal=55;fakePlainSignal.apply();
+ if(fakePlainSignal.m.ready() || fakePlainSignal.writes&bit(60))return false;
+ Rig rawBitMutation;rawBitMutation.apply();auto changed=rawBitMutation.io[60];changed.normal.peripheralOE=false;
+ rawBitMutation.m.observe(3,changed,-100);if(rawBitMutation.m.ready())return false;
  Rig swapped(true);swapped.apply();if(!swapped.m.ready()||swapped.m.state.panel!=panelAllowed)return false;
  for(int protectedPin : {0,1,7,17,20,57,58,59,63,64,-1}) {
   Model reject;if(reject.add(Role::Clock,protectedPin,53,true,-100)||!reject.state.schemaError||reject.state.target)return false;
@@ -89,7 +99,9 @@ static_assert(test(),"only configured known outputs, exact signal/mux validation
             self.assertIn('GetHAL().sleepIoRetentionReady()',function(standby,signature))
         serial=(R/'main/debug/serial_debug.cpp').read_text()
         report=serial.split('!std::strcmp(command,"sleep-io")',1)[1].split('!std::strcmp(command,"standby-sleep")',1)[0]
-        self.assertIn('report_only_no_arguments',report);self.assertIn('char details[1400]',report)
+        self.assertIn('report_only_no_arguments',report);self.assertIn('char details[1492]',report);self.assertIn('sizeof(details)+42<=1536',report)
+        self.assertIn('n_bits=f0-7,s8-23,d24-31,ie32,oe33,pc34,iv35,od36,pu37,pd38',report)
+        self.assertIn('pin.beforeNormal',report);self.assertIn('pin.afterNormal',report);self.assertIn('pin.currentNormal',report)
         self.assertIn('GetHAL().sleepIoRetentionInfo()',report);self.assertNotIn('gpio_sleep_sel_dis',report)
         self.assertIn('"sleep-io"',(R/'main/debug/serial_debug_transport.h').read_text())
         kconfig=(R/'main/Kconfig.projbuild').read_text().split('config MOSAICO_SLEEP_IO_RETENTION',1)[1]

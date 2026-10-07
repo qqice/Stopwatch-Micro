@@ -381,22 +381,28 @@ void SerialDebug::handleLine(char* line)
 #ifdef MOSAICO_BOARD
     if(command && !std::strcmp(command,"sleep-io")) {
         if(::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","reason=report_only_no_arguments no_changes=1");return;}
-        const auto s=GetHAL().sleepIoRetentionInfo();char pins[512]{};size_t used=0;
+        const auto s=GetHAL().sleepIoRetentionInfo();char pins[512]{},normal[448]{};size_t used=0,normalUsed=0;
         for(const auto& pin:s.pins) if(pin.pin>=0) {
             const int count=std::snprintf(pins+used,sizeof(pins)-used,"%s%d:%u:%d>%d>%d:%ld/%ld/%ld/%ld",used?",":"",
                 pin.pin,pin.signal,pin.before,pin.after,pin.current,static_cast<long>(pin.beforeRc),static_cast<long>(pin.applyRc),
                 static_cast<long>(pin.afterRc),static_cast<long>(pin.currentRc));
             if(count<0 || static_cast<size_t>(count)>=sizeof(pins)-used) {result(command,"FAIL","reason=diagnostic_capacity");return;}
             used+=static_cast<size_t>(count);
+            const int n=std::snprintf(normal+normalUsed,sizeof(normal)-normalUsed,"%s%d:%010llx/%010llx/%010llx",normalUsed?",":"",
+                pin.pin,static_cast<unsigned long long>(pin.beforeNormal),static_cast<unsigned long long>(pin.afterNormal),
+                static_cast<unsigned long long>(pin.currentNormal));
+            if(n<0 || static_cast<size_t>(n)>=sizeof(normal)-normalUsed) {result(command,"FAIL","reason=diagnostic_capacity");return;}
+            normalUsed+=static_cast<size_t>(n);
         }
-        char details[1400]{};
+        char details[1492]{};
+        static_assert(sizeof(details)+42<=1536,"sleep-io reply including DBG prefix stays bounded");
         const int count=std::snprintf(details,sizeof(details),
-            "enabled=%d ready=%d schema_error=%d error=%ld target=%016llx unused=%016llx rail=%016llx panel=%016llx before_read=%016llx before_slp_sel=%016llx after_read=%016llx after_slp_sel=%016llx apply_attempted=%016llx apply_rc_error=%016llx apply_ok=%016llx failed=%016llx unsafe=%016llx normal_cfg_same=%016llx current_read=%016llx current_slp_sel=%016llx current_normal_cfg_same=%016llx current_failed=%016llx pin_format=pin:sig:before-after-current:read-apply-after-current_rc pins=%s keep_normal_only=1 gpio60_not_toggled=1 level_readback=not_claimed",
+            "enabled=%d ready=%d schema_error=%d error=%ld target=%016llx unused=%016llx rail=%016llx panel=%016llx before_read=%016llx before_slp_sel=%016llx after_read=%016llx after_slp_sel=%016llx apply_attempted=%016llx apply_rc_error=%016llx apply_ok=%016llx failed=%016llx unsafe=%016llx normal_cfg_same=%016llx current_read=%016llx current_slp_sel=%016llx current_normal_cfg_same=%016llx current_failed=%016llx pin_format=pin:sig:before-after-current:read-apply-after-current_rc pins=%s n_bits=f0-7,s8-23,d24-31,ie32,oe33,pc34,iv35,od36,pu37,pd38 n_valid=read_masks n=%s keep_normal_only=1 gpio60_not_toggled=1 level_readback=not_claimed",
             s.enabled,s.ready,s.schemaError,static_cast<long>(s.error),
             static_cast<unsigned long long>(s.target),static_cast<unsigned long long>(s.unused),static_cast<unsigned long long>(s.rail),static_cast<unsigned long long>(s.panel),
             static_cast<unsigned long long>(s.beforeRead),static_cast<unsigned long long>(s.beforeSelected),static_cast<unsigned long long>(s.afterRead),static_cast<unsigned long long>(s.afterSelected),
             static_cast<unsigned long long>(s.attempted),static_cast<unsigned long long>(s.applyErrors),static_cast<unsigned long long>(s.applied),static_cast<unsigned long long>(s.failed),static_cast<unsigned long long>(s.unsafe),static_cast<unsigned long long>(s.normalSame),
-            static_cast<unsigned long long>(s.currentRead),static_cast<unsigned long long>(s.currentSelected),static_cast<unsigned long long>(s.currentNormalSame),static_cast<unsigned long long>(s.currentFailed),pins);
+            static_cast<unsigned long long>(s.currentRead),static_cast<unsigned long long>(s.currentSelected),static_cast<unsigned long long>(s.currentNormalSame),static_cast<unsigned long long>(s.currentFailed),pins,normal);
         if(count<0 || static_cast<size_t>(count)>=sizeof(details)) {result(command,"FAIL","reason=diagnostic_capacity");return;}
         result(command,s.error?"FAIL":"PASS",details);return;
     }

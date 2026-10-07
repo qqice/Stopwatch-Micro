@@ -30,11 +30,20 @@ constexpr bool same(Normal a,Normal b) {
         a.output==b.output && a.peripheralOE==b.peripheralOE && a.invertedOE==b.invertedOE &&
         a.openDrain==b.openDrain && a.pullup==b.pullup && a.pulldown==b.pulldown;
 }
+// Lossless public IO attributes: f[0:7], sig[8:23], drive[24:31],
+// input/output/raw-peripheralOE/inverse/OD/PU/PD in bits 32..38.
+constexpr uint64_t normalSummary(Normal normal) {
+    return uint64_t(normal.function) | (uint64_t(normal.signal)<<8) | (uint64_t(normal.drive)<<24) |
+        (uint64_t(normal.input)<<32) | (uint64_t(normal.output)<<33) | (uint64_t(normal.peripheralOE)<<34) |
+        (uint64_t(normal.invertedOE)<<35) | (uint64_t(normal.openDrain)<<36) |
+        (uint64_t(normal.pullup)<<37) | (uint64_t(normal.pulldown)<<38);
+}
 struct Read {int32_t error=0;Normal normal{};bool sleepSelected=false;};
 struct PinReport {
     int16_t pin=-1;uint16_t signal=0;bool peripheral=false;
     int8_t before=-1,after=-1,current=-1;
     int32_t beforeRc=0,applyRc=0,afterRc=0,currentRc=0;
+    uint64_t beforeNormal=0,afterNormal=0,currentNormal=0;
 };
 struct Snapshot {
     bool enabled=false,ready=false,schemaError=false;int32_t error=0;
@@ -44,6 +53,7 @@ struct Snapshot {
 };
 struct Model {
     Snapshot state{};std::array<Normal,Count> baseline{};uint16_t registeredRoles=0;
+    uint16_t gpioSignal=256; // Supplied from SDK SIG_GPIO_OUT_IDX; not a peripheral signal.
     uint16_t gpioFunction=1; // Supplied from the target's SDK PIN_FUNC_GPIO.
     constexpr void failure(int32_t error) { if(!state.error)state.error=error; }
     constexpr bool add(Role role,int pin,uint16_t signal,bool peripheral,int32_t invalid) {
@@ -62,8 +72,12 @@ struct Model {
         // Peripheral OE can be inactive between SPI transactions: OE register 0
         // alone is NOT proof of an unconfigured/input pin. The exact SPI signal
         // and GPIO-matrix function must still match the configured role.
+        // SIG_GPIO_OUT_IDX simple output is controlled by the GPIO OE register.
+        // gpio_output_enable() does NOT update OEN_SEL, so the public raw
+        // peripheralOE bit may legally stay true. Do not reinterpret/mutate it;
+        // same() continues comparing the raw bit across apply/readback.
         return pin.peripheral ? (normal.output || normal.peripheralOE) :
-            (normal.output && !normal.peripheralOE && !normal.input);
+            (pin.signal==gpioSignal && normal.output && !normal.input);
     }
     template<class Reader,class Disable> constexpr void apply(Role role,Reader read,Disable disable,int32_t invalid) {
         const unsigned index=static_cast<unsigned>(role);
@@ -71,6 +85,7 @@ struct Model {
         auto& pin=state.pins[index];const uint64_t mask=bit(pin.pin);
         const Read before=read(pin.pin);pin.beforeRc=before.error;
         if(before.error) {state.failed|=mask;failure(before.error);return;}
+        pin.beforeNormal=normalSummary(before.normal);
         state.beforeRead|=mask;pin.before=before.sleepSelected;if(before.sleepSelected)state.beforeSelected|=mask;
         if(!safe(index,before.normal)) {state.unsafe|=mask;failure(invalid);return;}
         baseline[index]=before.normal;
@@ -79,15 +94,17 @@ struct Model {
         else state.applied|=mask;
         const Read after=read(pin.pin);pin.afterRc=after.error;
         if(after.error) {state.failed|=mask;failure(after.error);return;}
+        pin.afterNormal=normalSummary(after.normal);
         state.afterRead|=mask;pin.after=after.sleepSelected;if(after.sleepSelected)state.afterSelected|=mask;
         if(same(before.normal,after.normal))state.normalSame|=mask;
         else {state.unsafe|=mask;failure(invalid);}
         if(after.sleepSelected) {state.failed|=mask;failure(invalid);}
     }
     constexpr void observe(unsigned index,Read current,int32_t invalid) {
-        auto& pin=state.pins[index];const uint64_t mask=bit(pin.pin);pin.currentRc=current.error;pin.current=-1;
+        auto& pin=state.pins[index];const uint64_t mask=bit(pin.pin);pin.currentRc=current.error;pin.current=-1;pin.currentNormal=0;
         state.currentRead&=~mask;state.currentSelected&=~mask;state.currentNormalSame&=~mask;state.currentFailed&=~mask;
         if(current.error) {state.currentFailed|=mask;failure(current.error);return;}
+        pin.currentNormal=normalSummary(current.normal);
         state.currentRead|=mask;pin.current=current.sleepSelected;
         if(current.sleepSelected) {state.currentSelected|=mask;state.currentFailed|=mask;failure(invalid);}
         if(safe(index,current.normal) && same(baseline[index],current.normal))state.currentNormalSame|=mask;
