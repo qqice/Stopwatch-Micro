@@ -1,0 +1,4 @@
+# Optional single wake-producer candidate, not a period sweep.
+# Preserve normal safe sleep overlays; replace the 10ms timebase wake with
+# an application monotonic LVGL clock and fixed 1000ms unused counter timer.
+CONFIG_MOSAICO_LVGL_MONOTONIC_TICK=y

@@ -9,4 +9,14 @@ menu "Mosaico application power policy"
             a stable locked display, no OTA or boot-health work, and radio inactivity.
             Awake/OTA pause the policy; explicit debug standby-sleep off disables it
             until auto CONFIRM or reboot. No NVS setting is written.
+    config MOSAICO_LVGL_MONOTONIC_TICK
+        bool "Use the Mosaico monotonic LVGL tick with a 1000 ms port timer"
+        depends on IDF_TARGET_ESP32S31
+        default n
+        help
+            Use LVGL's public tick callback with the monotonic ESP timer. Capture a
+            startup offset under the LVGL mutex to preserve tick continuity. The
+            existing port tick timer runs every 1000 ms; no new task or timer is
+            created. Touch polling, LVGL handler deadlines, animation, main-loop
+            and wireless scheduling are unchanged. Disabled keeps the 10 ms tick.
 endmenu

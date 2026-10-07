@@ -29,6 +29,7 @@
 #include "../utils/settings/settings.h"
 #include "mosaico_gauge_model.h"
 #include "mosaico_touch_power_model.h"
+#include "mosaico_lvgl_tick_model.h"
 #include "mosaico_orientation_model.h"
 #include "bmi270.h"
 #include "driver/gpio.h"
@@ -73,7 +74,15 @@ esp_lcd_panel_io_handle_t panel_io = nullptr;
 esp_lcd_panel_handle_t panel = nullptr;
 esp_lcd_touch_handle_t touch = nullptr;
 lv_display_t* display = nullptr;
-bool port_ready = false;
+std::atomic<bool> port_ready{false};
+uint32_t lvgl_timer_period_ms=0; // Immutable after release publication of port_ready.
+#if CONFIG_MOSAICO_LVGL_MONOTONIC_TICK
+std::atomic<uint32_t> lvgl_tick_offset{0};
+uint32_t monotonic_lvgl_tick() {
+    return mosaico_lvgl_tick::tick(mosaico_lvgl_tick::milliseconds(esp_timer_get_time()),
+        lvgl_tick_offset.load(std::memory_order_relaxed));
+}
+#endif
 std::atomic<bool> touch_idle_polling{false};
 bool touch_wait_for_release = false; // LVGL mutex owned; blocks pre-wake held fingers in cache too.
 std::atomic<bool> unused_gates_off{false};
@@ -1475,12 +1484,30 @@ void Hal::lvgl_init()
     config.task_affinity = 1;
     config.task_max_sleep_ms = 500;
     config.task_stack_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT;
-    // esp_lvgl_port uses this same configured period for esp_timer scheduling
-    // AND lv_tick_inc(period_ms), so elapsed-time scaling stays unchanged.
+#if CONFIG_MOSAICO_LVGL_MONOTONIC_TICK
+    // Only the existing port timer changes; handler deadlines and touch cadence
+    // remain owned by LVGL. Its lv_tick_inc no longer supplies the public tick.
+    config.timer_period_ms = mosaico_lvgl_tick::MonotonicTimerPeriodMs;
+#else
+    // Legacy period supplies both esp_timer scheduling and lv_tick_inc.
     config.timer_period_ms = mosaico_touch_power::LvglTickPeriodMs;
+#endif
     ESP_ERROR_CHECK(lvgl_port_init(&config));
-    port_ready = true;
+#if CONFIG_MOSAICO_LVGL_MONOTONIC_TICK
+    // Bootstrap directly: the HAL readiness flag must not become visible before
+    // offset/callback installation. The port task has already completed lv_init.
+    if (!lvgl_port_lock(0)) ESP_ERROR_CHECK(ESP_ERR_TIMEOUT);
+    const uint32_t prior_tick=lv_tick_get();
+    const uint32_t monotonic_ms=mosaico_lvgl_tick::milliseconds(esp_timer_get_time());
+    lvgl_tick_offset.store(mosaico_lvgl_tick::startupOffset(prior_tick,monotonic_ms),std::memory_order_relaxed);
+    lv_tick_set_cb(monotonic_lvgl_tick);
+    lvgl_timer_period_ms=config.timer_period_ms;
+    port_ready.store(true,std::memory_order_release);
+#else
+    lvgl_timer_period_ms=config.timer_period_ms;
+    port_ready.store(true,std::memory_order_release);
     if (!lvglLock()) ESP_ERROR_CHECK(ESP_ERR_TIMEOUT);
+#endif
     lvgl_port_display_cfg_t disp_config{};
     disp_config.io_handle = panel_io;
     disp_config.panel_handle = panel;
@@ -1586,7 +1613,14 @@ void Hal::setTouchIdlePolling(bool idle)
 Hal::TouchPollingInfo Hal::touchPollingInfo() const
 {
     const bool idle = touch_idle_polling.load(std::memory_order_relaxed);
-    return {idle, mosaico_touch_power::pollingPeriodMs(idle), unused_gates_off.load(std::memory_order_relaxed)};
+    TouchPollingInfo info{idle, mosaico_touch_power::pollingPeriodMs(idle), unused_gates_off.load(std::memory_order_relaxed)};
+    if(port_ready.load(std::memory_order_acquire)) {
+        info.lvglTimerPeriodMs=lvgl_timer_period_ms;
+#if CONFIG_MOSAICO_LVGL_MONOTONIC_TICK
+        info.monotonicTick=true;
+#endif
+    }
+    return info;
 }
 void Hal::startLvglUpdate()
 {

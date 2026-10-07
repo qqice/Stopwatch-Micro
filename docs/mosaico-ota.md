@@ -976,3 +976,17 @@ Wake and OTA pause normal sleeping; the next safe lock may resume it.
 No NVS setting or battery gauge value is written by these commands. Unsupported
 profiles cannot initialize the sleep machinery. Future power experiments must
 change one factor at a time; keep the known-good automatic policy unchanged.
+
+### Monotonic LVGL clock / reduced tick wake candidate (0.13.9)
+
+Optional overlay `boards/mosaico/sdkconfig.lvgl-monotonic-experiment` enables
+`CONFIG_MOSAICO_LVGL_MONOTONIC_TICK` (default off). Mosaico uses the existing port
+with fixed 1000 ms counter timer, and LVGL's public monotonic tick callback with
+an initial offset preserving its tick domain. The old counter timer is no longer
+its time source. No vendor/SDK code, stop/resume, extra timer/task or period sweep.
+LVGL still runs its own deadline-driven handler; touch remains 10 ms while awake
+and paused while locked, main remains 20 ms locked, and radio/sleep policy stays
+unchanged. This does not claim minute-long uninterrupted HP sleep or eliminate
+all wake producers. Inspect `idle-runtime` for the actual period and time source.
+Acceptance requires clock/minute redraw, UI/animation, Function/touch recovery,
+UART and OTA checks plus a matched two-minute input-current comparison.

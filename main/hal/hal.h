@@ -219,6 +219,8 @@ public:
         bool idle = false;
         uint32_t periodMs = 0; // Mosaico idle: paused (0), awake: 10 ms.
         bool unusedGatesOff = false; // Output setup succeeded, NOT measured voltage/current.
+        uint32_t lvglTimerPeriodMs = 0; // Actual configured port timer, not tick resolution.
+        bool monotonicTick = false; // Published only after the public callback is installed.
     };
 #ifdef MOSAICO_BOARD
     // idle=true pauses touch reads; wake is Function/explicit caller only.

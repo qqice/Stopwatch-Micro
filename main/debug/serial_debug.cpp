@@ -579,11 +579,12 @@ void SerialDebug::handleLine(char* line)
 #ifdef MOSAICO_BOARD
     if (std::strcmp(command, "idle-runtime") == 0) {
         const auto touch = GetHAL().touchPollingInfo();
-        char details[200]{};
+        char details[256]{};
         std::snprintf(details, sizeof(details),
-            "touch_idle=%d touch_period_ms=%lu unused_gate_commands_ok=%d configured_idle_mhz=%lu main_awake_delay_ms=10 lvgl_tick_ms=10",
+            "touch_idle=%d touch_period_ms=%lu unused_gate_commands_ok=%d configured_idle_mhz=%lu main_awake_delay_ms=10 lvgl_timer_period_ms=%lu lvgl_tick_source=%s",
             touch.idle, static_cast<unsigned long>(touch.periodMs), touch.unusedGatesOff,
-            static_cast<unsigned long>(GetNetworkQuota().idleCpuFrequency()));
+            static_cast<unsigned long>(GetNetworkQuota().idleCpuFrequency()),
+            static_cast<unsigned long>(touch.lvglTimerPeriodMs),touch.monotonicTick?"esp_timer_monotonic":"periodic_increment");
         result("idle-runtime", "PASS", details);
         return;
     }
