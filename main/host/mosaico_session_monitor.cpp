@@ -1,5 +1,6 @@
 #include "mosaico_session_monitor.h"
 #include "mosaico_session_model.h"
+#include "mosaico_display_settings.h"
 #include <esp_log.h>
 #include <esp_err.h>
 #include <esp_timer.h>
@@ -42,9 +43,12 @@ void service(bool locked, bool otaBusy) {
     const auto before = GetCodexMicroBle().snapshot();
     const bool hidReady = beginSucceeded && GetCodexMicroBle().diagnostics().hidReady;
     bool failed = !beginSucceeded || GetCodexMicroBle().diagnostics().linkFailed;
+    MosaicoDisplay::Snapshot display;
+    if (MosaicoDisplay::snapshot(display)) window.intervalMs = MosaicoDisplay::lockIntervalMs(display.config.lockBleMinutes, 1);
     const bool asked = lockedRefreshRequested.exchange(false);
     if (!locked || otaBusy || failed) {
-        lockedRefreshRequested.store(false);
+        if (!locked || failed) lockedRefreshRequested.store(false);
+        else if (asked) lockedRefreshRequested.store(true);
         window.finish(now, false, failed ? ESP_FAIL : 0);
     }
     if (locked && !wasLocked && !failed && before.connected && before.protocolReady && before.knownMask) {
@@ -52,7 +56,9 @@ void service(bool locked, bool otaBusy) {
         lockedCapturedMs = before.lastThreadStatusReceiptMs;
         window.freshMask = 0; // A seed is cached evidence, not a successful refresh.
     }
-    if (asked && locked && !otaBusy && !failed && hidReady) {
+    // The owner deadline is independent of the 60s GUI cache timer.
+    if (asked && locked && !failed && !hidReady) lockedRefreshRequested.store(true);
+    if ((asked || !window.attempted || !wasLocked || (window.attempted && now-window.startedMs >= window.intervalMs)) && locked && !otaBusy && !failed && hidReady) {
         const bool wasActive = window.active;
         if (!window.start(now, before.connectionGeneration, before.threadStatusCompleteReceiptSequence) && !wasActive)
             lockedRefreshRequested.store(true); // Preserve cooldown intent across owner scheduling jitter.

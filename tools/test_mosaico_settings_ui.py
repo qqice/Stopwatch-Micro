@@ -15,39 +15,44 @@ class SettingsUiTests(unittest.TestCase):
         self.assertIn('"NEVER"', render)
 
     def test_geometry_and_async_boundary(self):
-        self.assertIn('Command = 0, History, Agent, OTA, Settings', HDR)
-        self.assertIn('Page::Command, Page::History, Page::OTA, Page::Settings', CPP)
-        self.assertIn('(index + (direction > 0 ? 1 : 4)) % 5', CPP)
-        self.assertIn('panel(_settingsPage, 20, 64, 440, 402, 0)', CPP)
-        self.assertIn('panel(button, 300 + static_cast<int>(side) * 70, y, 60, 54)', CPP)
-        # All controls, numeric labels and the save icon stay within the panel,
-        # even when the root is at any of the nine two-pixel scan positions.
-        for row in range(6):
-            y = row * 62
-            boxes = [(4, y+16, 164, 24), (174, y+14, 110, 28),
-                     (300, y, 60, 54), (370, y, 60, 54)]
-            for x, yy, w, h in boxes:
-                self.assertLessEqual(x+w, 440); self.assertLessEqual(yy+h, 374)
-                for sx in (-2,0,2):
-                    for sy in (-2,0,2):
-                        self.assertGreaterEqual(20+x+sx, 0)
-                        self.assertLessEqual(20+x+w+sx, 480)
-                        self.assertGreaterEqual(64+yy+sy, 0)
-                        self.assertLessEqual(64+yy+h+sy, 480)
-        self.assertLessEqual(64+374+24+2, 480)
-        for x,y,w,h in ((48,426,180,48),(270,426,180,48),(120,64,240,64)):
-            self.assertGreaterEqual(x-2,0);self.assertGreaterEqual(y-2,0)
-            self.assertLessEqual(x+w+2,480);self.assertLessEqual(y+h+2,480)
+        self.assertIn('Page::Command, Page::History, Page::OTA, Page::Sessions', CPP)
+        self.assertIn('(index + (direction > 0 ? 1 : 3)) % 4', CPP)
+        self.assertIn('if (page == Page::Settings) { openSettings(); return _settingsOpen; }', CPP)
+        self.assertNotIn('_page = Page::Settings', CPP)
+        # Exact source-driven tile/detail geometry, including burn-in offsets.
+        for i in range(4):
+            x,y,w,h=12+(i%2)*218,64+56+8+(i//2)*166,206,154
+            self.assertLessEqual(x+w,440);self.assertLessEqual(y+h+2,480)
+        for rows in (2,3,1,2):
+            for i in range(rows):
+                boxes=[(12,8+i*62+16,150,24),(168,8+i*62+14,112,28),
+                       (292,8+i*62,64,54),(364,8+i*62,64,54)]
+                for x,y,w,h in boxes:
+                    self.assertLessEqual(x+w,440);self.assertLessEqual(y+h,346)
+                self.assertLessEqual(12+150,168);self.assertLessEqual(168+112,292)
+        for x,y,w,h in ((12,142,416,48),(12,198,416,48),(12,256,128,48),
+                        (156,256,128,48),(300,256,128,48),(12,314,416,24)):
+            self.assertLessEqual(x+w,440);self.assertLessEqual(y+h,346)
+        self.assertLessEqual(56+70+48,204) # Active editor does not overlap keyboard.
+        self.assertEqual(204+198,402)
+        for token in ('lv_textarea_set_password_mode(_wifiPassword, true)',
+                      'lv_textarea_set_password_show_time(_wifiPassword, 0)',
+                      'lv_textarea_set_max_length(_wifiSsid, 32)',
+                      'lv_textarea_set_max_length(_wifiPassword, 64)',
+                      '!self->_wifiOpenNetwork && !password[0]',
+                      'std::strlen(ssid) > 32', 'std::strlen(password) > 64',
+                      'requestWifiCredentials(ssid, self->_wifiOpenNetwork ? "" : password)',
+                      'lv_textarea_set_text(_wifiPassword, "")', 'SAVE ERROR'):
+            self.assertIn(token,CPP)
         callback=CPP.split('void CodexMicroView::settingsEvent(',1)[1].split('void CodexMicroView::refreshDisplaySettings()',1)[0]
-        self.assertIn('MosaicoDisplay::request(config)',callback)
         for forbidden in ('nvs_', 'setBackLightBrightness', 'service()', 'batteryTelemetry', 'lv_timer_create'):
             self.assertNotIn(forbidden,callback)
-        wake=CPP.split('void CodexMicroView::wakeDisplay()',1)[1].split('void CodexMicroView::lockDisplay()',1)[0]
-        self.assertIn('refreshQuota(GetHAL().millis())',wake)
-        self.assertIn('refreshDisplaySettings()',wake)
-        self.assertIn('lv_obj_invalidate(_root)',wake)
-        self.assertIn('setBackLightBrightness(_displaySettings.config.lockBrightness, false)',CPP)
-        self.assertNotIn('lv_timer_create',CPP)
+        toggle=CPP.split('void CodexMicroView::togglePage()',1)[1].split('void CodexMicroView::wakeDisplay()',1)[0]
+        self.assertIn('closeSettings(); return;',toggle)
+        touch=CPP.split('void CodexMicroView::touchEvent(',1)[1].split('void CodexMicroView::cellEvent',1)[0]
+        self.assertIn('dy < 0 && !self->_settingsOpen',touch)
+        self.assertIn('dy > 0 && self->_settingsOpen',touch)
+        self.assertIn('if (self->_touchOnEditor)',touch)
 
     def test_actual_settings_profile_and_shift_functions(self):
         compilers=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
@@ -80,7 +85,7 @@ struct CodexMicroView {
  struct Hit { CodexMicroView* owner; size_t index; };
  Page _page=Page::Settings; RotationPhase _rotationPhase=RotationPhase::Idle;
  bool _rotationFault=false,_locked=false,_suppressed=false,_swipeConsumed=false,busy=false;
- bool _settingsRequestFailed=false,_chargeProfile=false,_profileSeen=false;
+ bool _settingsRequestFailed=false,_chargeProfile=false,_profileSeen=false,_settingsOpen=true,_settingsAnimating=false;
  mosaico_charge::ChargeSupplyState _chargeSupply{};
  bool _shiftPending=false,_touchTracking=false,_usb=false,snapshotReady=true,accept=true;
  unsigned _activity=0,_now=123,_shiftIndex=0;
@@ -102,13 +107,13 @@ constexpr CodexMicroView::Hit* lv_event_get_user_data(CodexMicroView::Hit* e) { 
 '''+ '\n'.join(methods)+r'''
 constexpr bool controls() {
  CodexMicroView v;v.refreshDisplaySettings();
- for(int row=0;row<6;++row) {
+ for(int row=0;row<8;++row) {
   CodexMicroView::Hit h{&v,size_t(row*2+1)};
   for(int repeat=0;repeat<25;++repeat) {
    v.settingsEvent(&h);
    auto c=v._displaySettings.config;
    if(c.batteryTimeoutSeconds>60 || !c.batteryTimeoutSeconds || c.chargeBrightness<10 || c.chargeBrightness>100 ||
-      c.batteryBrightness<10 || c.batteryBrightness>100 || c.lockBrightness>100)return false;
+      c.batteryBrightness<10 || c.batteryBrightness>100 || c.lockBrightness>100 || c.lockWifiMinutes<1 || c.lockWifiMinutes>60 || c.lockBleMinutes<1 || c.lockBleMinutes>60)return false;
   }
   h.index=row*2;for(int repeat=0;repeat<25;++repeat)v.settingsEvent(&h);
  }
@@ -160,7 +165,7 @@ constexpr bool shift() {
  v._displaySettings.config.burnIn=false;v.applyBurnInShift(false);
  return !v.root.x && !v.root.y && !v._shiftPending;
 }
-static_assert(controls(),"six controls stay bounded and reject suppressed input");
+static_assert(controls(),"eight controls stay bounded and reject suppressed input");
 static_assert(profiles(),"profile changes reset activity once, live brightness and contention are safe");
 static_assert(shift(),"bounded scan defers unsafe movement and disabled shift returns to origin");
 '''

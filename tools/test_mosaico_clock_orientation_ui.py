@@ -243,7 +243,7 @@ struct CodexMicroView {
  RotationPhase _rotationPhase=RotationPhase::Idle;
  lv_obj_t curtain{},root{};
  lv_obj_t* _rotationCurtain=&curtain; lv_obj_t* _root=&root; lv_obj_t* _slideTo=nullptr;
- bool _rotationFault=false,_locked=false,_suppressed=false,busy=false,_touchTracking=false,_swipeConsumed=false;
+ bool _rotationFault=false,_locked=false,_suppressed=false,busy=false,_touchTracking=false,_swipeConsumed=false,_settingsAnimating=false;
  unsigned _motionGeneration=~0U,_rotationGeneration=0,_rotationFrame=0,_frames=0; unsigned short _rotationTarget=0;
  FakeHal _hal;
  constexpr bool otaBusy() { return busy; }

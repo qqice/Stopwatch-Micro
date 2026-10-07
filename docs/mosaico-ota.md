@@ -696,3 +696,40 @@ models must be re-exported and reviewed again. Source/image acceptance cannot
 prove physical OLED gamma/readability, so final hardware observation remains a
 separate gate. Existing native masks/fonts suffice; no NOR/NAND asset write or
 partition change is required.
+
+## Settings sheet (0.13.0)
+
+Settings is not a fifth carousel page. On quota, history, Micro/Sessions or OTA
+(idle), swipe upward to open its animated sheet. Function or a downward swipe
+dismisses it without advancing the underlying page. Locked Function still only
+wakes. OTA download/verify/install closes settings and keeps OTA awake.
+
+Four tiles group TIMEOUT, BRIGHTNESS, BURN-IN and WIRELESS. Existing icons and
+fonts are reused. WiFi and BT locked refresh periods can be independently set
+to 1, 2, 5, 10, 15, 30 or 60 minutes. The default remains WiFi5min/BT1min;
+settings-v1 blobs are read without writing, and user edits save v2 in the same
+CRC-protected24-byte blob. Lock screen rendering still updates once/minute;
+that does not force a network poll. BLE update windows remain bounded8seconds;
+WiFi1min windows are capped45seconds to leave an offline gap on connection failure.
+
+WIRELESS provides SSID and a masked password editor with the LVGL screen keyboard.
+Existing passwords are never returned to UI. An empty password is submitted only
+with OPEN explicitly selected. SAVE queues an atomic CRC-protected SSID/password
+pair (`quota_net/wifi_ui`); endpoint/token/tailnet are not changed. REBOOT is a
+separate explicit action to apply credentials, avoiding unsafe reconstruction of
+live WiFi/netif/tailnet. Both save and reboot are owner-executed and blocked across
+OTA/boot-health/staged-image work; reboot also waits for pending display settings
+persistence. A persistence error does not reboot and may be retried.
+
+This is not initial server provisioning: if the existing quota owner cannot start
+or endpoint configuration is absent, WiFi editing reports unavailable rather
+than pretending to save. The original serial recovery/provisioning route remains.
+The Bluetooth product name is unchanged: our bridge matches HID identifiers,
+but this is not proof that the official desktop client accepts arbitrary names.
+No network/gauge/flash-layout changes are made merely by installing this UI.
+
+Settings previews use exact source rectangles and reused icon primitives but are
+not LVGL screenshots; keyboard font/key composition is illustrative. Root viewed
+tiles, all four detail groups and keyboard layout to check overlap, then ran
+actual-source gesture/control and owner fault traces. Physical touch, glyph
+readability, radio timing and NVS power-loss recovery still need board acceptance.

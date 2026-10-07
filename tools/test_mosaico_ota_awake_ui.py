@@ -44,7 +44,9 @@ struct CodexMicroView {
  Quota* _quota=&quota;
  Page _page=Page::Command,_otaReturn=Page::Command;
  bool _locked=false,_rotationFault=false,_otaApproved=false,_chargeProfile=false;
- bool _touchTracking=false,_swipeConsumed=false;
+ bool _touchTracking=false,_swipeConsumed=false,_settingsOpen=false;
+ constexpr void openSettings() { _settingsOpen=true; }
+ constexpr void closeSettings(bool=true) { _settingsOpen=false; }
  uint32_t _now=100,_activity=100; int64_t _clockMinute=0;
  int lockCount=0,wakeCount=0;lv_obj_t root;
  lv_obj_t* _sessionsPage=&root;lv_obj_t* _otaPage=&root;lv_obj_t* _settingsPage=&root;lv_obj_t* _quotaPage=&root;

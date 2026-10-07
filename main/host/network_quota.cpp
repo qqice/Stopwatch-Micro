@@ -11,6 +11,8 @@
 #include <hal/hal.h>
 #include <esp_heap_caps.h>
 #include <esp_memory_utils.h>
+#include <esp_ota_ops.h>
+#include <esp_system.h>
 #endif
 #include <memory>
 #include <algorithm>
@@ -95,6 +97,8 @@ void NetworkQuota::wait(uint32_t milliseconds)
 #ifdef MOSAICO_BOARD
     MosaicoDisplay::Snapshot display;
     if (MosaicoDisplay::snapshot(display) && display.pending && milliseconds > 250) milliseconds = 250;
+    WifiSettingsSnapshot wifi;
+    if (wifiSettingsSnapshot(wifi) && (wifi.pending || wifi.restartPending) && milliseconds > 250) milliseconds=250;
 #endif
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(milliseconds));
 }
@@ -119,6 +123,79 @@ void NetworkQuota::setCpu(uint32_t mhz)
     if (result == ESP_OK) _cpu_target = mhz;
 }
 #ifdef MOSAICO_BOARD
+bool NetworkQuota::wifiSettingsSnapshot(WifiSettingsSnapshot& out)
+{
+    std::unique_lock<std::mutex> guard(_wifi_settings_mutex, std::try_to_lock);
+    if (!guard.owns_lock()) return false;
+    out = _wifi_settings; return true;
+}
+bool NetworkQuota::requestWifiCredentials(const char* ssid, const char* password)
+{
+    std::unique_lock<std::mutex> guard(_wifi_settings_mutex, std::try_to_lock);
+    if (!guard.owns_lock()) return false;
+    if (!_wifi_settings.available) { _wifi_settings.error=ESP_ERR_INVALID_STATE; return false; }
+    if (_wifi_settings.pending || _wifi_settings.restartPending) return false;
+    if (!MosaicoWifi::validCredentials(ssid,password)) { _wifi_settings.error=ESP_ERR_INVALID_ARG; return false; }
+    std::strcpy(_pending_ssid,ssid); std::strcpy(_pending_password,password);
+    _wifi_settings.pending=true; _wifi_settings.error=0;
+    xTaskNotifyGive(_task_handle); return true;
+}
+bool NetworkQuota::requestWifiRestart()
+{
+    std::unique_lock<std::mutex> guard(_wifi_settings_mutex, std::try_to_lock);
+    if (!guard.owns_lock()) return false;
+    if (!_wifi_settings.available || _wifi_settings.pending || _wifi_settings.error || !_wifi_settings.rebootRequired) return false;
+    _wifi_settings.restartPending=true; _wifi_settings.restartError=0; xTaskNotifyGive(_task_handle); return true;
+}
+void NetworkQuota::serviceWifiSettings()
+{
+    // Same sole-owner safety gate as display persistence. Never hold the GUI
+    // cache mutex over NVS operations or restart, never rebuild live netifs.
+    if (MosaicoOta::busy() || MosaicoOta::healthPending()) return;
+    MosaicoOta::UiSnapshot ota{};
+    if (!MosaicoOta::copyUiSnapshot(ota) ||
+        (ota.imageVerified && ota.stage != MosaicoOta::UiStage::Complete) ||
+        ota.stage==MosaicoOta::UiStage::ReadyReboot || ota.stage==MosaicoOta::UiStage::BootChecking) return;
+    const esp_partition_t* running=esp_ota_get_running_partition();
+    esp_ota_img_states_t state=ESP_OTA_IMG_UNDEFINED;
+    if (!running || esp_ota_get_state_partition(running,&state)!=ESP_OK || state!=ESP_OTA_IMG_VALID) return;
+    char ssid[33]{}, password[65]{};
+    bool restart=false;
+    {
+        std::unique_lock<std::mutex> guard(_wifi_settings_mutex,std::try_to_lock);
+        if (!guard.owns_lock()) return;
+        restart=_wifi_settings.restartPending && !_wifi_settings.pending && !_wifi_settings.error;
+        if (!restart && !_wifi_settings.pending) return;
+        if (!restart) { std::memcpy(ssid,_pending_ssid,sizeof(ssid)); std::memcpy(password,_pending_password,sizeof(password)); }
+    }
+    if (restart) {
+        MosaicoDisplay::Snapshot display;
+        if (!MosaicoDisplay::snapshot(display)) return;
+        if (display.error) {
+            std::lock_guard<std::mutex> guard(_wifi_settings_mutex);
+            _wifi_settings.restartPending=false;
+            _wifi_settings.restartError=display.error;
+            return;
+        }
+        if (!MosaicoDisplay::rebootSaveReady(display)) return;
+        esp_restart(); return;
+    }
+    nvs_handle_t h=0;
+    esp_err_t error=nvs_open("quota_net",NVS_READWRITE,&h);
+    if (error==ESP_OK) {
+        MosaicoWifi::Blob blob=MosaicoWifi::encode(ssid,password);
+        error=nvs_set_blob(h,"wifi_ui",blob.data(),blob.size());
+        MosaicoWifi::scrub(blob.data(),blob.size());
+        if (error==ESP_OK) error=nvs_commit(h);
+        nvs_close(h);
+    }
+    MosaicoWifi::scrub(password,sizeof(password));
+    std::lock_guard<std::mutex> guard(_wifi_settings_mutex);
+    MosaicoWifi::scrub(_pending_password,sizeof(_pending_password));
+    MosaicoWifi::scrub(_pending_ssid,sizeof(_pending_ssid));
+    _wifi_settings.pending=false; _wifi_settings.error=error;
+    if (!error) { std::memcpy(_wifi_settings.ssid,ssid,sizeof(ssid)); _wifi_settings.rebootRequired=true; }
+}
 void NetworkQuota::setLowClockDiagnostic(bool enabled)
 {
     if (enabled) _diagnostic_idle_mhz = 80; // legacy on/off means the original 80MHz experiment.
@@ -213,8 +290,15 @@ bool NetworkQuota::configure(const char* encoded)
     nvs_handle_t handle;
     if (nvs_open("quota_net", NVS_READWRITE, &handle) != ESP_OK) return false;
     bool ok = nvs_set_str(handle, "ssid", ssid) == ESP_OK && nvs_set_str(handle, "password", password) == ESP_OK &&
-              nvs_set_str(handle, "url", url) == ESP_OK && nvs_set_str(handle, "token", token) == ESP_OK &&
-              nvs_commit(handle) == ESP_OK;
+              nvs_set_str(handle, "url", url) == ESP_OK && nvs_set_str(handle, "token", token) == ESP_OK;
+#ifdef MOSAICO_BOARD
+    if (ok) {
+        auto blob=MosaicoWifi::encode(ssid,password);
+        ok=nvs_set_blob(handle,"wifi_ui",blob.data(),blob.size())==ESP_OK;
+        MosaicoWifi::scrub(blob.data(),blob.size());
+    }
+#endif
+    if (ok) ok=nvs_commit(handle)==ESP_OK;
     nvs_close(handle);
     std::memset(password, 0, sizeof(password));
     std::memset(token, 0, sizeof(token));
@@ -249,7 +333,19 @@ void NetworkQuota::begin()
     bool ok = nvs_get_str(handle, "ssid", _ssid, &a) == ESP_OK &&
               nvs_get_str(handle, "password", _password, &b) == ESP_OK &&
               nvs_get_str(handle, "url", _url, &c) == ESP_OK && nvs_get_str(handle, "token", _token, &d) == ESP_OK;
+    #ifdef MOSAICO_BOARD
+    MosaicoWifi::Blob wifiBlob{}; size_t wifiSize=wifiBlob.size();
+    const esp_err_t wifiError=nvs_get_blob(handle,"wifi_ui",wifiBlob.data(),&wifiSize);
+    if (wifiError==ESP_OK) {
+        // Corruption falls back to the legacy pair; never rewrite automatically.
+        if (wifiSize==wifiBlob.size()) MosaicoWifi::decode(wifiBlob,_ssid,_password);
+    }
+    MosaicoWifi::scrub(wifiBlob.data(),wifiBlob.size());
+#endif
     nvs_close(handle);
+#ifdef MOSAICO_BOARD
+    { std::lock_guard<std::mutex> guard(_wifi_settings_mutex); std::memcpy(_wifi_settings.ssid,_ssid,sizeof(_ssid)); }
+#endif
     if (!ok || !_ssid[0] || !_url[0] || !_token[0]) {
 #ifdef MOSAICO_BOARD
         MosaicoDisplay::startFallbackOwner();
@@ -335,19 +431,34 @@ void NetworkQuota::run()
     constexpr int64_t UpdateWindowUs    = 90LL * 1000000;
 #ifdef MOSAICO_BOARD
     const bool ownsDisplaySettings = MosaicoDisplay::claimNetworkOwner();
+    { std::lock_guard<std::mutex> guard(_wifi_settings_mutex);
+      std::memcpy(_wifi_settings.ssid,_ssid,sizeof(_ssid)); _wifi_settings.available=true; }
+    uint32_t refreshIntervalMs=300000;
+    int64_t refreshBaseUs=0;
     int64_t nextGaugeCheckUs = 0;
 
 #endif
     while (true) {
 #ifdef MOSAICO_BOARD
         if (ownsDisplaySettings) MosaicoDisplay::service();
+        serviceWifiSettings();
         MosaicoOta::processLocalRequests(); // INSTALL/REBOOT do not require network readiness.
         if (MosaicoOta::busy() && MosaicoOta::requestAgeMs() > 120000)
             MosaicoOta::fail("network_ready_timeout");
 #endif
         const bool locked = idleLocked();
         const int64_t now = esp_timer_get_time();
+        int64_t refreshIntervalUs=RefreshIntervalUs;
+        int64_t updateWindowUs=UpdateWindowUs;
 #ifdef MOSAICO_BOARD
+        MosaicoDisplay::Snapshot display;
+        if (MosaicoDisplay::snapshot(display)) {
+            const uint32_t interval=MosaicoDisplay::lockIntervalMs(display.config.lockWifiMinutes,5);
+            if (interval!=refreshIntervalMs) { refreshIntervalMs=interval; nextRefresh=refreshBaseUs+int64_t(interval)*1000; }
+        }
+        refreshIntervalUs=int64_t(refreshIntervalMs)*1000;
+        updateWindowUs=std::min<int64_t>(UpdateWindowUs, refreshIntervalUs*3/4);
+        if (updateWindow) windowDeadline=std::min(windowDeadline,refreshBaseUs+updateWindowUs);
         // Network/OTA can close the lease, never reopen a stale GUI request.
         // Main-loop Sessions service is the sole advertising-enable owner.
         if (!MosaicoSessions::enabled() || MosaicoOta::busy() || MosaicoOta::healthPending())
@@ -356,14 +467,20 @@ void NetworkQuota::run()
         GetCodexMicroBle().requestRadioIdle(locked);
 #endif
         if (locked && !wasLocked) {
-            nextRefresh  = now + RefreshIntervalUs;
+            nextRefresh  = now + refreshIntervalUs;
+#ifdef MOSAICO_BOARD
+            refreshBaseUs=now;
+#endif
             updateWindow = false;
         }
         wasLocked = locked;
-        if (locked && (_force_refresh.exchange(false) || now >= nextRefresh)) {
+        if (locked && !updateWindow && (_force_refresh.exchange(false) || now >= nextRefresh)) {
             updateWindow   = true;
-            windowDeadline = now + UpdateWindowUs;
-            nextRefresh    = now + RefreshIntervalUs;
+            windowDeadline = now + updateWindowUs;
+            nextRefresh    = now + refreshIntervalUs;
+#ifdef MOSAICO_BOARD
+            refreshBaseUs=now;
+#endif
         }
         if (locked && updateWindow && now >= windowDeadline) updateWindow = false;
         if (locked && !updateWindow) {

@@ -88,7 +88,7 @@ static_assert(test());
         self.assertIn('lockedRefreshRequested.store(true)',request)
         for forbidden in ('GetCodexMicroBle','nvs_','GetHAL','esp_ble_'): self.assertNotIn(forbidden,request)
         self.assertIn('if (!locked || otaBusy || failed)',MODULE)
-        self.assertIn('asked && locked && !otaBusy && !failed && hidReady',MODULE)
+        self.assertIn('now-window.startedMs >= window.intervalMs',MODULE)
         self.assertIn('requested.load() || window.active, locked && !window.active, otaBusy',MODULE)
         self.assertIn('if (window.freshMask == 0x3f) window.finish',MODULE)
         self.assertIn('window.expired(now)',MODULE)
@@ -126,7 +126,7 @@ static_assert(test());
         self.assertNotIn('MosaicoSessions::service(GetNetworkQuota().idleLocked()',main)
 
     def test_actual_owner_admission_fragment_retains_cooldown_request(self):
-        admission=MODULE.split('if (asked && locked && !otaBusy && !failed && hidReady)',1)[1].split('\n    wasLocked',1)[0]
+        admission=MODULE.split('if ((asked || !window.attempted || !wasLocked || (window.attempted && now-window.startedMs >= window.intervalMs)) && locked && !otaBusy && !failed && hidReady)',1)[1].split('\n    wasLocked',1)[0]
         # Exercise the actual owner admission branch with no RTOS/controller.
         code=r'''
 #include "main/host/mosaico_session_model.h"

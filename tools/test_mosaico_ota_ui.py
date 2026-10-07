@@ -145,7 +145,7 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         wake=CPP.split('void CodexMicroView::wakeDisplay()',1)[1].split('void CodexMicroView::lockDisplay()',1)[0]
         self.assertIn('if (_otaPending) { _otaPending = false; setPageForDebug(Page::OTA); }',wake)
         self.assertIn('if (_page == Page::OTA) renderOta();',wake)
-        pages=('Command','History','OTA','Settings','Sessions')
+        pages=('Command','History','OTA','Sessions')
         for start in pages:
             for locked,busy,pending in ((False,False,False),(True,False,False),(True,False,True),(False,True,False)):
                 page=start
@@ -153,7 +153,7 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
                     if pending: page='OTA'
                 elif not busy:
                     page=pages[(pages.index(page)+1)%len(pages)]
-                expected='OTA' if locked and pending else start if locked or busy else pages[(pages.index(start)+1)%5]
+                expected='OTA' if locked and pending else start if locked or busy else pages[(pages.index(start)+1)%4]
                 self.assertEqual(page,expected)
         setpage=CPP.split('bool CodexMicroView::setPageForDebug(',1)[1].split('void CodexMicroView::togglePage()',1)[0]
         self.assertIn('if (_page != Page::OTA) _otaReturn = _page;',setpage)
@@ -352,6 +352,7 @@ constexpr void lv_indev_get_point(lv_indev_t* i,lv_point_t* p) { *p=i->point; }
 constexpr unsigned lv_tick_get() { return 1; }
 constexpr void lv_obj_set_x(lv_obj_t* o,int x) { o->x=x; }
 constexpr void lv_obj_add_flag(lv_obj_t* o,int) { o->hidden=true; }
+constexpr bool lv_obj_has_flag(lv_obj_t* o,int) { return o->hidden; }
 constexpr void lv_obj_remove_flag(lv_obj_t* o,int) { o->hidden=false; }
 constexpr void lv_anim_delete(CodexMicroView*,void(*)(CodexMicroView*,int)) {}
 constexpr void lv_anim_init(lv_anim_t* a) { *a={}; }
@@ -367,7 +368,10 @@ struct CodexMicroView {
  enum class Page { Command,History,Agent,OTA,Settings,Sessions };
  enum class RotationPhase { Idle,FadeOut,WaitBlack,WaitRotated,FadeIn };
  RotationPhase _rotationPhase=RotationPhase::Idle;
- bool _rotationFault=false;
+ bool _rotationFault=false,_settingsOpen=false,_settingsAnimating=false,_touchOnEditor=false;
+ lv_obj_t keyboard{20,true}; lv_obj_t* _wifiKeyboard=&keyboard;
+ constexpr void openSettings() { _settingsOpen=true;_touchTracking=false;_swipeConsumed=true; }
+ constexpr void closeSettings(bool=true) { _settingsOpen=false;_touchTracking=false;_swipeConsumed=true; }
  Page _page=Page::Command; lv_obj_t panels[5]{};
  lv_obj_t* _quotaPage=&panels[0]; lv_obj_t* _historyPage=&panels[1]; lv_obj_t* _otaPage=&panels[2]; lv_obj_t* _settingsPage=&panels[3]; lv_obj_t* _sessionsPage=&panels[4];
  lv_obj_t* _slideFrom=nullptr; lv_obj_t* _slideTo=nullptr;
@@ -394,11 +398,11 @@ struct CodexMicroView {
         harness+='\n'.join(methods)+r'''
 constexpr bool exercise(int direction, bool cancel) {
  CodexMicroView v; lv_indev_t input{}; lv_event_t e{LV_EVENT_PRESSED,&v,&input};
- for(int step=0;step<5;++step) {
+ for(int step=0;step<4;++step) {
   input.point={240,200}; e.code=LV_EVENT_PRESSED; v.touchEvent(&e);
   input.point={240-direction*120,200}; e.code=LV_EVENT_PRESSING; v.touchEvent(&e);
-  int target=direction>0?(step+1)%5:(4-step+5)%5;
-  if(v._page != (target==0?CodexMicroView::Page::Command:target==1?CodexMicroView::Page::History:target==2?CodexMicroView::Page::OTA:target==3?CodexMicroView::Page::Settings:CodexMicroView::Page::Sessions)) return false;
+  int target=direction>0?(step+1)%4:(3-step+4)%4;
+  if(v._page != (target==0?CodexMicroView::Page::Command:target==1?CodexMicroView::Page::History:target==2?CodexMicroView::Page::OTA:CodexMicroView::Page::Sessions)) return false;
   if(!v._slideTo || v._touchTracking || !v._swipeConsumed) return false;
   v.slideExec(&v,240);
   if(v._slideFrom->x != 20-direction*240 || v._slideTo->x != 20+direction*240) return false;
@@ -437,6 +441,20 @@ static_assert(exercise(1,false),"forward completion");
 static_assert(exercise(-1,false),"reverse completion");
 static_assert(exercise(1,true),"forward cancellation");
 static_assert(exercise(-1,true),"reverse cancellation");
+constexpr bool sheets() {
+ CodexMicroView v; v._page=CodexMicroView::Page::Sessions;
+ lv_indev_t input{{240,300}}; lv_event_t e{LV_EVENT_PRESSED,&v,&input};
+ v.touchEvent(&e);input.point={240,150};e.code=LV_EVENT_PRESSING;v.touchEvent(&e);
+ if(!v._settingsOpen || v._page!=CodexMicroView::Page::Sessions || v._slideTo)return false;
+ input.point={240,200};e.code=LV_EVENT_PRESSED;v.touchEvent(&e);
+ input.point={120,200};e.code=LV_EVENT_PRESSING;v.touchEvent(&e);
+ if(v._slideTo || !v._settingsOpen)return false;
+ v.togglePage();if(v._settingsOpen || v._page!=CodexMicroView::Page::Sessions)return false;
+ v.openSettings();input.point={240,150};e.code=LV_EVENT_PRESSED;v.touchEvent(&e);
+ input.point={240,300};e.code=LV_EVENT_PRESSING;v.touchEvent(&e);
+ return !v._settingsOpen && v._page==CodexMicroView::Page::Sessions;
+}
+static_assert(sheets(),"vertical sheet gestures and Function preserve original page");
 static_assert(edgeCases(),"release fallback, press-lost, guards and Function");
 '''
         with tempfile.TemporaryDirectory() as directory:

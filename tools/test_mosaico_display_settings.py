@@ -35,7 +35,7 @@ constexpr bool test() {
  for(unsigned i=0;i<valid.size();++i) { Blob corrupt=valid; corrupt[i]^=1; Config out{15,15,20,20,3,false}; const Config before=out;
   if(decode(corrupt,out)||!(out==before)) return false;
  }
- Blob bad=valid; bad[4]=2; put32(bad,20,crc(bad)); Config out;
+ Blob bad=valid; bad[4]=3; put32(bad,20,crc(bad)); Config out;
  if(decode(bad,out)) return false;
  bad=valid; bad[5]=2; put32(bad,20,crc(bad)); if(decode(bad,out)) return false;
  bad=valid; put32(bad,16,120); put32(bad,20,crc(bad)); if(decode(bad,out)) return false;

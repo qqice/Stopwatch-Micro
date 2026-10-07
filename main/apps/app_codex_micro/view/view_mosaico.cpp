@@ -39,6 +39,9 @@ uint32_t quotaLevelColor(uint16_t bp, bool stale) {
     const uint32_t color = levelColor(bp);
     return stale ? dimCachedColor(color) : color;
 }
+// Sheet geometry includes the two-pixel burn-in margin.
+static_assert(20 + 12 + 218 + 206 + 2 <= 480 && 64 + 56 + 8 + 166 + 154 + 2 <= 480);
+static_assert(12 + 416 <= 440 && 314 + 24 <= 346 && 56 + 70 + 48 <= 204 && 204 + 198 == 402);
 static_assert(dimCachedColor(Green) == 0x52B88B, "cached green remains readable");
 void place(lv_obj_t* obj, int x, int y) { if (obj) lv_obj_set_pos(obj, x, y); }
 void panel(lv_obj_t* obj, int x, int y, int w, int h, uint32_t color = 0x15191F) {
@@ -100,6 +103,7 @@ void formatCountdown(mosaico_time::Countdown time, char* out, size_t size, bool 
 namespace view {
 CodexMicroView::~CodexMicroView() {
     MosaicoSessions::setEnabled(false);
+    closeSettings(false);
     cancelOrientation();
     GetHAL().setMotionIdle(true);
     cancelPageSlide();
@@ -255,29 +259,182 @@ void CodexMicroView::init(lv_obj_t* parent) {
 }
 // Settings reuse LVGL's input/render loop; callbacks only enqueue RAM changes.
 void CodexMicroView::initSettings() {
-    _settingsPage = lv_obj_create(_root); panel(_settingsPage, 20, 64, 440, 402, 0);
+    _settingsPage = lv_obj_create(_root); panel(_settingsPage, 20, 64, 440, 402, 0x080B10);
     lv_obj_add_flag(_settingsPage, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
-    static const char* names[] = {"CHG SEC", "BAT SEC", "CHG %", "BAT %", "LOCK %", "SHIFT"};
-    for (size_t row = 0; row < 6; ++row) {
-        const int y = static_cast<int>(row) * 62;
-        auto* name = label(_settingsPage, 4, y + 16, 164, names[row], &lv_font_montserrat_16);
-        lv_obj_set_height(name, 24);
-        _settingsValues[row] = label(_settingsPage, 174, y + 14, 110, "", &lv_font_montserrat_20);
-        lv_obj_set_height(_settingsValues[row], 28);
-        lv_obj_set_style_text_align(_settingsValues[row], LV_TEXT_ALIGN_CENTER, 0);
+    _settingsTitle = label(_settingsPage, 12, 8, 380, "SETTINGS", &lv_font_montserrat_20);
+    lv_obj_set_height(_settingsTitle, 40); lv_obj_set_style_text_color(_settingsTitle, lv_color_hex(Cyan), 0);
+    _settingsStatus = createIcon(_settingsPage, Icon::Check, 24, Green); place(_settingsStatus, 404, 16);
+    _settingsTiles = lv_obj_create(_settingsPage); panel(_settingsTiles, 0, 56, 440, 346, 0x080B10);
+    lv_obj_add_flag(_settingsTiles, LV_OBJ_FLAG_EVENT_BUBBLE);
+    const char* titles[] = {"TIMEOUT", "BRIGHTNESS", "BURN-IN", "WIRELESS"};
+    const Icon icons[] = {Icon::Clock, Icon::Bolt, Icon::Refresh, Icon::Wifi};
+    for (size_t i = 0; i < 4; ++i) {
+        auto* tile = lv_button_create(_settingsTiles); panel(tile, 12 + (i % 2) * 218, 8 + (i / 2) * 166, 206, 154);
+        lv_obj_add_flag(tile, LV_OBJ_FLAG_EVENT_BUBBLE);
+        auto* icon = createIcon(tile, icons[i], 64, Cyan); place(icon, 71, 18);
+        auto* name = label(tile, 8, 104, 190, titles[i], &lv_font_montserrat_20);
+        lv_obj_set_height(name, 40); lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(name, lv_color_hex(Cyan), 0);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(name, LV_OBJ_FLAG_CLICKABLE);
+        _settingsTileHits[i] = {this, i + 1};
+        lv_obj_add_event_cb(tile, settingsTileEvent, LV_EVENT_CLICKED, &_settingsTileHits[i]);
+        _settingsDetails[i] = lv_obj_create(_settingsPage); panel(_settingsDetails[i], 0, 56, 440, 346, 0x080B10);
+        lv_obj_add_flag(_settingsDetails[i], static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
+    }
+    const char* names[] = {"CHG SEC", "BAT SEC", "CHG %", "BAT %", "LOCK %", "SHIFT", "WIFI MIN", "BT MIN"};
+    for (size_t row = 0; row < 8; ++row) {
+        const size_t group = row < 2 ? 0 : row < 5 ? 1 : row == 5 ? 2 : 3;
+        const size_t slot = row < 2 ? row : row < 5 ? row - 2 : row == 5 ? 0 : row - 6;
+        const int y = 0;
+        _settingsRows[row] = lv_obj_create(_settingsDetails[group]);
+        panel(_settingsRows[row], 0, 8 + static_cast<int>(slot) * 62, 440, 54, 0x080B10);
+        lv_obj_add_flag(_settingsRows[row], LV_OBJ_FLAG_EVENT_BUBBLE); auto* parent = _settingsRows[row];
+        auto* name = label(parent, 12, y + 16, 150, names[row], &lv_font_montserrat_16); lv_obj_set_height(name, 24);
+        _settingsValues[row] = label(parent, 168, y + 14, 112, "", &lv_font_montserrat_20);
+        lv_obj_set_height(_settingsValues[row], 28); lv_obj_set_style_text_align(_settingsValues[row], LV_TEXT_ALIGN_CENTER, 0);
         for (size_t side = 0; side < 2; ++side) {
-            auto* button = lv_button_create(_settingsPage);
-            panel(button, 300 + static_cast<int>(side) * 70, y, 60, 54);
-            auto* text = label(button, 0, 15, 60, row == 5 ? (side ? "ON" : "OFF") : (side ? "+" : "-"), &lv_font_montserrat_20);
-            lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0);
+            auto* button = lv_button_create(parent); panel(button, 292 + static_cast<int>(side) * 72, y, 64, 54);
+            auto* text = label(button, 2, 11, 60, row == 5 ? (side ? "ON" : "OFF") : (side ? "+" : "-"), &lv_font_montserrat_20);
+            lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0); lv_obj_set_style_text_color(text, lv_color_hex(Cyan), 0);
             lv_obj_remove_flag(text, LV_OBJ_FLAG_CLICKABLE);
             auto& hit = _settingsHits[row * 2 + side]; hit = {this, row * 2 + side};
-            lv_obj_add_event_cb(button, settingsEvent, LV_EVENT_CLICKED, &hit);
-            lv_obj_add_flag(button, LV_OBJ_FLAG_EVENT_BUBBLE);
+            lv_obj_add_event_cb(button, settingsEvent, LV_EVENT_CLICKED, &hit); lv_obj_add_flag(button, LV_OBJ_FLAG_EVENT_BUBBLE);
         }
     }
-    _settingsStatus = createIcon(_settingsPage, Icon::Check, 24, Green); place(_settingsStatus, 208, 374);
+    auto* wireless = _settingsDetails[3];
+    _wifiSsid = lv_textarea_create(wireless); panel(_wifiSsid, 12, 142, 416, 48);
+    _wifiPassword = lv_textarea_create(wireless); panel(_wifiPassword, 12, 198, 416, 48);
+    for (auto* field : {_wifiSsid, _wifiPassword}) {
+        lv_textarea_set_one_line(field, true); lv_obj_set_style_text_font(field, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(field, lv_color_hex(Cyan), 0); lv_obj_set_style_pad_all(field, 10, 0);
+        lv_obj_add_flag(field, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_event_cb(field, wifiFieldEvent, LV_EVENT_CLICKED, this);
+        lv_obj_add_event_cb(field, wifiFieldEvent, LV_EVENT_VALUE_CHANGED, this);
+    }
+    lv_textarea_set_max_length(_wifiSsid, 32); lv_textarea_set_placeholder_text(_wifiSsid, "SSID");
+    lv_textarea_set_max_length(_wifiPassword, 64); lv_textarea_set_placeholder_text(_wifiPassword, "PASSWORD");
+    lv_textarea_set_password_mode(_wifiPassword, true); lv_textarea_set_password_show_time(_wifiPassword, 0);
+    _wifiOpenButton = lv_button_create(wireless); panel(_wifiOpenButton, 12, 256, 128, 48);
+    _wifiSaveButton = lv_button_create(wireless); panel(_wifiSaveButton, 156, 256, 128, 48);
+    _wifiRestartButton = lv_button_create(wireless); panel(_wifiRestartButton, 300, 256, 128, 48);
+    const char* actions[] = {"OPEN", "SAVE", "REBOOT"}; size_t action = 0;
+    for (auto* button : {_wifiOpenButton, _wifiSaveButton, _wifiRestartButton}) {
+        auto* text = label(button, 4, 8, 120, actions[action++], &lv_font_montserrat_20);
+        lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0); lv_obj_set_style_text_color(text, lv_color_hex(Cyan), 0);
+        lv_obj_remove_flag(text, LV_OBJ_FLAG_CLICKABLE); lv_obj_add_flag(button, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_event_cb(button, wifiActionEvent, LV_EVENT_CLICKED, this);
+    }
+    _wifiSaveState = label(wireless, 12, 314, 416, "", &lv_font_montserrat_14);
+    lv_obj_set_height(_wifiSaveState, 24); lv_label_set_long_mode(_wifiSaveState, LV_LABEL_LONG_MODE_DOTS);
+    _wifiKeyboard = lv_keyboard_create(_settingsPage); panel(_wifiKeyboard, 0, 204, 440, 198);
+    lv_obj_set_style_text_font(_wifiKeyboard, &lv_font_montserrat_16, 0); lv_obj_add_flag(_wifiKeyboard, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
+    lv_obj_add_event_cb(_wifiKeyboard, wifiFieldEvent, LV_EVENT_READY, this); lv_obj_add_event_cb(_wifiKeyboard, wifiFieldEvent, LV_EVENT_CANCEL, this);
     renderSettings();
+}
+void CodexMicroView::settingsDetailExec(void* owner, int32_t y) {
+    auto* self = static_cast<CodexMicroView*>(owner);
+    if (self->_settingsDetail) lv_obj_set_y(self->_settingsDetails[self->_settingsDetail - 1], y);
+}
+void CodexMicroView::settingsSheetExec(void* owner, int32_t y) {
+    auto* self = static_cast<CodexMicroView*>(owner); lv_obj_set_y(self->_settingsPage, y);
+}
+void CodexMicroView::settingsSheetCompleted(lv_anim_t* anim) {
+    auto* self = static_cast<CodexMicroView*>(anim->var); self->_settingsAnimating = false;
+    if (self->_settingsClosing) { lv_obj_add_flag(self->_settingsPage, LV_OBJ_FLAG_HIDDEN); self->_settingsClosing = false; }
+}
+void CodexMicroView::openSettings() {
+    if (!_settingsPage || _locked || _suppressed || _rotationFault || otaBusy() || _slideTo ||
+        _rotationPhase != RotationPhase::Idle || _settingsOpen || _settingsAnimating) return;
+    _settingsOpen = true; _settingsClosing = false; _settingsAnimating = true;
+    _touchTracking = false; _swipeConsumed = true; _activity = lv_tick_get(); showSettingsDetail(0); renderSettings();
+    WifiSettingsSnapshot wifi{}; GetNetworkQuota().wifiSettingsSnapshot(wifi); lv_textarea_set_text(_wifiSsid, wifi.ssid);
+    lv_obj_remove_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_settingsPage);
+    lv_anim_t anim; lv_anim_init(&anim); lv_anim_set_var(&anim, this);
+    lv_anim_set_exec_cb(&anim, settingsSheetExec); lv_anim_set_values(&anim, 480, 64);
+    lv_anim_set_duration(&anim, 200); lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&anim, settingsSheetCompleted); lv_anim_start(&anim);
+}
+void CodexMicroView::closeSettings(bool animate) {
+    if (!_settingsPage || (!_settingsOpen && !_settingsAnimating)) return;
+    lv_anim_delete(this, settingsDetailExec);
+    lv_anim_delete(this, settingsSheetExec); _settingsOpen = false; _settingsAnimating = animate; _settingsClosing = animate;
+    _touchTracking = false; _swipeConsumed = true; _activity = lv_tick_get();
+    lv_keyboard_set_textarea(_wifiKeyboard, nullptr); lv_obj_add_flag(_wifiKeyboard, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
+    lv_textarea_set_text(_wifiPassword, ""); _wifiOpenNetwork = false;
+    place(_wifiSsid, 12, 142); place(_wifiPassword, 12, 198);
+    lv_obj_remove_flag(_wifiSsid, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_wifiPassword, LV_OBJ_FLAG_HIDDEN);
+    for (size_t row = 6; row < 8; ++row) lv_obj_remove_flag(_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_border_width(_wifiOpenButton, 0, 0);
+    if (!animate) { lv_obj_add_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN); lv_obj_set_y(_settingsPage, 64); return; }
+    lv_anim_t anim; lv_anim_init(&anim); lv_anim_set_var(&anim, this);
+    lv_anim_set_exec_cb(&anim, settingsSheetExec); lv_anim_set_values(&anim, lv_obj_get_y(_settingsPage), 480);
+    lv_anim_set_duration(&anim, 180); lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&anim, settingsSheetCompleted); lv_anim_start(&anim);
+}
+void CodexMicroView::showSettingsDetail(unsigned detail) {
+    for (auto* panel : _settingsDetails) lv_obj_set_y(panel, 56);
+    _settingsDetail = detail;
+    if (!detail) lv_obj_remove_flag(_settingsTiles, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_settingsTiles, LV_OBJ_FLAG_HIDDEN);
+    for (size_t i = 0; i < _settingsDetails.size(); ++i)
+        if (detail == i + 1) lv_obj_remove_flag(_settingsDetails[i], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_settingsDetails[i], LV_OBJ_FLAG_HIDDEN);
+    const char* titles[] = {"SETTINGS", "TIMEOUT", "BRIGHTNESS", "BURN-IN", "WIRELESS"}; lv_label_set_text(_settingsTitle, titles[detail]);
+}
+void CodexMicroView::settingsTileEvent(lv_event_t* event) {
+    auto* hit = static_cast<Hit*>(lv_event_get_user_data(event)); auto* self = hit->owner;
+    if (!self->_settingsOpen || self->_settingsAnimating || self->_swipeConsumed || self->_locked || self->_suppressed ||
+        self->_rotationFault || self->_rotationPhase != RotationPhase::Idle || self->otaBusy()) return;
+    self->showSettingsDetail(hit->index); self->_activity = lv_tick_get();
+    self->_settingsAnimating = true;
+    lv_anim_t anim; lv_anim_init(&anim); lv_anim_set_var(&anim, self);
+    lv_anim_set_exec_cb(&anim, settingsDetailExec); lv_anim_set_values(&anim, 402, 56);
+    lv_anim_set_duration(&anim, 160); lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&anim, settingsSheetCompleted); lv_anim_start(&anim);
+}
+void CodexMicroView::wifiFieldEvent(lv_event_t* event) {
+    auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
+    if (!self->_settingsOpen || self->_settingsAnimating || self->_locked || self->_suppressed ||
+        self->_rotationFault || self->_rotationPhase != RotationPhase::Idle || self->otaBusy()) return;
+    self->_activity = lv_tick_get(); const auto code = lv_event_get_code(event);
+    if (code == LV_EVENT_VALUE_CHANGED) return;
+    if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+        lv_keyboard_set_textarea(self->_wifiKeyboard, nullptr); lv_obj_add_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
+        place(self->_wifiSsid, 12, 142); place(self->_wifiPassword, 12, 198);
+        lv_obj_remove_flag(self->_wifiSsid, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(self->_wifiPassword, LV_OBJ_FLAG_HIDDEN);
+        for (size_t row = 6; row < 8; ++row) lv_obj_remove_flag(self->_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
+        if (code == LV_EVENT_CANCEL) lv_textarea_set_text(self->_wifiPassword, "");
+    } else {
+        if (self->_swipeConsumed) return;
+        auto* field = static_cast<lv_obj_t*>(lv_event_get_target(event));
+        // Only the active editor is visible above keyboard; radio/action rows are hidden.
+        for (size_t row = 6; row < 8; ++row) lv_obj_add_flag(self->_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
+        auto* other = field == self->_wifiSsid ? self->_wifiPassword : self->_wifiSsid;
+        lv_obj_add_flag(other, LV_OBJ_FLAG_HIDDEN); place(field, 12, 70);
+        lv_keyboard_set_textarea(self->_wifiKeyboard, field); lv_obj_remove_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(self->_wifiKeyboard);
+    }
+}
+void CodexMicroView::wifiActionEvent(lv_event_t* event) {
+    auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
+    if (!self->_settingsOpen || self->_settingsDetail != 4 || self->_settingsAnimating || self->_swipeConsumed ||
+        self->_locked || self->_suppressed || self->_rotationFault || self->_rotationPhase != RotationPhase::Idle || self->otaBusy()) return;
+    auto* target = static_cast<lv_obj_t*>(lv_event_get_target(event)); self->_activity = lv_tick_get();
+    if (target == self->_wifiOpenButton) {
+        self->_wifiOpenNetwork = !self->_wifiOpenNetwork;
+        lv_obj_set_style_border_width(self->_wifiOpenButton, self->_wifiOpenNetwork ? 2 : 0, 0);
+        lv_obj_set_style_border_color(self->_wifiOpenButton, lv_color_hex(Orange), 0);
+        if (self->_wifiOpenNetwork) lv_textarea_set_text(self->_wifiPassword, "");
+    } else if (target == self->_wifiSaveButton) {
+        const char* ssid = lv_textarea_get_text(self->_wifiSsid); const char* password = lv_textarea_get_text(self->_wifiPassword);
+        if (!ssid[0] || std::strlen(ssid) > 32 || (!self->_wifiOpenNetwork && !password[0]) || std::strlen(password) > 64) {
+            lv_label_set_text(self->_wifiSaveState, "SSID / PASSWORD REQUIRED"); return;
+        }
+        const bool accepted = GetNetworkQuota().requestWifiCredentials(ssid, self->_wifiOpenNetwork ? "" : password);
+        lv_label_set_text(self->_wifiSaveState, accepted ? "SAVING" : "SAVE ERROR");
+        if (accepted) lv_textarea_set_text(self->_wifiPassword, "");
+    } else {
+        const bool accepted = GetNetworkQuota().requestWifiRestart();
+        lv_label_set_text(self->_wifiSaveState, accepted ? "REBOOT PENDING" : "REBOOT ERROR");
+    }
 }
 void CodexMicroView::renderSettings() {
     const auto& c = _displaySettings.config;
@@ -289,6 +446,10 @@ void CodexMicroView::renderSettings() {
         lv_label_set_text(_settingsValues[row], text);
     }
     lv_label_set_text(_settingsValues[5], c.burnIn ? "ON" : "OFF");
+    for (size_t row = 6; row < 8; ++row) {
+        char text[8]; std::snprintf(text, sizeof(text), "%u", row == 6 ? c.lockWifiMinutes : c.lockBleMinutes);
+        lv_label_set_text(_settingsValues[row], text);
+    }
     const bool error = _settingsRequestFailed || _displaySettings.error;
     const bool pending = _displaySettings.pending;
     setIcon(_settingsStatus, error ? Icon::Unknown : pending ? Icon::Hourglass : Icon::Check,
@@ -299,7 +460,7 @@ void CodexMicroView::settingsEvent(lv_event_t* event) {
     if (!hit || !hit->owner) return;
     auto* self = hit->owner;
     if (self->_rotationFault || self->_locked || self->_suppressed || self->_swipeConsumed || self->_slideTo ||
-        self->_rotationPhase != RotationPhase::Idle || self->otaBusy() || self->_page != Page::Settings) return;
+        self->_rotationPhase != RotationPhase::Idle || self->otaBusy() || !self->_settingsOpen || self->_settingsAnimating) return;
     auto config = self->_displaySettings.config;
     const size_t row = hit->index / 2;
     const bool up = hit->index % 2;
@@ -316,7 +477,13 @@ void CodexMicroView::settingsEvent(lv_event_t* event) {
         const int low = row == 4 ? 0 : 10;
         const int next = up ? (value / 5 + 1) * 5 : value ? ((value - 1) / 5) * 5 : 0;
         value = static_cast<uint8_t>(std::clamp(next, low, 100));
-    } else config.burnIn = up;
+    } else if (row == 5) config.burnIn = up;
+    else {
+        static constexpr uint8_t minutes[] = {1, 2, 5, 10, 15, 30, 60};
+        auto& value = row == 6 ? config.lockWifiMinutes : config.lockBleMinutes;
+        size_t index = 0; while (index + 1 < 7 && minutes[index] != value) ++index;
+        value = minutes[(index + (up ? 1 : 6)) % 7];
+    }
     self->_settingsRequestFailed = !MosaicoDisplay::request(config);
     self->_activity = lv_tick_get();
     self->refreshDisplaySettings(); // Accepted RAM config applies immediately, persistence is worker-owned.
@@ -629,6 +796,7 @@ void CodexMicroView::refreshOta(uint32_t tick) {
     }
     if (otaBusy()) {
         cancelOrientation(); GetHAL().setMotionIdle(true);
+        closeSettings(false);
         cancelPageSlide(); _touchTracking = false; _swipeConsumed = true;
         _activity = tick;
         // Only an actual accepted operation can wake the display, never discovery polling.
@@ -746,7 +914,7 @@ void CodexMicroView::touchEvent(lv_event_t* e) {
     const auto code = lv_event_get_code(e);
     if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING && code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(e));
-    if (self->_rotationFault || self->_suppressed || self->_locked || self->otaBusy() || self->_slideTo || self->_rotationPhase != RotationPhase::Idle) {
+    if (self->_rotationFault || self->_suppressed || self->_locked || self->otaBusy() || self->_slideTo || self->_settingsAnimating || self->_rotationPhase != RotationPhase::Idle) {
         self->_touchTracking = false; self->_swipeConsumed = true;
         return;
     }
@@ -756,11 +924,22 @@ void CodexMicroView::touchEvent(lv_event_t* e) {
     if (code == LV_EVENT_PRESSED) {
         self->_activity = lv_tick_get(); self->_touchStart = point;
         self->_touchTracking = true; self->_swipeConsumed = false;
+        self->_touchOnEditor = self->_settingsOpen && !lv_obj_has_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
     } else if (self->_touchTracking && (code == LV_EVENT_PRESSING || code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST)) {
         const int dx = point.x - self->_touchStart.x;
         const int dy = point.y - self->_touchStart.y;
         // Large horizontal motion consumes this contact even if it later drifts vertically.
-        if (std::abs(dx) >= 96) self->_swipeConsumed = true;
+        if (std::abs(dx) >= 32 || std::abs(dy) >= 32) self->_swipeConsumed = true;
+        if (self->_touchOnEditor) {
+            if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) self->_touchTracking = false;
+            return;
+        }
+        if (code != LV_EVENT_PRESS_LOST && std::abs(dy) >= 96 && std::abs(dx) <= 48) {
+            self->_touchTracking = false; self->_swipeConsumed = true;
+            if (dy < 0 && !self->_settingsOpen) self->openSettings();
+            else if (dy > 0 && self->_settingsOpen) self->closeSettings();
+            return;
+        }
         // Recognize while the contact is still valid: release/press-lost is not
         // guaranteed after a drag. setPageForDebug clears tracking, so this
         // contact cannot navigate again, even after the 200ms slide completes.
@@ -774,11 +953,11 @@ void CodexMicroView::touchEvent(lv_event_t* e) {
 }
 void CodexMicroView::cellEvent(lv_event_t* e) {
     auto* hit = static_cast<Hit*>(lv_event_get_user_data(e));
-    if (!hit->owner->_rotationFault && !hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_swipeConsumed && !hit->owner->_slideTo && hit->owner->_rotationPhase == RotationPhase::Idle && !hit->owner->otaBusy()) hit->owner->selectHistory(hit->index);
+    if (!hit->owner->_rotationFault && !hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_swipeConsumed && !hit->owner->_settingsOpen && !hit->owner->_settingsAnimating && !hit->owner->_slideTo && hit->owner->_rotationPhase == RotationPhase::Idle && !hit->owner->otaBusy()) hit->owner->selectHistory(hit->index);
 }
 void CodexMicroView::modeEvent(lv_event_t* e) {
     auto* hit = static_cast<Hit*>(lv_event_get_user_data(e));
-    if (!hit->owner->_rotationFault && !hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_swipeConsumed && !hit->owner->_slideTo && hit->owner->_rotationPhase == RotationPhase::Idle && !hit->owner->otaBusy()) hit->owner->showHistory(hit->index == 1);
+    if (!hit->owner->_rotationFault && !hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_swipeConsumed && !hit->owner->_settingsOpen && !hit->owner->_settingsAnimating && !hit->owner->_slideTo && hit->owner->_rotationPhase == RotationPhase::Idle && !hit->owner->otaBusy()) hit->owner->showHistory(hit->index == 1);
 }
 void CodexMicroView::refreshBattery(uint32_t now) {
     const auto telemetry = GetHAL().batteryTelemetry(false);
@@ -888,7 +1067,7 @@ void CodexMicroView::updateOrientation(bool touching) {
     if (idle) { cancelOrientation(); return; }
     if (_rotationPhase != RotationPhase::Idle) {
         // A newly pressed finger cancels before any hardware direction change.
-        if (touching || _slideTo) { cancelOrientation(); return; }
+        if (touching || _slideTo || _settingsAnimating) { cancelOrientation(); return; }
         if (_rotationPhase == RotationPhase::WaitBlack && GetDisplayFrameCount() != _rotationFrame) {
             _motionGeneration = _rotationGeneration; // One HAL attempt per stable candidate.
             if (!GetHAL().setDisplayOrientation(_rotationTarget)) {
@@ -904,7 +1083,7 @@ void CodexMicroView::updateOrientation(bool touching) {
         }
         return;
     }
-    if (touching || _touchTracking || _slideTo) return;
+    if (touching || _touchTracking || _slideTo || _settingsAnimating) return;
     const auto orientation = GetHAL().motionOrientation(); // Cache only.
     if (!orientation.available || orientation.idle || !orientation.valid || orientation.generation == _motionGeneration) return;
     if (orientation.degrees == GetHAL().getDisplayOrientation()) { _motionGeneration = orientation.generation; return; }
@@ -1224,6 +1403,8 @@ bool CodexMicroView::setPageForDebug(Page page) {
     if (_rotationFault) return false;
     if (!ready() || page == Page::Agent || (page != Page::Command && page != Page::History && page != Page::OTA && page != Page::Settings && page != Page::Sessions)) return false;
     if (otaBusy() && page != Page::OTA) return false;
+    if (page == Page::Settings) { openSettings(); return _settingsOpen; }
+    closeSettings(false);
     cancelOrientation();
     cancelPageSlide();
     if (_touchTracking) _swipeConsumed = true;
@@ -1233,8 +1414,7 @@ bool CodexMicroView::setPageForDebug(Page page) {
         renderOta();
     }
     if (page == Page::OTA) lv_obj_remove_flag(_otaPage, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaPage, LV_OBJ_FLAG_HIDDEN);
-    if (page == Page::Settings) { renderSettings(); lv_obj_remove_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN); }
-    else lv_obj_add_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN);
+
     if (page == Page::Sessions) { renderSessions(); lv_obj_remove_flag(_sessionsPage, LV_OBJ_FLAG_HIDDEN); }
     else lv_obj_add_flag(_sessionsPage, LV_OBJ_FLAG_HIDDEN);
     if (page != Page::Command) stopAnimations();
@@ -1276,11 +1456,11 @@ void CodexMicroView::slideCompleted(lv_anim_t* anim) {
     self->_slideFrom = self->_slideTo = nullptr;
 }
 void CodexMicroView::navigatePage(int direction) {
-    if (_rotationFault || _suppressed || _locked || !ready() || otaBusy() || _slideTo || _rotationPhase != RotationPhase::Idle) return;
-    const Page pages[] = {Page::Command, Page::History, Page::OTA, Page::Settings, Page::Sessions};
-    const int index = _page == Page::Command ? 0 : _page == Page::History ? 1 : _page == Page::OTA ? 2 : _page == Page::Settings ? 3 : 4;
+    if (_rotationFault || _suppressed || _locked || !ready() || otaBusy() || _slideTo || _settingsOpen || _settingsAnimating || _rotationPhase != RotationPhase::Idle) return;
+    const Page pages[] = {Page::Command, Page::History, Page::OTA, Page::Sessions};
+    const int index = _page == Page::Command ? 0 : _page == Page::History ? 1 : _page == Page::OTA ? 2 : 3;
     auto* from = pagePanel(_page);
-    if (!setPageForDebug(pages[(index + (direction > 0 ? 1 : 4)) % 5])) return;
+    if (!setPageForDebug(pages[(index + (direction > 0 ? 1 : 3)) % 4])) return;
     _slideFrom = from; _slideTo = pagePanel(_page); _slideDirection = direction > 0 ? 1 : -1;
     lv_obj_remove_flag(_slideFrom, LV_OBJ_FLAG_HIDDEN);
     // Executed by LVGL's existing timer under its single port mutex; no screen/snapshot allocations.
@@ -1293,13 +1473,14 @@ void CodexMicroView::navigatePage(int direction) {
 void CodexMicroView::setInputSuppressed(bool suppressed) {
     _suppressed = suppressed;
     refreshSessionsLease();
-    if (suppressed) { _touchTracking = false; _swipeConsumed = true; cancelOrientation(); GetHAL().setMotionIdle(true); cancelPageSlide(); stopAnimations(); }
+    if (suppressed) { closeSettings(false); _touchTracking = false; _swipeConsumed = true; cancelOrientation(); GetHAL().setMotionIdle(true); cancelPageSlide(); stopAnimations(); }
 }
 void CodexMicroView::togglePage() {
     if (_rotationFault) return;
     if (_suppressed || !ready()) return;
     if (_locked) { wakeDisplay(); return; }
     if (otaBusy()) return;
+    if (_settingsOpen || _settingsAnimating) { closeSettings(); return; }
     navigatePage(1);
 }
 void CodexMicroView::wakeDisplay() {
@@ -1323,6 +1504,7 @@ void CodexMicroView::lockDisplay() {
     if (_rotationFault) return;
     if (_locked || !ready() || otaKeepAwake()) return;
     cancelOrientation(); GetHAL().setMotionIdle(true);
+    closeSettings(false);
     cancelPageSlide(); _touchTracking = false; _swipeConsumed = true;
     stopAnimations();
     _locked = true; GetNetworkQuota().setLocked(true);
@@ -1350,9 +1532,15 @@ void CodexMicroView::update(const CodexMicroState& state) {
     bool interacting = lv_obj_is_scrolling(_quotaPage), touching = false;
     for (auto* input = lv_indev_get_next(nullptr); input; input = lv_indev_get_next(input))
         touching = touching || lv_indev_get_state(input) == LV_INDEV_STATE_PRESSED;
-    interacting = interacting || touching || _slideTo || _rotationPhase != RotationPhase::Idle;
+    interacting = interacting || touching || _slideTo || _settingsAnimating || _rotationPhase != RotationPhase::Idle;
     updateOrientation(touching);
     refreshDisplaySettings();
+    if (_settingsOpen && _settingsDetail == 4) {
+        WifiSettingsSnapshot wifi{}; GetNetworkQuota().wifiSettingsSnapshot(wifi);
+        if (wifi.pending || wifi.restartPending || wifi.restartError || wifi.error || wifi.rebootRequired || !wifi.available)
+            lv_label_set_text(_wifiSaveState, wifi.restartPending ? "REBOOT PENDING" : wifi.pending ? "SAVING" :
+                wifi.restartError ? "REBOOT ERROR" : wifi.error ? "SAVE ERROR" : !wifi.available ? "WIFI UNAVAILABLE" : "SAVED / REBOOT TO APPLY");
+    }
     if (!_locked) refreshClock(tick);
     // Rendering/page callbacks can record activity after the entry tick.
     tick = lv_tick_get();

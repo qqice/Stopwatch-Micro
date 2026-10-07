@@ -4,6 +4,7 @@
 #include <cstdint>
 #ifdef MOSAICO_BOARD
 #include <mutex>
+#include "mosaico_wifi_settings_model.h"
 #include <ota/mosaico_ota.h>
 #endif
 #include <freertos/FreeRTOS.h>
@@ -35,6 +36,9 @@ public:
     void refreshWhileLocked();
 #ifdef MOSAICO_BOARD
     void wakeForFirmwareUpdate();
+    bool requestWifiCredentials(const char* ssid, const char* password);
+    bool wifiSettingsSnapshot(WifiSettingsSnapshot& out);
+    bool requestWifiRestart();
 #endif
     IdlePowerStats powerStats() const;
 #ifdef MOSAICO_BOARD
@@ -82,6 +86,7 @@ private:
     bool fetchHistory();
 #ifdef MOSAICO_BOARD
     void updateFirmware();
+    void serviceWifiSettings();
 #endif
     void wait(uint32_t milliseconds);
     void setCpu(uint32_t mhz);
@@ -96,6 +101,9 @@ private:
     std::atomic<uint32_t> _diagnostic_idle_mhz{80};
     std::atomic<uint32_t> _idle_cpu_mhz{320};
     std::mutex _cpu_mutex;
+    std::mutex _wifi_settings_mutex;
+    WifiSettingsSnapshot _wifi_settings;
+    char _pending_ssid[33]{}, _pending_password[65]{};
 #endif
     std::atomic<uint32_t> _power_cycles{0};
     std::atomic<int> _clock_error{0};

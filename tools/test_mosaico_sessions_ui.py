@@ -9,8 +9,8 @@ HDR=(V/'view_mosaico.h').read_text(encoding='utf8')
 class SessionsUiTests(unittest.TestCase):
     def test_read_only_page_geometry_and_lifecycle(self):
         self.assertIn('Command = 0, History, Agent, OTA, Settings, Sessions',HDR)
-        self.assertIn('Page::Command, Page::History, Page::OTA, Page::Settings, Page::Sessions',CPP)
-        self.assertIn('(index + (direction > 0 ? 1 : 4)) % 5',CPP)
+        self.assertIn('Page::Command, Page::History, Page::OTA, Page::Sessions',CPP)
+        self.assertIn('(index + (direction > 0 ? 1 : 3)) % 4',CPP)
         for i in range(6):
             x=i%2*224;y=70+i//2*108
             self.assertLessEqual(x+216,440);self.assertLessEqual(y+98,402)

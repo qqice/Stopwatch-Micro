@@ -36,12 +36,13 @@ template<class State> constexpr void markReceipt(State& state, uint8_t mask, uin
 struct LockedWindow {
     static constexpr uint32_t DurationMs = 8000, IntervalMs = 60000;
     bool active = false, attempted = false, timedOut = false;
+    uint32_t intervalMs = IntervalMs;
     uint32_t startedMs = 0, endedMs = 0, count = 0, revision = 0, generation = 0;
     uint8_t freshMask = 0;
     int32_t error = 0;
     std::array<uint32_t, 6> baseline{};
     constexpr bool start(uint32_t now, uint32_t gen, const std::array<uint32_t, 6>& receipts) {
-        if (active || (attempted && now - startedMs < IntervalMs)) return false;
+        if (active || (attempted && now - startedMs < intervalMs)) return false;
         active = attempted = true; timedOut = false; error = 0;
         startedMs = now; endedMs = 0; generation = gen; baseline = receipts; freshMask = 0;
         ++count; ++revision; return true;
