@@ -71,7 +71,8 @@ def recovery_retry_safe(text: str) -> bool:
     if tokens[:1] not in (["debug"], ["dbg"]):
         return False
     return tuple(tokens[1:]) in {("ping",), ("settings", "get"), ("settings", "restore"),
-                                ("standby-sleep", "status"), ("standby-sleep", "off")}
+                                ("standby-sleep", "status"), ("standby-sleep", "off"),
+                                ("idle-wait", "status"), ("idle-wait", "off")}
 
 
 class DebugClient:

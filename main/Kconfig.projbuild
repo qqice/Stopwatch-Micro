@@ -1,4 +1,15 @@
 menu "Mosaico application power policy"
+    config MOSAICO_EVENT_IDLE_WAIT
+        bool "Use interruptible 500 ms app_main waits while safely locked"
+        depends on IDF_TARGET_ESP32S31
+        default n
+        help
+            Requires notification array index 1 and exclusive SerialDebug UART0
+            ownership plus GPIO7 LOW interrupt readiness. Unsafe/active states
+            retain 20 ms polling; awake stays 10 ms. This builds the capability,
+            but runtime always boots disabled. RAM-only debug idle-wait on/off
+            selects the candidate without changing sleep or radio policy. Flag
+            disabled builds cannot enable the candidate at runtime.
     config MOSAICO_STANDBY_AUTO_LIGHT_SLEEP
         bool "Automatically use validated light sleep while Mosaico is locked"
         depends on IDF_TARGET_ESP32S31 && PM_ENABLE

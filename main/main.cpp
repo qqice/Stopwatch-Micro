@@ -25,6 +25,8 @@ using namespace smooth_ui_toolkit;
 #include <host/mosaico_display_settings.h>
 #include <host/mosaico_session_monitor.h>
 #include <host/standby_sleep.h>
+#include "main_idle_wait.h"
+#include <tusb.h>
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
 #include <ota/panic_capture.h>
 #endif
@@ -48,6 +50,7 @@ extern "C" void app_main(void)
     GetHAL().init();
 #ifdef MOSAICO_BOARD
     MosaicoDisplay::init();
+    MainIdleWait::Lifetime idleWaitLifetime;
 #endif
     BootTraceStage(6);
 
@@ -111,9 +114,10 @@ extern "C" void app_main(void)
         GetNetworkQuota().serviceStandbySleep();
         // The monitor has no low-latency remote-control path. Keep its 10Hz
         // motion/100Hz touch responsive without a 1kHz application update loop.
-        // Function is now the sole wake input: 20ms GPIO sampling avoids the
-        // former 100ms window swallowing short presses. This is not touch I2C.
-        vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 20 : 10));
+        // Function remains the sole physical wake input. The event candidate
+        // retains 20 ms button/release sampling; it never polls touch I2C.
+        MainIdleWait::wait(GetNetworkQuota().idleLocked(), MosaicoOta::busy() || MosaicoOta::healthPending(),
+            tud_mounted(), GetNetworkQuota().powerStats().wifiRunning, sleepBle.advertising || sleepBle.connected);
 #else
         // Preserve StopWatch HID/control latency and scheduling.
         vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 1));

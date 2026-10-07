@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "standby_sleep.h"
+#include <main_idle_wait.h>
 #include "standby_sleep_model.h"
 #include <sdkconfig.h>
 #include <hal/hal.h>
@@ -127,6 +128,7 @@ void uartTraffic(bool pending, bool activity) {
 void viewState(bool locked, bool safe, bool fault) {
     std::lock_guard<std::mutex> guard(mutex);
     model.viewLocked=locked;model.displaySafe=safe;model.fault=fault;
+    MainIdleWait::viewState(locked && safe && !fault);
     model.service(esp_timer_get_time());
     if(!locked || !safe || fault)wanted=false;
     refreshRecovery(esp_timer_get_time());

@@ -1014,3 +1014,25 @@ that the rest of CoreBoard 1.2.1 is already ported.
 First verify readback, then use a bounded `debug standby-sleep on 30` and visual
 observation. Only a stable display qualifies for normal policy and power A/B.
 Preserve accurate time, minute refresh, Function/UART, and the rollback image.
+
+### Interruptible main idle wait candidate (0.13.12)
+
+`boards/mosaico/sdkconfig.idle-event-experiment` enables capability and reserves
+notification index 1 (two entries). The probe still starts OFF in RAM; index 0
+is not consumed. `debug idle-wait on/off/status` is a reversible local diagnostic.
+Locked idle may wait up to 500 ms only with complete GPIO/UART notification,
+view and transport gates. Button-low/release grace, serial traffic, USB mounted,
+Wi-Fi/BLE active, OTA/health, or any unavailable gate keeps the 20 ms fallback;
+awake remains 10 ms. USB mounted selects cadence, never a charging proof.
+
+GPIO7 LOW ISR masks only normal IRQ until release and notifies the existing main
+task; sleep wake remains enabled. GPIO6 has no application touch callback and is
+masked before adding the first GPIO service. Manual 10 ms awake touch polling is
+unchanged. UART READ/ERROR callbacks use the public driver notification interface;
+UART_WAKEUP-only does not notify. Keep the existing delimited wake preamble,
+CRC validation and firmware recovery hold. No new task/timer, pin levels, rails,
+SDK, managed component, gauge or stored settings are changed.
+
+Mock/source tests do not prove physical IRQ timing. Require real UART recovery,
+Function short/held/release and rollback checks before retaining the feature.
+Power A/B uses OFF/ON on the same image after charging is complete.

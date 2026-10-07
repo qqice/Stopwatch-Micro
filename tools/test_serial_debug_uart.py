@@ -203,10 +203,10 @@ static_assert(partialAndBoundedTx());
         # Hardware-TX pending must block auto-LS, but never block this poll or
         # add driver activity when the opt-in lease is disabled.
         self.assertEqual(re.findall(r'uart_wait_tx_done\(([^)]*)\)',SOURCE),['UART_NUM_0,0'])
-        traffic=poll.split('if(_uart_active && StandbySleep::monitoring())',1)[1]
+        traffic=poll.split('if(_uart_active && (StandbySleep::monitoring() || MainIdleWait::snapshot().supported))',1)[1]
         self.assertIn('uart_wait_tx_done(UART_NUM_0,0)',traffic)
         self.assertIn('_uart_tx.pending() || _uart_line_length || _uart_line_overflow',traffic)
-        self.assertIn('event.type == UART_WAKEUP) StandbySleep::uartWake()',poll)
+        self.assertIn('event.type == UART_WAKEUP) { StandbySleep::uartWake(); MainIdleWait::serialState(true,true); }',poll)
         shutdown=method('end')
         self.assertLess(shutdown.index('StandbySleep::cancelForActivity()'),shutdown.index('uart_driver_delete'))
         self.assertIn('#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31',method('drainUart'))

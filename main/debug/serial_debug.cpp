@@ -8,6 +8,7 @@
 #include <host/system_clock.h>
 #include <host/mosaico_display_settings.h>
 #include <host/standby_sleep.h>
+#include <main_idle_wait.h>
 #include <host/mosaico_session_monitor.h>
 #endif
 
@@ -140,6 +141,7 @@ bool SerialDebug::begin()
         }
     } // Do not reconfigure a UART already owned by another subsystem.
     StandbySleep::uartReady(_uart_active);
+    MainIdleWait::uartOwner(_uart_active);
 #endif
     // TinyUSB console/VFS is initialized before board bring-up in app_main.
     setvbuf(stdin, nullptr, _IONBF, 0);
@@ -195,6 +197,8 @@ void SerialDebug::end()
     cancelAsyncTest("shutdown", false);
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
     StandbySleep::cancelForActivity(); StandbySleep::uartReady(false);
+    MainIdleWait::uartOwner(false);
+    MainIdleWait::serialState(true,false);
     if (_uart_active) uart_driver_delete(UART_NUM_0);
 #endif
     _uart_active = _usb_active = _active = false;
@@ -233,7 +237,7 @@ void SerialDebug::poll()
         for (unsigned i = 0; i < serial_debug_transport::UartEventCapacity; ++i) {
             if (saturated()) { invalidateUartInput(); break; }
             if (!xQueueReceive(static_cast<QueueHandle_t>(_uart_events), &event, 0)) break;
-            if (event.type == UART_WAKEUP) StandbySleep::uartWake();
+            if (event.type == UART_WAKEUP) { StandbySleep::uartWake(); MainIdleWait::serialState(true,true); }
             if (event.type == UART_FIFO_OVF || event.type == UART_BUFFER_FULL ||
                 event.type == UART_FRAME_ERR || event.type == UART_PARITY_ERR) {
                 invalidateUartInput();
@@ -247,6 +251,7 @@ void SerialDebug::poll()
             bytes.fill(0);
         } else {
             StandbySleep::uartTraffic(_uart_line_length || _uart_line_overflow || count>0 || _uart_tx.pending(),count>0);
+            if(count>0)MainIdleWait::serialState(true,true);
             for (int i = 0; i < count; ++i) {
                 if (saturated()) { invalidateUartInput(); bytes.fill(0); break; }
                 consumeFrom(bytes[i], true);
@@ -261,11 +266,13 @@ void SerialDebug::poll()
     _reply_uart = false; _writer = previous;
     drainUart();
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
-    if(_uart_active && StandbySleep::monitoring()) {
+    if(_uart_active && (StandbySleep::monitoring() || MainIdleWait::snapshot().supported)) {
         size_t buffered=0;
         const bool rxUnknown=uart_get_buffered_data_len(UART_NUM_0,&buffered)!=ESP_OK;
         const bool txPending=uart_wait_tx_done(UART_NUM_0,0)!=ESP_OK; // Zero-tick query, no waits.
-        StandbySleep::uartTraffic(rxUnknown || buffered || txPending || _uart_tx.pending() || _uart_line_length || _uart_line_overflow,false);
+        const bool pending=rxUnknown || buffered || txPending || _uart_tx.pending() || _uart_line_length || _uart_line_overflow;
+        StandbySleep::uartTraffic(pending,false);
+        MainIdleWait::serialState(pending || _line_length || _line_overflow || _async_test!=AsyncTest::None,false);
     }
 #endif
 }
@@ -405,6 +412,21 @@ void SerialDebug::handleLine(char* line)
             static_cast<unsigned long long>(s.currentRead),static_cast<unsigned long long>(s.currentSelected),static_cast<unsigned long long>(s.currentNormalSame),static_cast<unsigned long long>(s.currentFailed),pins,normal);
         if(count<0 || static_cast<size_t>(count)>=sizeof(details)) {result(command,"FAIL","reason=diagnostic_capacity");return;}
         result(command,s.error?"FAIL":"PASS",details);return;
+    }
+    if (command && !std::strcmp(command,"idle-wait")) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        if(!action || (std::strcmp(action,"on") && std::strcmp(action,"off") && std::strcmp(action,"status")) ||
+            ::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","expected=on_off_status no_changes=1");return;}
+        if(std::strcmp(action,"status") && !MainIdleWait::setEnabled(!std::strcmp(action,"on"))) {
+            result(command,"FAIL","reason=unsupported_or_wake_not_ready no_changes=1");return;
+        }
+        const auto s=MainIdleWait::snapshot();char details[400]{};
+        std::snprintf(details,sizeof(details),
+            "supported=%d enabled=%d gpio_ready=%d uart_ready=%d gpio_wakes=%lu uart_wakes=%lu event_waits=%lu requested_ms=%lu actual_wait_max_us=%lu fallback=%s error=%ld ram_only=1 notification_index=1 usb_mounted_power_proof=0",
+            s.supported,s.enabled,s.gpio,s.uart,static_cast<unsigned long>(s.gpioWakes),static_cast<unsigned long>(s.uartWakes),
+            static_cast<unsigned long>(s.eventWaits),static_cast<unsigned long>(s.requestedMs),static_cast<unsigned long>(s.maxWaitUs),
+            MainIdleWait::causeName(s.cause),static_cast<long>(s.error));
+        result(command,"PASS",details);return;
     }
     if (command && !std::strcmp(command,"standby-sleep")) {
         const char* action=::strtok_r(nullptr," \t",&save);
@@ -1180,6 +1202,7 @@ void SerialDebug::printHelp()
 {
 #ifdef MOSAICO_BOARD
     debugPrintf("DBG HELP sleep-io report_only=1 registered_outputs_only=1\r\n");
+    debugPrintf("DBG HELP idle-wait on | off | status ram_only=1 locked_event_wait_ms=500 safe_gates_required=1\r\n");
     debugPrintf("DBG HELP standby-sleep on [lease_s=180,30..300] | standby-sleep off | standby-sleep auto CONFIRM | standby-sleep status automatic_default=profile UART_wake_preamble_required=1\r\n");
     debugPrintf("DBG HELP settings get | settings set <field> <int> [lease_s=180,30..600] | settings restore | settings save CONFIRM\r\n");
 #endif

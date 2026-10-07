@@ -130,7 +130,7 @@ static_assert(cases(),"same-frequency LS enable/disable is not hidden by cached 
         for forbidden in ('nvs_','xTaskCreate','vTaskDelay','esp_light_sleep_start','esp_timer_create'):
             self.assertNotIn(forbidden,source)
         serial=(R/'main/debug/serial_debug.cpp').read_text()
-        self.assertIn('event.type == UART_WAKEUP) StandbySleep::uartWake()',serial)
+        self.assertIn('event.type == UART_WAKEUP) { StandbySleep::uartWake(); MainIdleWait::serialState(true,true); }',serial)
         self.assertIn('uart_wait_tx_done(UART_NUM_0,0)',serial)
         self.assertIn('_uart_tx.pending() || _uart_line_length || _uart_line_overflow',serial)
         self.assertIn('!ble.advertising && !ble.connected && !MosaicoOta::busy() && !MosaicoOta::healthPending()',serial)

@@ -1,0 +1,4 @@
+# Mosaico event-idle diagnostic capability; runtime probe starts disabled.
+CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES=2
+CONFIG_MOSAICO_EVENT_IDLE_WAIT=y
+CONFIG_MOSAICO_STANDBY_AUTO_LIGHT_SLEEP=y

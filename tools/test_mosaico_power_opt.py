@@ -38,8 +38,47 @@ class PowerOptTests(unittest.TestCase):
   self.assertIn('setTouchIdlePolling(true)',lock); self.assertIn('setTouchIdlePolling(false)',wake)
   self.assertLess(wake.index('setLocked(false)'),wake.index('lv_obj_add_flag(_overlay'))
   main=(R/'main/main.cpp').read_text(encoding='utf8')
-  self.assertIn('idleLocked() ? 20 : 10',main)
-  self.assertIn('idleLocked() ? 100 : 1',main)
+  mosaico,s3=main.rsplit('#else',1)
+  self.assertIn('MainIdleWait::wait(GetNetworkQuota().idleLocked(), MosaicoOta::busy() || MosaicoOta::healthPending(), tud_mounted(), GetNetworkQuota().powerStats().wifiRunning, sleepBle.advertising || sleepBle.connected);',' '.join(mosaico.split()))
+  self.assertIn('vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 1));',s3)
+  self.assertNotIn('MainIdleWait::wait',s3)
+  comp=shutil.which('g++') or shutil.which('clang++')
+  if not comp:
+   c=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+   comp=str(c[-1]) if c else None
+  if not comp:self.skipTest('C++ compiler unavailable')
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d)/'idle_wait_contract.cpp'
+   p.write_text('#include "'+(R/'main/main_idle_wait_model.h').as_posix()+'"\n'+r'''
+using namespace MainIdleWait;
+constexpr bool timingContract() {
+ Gates safe;safe.locked=true;safe.enabled=true;safe.supported=true;
+ safe.gpio=true;safe.uart=true;safe.serial=false;safe.view=true;
+ if(waitMs(select(safe))!=500)return false;
+ // Every readiness/activity safety gate preserves the original locked 20 ms.
+ for(unsigned i=0;i<11;++i) {
+  auto blocked=safe;
+  switch(i) {
+   case 0:blocked.enabled=false;break;case 1:blocked.supported=false;break;
+   case 2:blocked.gpio=false;break;case 3:blocked.uart=false;break;
+   case 4:blocked.button=true;break;case 5:blocked.ota=true;break;
+   case 6:blocked.usb=true;break;case 7:blocked.wifi=true;break;
+   case 8:blocked.ble=true;break;case 9:blocked.serial=true;break;
+   case 10:blocked.view=false;break;
+  }
+  if(waitMs(select(blocked))!=20)return false;
+  blocked.locked=false;
+  if(waitMs(select(blocked))!=10)return false;
+ }
+ Gates boot;if(waitMs(select(boot))!=10)return false;
+ boot.locked=true;return select(boot)==Cause::Disabled && waitMs(select(boot))==20;
+}
+static_assert(timingContract(),"awake=10, disabled or unsafe locked=20, safe opt-in event=500");
+''',encoding='utf8')
+   q=subprocess.run([comp,'-std=c++17','-fsyntax-only',str(p)],capture_output=True,text=True)
+   log=R/'.artifacts/mosaico/main-idle-power-contract.log';log.parent.mkdir(parents=True,exist_ok=True)
+   log.write_text(q.stdout+q.stderr,encoding='utf8')
+   self.assertEqual(q.returncode,0,str(log))
  def test_optin_is_bounded_and_committed(self):
   setter=NET.split('bool NetworkQuota::setIdleCpuFrequency(',1)[1].split('#endif',1)[0]
   self.assertIn('mhz != 160 && mhz != 320',setter)
