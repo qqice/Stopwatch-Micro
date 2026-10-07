@@ -929,11 +929,11 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
     if (tick - _motionTick < 100) return;
     _motionTick = tick;
     const uint16_t phase = static_cast<uint16_t>(((tick - _motionEpoch) % 12000U) * 360U / 12000U);
-    const uint16_t meterPhase = static_cast<uint16_t>(((tick - _motionEpoch) % 8000U) * 360U / 8000U);
+    const uint16_t meterPhase = static_cast<uint16_t>(((tick - _motionEpoch) % 6000U) * 360U / 6000U);
     using S = MosaicoOta::UiStage;
     const bool otaMotion = _page == Page::OTA && (_ota.stage == S::Downloading || _ota.stage == S::Verifying || _ota.stage == S::Installing || _ota.stage == S::BootChecking);
     setMotion(_otaStageIcon, meterPhase, _page == Page::OTA && _ota.stage == S::Installing);
-    // Reverse only OTA phase: quota/reset meters retain their right-to-left wave.
+    // Reverse only OTA phase: quota/reset meters retain their right-to-left charging sweep.
     const uint16_t otaMeterPhase = static_cast<uint16_t>((360U - meterPhase) % 360U);
     setMotion(_otaMeter, otaMeterPhase, otaMotion && !lv_obj_has_flag(_otaMeter, LV_OBJ_FLAG_HIDDEN));
     setMotion(_otaArrow, meterPhase, otaMotion && !lv_obj_has_flag(_otaArrow, LV_OBJ_FLAG_HIDDEN));
@@ -1038,7 +1038,7 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         }
         if (bucket.creditsKnown) {
             lv_obj_remove_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN);
-            std::snprintf(buf, sizeof(buf), "%s Points", bucket.creditsUnlimited ? "inf" : (bucket.creditBalance[0] ? bucket.creditBalance : "--"));
+            std::snprintf(buf, sizeof(buf), "%s Credits", bucket.creditsUnlimited ? "inf" : (bucket.creditBalance[0] ? bucket.creditBalance : "--"));
             lv_label_set_text(_creditValues[i], buf);
         } else { lv_obj_add_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN); }
         lv_label_set_text(_cardMeta[i], bucket.reached);

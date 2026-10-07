@@ -16,8 +16,8 @@ class OtaUiTests(unittest.TestCase):
         expression=re.search(r'const uint16_t otaMeterPhase = static_cast<uint16_t>\(([^;]+)\);',motion)[1]
         compilers=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
         if not compilers:self.skipTest('embedded compiler unavailable')
-        header=(V/'dot_patterns.h').as_posix()
-        source='#include "'+header+'"\nusing namespace mosaico_dot::detail;\n'
+        header=(V/'dot_render_model.h').as_posix()
+        source='#include "'+header+'"\nusing namespace mosaico_dot::detail;\nusing namespace mosaico_dot::render;\n'
         source+='constexpr uint16_t otaPhase(uint16_t meterPhase) { return '+expression+'; }\n'
         source+=r"""
 constexpr bool direction() {
@@ -32,8 +32,8 @@ constexpr bool direction() {
    int advance=(after-before+circumference)%circumference;
    if(advance>circumference/2)return false;
    for(int x=0;x<g.columns;++x) {
-    int mix=waveMix(g,bp,true,otaPhase(phase),true,x);
-    if(mix && x*g.rows>=filled)return false;
+    auto color=meterColumnColor(g,bp,true,otaPhase(phase),true,x,0x67e7ae);
+    if(x*g.rows>=filled && color!=0x67e7ae)return false;
    }
   }
  }

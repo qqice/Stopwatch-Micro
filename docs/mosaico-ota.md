@@ -660,3 +660,39 @@ The entire caption widget and formatter are removed, with no replacement text or
 status badge. The six numbered state icons, battery centring, conservative colour
 rules and minute BLE acquisition are unchanged. Cache freshness/window errors
 remain available only through the existing read-only diagnostic interface.
+
+## 0.12.3 shared-model icon simulator and visual gate
+
+Quota uses an allowance-wallet symbol rather than a clock/gauge silhouette. The
+coin has a round ring with `C`; reset cards show `R`; Credits replaces Points.
+The install/update icon is a round two-arrow refresh symbol with a stable outline,
+not a deforming shape. Coin/card rotation remains, with readable C/R front and back.
+
+All dotted meters keep their original filled-dot count and stationary coordinates.
+A bright charging core travels between two genuinely dim/desaturated shoulders,
+which recover smoothly to the base colour. The selected STRONG DARK model keeps
+filled dots brighter than unfilled ones. Zero/unknown/stopped bars do not gain fake
+filled highlights; a single occupied column pulses in brightness only. The sweep
+cycle is6s, quota/reset travel right-to-left and OTA left-to-right. Existing
+visibility, stale-data, lock, slide and rotation gates remain unchanged.
+
+### Mandatory visual workflow for future icon work
+
+Run `tools/preview_dot_model.py` with the existing IDF Python/Pillow environment.
+It cross-compiles the same pure C++ samplers used by the firmware and exports
+bounded primitive commands from a `.preview` object section. Pillow rasterizes
+those commands; it does not maintain independent icon masks or motion formulas.
+The generated JSON hashes and frame metadata accompany PNG contact sheets/GIFs.
+Review actual1x sizes and nearest4x enlargements, fronts/edges/backs and animation
+phase strips using the image-view tool BEFORE integration/build/release. New icons
+must first be added to this shared simulator path. Keep rejected proposals as
+ignored evidence, not as the release's visual proof. Do not add a full-screen
+canvas or install a new toolchain to produce these previews.
+
+For0123, the first proposal was viewed and rejected for a diamond-shaped refresh
+outline and white-only shoulders. The v2 round-arcs/true dim-skirts proposal was
+viewed at actual28/32/88 sizes and accepted with STRONG DARK. Final integrated
+models must be re-exported and reviewed again. Source/image acceptance cannot
+prove physical OLED gamma/readability, so final hardware observation remains a
+separate gate. Existing native masks/fonts suffice; no NOR/NAND asset write or
+partition change is required.

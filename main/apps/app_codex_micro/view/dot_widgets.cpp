@@ -1,5 +1,6 @@
 #include "dot_widgets.h"
 #include "dot_patterns.h"
+#include "dot_render_model.h"
 #include <cstring>
 #include <new>
 
@@ -73,20 +74,12 @@ constexpr bool actionGlyphsTest() {
 static_assert(actionGlyphsTest(), "every staged action must have a real glyph");
 static_assert(uiGlyph(':').key == ':' && uiGlyph(':').rows[1] == 4 &&
               uiGlyph(':').rows[4] == 4, "clock colon has two visible dots");
-struct Motion { int scale = 1000, wavePhase = -1, pulse = 0; };
+struct Motion { int pulse = 0; };
 Motion motion(const State& s, int w, int h, uint16_t phase, bool enabled) {
     Motion m;
     if (!enabled) return m;
-    if (s.kind == Kind::Meter) {
-        if (detail::highlightColumn(detail::meterLayout(w, h, s.rows), s.bp, s.known, phase, true) >= 0)
-            m.wavePhase = phase % 360;
-    }
-    else if (s.kind == Kind::Icon && detail::min(w / 9, h / 9) >= 2) {
-        if (s.icon == Icon::Coin || s.icon == Icon::ResetCard) {
-            m.scale = detail::flipScale(phase);
-            // Both faces of the symmetric coin are visually identical.
-            if (s.icon == Icon::Coin && m.scale < 0) m.scale = -m.scale;
-        } else if (s.icon == Icon::Arrow || s.icon == Icon::Download || s.icon == Icon::Chip || s.icon == Icon::Refresh)
+    if (s.kind == Kind::Icon && detail::min(w / 9, h / 9) >= 2) {
+        if (s.icon == Icon::Arrow || s.icon == Icon::Download || s.icon == Icon::Chip)
             m.pulse = detail::pulse(phase);
         else if (s.icon == Icon::Battery && s.valid)
             m.pulse = detail::pulse(phase);
@@ -115,6 +108,17 @@ void dot(lv_layer_t* layer, lv_draw_rect_dsc_t& dsc, int x, int y, int d) {
     if (area.x2 < clip.x1 || area.x1 > clip.x2 || area.y2 < clip.y1 || area.y1 > clip.y2) return;
     lv_draw_rect(layer, &dsc, &area);
 }
+void primitiveDot(lv_layer_t* layer,lv_draw_rect_dsc_t& dsc,int x,int y,int d) { dot(layer,dsc,x,y,d); }
+struct LvglPrimitiveSink {
+    lv_layer_t* layer;lv_draw_rect_dsc_t& dsc;int x,y;
+    void dot(int dx,int dy,int diameter,uint32_t color) {
+        dsc.bg_color=lv_color_hex(color);primitiveDot(layer,dsc,x+dx,y+dy,diameter);
+    }
+};
+static_assert(static_cast<unsigned>(Icon::Quota)==static_cast<unsigned>(render::Accent::Quota) &&
+              static_cast<unsigned>(Icon::Coin)==static_cast<unsigned>(render::Accent::Coin) &&
+              static_cast<unsigned>(Icon::ResetCard)==static_cast<unsigned>(render::Accent::ResetCard) &&
+              static_cast<unsigned>(Icon::Refresh)==static_cast<unsigned>(render::Accent::Refresh),"preserve public icon enum ABI");
 void event(lv_event_t* e) {
     auto* obj = lv_event_get_current_target_obj(e);
     auto* s = static_cast<State*>(lv_obj_get_user_data(obj));
@@ -157,22 +161,11 @@ void event(lv_event_t* e) {
                         a.y1 + l.y + y * l.pitch, l.diameter);
         }
     } else if (s->kind == Kind::Meter) {
-        const auto g = detail::meterLayout(w, h, s->rows);
-        const auto columns = visibleSpan(a.x1 + g.x, g.pitch, g.diameter, g.columns, clip.x1, clip.x2);
-        for (int x = columns.first; x < columns.end; ++x) {
-            const int mix = detail::waveMix(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, m.wavePhase)), m.wavePhase >= 0, x);
-            const int lift = detail::waveLift(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, m.wavePhase)), m.wavePhase >= 0, x);
-            const auto foreground = mix ? lv_color_mix(lv_color_hex(0xFFFFFF), lv_color_hex(s->color), static_cast<uint8_t>(mix))
-                                        : lv_color_hex(s->known ? s->color : 0x69716D);
-            // A partly filled column contains both lifted and unlifted dots.
-            // This union is conservative; dot() applies the exact final clip check.
-            const auto rows = visibleSpan(a.y1 + g.y - lift, g.pitch, g.diameter + lift, g.rows, clip.y1, clip.y2);
-            for (int y = rows.first; y < rows.end; ++y) {
-                const bool lit = detail::meterLit(x, y, g, s->bp, s->known);
-                dsc.bg_color = lit ? foreground : lv_color_hex(0x283642);
-                dot(layer, dsc, a.x1 + g.x + x * g.pitch, a.y1 + g.y + y * g.pitch - (lit ? lift : 0), g.diameter);
-            }
-        }
+        LvglPrimitiveSink sink{layer,dsc,a.x1,a.y1};
+        render::sampleMeter(w,h,s->rows,s->bp,s->known,s->phase,s->motion,s->color,sink,render::SweepStyle::StrongDark);
+    } else if (render::supports(static_cast<unsigned>(s->icon))) {
+        LvglPrimitiveSink sink{layer,dsc,a.x1,a.y1};
+        render::sampleIcon(static_cast<render::Accent>(s->icon),w,h,s->phase,s->motion,s->color,sink);
     } else {
         const int p = detail::min(w / 9, h / 9);
         if (p < 2) return;
@@ -198,9 +191,9 @@ void event(lv_event_t* e) {
             // Only existing mask/fill dots pulse; zero capacity still has an
             // honest outline that can indicate actual charging.
             if (lit && ((s->icon == Icon::Battery && s->valid && m.pulse) ||
-                ((s->icon == Icon::Arrow || s->icon == Icon::Download || s->icon == Icon::Chip || s->icon == Icon::Refresh) && m.pulse)))
+                ((s->icon == Icon::Arrow || s->icon == Icon::Download || s->icon == Icon::Chip) && m.pulse)))
                 dsc.bg_color = lv_color_mix(lv_color_hex(0xFFFFFF), dsc.bg_color, static_cast<uint8_t>(m.pulse));
-            if (lit) dot(layer, dsc, ox + detail::projectedX(x, p, m.scale), oy + y * p, d);
+            if (lit) dot(layer, dsc, ox + detail::projectedX(x, p, 1000), oy + y * p, d);
         }
     }
 }
@@ -222,7 +215,7 @@ State* state(lv_obj_t* obj, Kind kind) {
     return s && s->kind == kind ? s : nullptr;
 }
 }
-bool selfTest() { return detail::algorithmTest() && detail::motionTest() && iconPatternsTest(); }
+bool selfTest() { return detail::algorithmTest() && detail::motionTest() && iconPatternsTest() && render::modelTest(); }
 lv_obj_t* createText(lv_obj_t* parent, int w, int h, int pitch, uint32_t color) {
     auto* obj = create(parent, w, h, Kind::Text);
     if (auto* s = state(obj, Kind::Text)) { s->pitch = detail::max(2, pitch); s->color = color; }
@@ -242,37 +235,21 @@ void setMotion(lv_obj_t* obj, uint16_t phase, bool enabled) {
     phase %= 360;
     if (s->phase == phase && s->motion == enabled) return;
     const int w = lv_obj_get_content_width(obj), h = lv_obj_get_content_height(obj);
-    const auto old = motion(*s, w, h, s->phase, s->motion);
+    const uint16_t previousPhase=s->phase;const bool previousEnabled=s->motion;
+    const auto old = motion(*s, w, h, previousPhase, previousEnabled);
     const auto next = motion(*s, w, h, phase, enabled);
     s->phase = phase; s->motion = enabled;
     // Stopping for a hidden/locked/stale widget never causes a wake-up redraw.
     // The next otherwise-required draw will use its static appearance.
     if (!enabled) return;
-    const auto base = lv_color_hex(s->color), white = lv_color_hex(0xFFFFFF);
-    bool changed = false;
-    if (old.wavePhase != next.wavePhase) {
-        const auto g = detail::meterLayout(w, h, s->rows);
-        const int filled = s->known ? detail::filledDots(g.columns * g.rows, s->bp) : 0;
-        for (int x = 0; x * g.rows < filled; ++x) {
-            const int a = detail::waveMix(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, old.wavePhase)), old.wavePhase >= 0, x);
-            const int b = detail::waveMix(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, next.wavePhase)), next.wavePhase >= 0, x);
-            const int liftA = detail::waveLift(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, old.wavePhase)), old.wavePhase >= 0, x);
-            const int liftB = detail::waveLift(g, s->bp, s->known, static_cast<uint16_t>(detail::max(0, next.wavePhase)), next.wavePhase >= 0, x);
-            if (liftA != liftB || !lv_color_eq(lv_color_mix(white, base, static_cast<uint8_t>(a)), lv_color_mix(white, base, static_cast<uint8_t>(b)))) {
-                changed = true;
-                break;
-            }
-        }
-    }
-    if (old.pulse != next.pulse && !lv_color_eq(lv_color_mix(white, base, static_cast<uint8_t>(old.pulse)),
-                                              lv_color_mix(white, base, static_cast<uint8_t>(next.pulse)))) changed = true;
-    const int p = detail::min(w / 9, h / 9);
-    if (old.scale != next.scale) {
-        uint16_t occupied = 0;
-        for (auto row : masks[static_cast<int>(s->icon)]) occupied |= row;
-        for (int x = 0; x < 9; ++x)
-            if ((occupied & (1 << (8 - x))) &&
-                detail::projectedX(x, p, old.scale) != detail::projectedX(x, p, next.scale)) changed = true;
+    bool changed=false;
+    if (s->kind==Kind::Meter) {
+        changed=render::meterChanged(w,h,s->rows,s->bp,s->known,previousPhase,previousEnabled,phase,enabled,s->color);
+    } else if (s->kind==Kind::Icon && render::supports(static_cast<unsigned>(s->icon))) {
+        changed=render::iconChanged(static_cast<render::Accent>(s->icon),w,h,previousPhase,previousEnabled,phase,enabled,s->color);
+    } else if (old.pulse!=next.pulse) {
+        const auto base=lv_color_hex(s->color),white=lv_color_hex(0xFFFFFF);
+        changed=!lv_color_eq(lv_color_mix(white,base,static_cast<uint8_t>(old.pulse)),lv_color_mix(white,base,static_cast<uint8_t>(next.pulse)));
     }
     if (changed) lv_obj_invalidate(obj);
 }

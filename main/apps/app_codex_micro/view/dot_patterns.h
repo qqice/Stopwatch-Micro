@@ -43,8 +43,8 @@ constexpr Grid meterLayout(int w, int h, int requestedRows) {
     const int d = cols ? max(1, p * 7 / 10) : 0;
     const int width = cols ? (cols - 1) * p + d : 0;
     const int height = cols ? (rows - 1) * p + d : 0;
-    // Reserve up to three pixels above the unchanged fixed grid. Pitch, column
-    // count and fill quantization are unaffected, including a 198x24 meter.
+    // Keep the established fixed row origin, pitch and fill quantization.
+    // Animated colour never changes this geometry, including a 198x24 meter.
     const int top = max((h - height) / 2, min(3, h - height));
     return {rows, cols, p, d, width, height, (w - width) / 2, top};
 }
@@ -66,27 +66,6 @@ constexpr int wavePosition(int columns, uint16_t phase) {
     const int position = (columns - 1) * 256 - (phase % 360) * circumference / 360;
     return position < 0 ? position + circumference : position;
 }
-constexpr int waveMix(Grid g, uint16_t bp, bool known, uint16_t phase, bool enabled, int column) {
-    const int filled = known ? filledDots(g.columns * g.rows, bp) : 0;
-    const int columns = filled ? (filled + g.rows - 1) / g.rows : 0;
-    if (!enabled || !columns || column < 0 || column >= columns) return 0;
-    // A lone real filled column cannot move: pulse it without adding capacity.
-    if (columns == 1) return 40 + pulse(phase) / 2;
-    const int circumference = columns * 256;
-    const int position = wavePosition(columns, phase);
-    int distance = column * 256 - position;
-    if (distance < 0) distance = -distance;
-    distance = min(distance, circumference - distance);
-    return distance < 384 ? (384 - distance) * 80 / 384 : 0;
-}
-constexpr int waveLift(Grid g, uint16_t bp, bool known, uint16_t phase, bool enabled, int column) {
-    const int mix = waveMix(g, bp, known, phase, enabled, column);
-    if (!mix) return 0;
-    const int filled = filledDots(g.columns * g.rows, bp);
-    const int columns = (filled + g.rows - 1) / g.rows;
-    const int strength = columns == 1 ? pulse(phase) : mix;
-    return (strength * min(3, g.y) + 40) / 80;
-}
 constexpr bool motionTest() {
     for (int phase = 0; phase < 360; ++phase) {
         const int scale = flipScale(static_cast<uint16_t>(phase));
@@ -102,19 +81,8 @@ constexpr bool motionTest() {
             if (col >= 0 && !meterLit(col, 0, g, bp, true)) return false;
             if (highlightColumn(g, bp, false, phase, true) != -1 || highlightColumn(g, bp, true, phase, false) != -1)
                 return false;
-            const int filled = filledDots(g.columns * g.rows, bp);
-            for (int x = 0; x < g.columns; ++x) {
-                const int mix = waveMix(g, bp, true, phase, true, x);
-                if (mix < 0 || mix > 80 || (mix && x * g.rows >= filled)) return false;
-                if (waveMix(g, bp, false, phase, true, x) || waveMix(g, bp, true, phase, false, x)) return false;
-                const int lift = waveLift(g, bp, true, phase, true, x);
-                if (lift < 0 || lift > 3 || g.y - lift < 0 || (lift && x * g.rows >= filled)) return false;
-                if (waveLift(g, bp, false, phase, true, x) || waveLift(g, bp, true, phase, false, x)) return false;
-            }
         }
     }
-    const auto tiny = meterLayout(198, 28, 3);
-    if (waveMix(tiny, 100, true, 0, true, 0) == waveMix(tiny, 100, true, 90, true, 0)) return false;
     const auto real = meterLayout(198, 24, 3);
     if (real.y < 3 || real.y + real.height > 24 || wavePosition(4, 90) >= wavePosition(4, 0)) return false;
     return flipScale(0) == 1000 && flipScale(90) == 0 && flipScale(180) == -1000;
