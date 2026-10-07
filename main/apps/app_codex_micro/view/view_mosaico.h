@@ -138,7 +138,6 @@ private:
     std::array<lv_obj_t*,6> _lockSessionCards{}, _lockSessionNumbers{};
     std::array<Hit,6> _lockSessionHits{};
     std::array<uint32_t,6> _lockSessionColors{};
-    lv_obj_t* _lockSessionsAge = nullptr;
     uint32_t _lockSessionsRevision = UINT32_MAX;
     lv_obj_t* _battery = nullptr;
     lv_obj_t* _batteryIcon = nullptr;

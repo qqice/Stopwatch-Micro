@@ -40,7 +40,7 @@ constexpr bool geometry() {
  for(unsigned i=0;i<4;++i) {
   auto c=corner(i);if(c.x-8<0 || c.x+8>53 || c.y-8<0 || c.y+8>47)return false;
  }
- return 370<392 && 440<448 && 448+18+2<480;
+ return 370<392 && 440+2<480;
 }
 static_assert(geometry(),"six centred rounded cards, exact battery group centre, cache freshness and bounded clip margins");
 '''
@@ -58,7 +58,10 @@ static_assert(geometry(),"six centred rounded cards, exact battery group centre,
         self.assertIn('batteryRow(size.x,size.y)',battery)
         render=CPP.split('void CodexMicroView::renderLockSessions()',1)[1].split('void CodexMicroView::initSessions()',1)[0]
         self.assertIn('_sessionBackend.freshnessKnownMask',render)
-        self.assertIn('CACHED --',render);self.assertIn('CACHED %lus',render)
+        init=CPP.split('void CodexMicroView::initLockSessions()',1)[1].split('void CodexMicroView::lockSessionBorderEvent',1)[0]
+        for explanation in ('CACHED', 'SYNC', 'STALE', '_lockSessionsAge'):
+            self.assertNotIn(explanation, init+render)
+        self.assertNotIn('_lockSessionsAge', (V/'view_mosaico.h').read_text(encoding='utf8'))
         for forbidden in ('wakeDisplay','setBackLightBrightness','GetCodexMicroBle','requestJson','sendKey','lv_timer_create'):
             self.assertNotIn(forbidden,border+render)
 

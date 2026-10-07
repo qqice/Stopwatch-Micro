@@ -652,3 +652,11 @@ After OTA, temporarily set the active supply profile to a finite idle timeout if
 it is normally NEVER. Verify the card row and battery centring, then watch two or
 more minute reconnect windows with a changed slot on the PC. Confirm normal
 brightness/lock remains, Function wakes only once, and OTA still prevents sleep.
+
+## 0.12.2 remove lock explanatory cache text
+
+The user rejected the lock-screen CACHED/SYNC/STALE age caption as redundant UI.
+The entire caption widget and formatter are removed, with no replacement text or
+status badge. The six numbered state icons, battery centring, conservative colour
+rules and minute BLE acquisition are unchanged. Cache freshness/window errors
+remain available only through the existing read-only diagnostic interface.

@@ -239,7 +239,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_style_radius(_rotationCurtain, 0, 0);
     lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
-    bool widgetsReady = _lockSessionNumbers[5] && _lockSessionsAge && _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    bool widgetsReady = _lockSessionNumbers[5] && _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
     for (auto* number : _lockSessionNumbers) widgetsReady = widgetsReady && number;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
@@ -365,9 +365,7 @@ void CodexMicroView::initLockSessions() {
         _lockSessionNumbers[i]=createText(obj,29,35,5,Gray); place(_lockSessionNumbers[i],12,6);
         char number[2]={static_cast<char>('1'+i),0}; setText(_lockSessionNumbers[i],number,Gray);
     }
-    _lockSessionsAge=label(_lockPanel,20,448,440,"CACHED --",&lv_font_montserrat_12);
-    lv_obj_set_height(_lockSessionsAge,18); lv_obj_set_style_text_align(_lockSessionsAge,LV_TEXT_ALIGN_CENTER,0);
-    lv_obj_remove_flag(_lockSessionsAge,LV_OBJ_FLAG_CLICKABLE);
+
 }
 void CodexMicroView::lockSessionBorderEvent(lv_event_t* event) {
     auto* hit=static_cast<Hit*>(lv_event_get_user_data(event));
@@ -405,13 +403,6 @@ void CodexMicroView::renderLockSessions() {
         if (color!=_lockSessionColors[i]) { _lockSessionColors[i]=color;lv_obj_invalidate(_lockSessionCards[i]); }
         char number[2]={static_cast<char>('1'+i),0};setText(_lockSessionNumbers[i],number,color);
     }
-    char text[64];
-    if (_sessionBackend.lockedCacheValid) {
-        const uint32_t age=mosaico_sessions_ui::ageSeconds(now,_sessionBackend.lockedCapturedMs);
-        std::snprintf(text,sizeof(text),"CACHED %lus%s",static_cast<unsigned long>(age),
-            _sessionBackend.lockedRefreshing ? " / SYNC" : age>60 ? " / STALE" : "");
-    } else std::snprintf(text,sizeof(text),"CACHED --%s",_sessionBackend.lockedRefreshing ? " / SYNC" : "");
-    lv_label_set_text(_lockSessionsAge,text);
     _lockSessionsRevision=_sessionBackend.lockedRefreshRevision;
 }
 void CodexMicroView::initSessions() {
