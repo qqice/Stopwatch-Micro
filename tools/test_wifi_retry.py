@@ -31,7 +31,10 @@ static_assert(test());"""
   s=(R/'main/host/network_quota.cpp').read_text(encoding='utf8')
   branch=s[s.index('if (!_connected) {'):s.index('esp_wifi_connect();',s.index('if (!_connected) {'))+100]
   self.assertLess(branch.index('wifiRetry.exhausted'),branch.index('esp_wifi_connect()'))
-  self.assertIn('updateWindow = false;',branch)
+  self.assertIn('closeWindow(MosaicoTwt::CycleReason::RetryBudget)',branch)
+  closer=s.split('auto closeWindow =',1)[1].split('};',1)[0]
+  self.assertIn('updateWindow = false;',closer)
+  self.assertNotIn('nextRefresh =',closer)
   self.assertNotIn('nextRefresh =',branch)
   self.assertIn('useRetryPolicy = !_twt.live()',branch)
   self.assertLess(branch.index('if (useRetryPolicy)'),branch.index('wifiRetry.remainingMs'))

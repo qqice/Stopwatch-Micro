@@ -1,4 +1,5 @@
 #include "network_quota.h"
+#include "mosaico_twt_model.h"
 #include "host_bridge.h"
 #include "tailscale_transport.h"
 #include "token_history.h"
@@ -386,15 +387,49 @@ void NetworkQuota::serviceWifiSettings()
     MosaicoWifi::scrub(&candidate,sizeof(candidate));
 }
 #if SOC_WIFI_HE_SUPPORT
-bool NetworkQuota::requestTwtTrial(MosaicoTwt::Mode mode)
+bool NetworkQuota::requestTwtTrial(MosaicoTwt::Mode mode, uint32_t leaseSeconds)
 {
     if (mode != MosaicoTwt::Mode::Off && mode != MosaicoTwt::Mode::Baseline && mode != MosaicoTwt::Mode::On) return false;
-    if (!_task_handle) return false;
+    if (!_task_handle || !MosaicoTwt::validLease(leaseSeconds)) return false;
     // Off always wins over a queued command; no Wi-Fi API on serial/GUI threads.
     if (mode == MosaicoTwt::Mode::Off) _twt_request.store(0);
-    else { int empty = -1; if (!_twt_request.compare_exchange_strong(empty, static_cast<int>(mode))) return false; }
+    else { int empty = -1; if (!_twt_request.compare_exchange_strong(empty, MosaicoTwt::encodeRequest(mode, leaseSeconds))) return false; }
     xTaskNotifyGive(_task_handle);
     return true;
+}
+void NetworkQuota::requestTwtObserve(bool enabled) { _twt_observe.store(enabled); }
+bool NetworkQuota::popTwtCycle(MosaicoTwt::Cycle& cycle)
+{
+    portENTER_CRITICAL(&_twt_mux);
+    const bool available = _twt_cycles.pop(cycle);
+    portEXIT_CRITICAL(&_twt_mux);
+    return available;
+}
+void NetworkQuota::reconcileTwtCycleIdentity()
+{
+    // Never carry an evidence window into another lease (including observe ID 0).
+    const uint16_t currentId = _twt.live() ? _twt.state.id : 0;
+    if (_twt_cycle_open && _twt_cycle_trial_id != currentId)
+        recordTwtCycle(MosaicoTwt::CyclePhase::End, MosaicoTwt::CycleReason::Cancel);
+}
+void NetworkQuota::recordTwtCycle(MosaicoTwt::CyclePhase phase, MosaicoTwt::CycleReason reason, uint8_t flags)
+{
+    using namespace MosaicoTwt;
+    if (phase == CyclePhase::Start) {
+        if (!_twt_observe.load() && !_twt.live()) return;
+        _twt_cycle_open = true; ++_twt_cycle_seq;
+        _twt_cycle_trial_id = _twt.live() ? _twt.state.id : 0;
+    } else if (!_twt_cycle_open) return;
+    wifi_ap_record_t ap{};
+    Cycle cycle{};
+    cycle.phase = phase; cycle.reason = reason; cycle.deviceUs = esp_timer_get_time();
+    cycle.trialId = _twt_cycle_trial_id; cycle.cycleSeq = _twt_cycle_seq;
+    cycle.associated = _wifi_running && esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+    cycle.fetchFlags = flags;
+    portENTER_CRITICAL(&_twt_mux);
+    _twt_cycles.push(cycle);
+    portEXIT_CRITICAL(&_twt_mux);
+    if (phase == CyclePhase::End) _twt_cycle_open = false;
 }
 MosaicoTwt::Snapshot NetworkQuota::twtSnapshot() const
 {
@@ -504,6 +539,7 @@ void NetworkQuota::cleanupTwtTrial()
 void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
 {
     using namespace MosaicoTwt;
+    reconcileTwtCycleIdentity();
     // Expiry/OTA/unlock wins over an already queued setup success.
     if (_twt.live() && !_twt.check(now, twtOtaBlocked(), locked))
         cancelTwtTrial(_twt.state.stop);
@@ -571,11 +607,12 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
     const int request = _twt_request.exchange(-1);
     if (request >= 0) {
         cancelTwtTrial(Stop::Explicit);
-        const auto mode = static_cast<Mode>(request);
+        const auto mode = static_cast<Mode>(request & 3);
+        const uint32_t leaseSeconds = request & 4 ? 1800 : 600;
         if (_twt.state.cleanupPending || _twt_cleanup_failed) {
             _twt.state.error = ESP_ERR_INVALID_STATE;
             _twt.end(Stop::Driver);
-        } else if (!_twt.start(mode, now)) { _twt.state.error = ESP_ERR_INVALID_STATE; _twt.end(Stop::Driver); }
+        } else if (!_twt.start(mode, now, leaseSeconds)) { _twt.state.error = ESP_ERR_INVALID_STATE; _twt.end(Stop::Driver); }
         if (_twt.live() && !locked) cancelTwtTrial(Stop::Awake);
         if (mode != Mode::Off && (!_twt_handler_ready || twtOtaBlocked()))
             cancelTwtTrial(_twt_handler_ready ? Stop::Ota : Stop::Driver);
@@ -624,6 +661,7 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
             }
         }
     }
+    reconcileTwtCycleIdentity();
     publishTwt();
 }
 #endif
@@ -919,6 +957,14 @@ void NetworkQuota::run()
     if (timeInit != ESP_OK) ESP_LOGW("SystemClock", "SNTP init failed: %s", esp_err_to_name(timeInit));
     bool hadConnection = false;
     bool wasLocked = false, updateWindow = false;
+    auto closeWindow = [&](MosaicoTwt::CycleReason reason) {
+#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
+        if (updateWindow) recordTwtCycle(MosaicoTwt::CyclePhase::End, reason);
+#else
+        (void)reason;
+#endif
+        updateWindow = false;
+    };
     int64_t nextRefresh = 0, windowDeadline = 0;
     constexpr int64_t RefreshIntervalUs = 300LL * 1000000;
     constexpr int64_t UpdateWindowUs    = 90LL * 1000000;
@@ -944,6 +990,8 @@ void NetworkQuota::run()
             _twt.state.error=ESP_ERR_TIMEOUT; _twt.end(MosaicoTwt::Stop::Timeout); publishTwt();
         }
         if(!_wifi_scan_started && !_wifi_scan_fault) serviceTwtTrial(esp_timer_get_time(), idleLocked());
+        // Scan-fault paths can change identity without servicing the trial.
+        reconcileTwtCycleIdentity();
         if (_twt.state.cleanupPending || _twt_cleanup_failed) {
             if (MosaicoOta::busy()) MosaicoOta::fail("twt_cleanup_not_ready");
             setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
@@ -990,7 +1038,7 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
             refreshBaseUs=now;
 #endif
-            updateWindow = false;
+            closeWindow(MosaicoTwt::CycleReason::Cancel);
         }
 #ifdef MOSAICO_BOARD
         if (!locked && wasLocked) { wifiRetry.reset(); _wifi_scan_complete=false; } // Explicit wake gets a fresh attempt.
@@ -998,6 +1046,9 @@ void NetworkQuota::run()
         wasLocked = locked;
         if (locked && !updateWindow && (_force_refresh.exchange(false) || now >= nextRefresh)) {
             updateWindow   = true;
+#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
+            recordTwtCycle(MosaicoTwt::CyclePhase::Start);
+#endif
 #ifdef MOSAICO_BOARD
             wifiRetry.reset(); _wifi_scan_complete=false; // New configured refresh window, not a task notification.
 #endif
@@ -1007,7 +1058,7 @@ void NetworkQuota::run()
             refreshBaseUs=now;
 #endif
         }
-        if (locked && updateWindow && now >= windowDeadline) updateWindow = false;
+        if (locked && updateWindow && now >= windowDeadline) closeWindow(MosaicoTwt::CycleReason::Deadline);
         if (locked && !updateWindow) {
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
             // Hold association/tailnet, but never fetch outside the existing refresh window.
@@ -1089,7 +1140,7 @@ void NetworkQuota::run()
 #endif
         }
         setPhase(locked ? 3 : 0);
-        if (!locked) updateWindow = false;
+        if (!locked) closeWindow(MosaicoTwt::CycleReason::Awake);
         wifi_ap_record_t ap{};
         esp_netif_ip_info_t ip{};
         esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -1106,7 +1157,7 @@ void NetworkQuota::run()
             const int64_t retryNow = esp_timer_get_time();
             if (wifiRetry.exhausted(locked) && !wifiRetry.remainingMs(retryNow)) {
                 ++_wifi_budget_closures;
-                updateWindow = false;
+                closeWindow(MosaicoTwt::CycleReason::RetryBudget);
                 continue; // Existing pause/disconnect/stop path; keep nextRefresh unchanged.
             }
             const uint32_t remaining = wifiRetry.remainingMs(retryNow);
@@ -1117,7 +1168,7 @@ void NetworkQuota::run()
             if (scanReady) sampleNetworkHeap("scan_ready_after", scanHeapAfter);
             if(!selectedCandidate) {
                 if(_wifi_scan_complete) {
-                    if(locked) updateWindow=false;
+                    if(locked) closeWindow(MosaicoTwt::CycleReason::NoCandidate);
                     else { wifiRetry.attempted(retryNow,false); _wifi_scan_complete=false; }
                 }
                 wait(100); continue;
@@ -1207,12 +1258,13 @@ void NetworkQuota::run()
             _twt.state.stage != MosaicoTwt::Stage::Armed && _twt.state.stage != MosaicoTwt::Stage::Negotiating &&
             (!twtMeasure || (_twt.live() && _twt.state.id == twtFetchId));
 #endif
-        bool historyOk = false;
+        bool historyOk = false, historyAttempted = false;
         if ((!GetTailnetQuota().enabled() || GetTailnetQuota().ready())
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
             && twtHistoryAllowed
 #endif
             ) {
+            historyAttempted = true;
             historyOk = fetchHistory();
             if (historyOk)
                 ++_history_accepted;
@@ -1220,6 +1272,8 @@ void NetworkQuota::run()
                 ++_history_failures;
         }
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
+        recordTwtCycle(MosaicoTwt::CyclePhase::Fetch, MosaicoTwt::CycleReason::None,
+            1 | (quotaOk ? 2 : 0) | (historyAttempted ? 4 : 0) | (historyOk ? 8 : 0));
         serviceTwtTrial(esp_timer_get_time(), idleLocked()); // Also before the next wait/idle transition.
         if (twtMeasure && _twt.state.id == twtFetchId) {
             ++_twt.state.fetchAttempts;
@@ -1230,7 +1284,7 @@ void NetworkQuota::run()
 #endif
         if (locked && quotaOk && historyOk) {
             ++_power_cycles;
-            updateWindow = false;
+            closeWindow(MosaicoTwt::CycleReason::Success);
             continue;
         }
         wait(locked ? 5000 : 60000);

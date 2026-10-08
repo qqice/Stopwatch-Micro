@@ -88,6 +88,7 @@ static_assert(cleanupTraces(), "actual cleanup fault traces");
     def test_cpp_trial_fault_traces(self):
         code = r'''
 #include "main/host/mosaico_twt_model.h"
+#include <initializer_list>
 using namespace MosaicoTwt;
 constexpr Result good(uint16_t id) { Result r; r.id=id; r.flow=5; r.status=1; r.mantissa=512; r.exponent=11; r.duration=64; return r; }
 constexpr bool traces() {
@@ -137,6 +138,86 @@ static_assert(traces(), "trial safety traces");
 '''
         self.compile_cpp(code)
 
+    def test_long_lease_and_cycle_ring(self):
+        self.compile_cpp(r'''
+#include "main/host/mosaico_twt_model.h"
+#include <initializer_list>
+using namespace MosaicoTwt;
+constexpr bool longLease() {
+ Model m; if(!m.start(Mode::Baseline, 7, 1800)) return false;
+ if(m.state.expiryUs!=1800000007LL || m.state.setupDeadlineUs!=10000007LL) return false;
+ if(m.start(Mode::On,8,1200)||m.state.id!=1) return false;
+ m.state.stage=Stage::Baseline; m.state.setupDeadlineUs=0;
+ if(!m.check(1799999999LL,false,true)||m.check(1800000007LL,false,true)) return false;
+ if(m.state.stop!=Stop::Expired || encodeRequest(Mode::On,1800)!=6 || encodeRequest(Mode::Baseline,600)!=1) return false;
+ if(encodeRequest(Mode::On,1200)!=-1 || !m.start(Mode::On,9) || m.state.expiryUs!=600000009LL) return false;
+ CycleRing r; Cycle c; for(int i=0;i<31;++i){c.cycleSeq=i;r.push(c);}
+ r.push(c); if(r.dropped!=1) return false;
+ for(int i=0;i<31;++i){if(!r.pop(c)||c.cycleSeq!=unsigned(i))return false;}
+ if(r.pop(c))return false; r.push(c);return r.pop(c)&&c.dropped==1;
+}
+static_assert(longLease(), "lease atomic encoding and bounded ring");
+''')
+
+    def test_actual_cycle_owner(self):
+        source = (ROOT/'main/host/network_quota.cpp').read_text()
+        body = 'void NetworkQuota::reconcileTwtCycleIdentity' + source.split('void NetworkQuota::reconcileTwtCycleIdentity', 1)[1].split('MosaicoTwt::Snapshot NetworkQuota::twtSnapshot', 1)[0]
+        body = body.replace('void NetworkQuota::', 'constexpr void Owner::')
+        self.compile_cpp(r'''
+#include "main/host/mosaico_twt_model.h"
+#include <initializer_list>
+using namespace MosaicoTwt;
+constexpr int ESP_OK=0;
+struct wifi_ap_record_t {};
+struct Flag { bool value=false; constexpr bool load() const{return value;} };
+struct Owner {
+ Model _twt; CycleRing _twt_cycles; Flag _twt_observe;
+ bool _twt_cycle_open=false,_wifi_running=true,associated=true;
+ uint32_t _twt_cycle_seq=0;uint16_t _twt_cycle_trial_id=0;
+ int _twt_mux=0;int64_t now=1;
+ constexpr int64_t esp_timer_get_time(){return now;}
+ constexpr int esp_wifi_sta_get_ap_info(wifi_ap_record_t*){return associated?0:1;}
+ constexpr void portENTER_CRITICAL(int*){} constexpr void portEXIT_CRITICAL(int*){}
+ constexpr void reconcileTwtCycleIdentity();
+ constexpr void recordTwtCycle(CyclePhase, CycleReason=CycleReason::None,uint8_t=0);
+};
+''' + body + r'''
+constexpr bool actualOwner() {
+ Owner o;Cycle c;
+ o.recordTwtCycle(CyclePhase::Start);if(o._twt_cycles.pop(c))return false;
+ o._twt_observe.value=true;o.recordTwtCycle(CyclePhase::Start);
+ if(!o._twt_cycles.pop(c)||c.trialId||c.cycleSeq!=1||!c.associated)return false;
+ o.associated=false;o.now=2;o.recordTwtCycle(CyclePhase::Fetch,CycleReason::None,5);
+ if(!o._twt_cycles.pop(c)||c.fetchFlags!=5||c.associated)return false;
+ o.recordTwtCycle(CyclePhase::End,CycleReason::Deadline);
+ if(!o._twt_cycles.pop(c)||c.reason!=CycleReason::Deadline||o._twt_cycle_open)return false;
+ o.recordTwtCycle(CyclePhase::Fetch);if(o._twt_cycles.pop(c))return false;
+ o._twt.start(Mode::On,3,1800);o.recordTwtCycle(CyclePhase::Start);o._twt_cycles.pop(c);
+ if(c.trialId!=1||c.cycleSeq!=2)return false;
+ o._twt.end(Stop::Expired);o.recordTwtCycle(CyclePhase::End,CycleReason::Cancel);
+ if(!o._twt_cycles.pop(c)||c.trialId!=1||c.reason!=CycleReason::Cancel)return false;
+ return true;
+}
+constexpr bool identityTransitions() {
+ for (Mode next : {Mode::Baseline, Mode::On}) {
+  Owner o;Cycle c;o._twt.start(Mode::Baseline,0,1800);o._twt.state.stage=Stage::Baseline;
+  o.recordTwtCycle(CyclePhase::Start);o._twt_cycles.pop(c);
+  o.reconcileTwtCycleIdentity();if(o._twt_cycles.pop(c))return false;
+  o._twt.start(next,1,1800);o.reconcileTwtCycleIdentity();
+  if(!o._twt_cycles.pop(c)||c.trialId!=1||c.reason!=CycleReason::Cancel||o._twt_cycle_open)return false;
+  o.recordTwtCycle(CyclePhase::Fetch,CycleReason::None,15);if(o._twt_cycles.pop(c))return false;
+  o.recordTwtCycle(CyclePhase::Start);if(!o._twt_cycles.pop(c)||c.trialId!=2)return false;
+ }
+ Owner observe;Cycle c;observe._twt_observe.value=true;observe.recordTwtCycle(CyclePhase::Start);observe._twt_cycles.pop(c);
+ observe.reconcileTwtCycleIdentity();if(observe._twt_cycles.pop(c))return false;
+ observe._twt.start(Mode::Baseline,1);observe.reconcileTwtCycleIdentity();
+ if(!observe._twt_cycles.pop(c)||c.trialId!=0||c.reason!=CycleReason::Cancel)return false;
+ return !observe._twt_cycle_open;
+}
+static_assert(actualOwner(), "actual network owner anchors");
+static_assert(identityTransitions(), "actual owner identity changes never mix evidence");
+''')
+
     def test_owner_and_serial_boundaries(self):
         source = (ROOT/'main/host/network_quota.cpp').read_text()
         serial = (ROOT/'main/debug/serial_debug.cpp').read_text()
@@ -146,7 +227,19 @@ static_assert(traces(), "trial safety traces");
         command = serial.split('if (std::strcmp(command, "twt")', 1)[1].split('#endif', 1)[0]
         self.assertNotIn('esp_wifi_', command)
         self.assertIn('requestTwtTrial', command); self.assertIn('twtSnapshot', command)
+        self.assertIn('requestTwtTrial(requested, leaseSeconds)', command)
+        self.assertIn('MosaicoTwt::validLease(leaseSeconds)', command)
+        self.assertIn('requestTwtObserve', command)
+        self.assertIn('recordTwtCycle(MosaicoTwt::CyclePhase::Start)', source)
+        self.assertIn('recordTwtCycle(MosaicoTwt::CyclePhase::Fetch', source)
+        owner = source.split('void NetworkQuota::recordTwtCycle', 1)[1].split('MosaicoTwt::Snapshot', 1)[0]
+        self.assertNotIn('printf', owner)
+        poll = serial.split('void SerialDebug::poll()', 1)[1].split('void SerialDebug::drainUart()', 1)[0]
+        self.assertIn('DBG TWT_CYCLE', poll)
+        self.assertIn('_reply_uart = twtCycleUart', poll)
+        self.assertIn('"twt"', (ROOT/'main/debug/serial_debug_transport.h').read_text())
         service = source.split('void NetworkQuota::serviceTwtTrial', 1)[1].split('void NetworkQuota::setLowClockDiagnostic', 1)[0]
+        self.assertGreaterEqual(service.count('reconcileTwtCycleIdentity();'), 2)
         self.assertLess(service.index('_twt.check('), service.index('_twt.accept('))
         self.assertIn('e.setup.id == _twt.state.id', service)
         self.assertIn('phy != WIFI_PHY_MODE_HE20', service)

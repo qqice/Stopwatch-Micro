@@ -41,7 +41,9 @@ public:
     void wakeForFirmwareUpdate();
     void serviceStandbySleep(); // Existing main loop; preserves the current CPU/RF target.
 #if SOC_WIFI_HE_SUPPORT
-    bool requestTwtTrial(MosaicoTwt::Mode mode);
+    bool requestTwtTrial(MosaicoTwt::Mode mode, uint32_t leaseSeconds = 600);
+    void requestTwtObserve(bool enabled);
+    bool popTwtCycle(MosaicoTwt::Cycle& cycle);
     MosaicoTwt::Snapshot twtSnapshot() const;
 #endif
     bool requestWifiCredentials(const char* ssid, const char* password);
@@ -119,6 +121,13 @@ private:
     void cancelTwtTrial(MosaicoTwt::Stop reason);
     void cleanupTwtTrial();
     void publishTwt();
+    void reconcileTwtCycleIdentity();
+    void recordTwtCycle(MosaicoTwt::CyclePhase phase, MosaicoTwt::CycleReason reason = MosaicoTwt::CycleReason::None, uint8_t flags = 0);
+    MosaicoTwt::CycleRing _twt_cycles;
+    uint32_t _twt_cycle_seq = 0;
+    uint16_t _twt_cycle_trial_id = 0;
+    bool _twt_cycle_open = false;
+    std::atomic<bool> _twt_observe{false};
     MosaicoTwt::Model _twt;
     MosaicoTwt::Snapshot _twt_cache;
     struct TwtEvent { uint8_t kind = 0, flow = 0; MosaicoTwt::Result setup{}; };

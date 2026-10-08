@@ -63,6 +63,10 @@ extern "C" esp_err_t ml_derp_patch_selftest(void);
 
 namespace {
 
+#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
+bool twtCycleUart = false; // SerialDebug poll/parser only; never network-thread output.
+#endif
+
 constexpr uint32_t DefaultMicTestMs         = 2000;
 constexpr uint32_t DefaultInputTestMs       = 15000;
 constexpr uint32_t DefaultPerformanceTestMs = 3000;
@@ -370,6 +374,16 @@ void SerialDebug::poll()
 #endif
     updateAsyncTest();
     if (_async_test == AsyncTest::None) _async_uart = false;
+#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
+    MosaicoTwt::Cycle cycle;
+    if (GetNetworkQuota().popTwtCycle(cycle)) {
+        _reply_uart = twtCycleUart;
+        debugPrintf("DBG TWT_CYCLE phase=%u device_us=%lld trial_id=%u cycle_seq=%lu associated=%d fetch_flags=%u reason=%u dropped=%lu\r\n",
+            unsigned(cycle.phase), static_cast<long long>(cycle.deviceUs), unsigned(cycle.trialId),
+            static_cast<unsigned long>(cycle.cycleSeq), cycle.associated, unsigned(cycle.fetchFlags),
+            unsigned(cycle.reason), static_cast<unsigned long>(cycle.dropped));
+    }
+#endif
     _reply_uart = false; _writer = previous;
     drainUart();
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
@@ -872,15 +886,29 @@ void SerialDebug::handleLine(char* line)
 #if SOC_WIFI_HE_SUPPORT
     if (std::strcmp(command, "twt") == 0) {
         const char* mode = ::strtok_r(nullptr, " \t", &save);
+        const char* option = ::strtok_r(nullptr, " \t", &save);
         if (!mode || ::strtok_r(nullptr, " \t", &save)) {
-            result("twt", "FAIL", "expected=baseline_on_off_status ram_only=1"); return;
+            result("twt", "FAIL", "expected=baseline_on_600_or_1800_off_status_observe_on_off ram_only=1"); return;
+        }
+        if (!std::strcmp(mode, "observe")) {
+            if (!option || (std::strcmp(option, "on") && std::strcmp(option, "off"))) {
+                result("twt", "FAIL", "expected=observe_on_off"); return;
+            }
+            twtCycleUart = _reply_uart;
+            GetNetworkQuota().requestTwtObserve(!std::strcmp(option, "on"));
+            result("twt", "PASS", "observe_only=1 connection_policy_unchanged=1"); return;
+        }
+        uint32_t leaseSeconds = 600;
+        if (option && ((std::strcmp(mode, "baseline") && std::strcmp(mode, "on")) ||
+            !serial_debug_transport::settingsInteger(option, 1800, leaseSeconds) || !MosaicoTwt::validLease(leaseSeconds))) {
+            result("twt", "FAIL", "expected=baseline_or_on_600_or_1800 no_changes=1"); return;
         }
         if (!std::strcmp(mode, "status")) {
             const auto t = GetNetworkQuota().twtSnapshot();
             char details[640]{};
             std::snprintf(details, sizeof(details),
-                "mode=%u stage=%u stop=%u id=%u expiry_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld ram_only=1",
-                unsigned(t.requested), unsigned(t.stage), unsigned(t.stop), unsigned(t.id),
+                "lease_s=%lu mode=%u stage=%u stop=%u id=%u expiry_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld ram_only=1",
+                static_cast<unsigned long>(t.leaseSeconds), unsigned(t.requested), unsigned(t.stage), unsigned(t.stop), unsigned(t.id),
                 static_cast<long long>(t.expiryUs), static_cast<long long>(t.setupDeadlineUs), t.associated, t.apAx, t.phy,
                 t.actual.status, unsigned(t.actual.reason), unsigned(t.actual.flow),
                 static_cast<unsigned long long>(t.intervalUs), static_cast<unsigned long long>(t.durationUs),
@@ -896,8 +924,11 @@ void SerialDebug::handleLine(char* line)
         else if (!std::strcmp(mode, "on")) requested = MosaicoTwt::Mode::On;
         else if (!std::strcmp(mode, "off")) requested = MosaicoTwt::Mode::Off;
         else { result("twt", "FAIL", "expected=baseline_on_off_status"); return; }
-        result("twt", GetNetworkQuota().requestTwtTrial(requested) ? "QUEUED" : "FAIL",
-               "lease_s=600 setup_cap_s=10 locked_trial_only=1 no_nvs=1 no_power_claim=1"); return;
+        const bool queued = GetNetworkQuota().requestTwtTrial(requested, leaseSeconds);
+        if (queued) twtCycleUart = _reply_uart;
+        char details[160]{};
+        std::snprintf(details, sizeof(details), "lease_s=%lu setup_cap_s=10 locked_trial_only=1 no_nvs=1 no_power_claim=1", static_cast<unsigned long>(leaseSeconds));
+        result("twt", queued ? "QUEUED" : "FAIL", details); return;
     }
 #endif
     if (std::strcmp(command, "display-clocks") == 0) {
