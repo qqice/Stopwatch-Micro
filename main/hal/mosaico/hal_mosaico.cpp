@@ -1600,7 +1600,13 @@ void Hal::lvgl_init()
     lvgl_port_cfg_t config{};
     config.task_priority = 3;
     config.task_stack = 7168;
+#if CONFIG_IDF_TARGET_ESP32S31
+    // APP-only mitigation: keep LVGL on CPU0 with the LCD SPI2 ISR installed
+    // by main, avoiding cross-core acquiring_dev changes in SDK bg_exit_core.
+    config.task_affinity = 0;
+#else
     config.task_affinity = 1;
+#endif
     config.task_max_sleep_ms = 500;
     config.task_stack_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT;
 #if CONFIG_MOSAICO_LVGL_MONOTONIC_TICK
