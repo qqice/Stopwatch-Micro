@@ -74,7 +74,7 @@ void uartInterrupt(uart_port_t port,uart_select_notif_t event,BaseType_t* woken)
 }
 Lifetime::Lifetime() {
 #if MAIN_IDLE_SUPPORTED
-    mainTask=xTaskGetCurrentTaskHandle();
+    portENTER_CRITICAL(&taskLock);mainTask=xTaskGetCurrentTaskHandle();portEXIT_CRITICAL(&taskLock);
     // CST9217 is manual LVGL input with no registered interrupt callback. Its
     // LOW interrupt configuration must not become live when adding the first
     // global GPIO ISR service. Mask only; do not change its type or pad state.
@@ -137,6 +137,15 @@ void serialState(bool busy,bool activity) {
     if(activity)serialAwakeUntil=esp_timer_get_time()+500000;
 }
 void viewState(bool safe) {safeView.store(safe,std::memory_order_relaxed);}
+void usbEvent() {
+#if MAIN_IDLE_SUPPORTED
+    // The task handle is valid only inside Lifetime. Startup callbacks and
+    // callbacks after teardown still count in USB diagnostics but cannot wake.
+    portENTER_CRITICAL(&taskLock);
+    if(mainTask)xTaskNotifyGiveIndexed(mainTask,NotifyIndex);
+    portEXIT_CRITICAL(&taskLock);
+#endif
+}
 void wait(bool locked,bool ota,bool usb,bool wifi,bool ble) {
     Gates gates;gates.locked=locked;gates.enabled=enabled;gates.supported=MAIN_IDLE_SUPPORTED;
     gates.gpio=gpioReady;gates.uart=uartComplete();gates.ota=ota;gates.usb=usb;gates.wifi=wifi;gates.ble=ble;

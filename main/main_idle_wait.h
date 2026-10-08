@@ -15,6 +15,7 @@ void uartEvent(bool wake, bool data, uint32_t queueDepth); // Existing queue con
 void uartOwner(bool owned); // Only SerialDebug's freshly installed UART0 driver.
 void serialState(bool busy, bool activity); // Task context; independent 500 ms receive hold.
 void viewState(bool safe); // Same authoritative view eligibility as standby sleep.
+void usbEvent(); // TinyUSB task callback, notify only; never an ISR.
 void wait(bool locked, bool ota, bool usb, bool wifi, bool ble);
 struct Snapshot {
     bool supported=false, enabled=false, gpio=false, uart=false;

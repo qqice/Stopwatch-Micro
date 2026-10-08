@@ -39,7 +39,7 @@ class PowerOptTests(unittest.TestCase):
   self.assertLess(wake.index('setLocked(false)'),wake.index('lv_obj_add_flag(_overlay'))
   main=(R/'main/main.cpp').read_text(encoding='utf8')
   mosaico,s3=main.rsplit('#else',1)
-  self.assertIn('MainIdleWait::wait(GetNetworkQuota().idleLocked(), MosaicoOta::busy() || MosaicoOta::healthPending(), tud_mounted(), GetNetworkQuota().powerStats().wifiRunning, sleepBle.advertising || sleepBle.connected);',' '.join(mosaico.split()))
+  self.assertIn('MainIdleWait::wait(GetNetworkQuota().idleLocked(), MosaicoOta::busy() || MosaicoOta::healthPending(), mosaico_console_usb_snapshot().effective_active, GetNetworkQuota().powerStats().wifiRunning, sleepBle.advertising || sleepBle.connected);',' '.join(mosaico.split()))
   self.assertIn('vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 1));',s3)
   self.assertNotIn('MainIdleWait::wait',s3)
   comp=shutil.which('g++') or shutil.which('clang++')

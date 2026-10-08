@@ -27,11 +27,11 @@ using namespace smooth_ui_toolkit;
 #include <host/standby_sleep.h>
 #include <host/touch_sleep.h>
 #include "main_idle_wait.h"
-#include <tusb.h>
+#include <hal/mosaico/usb_console.h>
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
 #include <ota/panic_capture.h>
 #endif
-extern "C" void mosaico_console_init(void);
+extern "C" void mosaico_idle_usb_notify(void) { MainIdleWait::usbEvent(); }
 #endif
 extern "C" void app_main(void)
 {
@@ -119,7 +119,7 @@ extern "C" void app_main(void)
         // Function remains the sole physical wake input. The event candidate
         // retains 20 ms button/release sampling; it never polls touch I2C.
         MainIdleWait::wait(GetNetworkQuota().idleLocked(), MosaicoOta::busy() || MosaicoOta::healthPending(),
-            tud_mounted(), GetNetworkQuota().powerStats().wifiRunning, sleepBle.advertising || sleepBle.connected);
+            mosaico_console_usb_snapshot().effective_active, GetNetworkQuota().powerStats().wifiRunning, sleepBle.advertising || sleepBle.connected);
 #else
         // Preserve StopWatch HID/control latency and scheduling.
         vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 1));

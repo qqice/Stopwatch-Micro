@@ -54,7 +54,7 @@ static_assert(cases(),"all fallback gates, hold/release/short IRQ/wrap grace");
         source=source.replace('uart_set_select_notif_callback(UART_NUM_0,uartInterrupt)','uart_set_select_notif_callback(UART_NUM_0,1)')
         source=source.replace('uart_set_select_notif_callback(UART_NUM_0,nullptr)','uart_set_select_notif_callback(UART_NUM_0,0)')
         source=source.replace('constexpr UBaseType_t NotifyIndex=1','static constexpr UBaseType_t NotifyIndex=1').replace('constexpr bool fifoRecovery','static constexpr bool fifoRecovery')
-        for name in ['gpioInterrupt','uartInterrupt','uartComplete','setEnabled','uartRxConfigured','uartRecoveryConfigured','uartEvent','uartOwner','serialState','viewState','wait','snapshot']:
+        for name in ['gpioInterrupt','uartInterrupt','uartComplete','setEnabled','uartRxConfigured','uartRecoveryConfigured','uartEvent','uartOwner','serialState','viewState','usbEvent','wait','snapshot']:
             source=re.sub(r'(?m)^(void|bool|Snapshot) '+name+r'\(',r'constexpr \1 '+name+'(',source)
         source=source.rstrip();assert source.endswith('}')
         source=source[:-1]+'};'
@@ -105,6 +105,7 @@ template<class T>struct Atom {
  constexpr int* uart_get_selectlock(){return &mux;}
  constexpr void uart_set_select_notif_callback(int,int cb){callback=cb!=0;}
  constexpr void vTaskNotifyGiveIndexedFromISR(int task,unsigned index,int* woken){if(task==7&&index==1){++pending;*woken=1;}}
+ constexpr void xTaskNotifyGiveIndexed(int task,unsigned index){if(task==7&&index==1)++pending;}
  constexpr int ulTaskNotifyTakeIndexed(unsigned index,int clear,uint32_t ms){
   if(index!=1)return -1;int n=pending;if(n){if(clear)pending=0;}else nowUs+=int64_t(ms)*1000;return n;
  }
@@ -113,12 +114,16 @@ template<class T>struct Atom {
         source=source.replace('struct Actual {','struct Actual {'+stub,1)
         cases=r'''
 constexpr bool actualCases(){
- Actual a;a.begin();
+ Actual a;a.usbEvent();if(a.pending)return false;a.begin();
  if(!a.gpioReady||!a.masked6||a.setEnabled(true))return false;
  a.uartOwner(true);if(a.setEnabled(true))return false;
  a.uartRxConfigured(true,0);if(a.setEnabled(true))return false;
  a.uartRecoveryConfigured(true,0);if(!a.callback||!a.setEnabled(true))return false;
  a.serialState(false,false);a.viewState(true);
+ // USB task events racing a 500 ms eligibility sample stay latched on index 1.
+ a.usbEvent();a.wait(true,false,false,false,false);
+ if(a.nowUs||a.pending||a.lastWaitNotify!=1)return false;
+ a.eventWaits=0;
  // IRQ before wait is latched, not erased by task-side eligibility sampling.
  int woken=0;a.uartInterrupt(0,UART_SELECT_READ_NOTIF,&woken);
  const auto before=a.nowUs;a.wait(true,false,false,false,false);
@@ -136,6 +141,7 @@ constexpr bool actualCases(){
  if(a.requestedMs!=500)return false;
  a.setEnabled(false);a.wait(true,false,false,false,false);if(a.requestedMs!=20)return false;
  a.end();if(a.callback||a.handler||a.mainTask||a.gpioReady)return false;
+ a.usbEvent();if(a.pending)return false;
  // Unknown service or rearm errors never allow a long wait.
  Actual b;b.serviceError=23;b.begin();b.uartOwner(true);
  if(b.gpioReady||b.setEnabled(true)||b.error!=23)return false;b.end();

@@ -9,6 +9,7 @@
 #include <host/mosaico_display_settings.h>
 #include <host/standby_sleep.h>
 #include <host/touch_sleep.h>
+#include <hal/mosaico/usb_console.h>
 #include <main_idle_wait.h>
 #include <host/uart_fifo_recovery_model.h>
 #include <host/mosaico_session_monitor.h>
@@ -600,6 +601,15 @@ void SerialDebug::handleLine(char* line)
     if (command && !std::strcmp(command, "settings")) {
         const char* action=::strtok_r(nullptr, " \t", &save);
         bool ok=false;
+        if (action && !std::strcmp(action,"usb")) {
+            if (::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","reason=arguments no_changes=1");return;}
+            const auto s=mosaico_console_usb_snapshot(); char details[280]{};
+            std::snprintf(details,sizeof(details),"mounted=%lu connected=%lu suspended=%lu effective_active=%lu mounts=%lu unmounts=%lu suspends=%lu resumes=%lu rx_events=%lu physical_power_proof=0",
+                static_cast<unsigned long>(s.mounted),static_cast<unsigned long>(s.connected),static_cast<unsigned long>(s.suspended),
+                static_cast<unsigned long>(s.effective_active),static_cast<unsigned long>(s.mounts),static_cast<unsigned long>(s.unmounts),
+                static_cast<unsigned long>(s.suspends),static_cast<unsigned long>(s.resumes),static_cast<unsigned long>(s.rx_events));
+            result(command,"PASS",details);return;
+        }
         if (action && !std::strcmp(action,"ui")) {
             if (::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","reason=arguments no_changes=1");return;}
             view::CodexMicroView::WifiEditorDebugSnapshot s;
