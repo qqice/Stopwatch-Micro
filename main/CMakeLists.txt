@@ -46,6 +46,10 @@ set(MY_INCS
 # The board-specific project includes this list from a separate main component.
 list(TRANSFORM APP_SRCS PREPEND "${CMAKE_CURRENT_LIST_DIR}/")
 list(TRANSFORM PLATFORM_SRCS PREPEND "${CMAKE_CURRENT_LIST_DIR}/")
+set(APP_LDFRAGMENTS)
+if(MOSAICO_BOARD AND CONFIG_IDF_TARGET_ESP32S31)
+    list(APPEND APP_LDFRAGMENTS "${CMAKE_CURRENT_LIST_DIR}/linker/mosaico_ble_rodata.lf")
+endif()
 idf_component_register(
     SRCS 
         "${CMAKE_CURRENT_LIST_DIR}/main.cpp"
@@ -53,6 +57,7 @@ idf_component_register(
         ${PLATFORM_SRCS}
     INCLUDE_DIRS 
         ${MY_INCS}
+    LDFRAGMENTS ${APP_LDFRAGMENTS}
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE

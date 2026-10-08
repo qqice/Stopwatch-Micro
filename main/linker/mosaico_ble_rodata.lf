@@ -1,0 +1,19 @@
+# APP-only placement for the three SDK BLE constants passed to ROM memcpy.
+# Payload: 8 + 16 + 43 bytes (68 bytes with final 4-byte alignment).
+# Numeric archive members (14.o/47.o/19.o) cannot be named in this SDK's
+# mapping grammar. Literal input sections keep the scope equally narrow:
+# no '+' suffix, other rodata, text, or whole-object noflash mapping.
+[sections:mosaico_ble_rom_memcpy_rodata]
+entries:
+    .rodata.r_sym_ble_xWK8Hh2AdoTzjH7mpE35
+    .rodata.r_sym_ble_0sNsCROob3I5TWDLCYZB
+    .rodata.r_sym_ble_vGKFjJHiB3SRmtFpLbPB
+
+[scheme:mosaico_ble_rom_memcpy_data]
+entries:
+    mosaico_ble_rom_memcpy_rodata -> dram0_data
+
+[mapping:mosaico_ble_rom_memcpy_data]
+archive: libble_app.a
+entries:
+    * (mosaico_ble_rom_memcpy_data)
