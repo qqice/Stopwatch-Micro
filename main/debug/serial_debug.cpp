@@ -12,6 +12,8 @@
 #include <main_idle_wait.h>
 #include <host/uart_fifo_recovery_model.h>
 #include <host/mosaico_session_monitor.h>
+#include <cJSON.h>
+#include <mbedtls/base64.h>
 #endif
 
 #include <apps/app_codex_micro/app_codex_micro.h>
@@ -97,6 +99,78 @@ bool parseUnsignedStrict(const char* value, uint32_t minimum, uint32_t maximum, 
     parsed = static_cast<uint32_t>(number);
     return true;
 }
+
+
+#ifdef MOSAICO_BOARD
+// Local physical console trust only: base64/CRC are not encryption or authentication.
+bool settingsDecode(const char* encoded, unsigned char* bytes, size_t capacity, size_t& length)
+{
+    if (!encoded || !*encoded || std::strlen(encoded)>768) return false;
+    for (const char* p=encoded; *p; ++p)
+        if (!((*p>='A'&&*p<='Z')||(*p>='a'&&*p<='z')||(*p>='0'&&*p<='9')||*p=='+'||*p=='/'||*p=='=')) return false;
+    if (mbedtls_base64_decode(bytes,capacity-1,&length,
+        reinterpret_cast<const unsigned char*>(encoded),std::strlen(encoded)) || !length) return false;
+    bytes[length]=0;
+    return !std::memchr(bytes,0,length);
+}
+bool settingsFlatJson(const unsigned char* bytes, size_t length)
+{
+    bool quoted=false, escaped=false; unsigned depth=0;
+    for(size_t i=0;i<length;++i) {
+        const unsigned char c=bytes[i];
+        if(quoted) {
+            if(escaped) escaped=false;
+            else if(c=='\\') escaped=true;
+            else if(c=='"') quoted=false;
+        } else {
+            if(c=='"') quoted=true;
+            else if(c=='[' || c==']') return false;
+            else if(c=='{') { if(++depth!=1) return false; }
+            else if(c=='}') { if(depth!=1) return false; --depth; }
+        }
+    }
+    return !quoted && !depth;
+}
+void settingsScrubJson(cJSON* node)
+{
+    for(;node;node=node->next) {
+        if(node->valuestring) MosaicoWifi::scrub(node->valuestring,std::strlen(node->valuestring));
+        if(node->string) MosaicoWifi::scrub(node->string,std::strlen(node->string));
+        settingsScrubJson(node->child);
+    }
+}
+bool settingsWifiSave(const char* encoded)
+{
+    unsigned char decoded[577]{}; size_t length=0;
+    char ssid[33]{},password[65]{};
+    cJSON* root=nullptr; bool ok=false;
+    if (settingsDecode(encoded,decoded,sizeof(decoded),length) && settingsFlatJson(decoded,length) &&
+        !std::strstr(reinterpret_cast<char*>(decoded),"\\u0000")) {
+        const char* end=nullptr;
+        root=cJSON_ParseWithLengthOpts(reinterpret_cast<char*>(decoded),length+1,&end,true);
+        const cJSON* s=cJSON_GetObjectItemCaseSensitive(root,"ssid");
+        const cJSON* p=cJSON_GetObjectItemCaseSensitive(root,"password");
+        if(cJSON_IsObject(root) && cJSON_GetArraySize(root)==2 && cJSON_IsString(s) && cJSON_IsString(p) &&
+            s->valuestring && p->valuestring && std::strlen(s->valuestring)<sizeof(ssid) &&
+            std::strlen(p->valuestring)<sizeof(password)) {
+            std::strcpy(ssid,s->valuestring); std::strcpy(password,p->valuestring);
+            if(MosaicoWifi::validCredentials(ssid,password)) ok=GetNetworkQuota().requestWifiCredentials(ssid,password);
+        }
+    }
+    // cJSON owns additional decoded copies; wipe every string, including rejected keys.
+    settingsScrubJson(root);
+    cJSON_Delete(root);
+    MosaicoWifi::scrub(decoded,sizeof(decoded)); MosaicoWifi::scrub(password,sizeof(password));
+    MosaicoWifi::scrub(ssid,sizeof(ssid)); return ok;
+}
+void settingsBase64(const char* source, char (&encoded)[89])
+{
+    size_t length=0;
+    if(mbedtls_base64_encode(reinterpret_cast<unsigned char*>(encoded),sizeof(encoded)-1,&length,
+        reinterpret_cast<const unsigned char*>(source),std::strlen(source))) encoded[0]=0;
+    else encoded[length]=0;
+}
+#endif
 
 }  // namespace
 
@@ -526,6 +600,42 @@ void SerialDebug::handleLine(char* line)
     if (command && !std::strcmp(command, "settings")) {
         const char* action=::strtok_r(nullptr, " \t", &save);
         bool ok=false;
+        if (action && !std::strcmp(action,"wifi")) {
+            const char* operation=::strtok_r(nullptr," \t",&save);
+            const char* argument=::strtok_r(nullptr," \t",&save);
+            const bool extra=::strtok_r(nullptr," \t",&save)!=nullptr;
+            if(operation && !std::strcmp(operation,"list") && !argument && !extra) {
+                WifiSettingsSnapshot w{};
+                if(!GetNetworkQuota().wifiSettingsSnapshot(w)) {result(command,"FAIL","reason=busy no_changes=1");return;}
+                for(unsigned i=0;i<w.count && i<6;++i) {
+                    char encoded[89]{}; settingsBase64(w.names[i],encoded);
+                    debugPrintf("DBG WIFI_PROFILE index=%u ssid_b64=%s\r\n",i,encoded);
+                }
+                char details[256]{};
+                std::snprintf(details,sizeof(details),"wifi_count=%u wifi_current_index=%u pending=%d reboot_required=%d restart_pending=%d error=%ld restart_error=%ld scan_error=%ld credentials_redacted=1",
+                    w.count,w.currentIndex,w.pending,w.rebootRequired,w.restartPending,static_cast<long>(w.error),static_cast<long>(w.restartError),static_cast<long>(w.scanError));
+                result(command,"PASS",details);return;
+            }
+            if(MosaicoOta::busy() || MosaicoOta::healthPending() || TouchSleep::active()) {
+                result(command,"FAIL","reason=ota_health_or_touch_lease no_changes=1");return;
+            }
+            if(!extra && operation && argument) {
+                if(!std::strcmp(operation,"save")) ok=settingsWifiSave(argument);
+                else if(!std::strcmp(operation,"forget")) {
+                    unsigned char ssid[33]{};size_t length=0;
+                    if(settingsDecode(argument,ssid,sizeof(ssid),length) &&
+                        MosaicoWifi::validCredentials(reinterpret_cast<char*>(ssid),""))
+                        ok=GetNetworkQuota().requestWifiForget(reinterpret_cast<char*>(ssid));
+                    MosaicoWifi::scrub(ssid,sizeof(ssid));
+                } else if(!std::strcmp(operation,"restart") && !std::strcmp(argument,"CONFIRM"))
+                    ok=GetNetworkQuota().requestWifiRestart();
+            }
+            result(command,ok?"PASS":"FAIL",ok?"accepted_owner_pending=1 verify_wifi_list=1":"reason=arguments_range_busy_or_contention no_changes=1");return;
+        }
+        if(action && std::strcmp(action,"get") &&
+            (MosaicoOta::busy() || MosaicoOta::healthPending() || TouchSleep::active())) {
+            result(command,"FAIL","reason=ota_health_or_touch_lease no_changes=1");return;
+        }
         if (action && !std::strcmp(action,"get")) {
             if (::strtok_r(nullptr, " \t", &save)) { result(command,"FAIL","reason=arguments no_changes=1"); return; }
             const auto s=MosaicoDisplay::snapshot(); const auto& c=s.effectiveConfig;
@@ -536,6 +646,11 @@ void SerialDebug::handleLine(char* line)
                 c.chargeBrightness,c.batteryBrightness,c.lockBrightness,c.burnIn,c.lockWifiMinutes,c.lockBleMinutes,s.temporary,
                 static_cast<unsigned long>(s.remainingLeaseSeconds),static_cast<unsigned long>(s.runtimeRevision),
                 static_cast<unsigned long>(s.revision),static_cast<unsigned long>(s.savedRevision),s.pending,static_cast<long>(s.error));
+            WifiSettingsSnapshot w{};
+            const bool ready=GetNetworkQuota().wifiSettingsSnapshot(w);
+            char name[89]{}; settingsBase64(system_config::ProductName,name);
+            debugPrintf("DBG SETTINGS ble_name_b64=%s ble_name_mutable=0 wifi_available=%d wifi_count=%u wifi_current_index=%u wifi_pending=%d wifi_reboot_required=%d wifi_scan_error=%ld\r\n",
+                name,ready && w.available,w.count,w.currentIndex,w.pending,w.rebootRequired,static_cast<long>(w.scanError));
             result(command,"PASS",details); return;
         } else if (action && !std::strcmp(action,"set")) {
             const char* field=::strtok_r(nullptr, " \t", &save);
@@ -1276,6 +1391,8 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP idle-wait on | off | status ram_only=1 locked_event_wait_ms=500 safe_gates_required=1\r\n");
     debugPrintf("DBG HELP standby-sleep on [lease_s=180,30..300] | standby-sleep off | standby-sleep auto CONFIRM | standby-sleep status automatic_default=profile UART_wake_preamble_required=1\r\n");
     debugPrintf("DBG HELP settings get | settings set <field> <int> [lease_s=180,30..600] | settings restore | settings save CONFIRM\r\n");
+    debugPrintf("DBG HELP settings fields=charge_timeout:0,15,30,60,120,300,600 battery_timeout:15,30,45,60 charge_brightness:10..100 battery_brightness:10..100 lock_brightness:0..100 burn_in:0,1 lock_wifi_minutes:1,2,5,10,15,30,60 lock_ble_minutes:1,2,5,10,15,30,60\r\n");
+    debugPrintf("DBG HELP settings wifi list | save <base64JSON_ssid_password_only> | forget <base64SSID> | restart CONFIRM physical_local_console_trust=1 base64_crc_not_security=1 save_async=1 restart_requires_saved=1\r\n");
 #endif
 
     debugPrintf("DBG HELP commands=ping,status,selftest,controls,protocol,debug-transport\r\n");
