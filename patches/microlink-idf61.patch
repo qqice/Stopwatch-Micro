@@ -5,7 +5,8 @@ index 7367f56..6945952 100644
 @@ -1,3 +1,8 @@
  # MicroLink v2 - Top-level project CMakeLists
  # This is not a standalone project - examples include this as a component
- cmake_minimum_required(VERSION 3.16)
+-cmake_minimum_required(VERSION 3.16)
++cmake_minimum_required(VERSION 3.16)
 +
 +# This repository is vendored beneath components/.  Register its root as an
 +# empty component so ESP-IDF does not attempt to treat this project file as a
@@ -26,7 +27,7 @@ index 35b0bda..1c4fb3e 100644
  )
  
  set(REQUIRES
-@@ -27,10 +23,9 @@ set(REQUIRES
+@@ -27,11 +23,10 @@ set(REQUIRES
      esp_timer
      lwip
      mbedtls
@@ -35,9 +36,11 @@ index 35b0bda..1c4fb3e 100644
      driver
      esp_driver_tsens
 -    esp_http_server
- )
+-)
++)
  
  idf_component_register(
+     SRCS ${SRCS}
 diff --git a/components/microlink/components/wireguard_lwip/src/wireguard-platform-esp32.c b/components/microlink/components/wireguard_lwip/src/wireguard-platform-esp32.c
 index f974c67..fa76a14 100644
 --- a/components/microlink/components/wireguard_lwip/src/wireguard-platform-esp32.c
@@ -100,10 +103,61 @@ index a11aefd..30704e9 100644
  static const char *base64_lookup = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
  
 diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/components/microlink/components/wireguard_lwip/src/wireguardif.c
-index 6627fd0..7d321fe 100644
+index 6627fd0..3bfc401 100644
 --- a/components/microlink/components/wireguard_lwip/src/wireguardif.c
 +++ b/components/microlink/components/wireguard_lwip/src/wireguardif.c
-@@ -539,9 +539,10 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
+@@ -31,6 +31,8 @@
+  */
+ 
+ #include "wireguardif.h"
++#include "wireguardif_owner.h"
++#include "wireguardif_diag.h"
+ 
+ #include <string.h>
+ #include <stdlib.h>
+@@ -68,7 +70,21 @@ static void wireguardif_tmr(void *arg);
+ // Flag to disable internal UDP socket binding (for magicsock mode)
+ static bool g_disable_socket_bind = false;
+ 
++typedef struct {  int unused; } wireguardif_disable_socket_bind_owner_ctx;
++void wireguardif_disable_socket_bind(void);
++static void wireguardif_disable_socket_bind_owner_cb(void *arg) {
++    wireguardif_disable_socket_bind_owner_ctx *c = (wireguardif_disable_socket_bind_owner_ctx *)arg;
++    (void)c;
++    wireguardif_disable_socket_bind();
++}
+ void wireguardif_disable_socket_bind(void) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_disable_socket_bind_owner_ctx c = { .unused = 0 };
++        err_t dispatch = wireguardif_owner_call(wireguardif_disable_socket_bind_owner_cb, &c);
++        (void)dispatch; /* No mutation if dispatch allocation fails. */
++        return;
++    }
++
+ 	g_disable_socket_bind = true;
+ }
+ 
+@@ -327,7 +343,19 @@ static err_t wireguardif_output_to_peer(struct netif *netif, struct pbuf *q, con
+ 
+ // This is used as the output function for the Wireguard netif
+ // The ipaddr here is the one inside the VPN which we use to lookup the correct peer/endpoint
++typedef struct { struct netif *netif; struct pbuf *q; const ip4_addr_t *ipaddr; err_t result; } wireguardif_output_owner_ctx;
++static err_t wireguardif_output(struct netif *netif, struct pbuf *q, const ip4_addr_t *ipaddr);
++static void wireguardif_output_owner_cb(void *arg) {
++    wireguardif_output_owner_ctx *c = (wireguardif_output_owner_ctx *)arg;
++    c->result = wireguardif_output(c->netif, c->q, c->ipaddr);
++}
+ static err_t wireguardif_output(struct netif *netif, struct pbuf *q, const ip4_addr_t *ipaddr) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_output_owner_ctx c = { .netif = netif, .q = q, .ipaddr = ipaddr, .result = ERR_IF };
++        err_t dispatch = wireguardif_owner_call(wireguardif_output_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : dispatch;
++    }
++
+ 	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+ 	// Send to peer that matches dest IP
+ 	// Convert ip4_addr_t to ip_addr_t for lookup
+@@ -539,9 +567,10 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
  								if (dest_ok) {
  									// Send packet to be processed by LWIP
  									WG_DEBUG("[WG_RX_IP] Passing %u bytes to IP layer\n", (unsigned)pbuf->tot_len);
@@ -117,7 +171,28 @@ index 6627fd0..7d321fe 100644
  								} else {
  									WG_DEBUG("[WG_RX_IP] DROPPED: dest_ok=false\n");
  								}
-@@ -755,8 +756,8 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
+@@ -739,7 +768,20 @@ static bool wireguardif_check_response_message(struct wireguard_device *device,
+ }
+ 
+ 
++typedef struct { void *arg; struct udp_pcb *pcb; struct pbuf *p; const ip_addr_t *addr; u16_t port; int unused; } wireguardif_network_rx_owner_ctx;
++void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port);
++static void wireguardif_network_rx_owner_cb(void *arg) {
++    wireguardif_network_rx_owner_ctx *c = (wireguardif_network_rx_owner_ctx *)arg;
++    wireguardif_network_rx(c->arg, c->pcb, c->p, c->addr, c->port);
++}
+ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_network_rx_owner_ctx c = { .arg = arg, .pcb = pcb, .p = p, .addr = addr, .port = port };
++        err_t dispatch = wireguardif_owner_call(wireguardif_network_rx_owner_cb, &c);
++        if (dispatch != ERR_OK) pbuf_free(p); /* RX consumes p on every path. */
++        return;
++    }
++
+ 	LWIP_ASSERT("wireguardif_network_rx: invalid arg", arg != NULL);
+ 	LWIP_ASSERT("wireguardif_network_rx: invalid pbuf", p != NULL);
+ 	// We have received a packet from the base_netif to our UDP port - process this as a possible Wireguard packet
+@@ -755,8 +797,8 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
  
  	uint8_t type = wireguard_get_message_type(data, len);
  
@@ -128,23 +203,389 @@ index 6627fd0..7d321fe 100644
  		type,
  		type == 1 ? "INIT" : type == 2 ? "RESP" : type == 3 ? "COOKIE" : type == 4 ? "DATA" : "?",
  		(unsigned)len,
+@@ -821,7 +863,10 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
+ 				if (peer) {
+ 					printf("[WG_RX] Peer found for handshake, processing response\n");
+ 					// Process the handshake response
+-					wireguardif_process_response_message(device, peer, msg_response, addr, port);
++                    static unsigned response_before, response_after;
++                    wireguardif_diag("response_before", device, &response_before);
++                    wireguardif_process_response_message(device, peer, msg_response, addr, port);
++                    wireguardif_diag("response_after", device, &response_after);
+ 				} else {
+ 					printf("[WG_RX] ERROR: No peer found for receiver_idx=%lu\n", (unsigned long)msg_response->receiver);
+ 				}
+@@ -856,8 +901,11 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
+ 			// Unknown or bad packet header
+ 			break;
+ 	}
+-	// Release data!
+-	pbuf_free(p);
++    // Sample before the final RX release; transport RX can already transfer p.
++    static unsigned rx_free_samples;
++    wireguardif_diag("rx_before_free", p, &rx_free_samples);
++    // Release data!
++    pbuf_free(p);
+ }
+ 
+ static err_t wireguard_start_handshake(struct netif *netif, struct wireguard_peer *peer) {
+@@ -910,7 +958,19 @@ static err_t wireguardif_lookup_peer(struct netif *netif, u8_t peer_index, struc
+ 	return result;
+ }
+ 
++typedef struct { struct netif *netif; u8_t peer_index; err_t result; } wireguardif_connect_owner_ctx;
++err_t wireguardif_connect(struct netif *netif, u8_t peer_index);
++static void wireguardif_connect_owner_cb(void *arg) {
++    wireguardif_connect_owner_ctx *c = (wireguardif_connect_owner_ctx *)arg;
++    c->result = wireguardif_connect(c->netif, c->peer_index);
++}
+ err_t wireguardif_connect(struct netif *netif, u8_t peer_index) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_connect_owner_ctx c = { .netif = netif, .peer_index = peer_index, .result = ERR_IF };
++        err_t dispatch = wireguardif_owner_call(wireguardif_connect_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : dispatch;
++    }
++
+ 	struct wireguard_peer *peer;
+ 	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
+ 	if (result == ERR_OK) {
+@@ -932,7 +992,19 @@ err_t wireguardif_connect(struct netif *netif, u8_t peer_index) {
+ 	return result;
+ }
+ 
++typedef struct { struct netif *netif; u8_t peer_index; err_t result; } wireguardif_disconnect_owner_ctx;
++err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index);
++static void wireguardif_disconnect_owner_cb(void *arg) {
++    wireguardif_disconnect_owner_ctx *c = (wireguardif_disconnect_owner_ctx *)arg;
++    c->result = wireguardif_disconnect(c->netif, c->peer_index);
++}
+ err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_disconnect_owner_ctx c = { .netif = netif, .peer_index = peer_index, .result = ERR_IF };
++        err_t dispatch = wireguardif_owner_call(wireguardif_disconnect_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : dispatch;
++    }
++
+ 	struct wireguard_peer *peer;
+ 	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
+ 	if (result == ERR_OK) {
+@@ -947,7 +1019,19 @@ err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index) {
+ 	return result;
+ }
+ 
++typedef struct { struct netif *netif; u8_t peer_index; ip_addr_t *current_ip; u16_t *current_port; err_t result; } wireguardif_peer_is_up_owner_ctx;
++err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *current_ip, u16_t *current_port);
++static void wireguardif_peer_is_up_owner_cb(void *arg) {
++    wireguardif_peer_is_up_owner_ctx *c = (wireguardif_peer_is_up_owner_ctx *)arg;
++    c->result = wireguardif_peer_is_up(c->netif, c->peer_index, c->current_ip, c->current_port);
++}
+ err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *current_ip, u16_t *current_port) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_peer_is_up_owner_ctx c = { .netif = netif, .peer_index = peer_index, .current_ip = current_ip, .current_port = current_port, .result = ERR_IF };
++        err_t dispatch = wireguardif_owner_call(wireguardif_peer_is_up_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : dispatch;
++    }
++
+ 	struct wireguard_peer *peer;
+ 	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
+ 	if (result == ERR_OK) {
+@@ -966,7 +1050,19 @@ err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *cu
+ 	return result;
+ }
+ 
++typedef struct { struct netif *netif; u8_t peer_index; err_t result; } wireguardif_remove_peer_owner_ctx;
++err_t wireguardif_remove_peer(struct netif *netif, u8_t peer_index);
++static void wireguardif_remove_peer_owner_cb(void *arg) {
++    wireguardif_remove_peer_owner_ctx *c = (wireguardif_remove_peer_owner_ctx *)arg;
++    c->result = wireguardif_remove_peer(c->netif, c->peer_index);
++}
+ err_t wireguardif_remove_peer(struct netif *netif, u8_t peer_index) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_remove_peer_owner_ctx c = { .netif = netif, .peer_index = peer_index, .result = ERR_IF };
++        err_t dispatch = wireguardif_owner_call(wireguardif_remove_peer_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : dispatch;
++    }
++
+ 	struct wireguard_peer *peer;
+ 	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
+ 	if (result == ERR_OK) {
+@@ -977,7 +1073,20 @@ err_t wireguardif_remove_peer(struct netif *netif, u8_t peer_index) {
+ 	return result;
+ }
+ 
++typedef struct { struct netif *netif; int unused; } wireguardif_shutdown_owner_ctx;
++void wireguardif_shutdown(struct netif *netif);
++static void wireguardif_shutdown_owner_cb(void *arg) {
++    wireguardif_shutdown_owner_ctx *c = (wireguardif_shutdown_owner_ctx *)arg;
++    wireguardif_shutdown(c->netif);
++}
+ void wireguardif_shutdown(struct netif *netif) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_shutdown_owner_ctx c = { .netif = netif };
++        err_t dispatch = wireguardif_owner_call(wireguardif_shutdown_owner_cb, &c);
++        (void)dispatch; /* No mutation if dispatch allocation fails. */
++        return;
++    }
++
+ 	if (!netif || !netif->state) {
+ 		return;
+ 	}
+@@ -988,7 +1097,19 @@ void wireguardif_shutdown(struct netif *netif) {
+ 	sys_untimeout(wireguardif_tmr, device);
+ }
+ 
++typedef struct { struct netif *netif; u8_t peer_index; const ip_addr_t *ip; u16_t port; err_t result; } wireguardif_update_endpoint_owner_ctx;
++err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip_addr_t *ip, u16_t port);
++static void wireguardif_update_endpoint_owner_cb(void *arg) {
++    wireguardif_update_endpoint_owner_ctx *c = (wireguardif_update_endpoint_owner_ctx *)arg;
++    c->result = wireguardif_update_endpoint(c->netif, c->peer_index, c->ip, c->port);
++}
+ err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip_addr_t *ip, u16_t port) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_update_endpoint_owner_ctx c = { .netif = netif, .peer_index = peer_index, .ip = ip, .port = port, .result = ERR_IF };
++        err_t dispatch = wireguardif_owner_call(wireguardif_update_endpoint_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : dispatch;
++    }
++
+ 	struct wireguard_peer *peer;
+ 	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
+ 	if (result == ERR_OK) {
+@@ -1000,7 +1121,19 @@ err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip
+ }
+ 
+ 
++typedef struct { struct netif *netif; struct wireguardif_peer *p; u8_t *peer_index; err_t result; } wireguardif_add_peer_owner_ctx;
++err_t wireguardif_add_peer(struct netif *netif, struct wireguardif_peer *p, u8_t *peer_index);
++static void wireguardif_add_peer_owner_cb(void *arg) {
++    wireguardif_add_peer_owner_ctx *c = (wireguardif_add_peer_owner_ctx *)arg;
++    c->result = wireguardif_add_peer(c->netif, c->p, c->peer_index);
++}
+ err_t wireguardif_add_peer(struct netif *netif, struct wireguardif_peer *p, u8_t *peer_index) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_add_peer_owner_ctx c = { .netif = netif, .p = p, .peer_index = peer_index, .result = ERR_IF };
++        err_t dispatch = wireguardif_owner_call(wireguardif_add_peer_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : dispatch;
++    }
++
+ 	LWIP_ASSERT("netif != NULL", (netif != NULL));
+ 	LWIP_ASSERT("state != NULL", (netif->state != NULL));
+ 	LWIP_ASSERT("p != NULL", (p != NULL));
+@@ -1159,7 +1292,20 @@ static void wireguardif_tmr(void *arg) {
+ 	}
+ }
+ 
++typedef struct { struct netif *netif; int unused; } wireguardif_periodic_owner_ctx;
++void wireguardif_periodic(struct netif *netif);
++static void wireguardif_periodic_owner_cb(void *arg) {
++    wireguardif_periodic_owner_ctx *c = (wireguardif_periodic_owner_ctx *)arg;
++    wireguardif_periodic(c->netif);
++}
+ void wireguardif_periodic(struct netif *netif) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_periodic_owner_ctx c = { .netif = netif };
++        err_t dispatch = wireguardif_owner_call(wireguardif_periodic_owner_cb, &c);
++        (void)dispatch; /* No mutation if dispatch allocation fails. */
++        return;
++    }
++
+ 	if (!netif || !netif->state) {
+ 		return;
+ 	}
+@@ -1209,7 +1355,19 @@ void wireguardif_periodic(struct netif *netif) {
+ 	}
+ }
+ 
++typedef struct { struct netif *netif; err_t result; } wireguardif_init_owner_ctx;
++err_t wireguardif_init(struct netif *netif);
++static void wireguardif_init_owner_cb(void *arg) {
++    wireguardif_init_owner_ctx *c = (wireguardif_init_owner_ctx *)arg;
++    c->result = wireguardif_init(c->netif);
++}
+ err_t wireguardif_init(struct netif *netif) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_init_owner_ctx c = { .netif = netif, .result = ERR_IF };
++        err_t dispatch = wireguardif_owner_call(wireguardif_init_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : dispatch;
++    }
++
+ 	err_t result;
+ 	struct wireguardif_init_data *init_data;
+ 	struct wireguard_device *device;
+@@ -1355,7 +1513,20 @@ void wireguardif_peer_init(struct wireguardif_peer *peer) {
+ 	peer->preshared_key = NULL;
+ }
+ 
++typedef struct { struct netif *netif; wireguard_derp_output_fn fn; void *ctx; int unused; } wireguardif_set_derp_output_owner_ctx;
++void wireguardif_set_derp_output(struct netif *netif, wireguard_derp_output_fn fn, void *ctx);
++static void wireguardif_set_derp_output_owner_cb(void *arg) {
++    wireguardif_set_derp_output_owner_ctx *c = (wireguardif_set_derp_output_owner_ctx *)arg;
++    wireguardif_set_derp_output(c->netif, c->fn, c->ctx);
++}
+ void wireguardif_set_derp_output(struct netif *netif, wireguard_derp_output_fn fn, void *ctx) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_set_derp_output_owner_ctx c = { .netif = netif, .fn = fn, .ctx = ctx };
++        err_t dispatch = wireguardif_owner_call(wireguardif_set_derp_output_owner_cb, &c);
++        (void)dispatch; /* No mutation if dispatch allocation fails. */
++        return;
++    }
++
+ 	LWIP_ASSERT("netif != NULL", (netif != NULL));
+ 	LWIP_ASSERT("state != NULL", (netif->state != NULL));
+ 	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+@@ -1365,7 +1536,20 @@ void wireguardif_set_derp_output(struct netif *netif, wireguard_derp_output_fn f
+ 	}
+ }
+ 
++typedef struct { struct netif *netif; wireguard_udp_output_fn fn; void *ctx; int unused; } wireguardif_set_udp_output_owner_ctx;
++void wireguardif_set_udp_output(struct netif *netif, wireguard_udp_output_fn fn, void *ctx);
++static void wireguardif_set_udp_output_owner_cb(void *arg) {
++    wireguardif_set_udp_output_owner_ctx *c = (wireguardif_set_udp_output_owner_ctx *)arg;
++    wireguardif_set_udp_output(c->netif, c->fn, c->ctx);
++}
+ void wireguardif_set_udp_output(struct netif *netif, wireguard_udp_output_fn fn, void *ctx) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_set_udp_output_owner_ctx c = { .netif = netif, .fn = fn, .ctx = ctx };
++        err_t dispatch = wireguardif_owner_call(wireguardif_set_udp_output_owner_cb, &c);
++        (void)dispatch; /* No mutation if dispatch allocation fails. */
++        return;
++    }
++
+ 	LWIP_ASSERT("netif != NULL", (netif != NULL));
+ 	LWIP_ASSERT("state != NULL", (netif->state != NULL));
+ 	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+@@ -1376,7 +1560,20 @@ void wireguardif_set_udp_output(struct netif *netif, wireguard_udp_output_fn fn,
+ 	}
+ }
+ 
++typedef struct { struct netif *netif; bool force; int unused; } wireguardif_force_derp_output_owner_ctx;
++void wireguardif_force_derp_output(struct netif *netif, bool force);
++static void wireguardif_force_derp_output_owner_cb(void *arg) {
++    wireguardif_force_derp_output_owner_ctx *c = (wireguardif_force_derp_output_owner_ctx *)arg;
++    wireguardif_force_derp_output(c->netif, c->force);
++}
+ void wireguardif_force_derp_output(struct netif *netif, bool force) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_force_derp_output_owner_ctx c = { .netif = netif, .force = force };
++        err_t dispatch = wireguardif_owner_call(wireguardif_force_derp_output_owner_cb, &c);
++        (void)dispatch; /* No mutation if dispatch allocation fails. */
++        return;
++    }
++
+ 	LWIP_ASSERT("netif != NULL", (netif != NULL));
+ 	LWIP_ASSERT("state != NULL", (netif->state != NULL));
+ 	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+@@ -1386,7 +1583,19 @@ void wireguardif_force_derp_output(struct netif *netif, bool force) {
+ 	}
+ }
+ 
++typedef struct { struct netif *netif; u8_t peer_index; err_t result; } wireguardif_connect_derp_owner_ctx;
++err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index);
++static void wireguardif_connect_derp_owner_cb(void *arg) {
++    wireguardif_connect_derp_owner_ctx *c = (wireguardif_connect_derp_owner_ctx *)arg;
++    c->result = wireguardif_connect_derp(c->netif, c->peer_index);
++}
+ err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_connect_derp_owner_ctx c = { .netif = netif, .peer_index = peer_index, .result = ERR_IF };
++        err_t dispatch = wireguardif_owner_call(wireguardif_connect_derp_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : dispatch;
++    }
++
+ 	struct wireguard_peer *peer;
+ 	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
+ 	if (result == ERR_OK) {
+@@ -1408,8 +1617,21 @@ err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index) {
+ 	return result;
+ }
+ 
++typedef struct { struct netif *netif; uint32_t src_ip; uint16_t src_port; const uint8_t *data; size_t len; err_t result; } wireguardif_inject_packet_owner_ctx;
++err_t wireguardif_inject_packet(struct netif *netif, uint32_t src_ip, uint16_t src_port,
++                                 const uint8_t *data, size_t len);
++static void wireguardif_inject_packet_owner_cb(void *arg) {
++    wireguardif_inject_packet_owner_ctx *c = (wireguardif_inject_packet_owner_ctx *)arg;
++    c->result = wireguardif_inject_packet(c->netif, c->src_ip, c->src_port, c->data, c->len);
++}
+ err_t wireguardif_inject_packet(struct netif *netif, uint32_t src_ip, uint16_t src_port,
+                                  const uint8_t *data, size_t len) {
++    if (!wireguardif_owner_current()) {
++        wireguardif_inject_packet_owner_ctx c = { .netif = netif, .src_ip = src_ip, .src_port = src_port, .data = data, .len = len, .result = ERR_IF };
++        err_t dispatch = wireguardif_owner_call(wireguardif_inject_packet_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : dispatch;
++    }
++
+ 	if (!netif || !netif->state || !data || len == 0) {
+ 		return ERR_ARG;
+ 	}
+diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif_diag.h b/components/microlink/components/wireguard_lwip/src/wireguardif_diag.h
+new file mode 100644
+index 0000000..6d81847
+--- /dev/null
++++ b/components/microlink/components/wireguard_lwip/src/wireguardif_diag.h
+@@ -0,0 +1,18 @@
++/* Bounded observational probes: each call site samples twice per boot.
++ * Address API checks the containing heap, not just the individual allocation.
++ * No key, packet bytes, abort, or repair. Counters are used only in WG owner.
++ */
++#ifndef WIREGUARDIF_DIAG_H
++#define WIREGUARDIF_DIAG_H
++#include "esp_heap_caps.h"
++#include "esp_log.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++static inline void wireguardif_diag(const char *stage, const void *addr, unsigned *budget) {
++    if (*budget >= 2) return;
++    ++*budget;
++    bool ok = addr && heap_caps_check_integrity_addr((intptr_t)addr, false);
++    ESP_LOGI("wg_heap_diag", "stage=%s addr=%p heap_ok=%d stack_hwm=%u sample=%u/2",
++             stage, addr, ok, (unsigned)uxTaskGetStackHighWaterMark(NULL), *budget);
++}
++#endif
+diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif_owner.h b/components/microlink/components/wireguard_lwip/src/wireguardif_owner.h
+new file mode 100644
+index 0000000..3ec90d5
+--- /dev/null
++++ b/components/microlink/components/wireguard_lwip/src/wireguardif_owner.h
+@@ -0,0 +1,21 @@
++/* Synchronous, re-entrant owner dispatch for ESP-IDF lwIP.
++ * Never call with a mutex needed by TCPIP callbacks. The callback must not
++ * use BSD sockets or wait for work on TCPIP. With core locking off, crypto
++ * executes on TCPIP; with it on, the caller executes while holding the core.
++ */
++#ifndef WIREGUARDIF_OWNER_H
++#define WIREGUARDIF_OWNER_H
++#include <stdbool.h>
++#include "lwip/tcpip.h"
++#include "lwip/sys.h"
++static inline bool wireguardif_owner_current(void) {
++    return sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER);
++}
++static inline err_t wireguardif_owner_call(tcpip_callback_fn fn, void *ctx) {
++    if (wireguardif_owner_current()) {
++        fn(ctx);
++        return ERR_OK;
++    }
++    return tcpip_callback_wait(fn, ctx);
++}
++#endif
 diff --git a/components/microlink/include/microlink.h b/components/microlink/include/microlink.h
 index 9126a53..7073671 100644
 --- a/components/microlink/include/microlink.h
 +++ b/components/microlink/include/microlink.h
-@@ -23,6 +23,12 @@ extern "C" {
- /* Opaque handle */
- typedef struct microlink_s microlink_t;
+@@ -21,7 +21,13 @@ extern "C" {
+ #endif
  
+ /* Opaque handle */
+-typedef struct microlink_s microlink_t;
++typedef struct microlink_s microlink_t;
++
 +/**
 + * Run a deterministic ChaCha20-Poly1305 known-answer and tamper-rejection test.
 + * This performs no network or account operation.
 + */
 +esp_err_t ml_noise_selftest(void);
-+
+ 
  /* Configuration */
  typedef struct {
-     const char *auth_key;       /* Tailscale auth key (tskey-auth-...) */
 diff --git a/components/microlink/include/microlink_internal.h b/components/microlink/include/microlink_internal.h
 index add69c7..9f48b8c 100644
 --- a/components/microlink/include/microlink_internal.h
@@ -241,18 +682,23 @@ diff --git a/components/microlink/src/microlink.c b/components/microlink/src/mic
 index 237f039..fd5379a 100644
 --- a/components/microlink/src/microlink.c
 +++ b/components/microlink/src/microlink.c
-@@ -15,6 +15,7 @@
+@@ -14,7 +14,8 @@
+ #include "esp_wifi.h"
  #include "nvs_flash.h"
  #include "nvs.h"
- #include "cJSON.h"
+-#include "cJSON.h"
++#include "cJSON.h"
 +#include "psa/crypto.h"
  #include <string.h>
  #include <stdio.h>
  #include <fcntl.h>
-@@ -26,6 +27,23 @@
+@@ -24,7 +25,24 @@
+ #include "ml_cellular.h"
+ #endif
  
- static const char *TAG = "microlink";
- 
+-static const char *TAG = "microlink";
++static const char *TAG = "microlink";
++
 +#define ML_STOP_TIMEOUT_MS 15000
 +
 +static void drain_packet_queue(QueueHandle_t queue) {
@@ -269,14 +715,21 @@ index 237f039..fd5379a 100644
 +    ml_derp_tx_item_t item;
 +    while (queue && xQueueReceive(queue, &item, 0) == pdTRUE) free(item.data);
 +}
-+
+ 
  /* NVS keys */
  #define NVS_NAMESPACE       "microlink"
- #define NVS_KEY_MACHINE_PRI "machine_pri"
-@@ -156,6 +174,10 @@ microlink_t *microlink_init(const microlink_config_t *config) {
+@@ -151,11 +169,15 @@ esp_err_t microlink_factory_reset(void) {
+  * Public API
+  * ========================================================================== */
+ 
+-microlink_t *microlink_init(const microlink_config_t *config) {
++microlink_t *microlink_init(const microlink_config_t *config) {
+     if (!config || !config->auth_key) {
          ESP_LOGE(TAG, "Invalid config: auth_key required");
-         return NULL;
-     }
+-        return NULL;
+-    }
++        return NULL;
++    }
 +    if (psa_crypto_init() != PSA_SUCCESS) {
 +        ESP_LOGE(TAG, "PSA crypto initialization failed");
 +        return NULL;
@@ -298,10 +751,19 @@ index 237f039..fd5379a 100644
          microlink_destroy(ml);
          return NULL;
      }
-@@ -304,6 +327,17 @@ esp_err_t microlink_start(microlink_t *ml) {
+@@ -297,14 +320,25 @@ microlink_t *microlink_init(const microlink_config_t *config) {
+     return ml;
+ }
+ 
+-esp_err_t microlink_start(microlink_t *ml) {
++esp_err_t microlink_start(microlink_t *ml) {
+     if (!ml) return ESP_ERR_INVALID_ARG;
+     if (ml->state != ML_STATE_IDLE) {
+         ESP_LOGW(TAG, "Already started (state=%d)", ml->state);
          return ESP_ERR_INVALID_STATE;
      }
  
+-    ml->state = ML_STATE_WIFI_WAIT;
 +    xEventGroupClearBits(ml->events, ML_EVT_SHUTDOWN_REQUEST | ML_EVT_TASK_EXITED_MASK |
 +                                         ML_EVT_COORD_REGISTERED | ML_EVT_DERP_CONNECTED | ML_EVT_WG_READY |
 +                                         ML_EVT_DERP_CONNECT_REQ | ML_EVT_DERP_RECONNECT);
@@ -313,51 +775,70 @@ index 237f039..fd5379a 100644
 +    drain_peer_queue(ml->peer_update_queue);
 +    ml_coord_cmd_t stale_cmd;
 +    while (xQueueReceive(ml->coord_cmd_queue, &stale_cmd, 0) == pdTRUE) {}
-     ml->state = ML_STATE_WIFI_WAIT;
++    ml->state = ML_STATE_WIFI_WAIT;
  
      /* Set WiFi TX power if configured */
-@@ -374,29 +408,33 @@ skip_bsd_socket:
+     if (ml->config.wifi_tx_power_dbm > 0) {
+@@ -372,31 +406,35 @@ skip_bsd_socket:
+ 
+     ret = xTaskCreatePinnedToCore(ml_net_io_task, "ml_net_io", ML_TASK_NET_IO_STACK,
                                     ml, ML_TASK_NET_IO_PRIO, &ml->net_io_task, ML_TASK_NET_IO_CORE);
-     if (ret != pdPASS) {
-         ESP_LOGE(TAG, "Failed to create net_io task");
+-    if (ret != pdPASS) {
+-        ESP_LOGE(TAG, "Failed to create net_io task");
 -        return ESP_FAIL;
+-    }
++    if (ret != pdPASS) {
++        ESP_LOGE(TAG, "Failed to create net_io task");
 +        goto start_failure;
-     }
++    }
 +    ml->lifecycle_expected |= ML_EVT_NET_IO_EXITED;
  
      ret = xTaskCreatePinnedToCore(ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK,
                                     ml, ML_TASK_DERP_TX_PRIO, &ml->derp_tx_task, ML_TASK_DERP_TX_CORE);
-     if (ret != pdPASS) {
-         ESP_LOGE(TAG, "Failed to create derp_tx task");
+-    if (ret != pdPASS) {
+-        ESP_LOGE(TAG, "Failed to create derp_tx task");
 -        return ESP_FAIL;
+-    }
++    if (ret != pdPASS) {
++        ESP_LOGE(TAG, "Failed to create derp_tx task");
 +        goto start_failure;
-     }
++    }
 +    ml->lifecycle_expected |= ML_EVT_DERP_TX_EXITED;
  
      ret = xTaskCreatePinnedToCore(ml_coord_task, "ml_coord", ML_TASK_COORD_STACK,
                                     ml, ML_TASK_COORD_PRIO, &ml->coord_task, ML_TASK_COORD_CORE);
-     if (ret != pdPASS) {
-         ESP_LOGE(TAG, "Failed to create coord task");
+-    if (ret != pdPASS) {
+-        ESP_LOGE(TAG, "Failed to create coord task");
 -        return ESP_FAIL;
+-    }
++    if (ret != pdPASS) {
++        ESP_LOGE(TAG, "Failed to create coord task");
 +        goto start_failure;
-     }
++    }
 +    ml->lifecycle_expected |= ML_EVT_COORD_EXITED;
  
      ret = xTaskCreatePinnedToCore(ml_wg_mgr_task, "ml_wg_mgr", ML_TASK_WG_MGR_STACK,
                                     ml, ML_TASK_WG_MGR_PRIO, &ml->wg_mgr_task, ML_TASK_WG_MGR_CORE);
-     if (ret != pdPASS) {
-         ESP_LOGE(TAG, "Failed to create wg_mgr task");
+-    if (ret != pdPASS) {
+-        ESP_LOGE(TAG, "Failed to create wg_mgr task");
 -        return ESP_FAIL;
+-    }
++    if (ret != pdPASS) {
++        ESP_LOGE(TAG, "Failed to create wg_mgr task");
 +        goto start_failure;
-     }
++    }
 +    ml->lifecycle_expected |= ML_EVT_WG_MGR_EXITED;
  
      /* WiFi is expected to be connected before microlink_start() is called.
       * Signal the event so coord/wg_mgr tasks proceed immediately. */
-@@ -413,6 +451,10 @@ skip_bsd_socket:
+@@ -411,8 +449,12 @@ skip_bsd_socket:
+         ml_config_httpd_start(ml->config_httpd, ml);
+     }
  
-     ESP_LOGI(TAG, "All tasks started");
-     return ESP_OK;
+-    ESP_LOGI(TAG, "All tasks started");
+-    return ESP_OK;
++    ESP_LOGI(TAG, "All tasks started");
++    return ESP_OK;
 +
 +start_failure:
 +    microlink_stop(ml);
@@ -374,14 +855,29 @@ index 237f039..fd5379a 100644
      if (ml_zerocopy_init(ml) == ESP_OK) {
          ESP_LOGI(TAG, "Rebind: zero-copy DISCO PCB recreated");
          goto rebind_wg_update;
-@@ -508,15 +550,24 @@ rebind_wg_update:
- esp_err_t microlink_stop(microlink_t *ml) {
-     if (!ml) return ESP_ERR_INVALID_ARG;
+@@ -505,18 +547,27 @@ rebind_wg_update:
+     return ESP_OK;
+ }
  
+-esp_err_t microlink_stop(microlink_t *ml) {
+-    if (!ml) return ESP_ERR_INVALID_ARG;
+-
+-    ESP_LOGI(TAG, "Stopping...");
+-    xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
+-
+-    /* Wait for tasks to exit (they check ML_EVT_SHUTDOWN_REQUEST).
+-     * Tasks call vTaskDelete(NULL) to self-delete, so we must NOT call
+-     * vTaskDelete() on them again — that causes a crash in uxListRemove
+-     * because the task's list node is already invalid. Just wait and
+-     * NULL the handles. */
+-    vTaskDelay(pdMS_TO_TICKS(3000));
++esp_err_t microlink_stop(microlink_t *ml) {
++    if (!ml) return ESP_ERR_INVALID_ARG;
++
 +    if (ml->state == ML_STATE_IDLE && ml->lifecycle_expected == 0) return ESP_OK;
 +
-     ESP_LOGI(TAG, "Stopping...");
-     xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
++    ESP_LOGI(TAG, "Stopping...");
++    xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
 +    ml_coord_cmd_t disconnect = ML_CMD_DISCONNECT;
 +    if (ml->coord_cmd_queue) xQueueSend(ml->coord_cmd_queue, &disconnect, 0);
 +    if (ml->coord_sock >= 0) shutdown(ml->coord_sock, SHUT_RDWR);
@@ -389,13 +885,7 @@ index 237f039..fd5379a 100644
 +    if (ml->disco_sock4 >= 0) shutdown(ml->disco_sock4, SHUT_RDWR);
 +    if (ml->stun_sock >= 0) shutdown(ml->stun_sock, SHUT_RDWR);
 +    if (ml->stun_sock6 >= 0) shutdown(ml->stun_sock6, SHUT_RDWR);
- 
--    /* Wait for tasks to exit (they check ML_EVT_SHUTDOWN_REQUEST).
--     * Tasks call vTaskDelete(NULL) to self-delete, so we must NOT call
--     * vTaskDelete() on them again — that causes a crash in uxListRemove
--     * because the task's list node is already invalid. Just wait and
--     * NULL the handles. */
--    vTaskDelay(pdMS_TO_TICKS(3000));
++
 +    const EventBits_t exited = xEventGroupWaitBits(ml->events, ml->lifecycle_expected,
 +                                                     pdFALSE, pdTRUE, pdMS_TO_TICKS(ML_STOP_TIMEOUT_MS));
 +    if ((exited & ml->lifecycle_expected) != ml->lifecycle_expected) {
@@ -405,7 +895,14 @@ index 237f039..fd5379a 100644
  
      ml->net_io_task = NULL;
      ml->derp_tx_task = NULL;
-@@ -530,7 +581,7 @@ esp_err_t microlink_stop(microlink_t *ml) {
+@@ -524,21 +575,28 @@ esp_err_t microlink_stop(microlink_t *ml) {
+     ml->wg_mgr_task = NULL;
+ 
+     /* Stop HTTP config server */
+-    if (ml->config_httpd) {
++    if (ml->config_httpd) {
+         ml_config_httpd_stop(ml->config_httpd);
+     }
  
      /* Clean up zero-copy PCB if active */
  #ifdef CONFIG_ML_ZERO_COPY_WG
@@ -414,10 +911,13 @@ index 237f039..fd5379a 100644
  #endif
  
      /* Close sockets */
-@@ -538,6 +589,13 @@ esp_err_t microlink_stop(microlink_t *ml) {
+     if (ml->disco_sock4 >= 0) { ml_close_sock(ml->disco_sock4); ml->disco_sock4 = -1; }
      if (ml->stun_sock >= 0) { ml_close_sock(ml->stun_sock); ml->stun_sock = -1; }
-     if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
- 
+-    if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
+-
+-    ml->state = ML_STATE_IDLE;
++    if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
++
 +    drain_derp_queue(ml->derp_tx_queue);
 +    drain_packet_queue(ml->disco_rx_queue);
 +    drain_packet_queue(ml->wg_rx_queue);
@@ -425,9 +925,10 @@ index 237f039..fd5379a 100644
 +    drain_peer_queue(ml->peer_update_queue);
 +    ml->lifecycle_expected = 0;
 +
-     ml->state = ML_STATE_IDLE;
++    ml->state = ML_STATE_IDLE;
      ESP_LOGI(TAG, "Stopped");
      return ESP_OK;
+ }
 @@ -546,7 +604,10 @@ esp_err_t microlink_stop(microlink_t *ml) {
  void microlink_destroy(microlink_t *ml) {
      if (!ml) return;
@@ -1329,13 +1830,18 @@ diff --git a/components/microlink/src/ml_net_io.c b/components/microlink/src/ml_
 index f8b6799..6da6446 100644
 --- a/components/microlink/src/ml_net_io.c
 +++ b/components/microlink/src/ml_net_io.c
-@@ -208,6 +208,8 @@ void ml_net_io_task(void *arg) {
+@@ -206,8 +206,10 @@ void ml_net_io_task(void *arg) {
+                 }
+             }
          }
-     }
- 
+-    }
+-
+-    ESP_LOGI(TAG, "Net I/O task exiting");
++    }
++
 +    ml->net_io_task = NULL;
 +    xEventGroupSetBits(ml->events, ML_EVT_NET_IO_EXITED);
-     ESP_LOGI(TAG, "Net I/O task exiting");
++    ESP_LOGI(TAG, "Net I/O task exiting");
      vTaskDelete(NULL);
  }
 diff --git a/components/microlink/src/ml_noise.c b/components/microlink/src/ml_noise.c
@@ -1352,7 +1858,16 @@ index 1b0fac2..0d94a4b 100644
  #include <string.h>
  
  static const char *TAG = "ml_noise";
-@@ -167,17 +166,22 @@ static int chacha20poly1305_encrypt(const uint8_t *key, uint64_t nonce,
+@@ -149,7 +148,7 @@ static void noise_mix_key(uint8_t ck[32], uint8_t k[32], const uint8_t *dh_outpu
+  * ChaCha20-Poly1305 AEAD (Noise uses 64-bit nonce, padded to 96-bit)
+  * ========================================================================== */
+ 
+-static int chacha20poly1305_encrypt(const uint8_t *key, uint64_t nonce,
++static int chacha20poly1305_encrypt(const uint8_t *key, uint64_t nonce,
+                                       const uint8_t *ad, size_t ad_len,
+                                       const uint8_t *plaintext, size_t pt_len,
+                                       uint8_t *ciphertext) {
+@@ -167,20 +166,25 @@ static int chacha20poly1305_encrypt(const uint8_t *key, uint64_t nonce,
      nonce_bytes[10] = (nonce >> 8) & 0xFF;
      nonce_bytes[11] = nonce & 0xFF;
  
@@ -1385,8 +1900,12 @@ index 1b0fac2..0d94a4b 100644
 +    return (status == PSA_SUCCESS && ciphertext_len == pt_len + 16) ? 0 : -1;
  }
  
- static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
-@@ -198,19 +202,115 @@ static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
+-static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
++static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
+                                       const uint8_t *ad, size_t ad_len,
+                                       const uint8_t *ciphertext, size_t ct_len,
+                                       uint8_t *plaintext) {
+@@ -198,20 +202,116 @@ static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
      nonce_bytes[10] = (nonce >> 8) & 0xFF;
      nonce_bytes[11] = nonce & 0xFF;
  
@@ -1400,6 +1919,10 @@ index 1b0fac2..0d94a4b 100644
 -    int ret = mbedtls_chachapoly_auth_decrypt(&ctx,
 -                payload_len, nonce_bytes, ad, ad_len,
 -                tag, ciphertext, plaintext);
+-
+-    mbedtls_chachapoly_free(&ctx);
+-    return ret;
+-}
 +    const size_t payload_len = ct_len - 16;
 +    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
 +    psa_key_id_t key_id = 0;
@@ -1418,9 +1941,7 @@ index 1b0fac2..0d94a4b 100644
 +    }
 +    return (status == PSA_SUCCESS && plaintext_len == payload_len) ? 0 : -1;
 +}
- 
--    mbedtls_chachapoly_free(&ctx);
--    return ret;
++
 +esp_err_t ml_noise_selftest(void) {
 +    static const uint8_t key[32] = {
 +        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -1511,17 +2032,22 @@ index 1b0fac2..0d94a4b 100644
 +    memset(&state, 0, sizeof(state));
 +    if (result != ESP_OK) ESP_LOGE(TAG, "Noise self-test failed at %s", stage);
 +    return result;
- }
++}
  
  /* ============================================================================
-@@ -269,6 +369,7 @@ void ml_noise_init(ml_noise_state_t *state,
+  * Noise IK Handshake
+@@ -268,8 +368,9 @@ void ml_noise_init(ml_noise_state_t *state,
+  *
   * Header: [version(2)][type(1)=0x01][length(2)=96]
   */
- esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out_len) {
+-esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out_len) {
+-    size_t pos = 0;
++esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out_len) {
 +    if (state == NULL || out == NULL || out_len == NULL) return ESP_ERR_INVALID_ARG;
-     size_t pos = 0;
++    size_t pos = 0;
  
      /* Header: version(2) + type(1) + payload_length(2) = 5 bytes */
+     out[pos++] = (ML_CTRL_PROTOCOL_VER >> 8) & 0xFF;  /* version high */
 @@ -292,9 +393,11 @@ esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out
      memset(dh_output, 0, 32);
  
@@ -1537,7 +2063,7 @@ index 1b0fac2..0d94a4b 100644
      noise_mix_hash(state->h, out + pos, 48);
      pos += 48;
  
-@@ -304,8 +407,10 @@ esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out
+@@ -304,17 +407,27 @@ esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out
      memset(dh_output, 0, 32);
  
      /* Empty payload encrypted (just the 16-byte auth tag) */
@@ -1550,10 +2076,14 @@ index 1b0fac2..0d94a4b 100644
      noise_mix_hash(state->h, out + pos, 16);
      pos += 16;
  
-@@ -314,6 +419,14 @@ esp_err_t ml_noise_write_msg1(ml_noise_state_t *state, uint8_t *out, size_t *out
+     memset(k, 0, 32);
+     *out_len = pos;
  
-     ESP_LOGI(TAG, "Noise msg1 built: %d bytes", (int)pos);
-     return ESP_OK;
+-    ESP_LOGI(TAG, "Noise msg1 built: %d bytes", (int)pos);
+-    return ESP_OK;
+-}
++    ESP_LOGI(TAG, "Noise msg1 built: %d bytes", (int)pos);
++    return ESP_OK;
 +
 +crypto_failure:
 +    memset(dh_output, 0, sizeof(dh_output));
@@ -1562,9 +2092,10 @@ index 1b0fac2..0d94a4b 100644
 +    *out_len = 0;
 +    ESP_LOGE(TAG, "Noise msg1 encryption failed");
 +    return ESP_FAIL;
- }
++}
  
  /**
+  * Parse Noise message 2 (responder -> initiator)
 diff --git a/components/microlink/src/ml_tcp.c b/components/microlink/src/ml_tcp.c
 index e65d72d..d64d23c 100644
 --- a/components/microlink/src/ml_tcp.c
@@ -1608,7 +2139,7 @@ index e65d72d..d64d23c 100644
      }
  
      /* Set connect/send timeout */
-@@ -163,14 +163,16 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
+@@ -163,15 +163,17 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
              fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
              if (fd < 0) return NULL;
  
@@ -1620,6 +2151,7 @@ index e65d72d..d64d23c 100644
 -                    .sin_addr.s_addr = htonl(ml->vpn_ip),
 -                };
 -                bind(fd, (struct sockaddr *)&retry_src, sizeof(retry_src));
+-            }
 +            /* Retry must keep the same fail-closed VPN routing guarantee. */
 +            struct sockaddr_in retry_src = {
 +                .sin_family = AF_INET,
@@ -1630,22 +2162,172 @@ index e65d72d..d64d23c 100644
 +                ESP_LOGE(TAG, "retry bind() to VPN IP failed: errno=%d", errno);
 +                close(fd);
 +                return NULL;
-             }
++            }
  
              setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
+diff --git a/components/microlink/src/ml_udp.c b/components/microlink/src/ml_udp.c
+index 3919101..4a1e7f0 100644
+--- a/components/microlink/src/ml_udp.c
++++ b/components/microlink/src/ml_udp.c
+@@ -12,6 +12,7 @@
+  */
+ 
+ #include "microlink_internal.h"
++#include "wireguardif_owner.h"
+ #include "esp_log.h"
+ #include "lwip/udp.h"
+ #include "lwip/pbuf.h"
+@@ -148,6 +149,62 @@ static void udp_rx_task(void *arg) {
+  * Public API
+  * ========================================================================== */
+ 
++typedef struct {
++    microlink_udp_socket_t *sock;
++    uint16_t local_port;
++    err_t result;
++} udp_create_owner_ctx;
++static void udp_create_in_owner(void *arg) {
++    udp_create_owner_ctx *c = arg;
++    microlink_udp_socket_t *sock = c->sock;
++    microlink_t *ml = sock->ml;
++    uint16_t local_port = c->local_port;
++    sock->pcb = udp_new();
++    if (!sock->pcb) { c->result = ERR_MEM; return; }
++
++    /* Bind to WG netif */
++    if (ml->wg_netif) {
++        udp_bind_netif(sock->pcb, (struct netif *)ml->wg_netif);
++    }
++
++    /* Bind to VPN IP + port */
++    ip_addr_t local_ip;
++    ip_to_lwip(ml->vpn_ip, &local_ip);
++
++    err_t err = udp_bind(sock->pcb, &local_ip, local_port);
++    if (err != ERR_OK) {
++        ESP_LOGE(TAG, "udp_bind failed: %d", err);
++        udp_remove(sock->pcb);
++        sock->pcb = NULL;
++        c->result = err;
++        return;
++    }
++
++    sock->local_port = sock->pcb->local_port;
++    udp_recv(sock->pcb, udp_recv_cb, sock);
++
++    c->result = ERR_OK;
++}
++static void udp_remove_in_owner(void *arg) {
++    microlink_udp_socket_t *sock = arg;
++    if (sock->pcb) {
++        udp_recv(sock->pcb, NULL, NULL);
++        udp_remove(sock->pcb);
++        sock->pcb = NULL;
++    }
++}
++typedef struct {
++    microlink_udp_socket_t *sock;
++    struct pbuf *p;
++    ip_addr_t dest;
++    uint16_t port;
++    err_t result;
++} udp_send_owner_ctx;
++static void udp_send_in_owner(void *arg) {
++    udp_send_owner_ctx *c = arg;
++    c->result = c->sock->pcb ? udp_sendto(c->sock->pcb, c->p, &c->dest, c->port) : ERR_CONN;
++}
++
+ microlink_udp_socket_t *microlink_udp_create(microlink_t *ml, uint16_t local_port) {
+     if (!ml) {
+         ESP_LOGE(TAG, "NULL handle");
+@@ -168,34 +225,13 @@ microlink_udp_socket_t *microlink_udp_create(microlink_t *ml, uint16_t local_por
+         return NULL;
+     }
+ 
+-    sock->pcb = udp_new();
+-    if (!sock->pcb) {
+-        vSemaphoreDelete(sock->rx_sem);
+-        free(sock);
+-        return NULL;
+-    }
+-
+-    /* Bind to WG netif */
+-    if (ml->wg_netif) {
+-        udp_bind_netif(sock->pcb, (struct netif *)ml->wg_netif);
+-    }
+-
+-    /* Bind to VPN IP + port */
+-    ip_addr_t local_ip;
+-    ip_to_lwip(ml->vpn_ip, &local_ip);
+-
+-    err_t err = udp_bind(sock->pcb, &local_ip, local_port);
+-    if (err != ERR_OK) {
+-        ESP_LOGE(TAG, "udp_bind failed: %d", err);
+-        udp_remove(sock->pcb);
++    udp_create_owner_ctx c = { .sock = sock, .local_port = local_port, .result = ERR_IF };
++    if (wireguardif_owner_call(udp_create_in_owner, &c) != ERR_OK || c.result != ERR_OK) {
+         vSemaphoreDelete(sock->rx_sem);
+         free(sock);
+         return NULL;
+     }
+ 
+-    sock->local_port = sock->pcb->local_port;
+-    udp_recv(sock->pcb, udp_recv_cb, sock);
+-
+     /* Start RX task on Core 1 */
+     sock->rx_running = true;
+     if (xTaskCreatePinnedToCore(udp_rx_task, "ml_udp_rx", 4096, sock,
+@@ -225,8 +261,9 @@ void microlink_udp_close(microlink_udp_socket_t *sock) {
+     /* Unregister lwIP callback FIRST to prevent use-after-free.
+      * The callback runs from tcpip thread and accesses sock->rx_sem,
+      * so it must be unregistered before we touch any sock fields. */
+-    if (sock->pcb) {
+-        udp_recv(sock->pcb, NULL, NULL);
++    if (wireguardif_owner_call(udp_remove_in_owner, sock) != ERR_OK) {
++        ESP_LOGE(TAG, "UDP close owner dispatch failed; retaining live socket");
++        return;
+     }
+ 
+     if (sock->rx_running) {
+@@ -235,9 +272,6 @@ void microlink_udp_close(microlink_udp_socket_t *sock) {
+         vTaskDelay(pdMS_TO_TICKS(150));
+     }
+ 
+-    if (sock->pcb) {
+-        udp_remove(sock->pcb);
+-    }
+ 
+     if (sock->rx_sem) vSemaphoreDelete(sock->rx_sem);
+     free(sock);
+@@ -256,7 +290,9 @@ esp_err_t microlink_udp_send(microlink_udp_socket_t *sock, uint32_t dest_ip,
+     if (!p) return ESP_ERR_NO_MEM;
+ 
+     memcpy(p->payload, data, len);
+-    err_t err = udp_sendto(sock->pcb, p, &dest, dest_port);
++    udp_send_owner_ctx c = { .sock = sock, .p = p, .dest = dest, .port = dest_port, .result = ERR_IF };
++    err_t dispatch = wireguardif_owner_call(udp_send_in_owner, &c);
++    err_t err = dispatch == ERR_OK ? c.result : dispatch;
+     pbuf_free(p);
+ 
+     if (err != ERR_OK) {
 diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_wg_mgr.c
-index ed40942..51bc66f 100644
+index ed40942..d924494 100644
 --- a/components/microlink/src/ml_wg_mgr.c
 +++ b/components/microlink/src/ml_wg_mgr.c
-@@ -24,6 +24,7 @@
+@@ -24,8 +24,11 @@
  #include "lwip/ip_addr.h"
  #include "lwip/ip.h"
  #include "lwip/tcpip.h"
 +#include "lwip/udp.h"
  #include "nacl_box.h"
  #include "wireguardif.h"
++#include "wireguardif_owner.h"
++#include "wireguardif_diag.h"
  #include "wireguard.h"
-@@ -128,9 +129,8 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+ #include "mbedtls/base64.h"
+ #include <string.h>
+@@ -128,9 +131,8 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
          return ERR_CONN;
      }
  
@@ -1656,7 +2338,7 @@ index ed40942..51bc66f 100644
          const char *hostname = "?";
          for (int i = 0; i < ml->peer_count; i++) {
              if (memcmp(ml->peers[i].public_key, peer_public_key, 32) == 0) {
-@@ -138,35 +138,7 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+@@ -138,35 +140,7 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
                  break;
              }
          }
@@ -1693,7 +2375,7 @@ index ed40942..51bc66f 100644
      }
  
      esp_err_t err = ml_derp_queue_send(ml, peer_public_key, data, len);
-@@ -181,6 +153,48 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+@@ -181,6 +155,48 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
   * on that thread. */
  static struct udp_pcb *s_wg_output_pcb = NULL;
  
@@ -1742,7 +2424,48 @@ index ed40942..51bc66f 100644
  static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
                                  const uint8_t *data, size_t len, void *ctx) {
      microlink_t *ml = (microlink_t *)ctx;
-@@ -315,14 +329,9 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
+@@ -195,7 +211,8 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
+              (int)dest_port,
+              len >= 1 ? data[0] : -1);
+ 
+-    /* Use raw PCB to send — safe from any thread context */
++    /* Only reached while the WG owner holds the core or runs on TCPIP. */
++    LWIP_ASSERT_CORE_LOCKED();
+     if (!s_wg_output_pcb) return ERR_CONN;
+ 
+     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
+@@ -206,7 +223,10 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
+     IP_SET_TYPE_VAL(dst, IPADDR_TYPE_V4);
+     ip4_addr_set_u32(ip_2_ip4(&dst), dest_ip);  /* already network byte order */
+ 
++    static unsigned tx_before, tx_after;
++    wireguardif_diag("udp_before_send", p, &tx_before);
+     err_t err = udp_sendto(s_wg_output_pcb, p, &dst, dest_port);
++    wireguardif_diag("udp_after_send", p, &tx_after);
+     pbuf_free(p);
+     return err;
+ }
+@@ -215,7 +235,19 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
+  * WireGuard Interface Initialization
+  * ========================================================================== */
+ 
++typedef struct { microlink_t *ml; esp_err_t result; } wg_init_interface_ctx;
++static esp_err_t wg_init_interface(microlink_t *ml);
++static void wg_init_interface_owner_cb(void *arg) {
++    wg_init_interface_ctx *c = arg;
++    c->result = wg_init_interface(c->ml);
++}
+ static esp_err_t wg_init_interface(microlink_t *ml) {
++    if (!wireguardif_owner_current()) {
++        wg_init_interface_ctx c = { .ml = ml, .result = ESP_FAIL };
++        err_t dispatch = wireguardif_owner_call(wg_init_interface_owner_cb, &c);
++        return dispatch == ERR_OK ? c.result : ESP_FAIL;
++    }
++
+     /* Convert our WG private key to base64 */
+     char privkey_b64[64];
+     key_to_base64(ml->wg_private_key, privkey_b64, sizeof(privkey_b64));
+@@ -315,14 +347,9 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
          struct wireguard_device *dev = (struct wireguard_device *)netif->state;
          if (dev) {
              bool match = (memcmp(dev->public_key, ml->wg_public_key, 32) == 0);
@@ -1759,7 +2482,55 @@ index ed40942..51bc66f 100644
              }
          }
      }
-@@ -464,10 +473,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+@@ -331,7 +358,20 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
+     return ESP_OK;
+ }
+ 
++typedef struct { microlink_t *ml; esp_err_t result; } wg_update_vpn_ip_ctx;
++static void wg_update_vpn_ip(microlink_t *ml);
++static void wg_update_vpn_ip_owner_cb(void *arg) {
++    wg_update_vpn_ip_ctx *c = arg;
++    wg_update_vpn_ip(c->ml);
++}
+ static void wg_update_vpn_ip(microlink_t *ml) {
++    if (!wireguardif_owner_current()) {
++        wg_update_vpn_ip_ctx c = { .ml = ml, .result = ESP_FAIL };
++        err_t dispatch = wireguardif_owner_call(wg_update_vpn_ip_owner_cb, &c);
++        (void)dispatch;
++        return;
++    }
++
+     if (ml->wg_netif && ml->vpn_ip != 0) {
+         struct netif *netif = (struct netif *)ml->wg_netif;
+         uint8_t a = (ml->vpn_ip >> 24) & 0xFF;
+@@ -346,6 +386,26 @@ static void wg_update_vpn_ip(microlink_t *ml) {
+  * Peer Management (owned exclusively by this task)
+  * ========================================================================== */
+ 
++typedef struct {
++    struct netif *netif;
++    u8_t index;
++    const uint8_t *key;
++    bool clear_active;
++    bool key_match;
++} wg_peer_owner_ctx;
++static void wg_peer_state_in_owner(void *arg) {
++    wg_peer_owner_ctx *c = arg;
++    struct wireguard_device *dev = c->netif->state;
++    if (dev && c->index < WIREGUARD_MAX_PEERS) {
++        if (c->clear_active) dev->peers[c->index].active = false;
++        if (c->key) c->key_match = memcmp(dev->peers[c->index].public_key, c->key, 32) == 0;
++    }
++}
++static bool wg_peer_key_matches(struct netif *netif, u8_t index, const uint8_t *key) {
++    wg_peer_owner_ctx c = { .netif = netif, .index = index, .key = key };
++    return wireguardif_owner_call(wg_peer_state_in_owner, &c) == ERR_OK && c.key_match;
++}
++
+ static int find_peer_by_key(microlink_t *ml, const uint8_t *pubkey) {
+     for (int i = 0; i < ml->peer_count; i++) {
+         if (ml->peers[i].active && memcmp(ml->peers[i].public_key, pubkey, 32) == 0) {
+@@ -464,10 +524,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
  
      char ip_str[16];
      microlink_ip_to_str(update->vpn_ip, ip_str);
@@ -1772,21 +2543,27 @@ index ed40942..51bc66f 100644
  
      /* Add to wireguard-lwip */
      if (ml->wg_netif) {
-@@ -523,11 +530,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
-             if (dev && wg_peer_idx < WIREGUARD_MAX_PEERS) {
-                 struct wireguard_peer *wp = &dev->peers[wg_peer_idx];
-                 bool key_match = (memcmp(wp->public_key, p->public_key, 32) == 0);
+@@ -519,15 +577,10 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+             p->wg_peer_index = wg_peer_idx;
+ 
+             /* Verify the WG internal peer key matches what we passed */
+-            struct wireguard_device *dev = (struct wireguard_device *)netif->state;
+-            if (dev && wg_peer_idx < WIREGUARD_MAX_PEERS) {
+-                struct wireguard_peer *wp = &dev->peers[wg_peer_idx];
+-                bool key_match = (memcmp(wp->public_key, p->public_key, 32) == 0);
 -                ESP_LOGI(TAG, "WG peer added: wg_idx=%d internal_key=%02x%02x%02x%02x %s",
 -                         wg_peer_idx,
 -                         wp->public_key[0], wp->public_key[1],
 -                         wp->public_key[2], wp->public_key[3],
 -                         key_match ? "KEY_OK" : "KEY_MISMATCH!");
++            {
++                bool key_match = wg_peer_key_matches(netif, wg_peer_idx, p->public_key);
 +                ESP_LOGI(TAG, "WG peer added: wg_idx=%d key consistency=%s",
 +                         wg_peer_idx, key_match ? "match" : "mismatch");
              }
  
              /* DON'T initiate handshakes to all peers on add.
-@@ -647,6 +651,25 @@ static void process_peer_updates(microlink_t *ml) {
+@@ -647,6 +700,25 @@ static void process_peer_updates(microlink_t *ml) {
      }
  }
  
@@ -1812,7 +2589,20 @@ index ed40942..51bc66f 100644
  /* ============================================================================
   * DISCO Protocol
   * ========================================================================== */
-@@ -1018,9 +1041,8 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
+@@ -982,10 +1054,8 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
+                          * If handshake succeeds, the response handler will
+                          * establish the session regardless of active flag. */
+                         {
+-                            struct wireguard_device *dev = (struct wireguard_device *)netif->state;
+-                            if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
+-                                dev->peers[p->wg_peer_index].active = false;
+-                            }
++                            wg_peer_owner_ctx c = { .netif = netif, .index = (u8_t)p->wg_peer_index, .clear_active = true };
++                            (void)wireguardif_owner_call(wg_peer_state_in_owner, &c);
+                         }
+                         ESP_LOGI(TAG, "WG one-shot handshake to %s (first direct path)", p->hostname);
+                     }
+@@ -1018,9 +1088,8 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
      /* Verify DISCO magic */
      if (memcmp(pkt->data, DISCO_MAGIC, 6) != 0) return;
  
@@ -1824,7 +2614,7 @@ index ed40942..51bc66f 100644
  
      /* Extract sender's disco public key */
      const uint8_t *sender_disco_key = pkt->data + 6;
-@@ -1163,7 +1185,7 @@ static void process_wg_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
+@@ -1163,7 +1232,7 @@ static void process_wg_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
  
      /* Allocate PBUF_RAM and copy data so the pbuf OWNS its data.
       * This is required because wireguardif decrypts in-place and then
@@ -1833,7 +2623,7 @@ index ed40942..51bc66f 100644
       * With PBUF_REF the backing data would be freed before the TCPIP
       * thread processes the packet. */
      struct pbuf *p = pbuf_alloc(PBUF_RAW, pkt->len, PBUF_RAM);
-@@ -1331,14 +1353,16 @@ esp_err_t ml_wg_mgr_trigger_handshake(microlink_t *ml, uint32_t dest_vpn_ip) {
+@@ -1331,14 +1400,16 @@ esp_err_t ml_wg_mgr_trigger_handshake(microlink_t *ml, uint32_t dest_vpn_ip) {
      err_t is_up = wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index, NULL, NULL);
      if (is_up == ERR_OK) return ESP_OK;
  
@@ -1857,11 +2647,17 @@ index ed40942..51bc66f 100644
      if (p->best_ip != 0 && p->best_port != 0) {
          ip_addr_t ep_ip;
          IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
-@@ -1372,13 +1396,10 @@ bool ml_wg_mgr_peer_is_up(microlink_t *ml, uint32_t vpn_ip) {
-         if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
-             struct wireguard_peer *wp = &dev->peers[p->wg_peer_index];
-             bool key_match = (memcmp(wp->public_key, p->public_key, 32) == 0);
+@@ -1368,17 +1439,12 @@ bool ml_wg_mgr_peer_is_up(microlink_t *ml, uint32_t vpn_ip) {
+     bool up = wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index, &cur_ip, &cur_port) == ERR_OK;
+     if (up) {
+         /* Verify WG internal peer key matches our DISCO peer */
+-        struct wireguard_device *dev = (struct wireguard_device *)netif->state;
+-        if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
+-            struct wireguard_peer *wp = &dev->peers[p->wg_peer_index];
+-            bool key_match = (memcmp(wp->public_key, p->public_key, 32) == 0);
 -            ESP_LOGI(TAG, "WG peer UP: %s wg_idx=%d ep=%s:%u key=%02x%02x%02x%02x %s",
++        {
++            bool key_match = wg_peer_key_matches(netif, (u8_t)p->wg_peer_index, p->public_key);
 +            ESP_LOGI(TAG, "WG peer UP: %s wg_idx=%d ep=%s:%u key consistency=%s",
                       p->hostname, p->wg_peer_index,
                       ip_addr_isany(&cur_ip) ? "DERP" : ipaddr_ntoa(&cur_ip),
@@ -1873,7 +2669,7 @@ index ed40942..51bc66f 100644
          }
      }
      return up;
-@@ -1518,8 +1539,7 @@ void ml_wg_mgr_task(void *arg) {
+@@ -1518,8 +1584,7 @@ void ml_wg_mgr_task(void *arg) {
  
      if (wait_bits & ML_EVT_SHUTDOWN_REQUEST) {
          ESP_LOGI(TAG, "Shutdown requested before registration, exiting");
@@ -1883,7 +2679,7 @@ index ed40942..51bc66f 100644
      }
  
      ESP_LOGI(TAG, "Coord registered, initializing WireGuard...");
-@@ -1530,6 +1550,7 @@ void ml_wg_mgr_task(void *arg) {
+@@ -1530,6 +1595,7 @@ void ml_wg_mgr_task(void *arg) {
      } else {
          /* Update VPN IP if coord already set it */
          wg_update_vpn_ip(ml);
@@ -1891,7 +2687,20 @@ index ed40942..51bc66f 100644
          xEventGroupSetBits(ml->events, ML_EVT_WG_READY);
      }
  
-@@ -1639,18 +1660,33 @@ void ml_wg_mgr_task(void *arg) {
+@@ -1612,9 +1678,9 @@ void ml_wg_mgr_task(void *arg) {
+         }
+ 
+         /* Run WireGuard periodic processing (handshakes, keepalives, rekeys).
+-         * This runs on OUR task stack (8KB) instead of the lwIP TCPIP thread (3-8KB),
+-         * preventing heavy crypto (X25519, ChaCha20-Poly1305) from monopolizing
+-         * the TCPIP thread and blocking all socket operations system-wide. */
++         * With core locking enabled, this runs on our task stack while holding
++         * the core; without it, owner dispatch runs on TCPIP. Both serialize
++         * WG state with netif output and can delay other core work during crypto. */
+         uint64_t now = ml_get_time_ms();
+         if (ml->wg_netif && now - last_wg_periodic_ms >= 400) {
+             uint64_t t0 = now;
+@@ -1639,18 +1705,33 @@ void ml_wg_mgr_task(void *arg) {
          vTaskDelay(pdMS_TO_TICKS(10));
      }
  
@@ -1950,25 +2759,30 @@ index e9a46e0..899c6d5 100644
  
      ESP_LOGI(TAG, "Shutting down zero-copy WG path");
  
-@@ -236,11 +236,16 @@ void ml_zerocopy_deinit(microlink_t *ml) {
+@@ -236,12 +236,17 @@ void ml_zerocopy_deinit(microlink_t *ml) {
          .ml = ml,
          .done = xSemaphoreCreateBinary(),
      };
 -    if (!ctx.done) return;
-+    if (!ctx.done) return ESP_ERR_NO_MEM;
- 
+-
 -    tcpip_callback(zc_pcb_remove_in_tcpip, &ctx);
+-    xSemaphoreTake(ctx.done, portMAX_DELAY);
+-    vSemaphoreDelete(ctx.done);
+-}
++    if (!ctx.done) return ESP_ERR_NO_MEM;
++
 +    if (tcpip_callback(zc_pcb_remove_in_tcpip, &ctx) != ERR_OK) {
 +        vSemaphoreDelete(ctx.done);
 +        return ESP_FAIL;
 +    }
-     xSemaphoreTake(ctx.done, portMAX_DELAY);
-     vSemaphoreDelete(ctx.done);
++    xSemaphoreTake(ctx.done, portMAX_DELAY);
++    vSemaphoreDelete(ctx.done);
 +    memset(&ml->zc, 0, sizeof(ml->zc));
 +    return ESP_OK;
- }
++}
  
  esp_err_t ml_zerocopy_send(microlink_t *ml, const uint8_t *data, size_t len,
+                             uint32_t dest_ip, uint16_t dest_port) {
 diff --git a/components/microlink/src/nacl_box.c b/components/microlink/src/nacl_box.c
 index 93bfd5f..4de7d33 100644
 --- a/components/microlink/src/nacl_box.c

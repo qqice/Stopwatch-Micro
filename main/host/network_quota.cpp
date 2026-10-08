@@ -46,6 +46,15 @@
 
 namespace {
 NetworkQuota instance;
+#ifdef MOSAICO_BOARD
+void sampleNetworkHeap(const char* stage, unsigned& budget) {
+    if (budget >= 2) return;
+    ++budget;
+    const bool ok = heap_caps_check_integrity_all(false);
+    ESP_LOGI("QuotaHeapDiag", "stage=%s heap_ok=%d stack_hwm=%u sample=%u/2",
+        stage, ok, static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)), budget);
+}
+#endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
 bool twtOtaBlocked()
 {
@@ -921,6 +930,7 @@ void NetworkQuota::run()
     int64_t refreshBaseUs=0;
     int64_t nextGaugeCheckUs = 0;
     MosaicoWifiRetry::Policy wifiRetry;
+    unsigned scanHeapBefore = 0, scanHeapAfter = 0, tailnetHeapBefore = 0, tailnetHeapAfter = 0;
 
 #endif
     while (true) {
@@ -1101,7 +1111,11 @@ void NetworkQuota::run()
             }
             const uint32_t remaining = wifiRetry.remainingMs(retryNow);
             if (remaining) { wait(std::min<uint32_t>(remaining, 5000)); continue; }
-            if(!selectWifiCandidate(locked,retryNow)) {
+            const bool scanReady = _wifi_scan_started && !_wifi_scan_cancelled && _wifi_scan_done && !_wifi_scan_status;
+            if (scanReady) sampleNetworkHeap("scan_ready_before", scanHeapBefore);
+            const bool selectedCandidate = selectWifiCandidate(locked,retryNow);
+            if (scanReady) sampleNetworkHeap("scan_ready_after", scanHeapAfter);
+            if(!selectedCandidate) {
                 if(_wifi_scan_complete) {
                     if(locked) updateWindow=false;
                     else { wifiRetry.attempted(retryNow,false); _wifi_scan_complete=false; }
@@ -1137,7 +1151,13 @@ void NetworkQuota::run()
                 wait(5000);
                 continue;
             }
+#ifdef MOSAICO_BOARD
+            sampleNetworkHeap("tailnet_start_before", tailnetHeapBefore);
+#endif
             GetTailnetQuota().start();
+#ifdef MOSAICO_BOARD
+            sampleNetworkHeap("tailnet_start_after", tailnetHeapAfter);
+#endif
             // start() resumes a paused context; rebind is only for live link loss.
             if (!hadConnection && GetTailnetQuota().ready()) GetTailnetQuota().rebind();
         }

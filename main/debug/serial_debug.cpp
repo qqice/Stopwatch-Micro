@@ -600,6 +600,16 @@ void SerialDebug::handleLine(char* line)
     if (command && !std::strcmp(command, "settings")) {
         const char* action=::strtok_r(nullptr, " \t", &save);
         bool ok=false;
+        if (action && !std::strcmp(action,"ui")) {
+            if (::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","reason=arguments no_changes=1");return;}
+            view::CodexMicroView::WifiEditorDebugSnapshot s;
+            if (!_app.debugWifiEditorSnapshot(s)) {result(command,"SKIP","reason=snapshot_contention no_changes=1");return;}
+            char details[240]{};
+            std::snprintf(details,sizeof(details),"presses=%lu clicks=%lu releases=%lu field=%lu guards=%lu keyboard_visible=%lu pending=%lu numeric_only=1",
+                static_cast<unsigned long>(s.presses),static_cast<unsigned long>(s.clicks),static_cast<unsigned long>(s.releases),
+                static_cast<unsigned long>(s.field),static_cast<unsigned long>(s.guards),static_cast<unsigned long>(s.keyboardVisible),static_cast<unsigned long>(s.pending));
+            result(command,"PASS",details);return;
+        }
         if (action && !std::strcmp(action,"wifi")) {
             const char* operation=::strtok_r(nullptr," \t",&save);
             const char* argument=::strtok_r(nullptr," \t",&save);
@@ -688,7 +698,7 @@ void SerialDebug::handleLine(char* line)
     }
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
     if (command && std::strcmp(command, "panic") == 0) {
-        char details[320];
+        char details[768];
         const bool saved = MosaicoPanicStatus(details, sizeof(details));
         result("panic", saved ? "PASS" : "SKIP", details);
         return;
@@ -1391,6 +1401,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP idle-wait on | off | status ram_only=1 locked_event_wait_ms=500 safe_gates_required=1\r\n");
     debugPrintf("DBG HELP standby-sleep on [lease_s=180,30..300] | standby-sleep off | standby-sleep auto CONFIRM | standby-sleep status automatic_default=profile UART_wake_preamble_required=1\r\n");
     debugPrintf("DBG HELP settings get | settings set <field> <int> [lease_s=180,30..600] | settings restore | settings save CONFIRM\r\n");
+    debugPrintf("DBG HELP settings ui numeric_editor_diagnostic=1 no_input_text=1\r\n");
     debugPrintf("DBG HELP settings fields=charge_timeout:0,15,30,60,120,300,600 battery_timeout:15,30,45,60 charge_brightness:10..100 battery_brightness:10..100 lock_brightness:0..100 burn_in:0,1 lock_wifi_minutes:1,2,5,10,15,30,60 lock_ble_minutes:1,2,5,10,15,30,60\r\n");
     debugPrintf("DBG HELP settings wifi list | save <base64JSON_ssid_password_only> | forget <base64SSID> | restart CONFIRM physical_local_console_trust=1 base64_crc_not_security=1 save_async=1 restart_requires_saved=1\r\n");
 #endif
