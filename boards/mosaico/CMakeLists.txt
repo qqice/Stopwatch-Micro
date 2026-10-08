@@ -13,6 +13,6 @@ set(EXTRA_COMPONENT_DIRS
  "${STOPWATCH_ROOT}/components/microlink-source/components/microlink/components/wireguard_lwip")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 if(NOT DEFINED PROJECT_VER)
-    set(PROJECT_VER "0.13.14-mosaico-ota")
+    set(PROJECT_VER "0.13.15-mosaico-ota")
 endif()
 project(Stopwatch-Mosaico)

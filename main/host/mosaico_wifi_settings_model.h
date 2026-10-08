@@ -4,8 +4,10 @@
 #include <cstdint>
 struct WifiSettingsSnapshot {
     char ssid[33]{};
+    char names[6][33]{};
+    uint8_t count=0, currentIndex=255;
     bool pending=false, rebootRequired=false, restartPending=false, available=false;
-    int32_t error=0, restartError=0;
+    int32_t error=0, restartError=0, scanError=0;
 };
 namespace MosaicoWifi {
 inline void scrub(void* p, size_t n) { volatile unsigned char* b=static_cast<volatile unsigned char*>(p); while(n--) *b++=0; }

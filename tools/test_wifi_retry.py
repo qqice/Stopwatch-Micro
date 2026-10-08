@@ -29,14 +29,17 @@ static_assert(test());"""
    self.assertEqual(r.returncode,0,r.stdout+r.stderr)
  def test_owner_budget_before_connect(self):
   s=(R/'main/host/network_quota.cpp').read_text(encoding='utf8')
-  branch=s[s.index('if (!_connected) {'):s.index('if (!_connected) {')+1800]
+  branch=s[s.index('if (!_connected) {'):s.index('esp_wifi_connect();',s.index('if (!_connected) {'))+100]
   self.assertLess(branch.index('wifiRetry.exhausted'),branch.index('esp_wifi_connect()'))
   self.assertIn('updateWindow = false;',branch)
   self.assertNotIn('nextRefresh =',branch)
   self.assertIn('useRetryPolicy = !_twt.live()',branch)
   self.assertLess(branch.index('if (useRetryPolicy)'),branch.index('wifiRetry.remainingMs'))
   self.assertIn('wifiRetry.remainingMs',branch)
-  self.assertIn('wifiRetry.reset(); // New configured refresh window',s)
+  self.assertLess(branch.index('if (useRetryPolicy)'),branch.index('selectWifiCandidate'))
+  self.assertGreater(branch.index('selectWifiCandidate'),branch.index('useRetryPolicy = !_twt.live()'))
+  self.assertIn('if(!locked) wifiRetry.reset();',s)
+  self.assertIn('wifiRetry.reset(); _wifi_scan_complete=false; // New configured refresh window',s)
  def test_original_off_path(self):
   s=(R/'main/host/network_quota.cpp').read_text(encoding='utf8')
   pause=s[s.index('if (locked && !updateWindow) {'):s.index('if (locked && !updateWindow) {')+3800]

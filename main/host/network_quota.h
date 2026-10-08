@@ -5,6 +5,7 @@
 #ifdef MOSAICO_BOARD
 #include <mutex>
 #include "mosaico_wifi_settings_model.h"
+#include "mosaico_wifi_profiles_model.h"
 #include "mosaico_twt_model.h"
 #include <soc/soc_caps.h>
 #include <ota/mosaico_ota.h>
@@ -44,6 +45,7 @@ public:
     MosaicoTwt::Snapshot twtSnapshot() const;
 #endif
     bool requestWifiCredentials(const char* ssid, const char* password);
+    bool requestWifiForget(const char* ssid);
     bool wifiSettingsSnapshot(WifiSettingsSnapshot& out);
     bool requestWifiRestart();
     uint32_t wifiConnectAttempts() const { return _wifi_connect_attempts.load(); }
@@ -96,6 +98,21 @@ private:
 #ifdef MOSAICO_BOARD
     void updateFirmware();
     void serviceWifiSettings();
+    void publishWifiProfiles();
+    static void scanEvent(void* arg, const char*, int32_t, void*);
+    bool selectWifiCandidate(bool locked, int64_t now);
+    void cancelWifiScan();
+    void drainWifiScan();
+    MosaicoWifiProfiles::Model _wifi_profiles;
+    MosaicoWifiProfiles::Candidates _wifi_candidates;
+    std::atomic<bool> _wifi_scan_done{false};
+    std::atomic<int> _wifi_scan_id{-1};
+    std::atomic<uint32_t> _wifi_scan_status{1};
+    bool _wifi_scan_cancelled=false, _wifi_scan_fault=false;
+    bool _wifi_scan_complete=false, _wifi_scan_handler=false;
+    std::atomic<bool> _wifi_scan_started{false};
+    int64_t _wifi_scan_deadline=0;
+    bool _pending_forget=false, _wifi_profiles_persisted=false;
 #if SOC_WIFI_HE_SUPPORT
     static void twtEvent(void* arg, const char* base, int32_t event, void* data);
     void serviceTwtTrial(int64_t now, bool locked);

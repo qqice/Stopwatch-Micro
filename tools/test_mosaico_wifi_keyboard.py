@@ -25,15 +25,24 @@ class WifiKeyboardTests(unittest.TestCase):
         self.assertIn('lv_keyboard_set_textarea(_wifiKeyboard, nullptr)', close)
         self.assertIn('lv_textarea_set_text(_wifiPassword, "")', close)
         self.assertNotIn('lv_event_stop_', CPP)
+        select = CPP.split('void CodexMicroView::wifiSelectionEvent(', 1)[1].split('void CodexMicroView::wifiActionEvent', 1)[0]
+        self.assertIn('wifi.names[index]', select)
+        self.assertNotIn('password', select.lower().replace('_wifipassword', ''))
+        self.assertIn('lv_textarea_set_text(self->_wifiPassword, "")', select)
+        self.assertIn('requestWifiForget(ssid)', CPP)
+        self.assertIn('wifi.count > 1', CPP)
 
     def test_actual_touch_and_field_callbacks(self):
         compilers = sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
         if not compilers:
             self.skipTest('embedded compiler unavailable')
         methods = []
-        for name in ('wifiFieldEvent', 'touchEvent'):
+        for name in ('wifiFieldEvent', 'touchEvent', 'wifiSelectionEvent', 'wifiActionEvent'):
             start = CPP.index('void CodexMicroView::' + name + '(')
-            methods.append('constexpr ' + CPP[start:CPP.index('\n}', start) + 2])
+            body = CPP[start:CPP.index('\n}', start) + 2]
+            body = body.replace('std::strlen', 'textLength').replace('std::strcmp', 'textCompare')
+            body = body.replace('GetNetworkQuota()', 'self->network')
+            methods.append('constexpr ' + body)
         harness = r'''
 #include <cstddef>
 #include <cstdlib>
@@ -45,7 +54,7 @@ enum lv_obj_flag_t { LV_OBJ_FLAG_HIDDEN=1 };
 enum { LV_INDEV_TYPE_POINTER };
 struct lv_point_t { int x=0,y=0; };
 struct lv_indev_t { lv_point_t point; };
-struct lv_obj_t { lv_obj_t* parent=nullptr; int flags=0,x=0,y=0; bool empty=false; lv_obj_t* editor=nullptr; };
+struct lv_obj_t { lv_obj_t* parent=nullptr; int flags=0,x=0,y=0; bool empty=false; lv_obj_t* editor=nullptr; char text[65]{}; unsigned selected=0; };
 struct CodexMicroView;
 struct lv_event_t { CodexMicroView* owner; int code; lv_obj_t* target; lv_obj_t* current; lv_indev_t* input; };
 constexpr auto lv_event_get_user_data(lv_event_t* e) { return e->owner; }
@@ -60,28 +69,54 @@ constexpr bool lv_obj_has_flag(lv_obj_t* o,lv_obj_flag_t f) { return o->flags&f;
 constexpr void lv_obj_add_flag(lv_obj_t* o,lv_obj_flag_t f) { o->flags|=f; }
 constexpr void lv_obj_remove_flag(lv_obj_t* o,lv_obj_flag_t f) { o->flags&=~f; }
 constexpr void lv_keyboard_set_textarea(lv_obj_t* k,lv_obj_t* e) { k->editor=e; }
-constexpr void lv_textarea_set_text(lv_obj_t* o,const char*) { o->empty=true; }
+constexpr void lv_textarea_set_text(lv_obj_t* o,const char* s) { size_t i=0;for(;s[i]&&i<64;++i)o->text[i]=s[i];o->text[i]=0;o->empty=!i; }
+constexpr auto lv_textarea_get_text(lv_obj_t* o) { return o->text; }
+constexpr void lv_label_set_text(lv_obj_t* o,const char* s) { lv_textarea_set_text(o,s); }
+constexpr unsigned lv_dropdown_get_selected(lv_obj_t* o) { return o->selected; }
+constexpr void lv_dropdown_get_selected_str(lv_obj_t*,char* s,size_t) { s[0]=0; }
+constexpr void lv_obj_set_style_border_width(lv_obj_t*,int,int) {}
+constexpr void lv_obj_set_style_border_color(lv_obj_t*,int,int) {}
+constexpr int lv_color_hex(int c) { return c; }
+constexpr int Orange=1;
+constexpr size_t textLength(const char* s) { size_t n=0;while(s[n])++n;return n; }
+constexpr int textCompare(const char* a,const char* b) { size_t i=0;while(a[i]&&a[i]==b[i])++i;return a[i]-b[i]; }
+struct WifiSettingsSnapshot { char names[6][33]={"saved","other"}; unsigned count=2; };
+struct Network {
+ bool queued=false;bool forgotten=false;
+ constexpr bool wifiSettingsSnapshot(WifiSettingsSnapshot&) { return true; }
+ constexpr bool requestWifiCredentials(const char*,const char*) { queued=true;return true; }
+ constexpr bool requestWifiForget(const char*) { forgotten=true;return true; }
+ constexpr bool requestWifiRestart() { return true; }
+};
 constexpr void lv_obj_move_foreground(lv_obj_t*) {}
+constexpr void lv_dropdown_close(lv_obj_t*) {}
 constexpr void place(lv_obj_t* o,int x,int y) { o->x=x;o->y=y; }
 constexpr unsigned lv_tick_get() { return 10; }
 struct CodexMicroView {
  enum class RotationPhase { Idle,FadeOut };
  RotationPhase _rotationPhase=RotationPhase::Idle;
  bool _settingsOpen=true,_settingsAnimating=false,_locked=false,_suppressed=false,_rotationFault=false,busy=false;
- bool _touchTracking=false,_swipeConsumed=true,_touchOnEditor=false;
+ bool _touchTracking=false,_swipeConsumed=true,_touchOnEditor=false,_wifiOpenNetwork=false;
  unsigned _settingsDetail=4,_activity=0;
  lv_point_t _touchStart;
  lv_obj_t page{},ssid{&page},password{&page},keyboard{&page,1},child{&ssid},rows[8]{};
  lv_obj_t* _wifiSsid=&ssid; lv_obj_t* _wifiPassword=&password; lv_obj_t* _wifiKeyboard=&keyboard;
  lv_obj_t* _settingsPage=&page; lv_obj_t* _slideTo=nullptr;
+ lv_obj_t profiles{&page},forget{},open{},save{},restart{},state{};
+ lv_obj_t* _wifiProfiles=&profiles;lv_obj_t* _wifiForgetButton=&forget;lv_obj_t* _wifiOpenButton=&open;
+ lv_obj_t* _wifiSaveButton=&save;lv_obj_t* _wifiRestartButton=&restart;lv_obj_t* _wifiSaveState=&state;
  lv_obj_t* _settingsRows[8]={&rows[0],&rows[1],&rows[2],&rows[3],&rows[4],&rows[5],&rows[6],&rows[7]};
  int navigation=0,closed=0;
+ Network network;
+ constexpr Network& GetNetworkQuota() { return network; }
  constexpr bool otaBusy() { return busy; }
  constexpr void openSettings() { _settingsOpen=true; }
  constexpr void closeSettings() { ++closed; }
  constexpr void navigatePage(int) { ++navigation; }
  static constexpr void wifiFieldEvent(lv_event_t*);
  static constexpr void touchEvent(lv_event_t*);
+ static constexpr void wifiSelectionEvent(lv_event_t*);
+ static constexpr void wifiActionEvent(lv_event_t*);
 };
 '''
         harness += '\n'.join(methods)
@@ -94,8 +129,12 @@ constexpr bool exercise() {
  e.code=LV_EVENT_RELEASED;v.touchEvent(&e);
  e.code=LV_EVENT_CLICKED;e.current=&v.ssid;v.wifiFieldEvent(&e);
  if(v.keyboard.editor!=&v.ssid || v.keyboard.flags || v.ssid.y!=70 || !(v.password.flags&1))return false;
+ for(auto* o:{v._wifiProfiles,v._wifiForgetButton,v._wifiOpenButton,v._wifiSaveButton,v._wifiRestartButton,v._wifiSaveState})
+  if(!(o->flags&1))return false;
  e.code=LV_EVENT_READY;e.current=&v.keyboard;v.wifiFieldEvent(&e);
- if(v.keyboard.editor || !(v.keyboard.flags&1) || v.ssid.y!=142 || v.password.y!=198 || v.password.flags)return false;
+ if(v.keyboard.editor || !(v.keyboard.flags&1) || v.ssid.y!=170 || v.password.y!=224 || v.password.flags)return false;
+ for(auto* o:{v._wifiProfiles,v._wifiForgetButton,v._wifiOpenButton,v._wifiSaveButton,v._wifiRestartButton,v._wifiSaveState})
+  if(o->flags&1)return false;
  // First-contact drags on either textarea must not navigate or close settings.
  for(auto* field:{&v.ssid,&v.password}) {
   input.point={200,280};e.target=field;e.current=&v.page;e.code=LV_EVENT_PRESSED;v.touchEvent(&e);
@@ -125,6 +164,23 @@ constexpr bool exercise() {
  return true;
 }
 static_assert(exercise(),"actual editor callbacks preserve contact boundaries and keyboard lifecycle");
+constexpr bool profiles() {
+ CodexMicroView v;lv_event_t e{&v,LV_EVENT_VALUE_CHANGED,&v.profiles,&v.profiles,nullptr};
+ lv_textarea_set_text(&v.password,"not-returned-to-list");
+ v.profiles.selected=1;v.wifiSelectionEvent(&e);
+ if(textCompare(v.ssid.text,"other") || !v.password.empty)return false;
+ v.profiles.selected=6;v.wifiSelectionEvent(&e);
+ if(textCompare(v.ssid.text,"other"))return false;
+ // Saved SSIDs accept an empty editor: secret retention is the backend contract.
+ v._swipeConsumed=false;e.code=LV_EVENT_CLICKED;e.target=&v.save;e.current=&v.save;
+ v.wifiActionEvent(&e);if(!v.network.queued)return false;
+ // A new secure SSID cannot be queued without a password or explicit OPEN.
+ v.network.queued=false;lv_textarea_set_text(&v.ssid,"new");v.wifiActionEvent(&e);
+ if(v.network.queued)return false;
+ v._wifiOpenNetwork=true;v.wifiActionEvent(&e);if(!v.network.queued)return false;
+ e.target=&v.forget;v.wifiActionEvent(&e);return v.network.forgotten;
+}
+static_assert(profiles(),"selection never reads a secret and saved/new/open queues retain policy");
 '''
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'keyboard.cpp'

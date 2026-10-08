@@ -42,7 +42,7 @@ uint32_t quotaLevelColor(uint16_t bp, bool stale) {
 }
 // Sheet geometry includes the two-pixel burn-in margin.
 static_assert(20 + 12 + 218 + 206 + 2 <= 480 && 64 + 56 + 8 + 166 + 154 + 2 <= 480);
-static_assert(12 + 416 <= 440 && 314 + 24 <= 346 && 56 + 70 + 48 <= 204 && 204 + 198 == 402);
+static_assert(12 + 416 <= 440 && 324 + 18 <= 346 && 56 + 70 + 48 <= 204 && 204 + 198 == 402);
 static_assert(dimCachedColor(Green) == 0x52B88B, "cached green remains readable");
 void place(lv_obj_t* obj, int x, int y) { if (obj) lv_obj_set_pos(obj, x, y); }
 void panel(lv_obj_t* obj, int x, int y, int w, int h, uint32_t color = 0x15191F) {
@@ -304,8 +304,25 @@ void CodexMicroView::initSettings() {
         }
     }
     auto* wireless = _settingsDetails[3];
-    _wifiSsid = lv_textarea_create(wireless); panel(_wifiSsid, 12, 142, 416, 48);
-    _wifiPassword = lv_textarea_create(wireless); panel(_wifiPassword, 12, 198, 416, 48);
+    _wifiProfiles = lv_dropdown_create(wireless); panel(_wifiProfiles, 12, 128, 272, 36);
+    lv_dropdown_set_options(_wifiProfiles, "--"); lv_dropdown_set_dir(_wifiProfiles, LV_DIR_TOP);
+    lv_obj_set_style_text_font(_wifiProfiles, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(_wifiProfiles, lv_color_hex(Cyan), 0);
+    lv_obj_set_style_pad_all(_wifiProfiles, 8, 0); lv_obj_add_flag(_wifiProfiles, LV_OBJ_FLAG_EVENT_BUBBLE);
+    auto* list = lv_dropdown_get_list(_wifiProfiles);
+    lv_obj_set_style_text_font(list, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_line_space(list, 14, 0); lv_obj_set_style_pad_all(list, 8, 0);
+    lv_obj_set_style_max_width(list, 416, 0); lv_obj_set_style_max_height(list, 184, 0);
+    lv_obj_set_style_bg_color(list, lv_color_hex(0x15191F), 0);
+    lv_obj_set_style_text_color(list, lv_color_hex(Cyan), 0);
+    lv_obj_add_event_cb(_wifiProfiles, wifiSelectionEvent, LV_EVENT_VALUE_CHANGED, this);
+    _wifiForgetButton = lv_button_create(wireless); panel(_wifiForgetButton, 300, 128, 128, 36);
+    auto* forget = label(_wifiForgetButton, 4, 8, 120, "FORGET", &lv_font_montserrat_16);
+    lv_obj_set_style_text_align(forget, LV_TEXT_ALIGN_CENTER, 0); lv_obj_set_style_text_color(forget, lv_color_hex(Cyan), 0);
+    lv_obj_remove_flag(forget, LV_OBJ_FLAG_CLICKABLE); lv_obj_add_flag(_wifiForgetButton, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(_wifiForgetButton, wifiActionEvent, LV_EVENT_CLICKED, this);
+    _wifiSsid = lv_textarea_create(wireless); panel(_wifiSsid, 12, 170, 416, 48);
+    _wifiPassword = lv_textarea_create(wireless); panel(_wifiPassword, 12, 224, 416, 48);
     for (auto* field : {_wifiSsid, _wifiPassword}) {
         lv_textarea_set_one_line(field, true); lv_obj_set_style_text_font(field, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(field, lv_color_hex(Cyan), 0); lv_obj_set_style_pad_all(field, 10, 0);
@@ -319,9 +336,9 @@ void CodexMicroView::initSettings() {
     lv_textarea_set_max_length(_wifiSsid, 32); lv_textarea_set_placeholder_text(_wifiSsid, "SSID");
     lv_textarea_set_max_length(_wifiPassword, 64); lv_textarea_set_placeholder_text(_wifiPassword, "PASSWORD");
     lv_textarea_set_password_mode(_wifiPassword, true); lv_textarea_set_password_show_time(_wifiPassword, 0);
-    _wifiOpenButton = lv_button_create(wireless); panel(_wifiOpenButton, 12, 256, 128, 48);
-    _wifiSaveButton = lv_button_create(wireless); panel(_wifiSaveButton, 156, 256, 128, 48);
-    _wifiRestartButton = lv_button_create(wireless); panel(_wifiRestartButton, 300, 256, 128, 48);
+    _wifiOpenButton = lv_button_create(wireless); panel(_wifiOpenButton, 12, 280, 128, 40);
+    _wifiSaveButton = lv_button_create(wireless); panel(_wifiSaveButton, 156, 280, 128, 40);
+    _wifiRestartButton = lv_button_create(wireless); panel(_wifiRestartButton, 300, 280, 128, 40);
     const char* actions[] = {"OPEN", "SAVE", "REBOOT"}; size_t action = 0;
     for (auto* button : {_wifiOpenButton, _wifiSaveButton, _wifiRestartButton}) {
         auto* text = label(button, 4, 8, 120, actions[action++], &lv_font_montserrat_20);
@@ -329,8 +346,8 @@ void CodexMicroView::initSettings() {
         lv_obj_remove_flag(text, LV_OBJ_FLAG_CLICKABLE); lv_obj_add_flag(button, LV_OBJ_FLAG_EVENT_BUBBLE);
         lv_obj_add_event_cb(button, wifiActionEvent, LV_EVENT_CLICKED, this);
     }
-    _wifiSaveState = label(wireless, 12, 314, 416, "", &lv_font_montserrat_14);
-    lv_obj_set_height(_wifiSaveState, 24); lv_label_set_long_mode(_wifiSaveState, LV_LABEL_LONG_MODE_DOTS);
+    _wifiSaveState = label(wireless, 12, 324, 416, "", &lv_font_montserrat_14);
+    lv_obj_set_height(_wifiSaveState, 18); lv_label_set_long_mode(_wifiSaveState, LV_LABEL_LONG_MODE_DOTS);
     _wifiKeyboard = lv_keyboard_create(_settingsPage); panel(_wifiKeyboard, 0, 204, 440, 198);
     lv_obj_set_style_text_font(_wifiKeyboard, &lv_font_montserrat_16, 0); lv_obj_add_flag(_wifiKeyboard, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
     lv_obj_add_event_cb(_wifiKeyboard, wifiFieldEvent, LV_EVENT_READY, this); lv_obj_add_event_cb(_wifiKeyboard, wifiFieldEvent, LV_EVENT_CANCEL, this);
@@ -364,11 +381,14 @@ void CodexMicroView::closeSettings(bool animate) {
     lv_anim_delete(this, settingsDetailExec);
     lv_anim_delete(this, settingsSheetExec); _settingsOpen = false; _settingsAnimating = animate; _settingsClosing = animate;
     _touchTracking = false; _swipeConsumed = true; _activity = lv_tick_get();
+    lv_dropdown_close(_wifiProfiles);
     lv_keyboard_set_textarea(_wifiKeyboard, nullptr); lv_obj_add_flag(_wifiKeyboard, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
     lv_textarea_set_text(_wifiPassword, ""); _wifiOpenNetwork = false;
-    place(_wifiSsid, 12, 142); place(_wifiPassword, 12, 198);
+    place(_wifiSsid, 12, 170); place(_wifiPassword, 12, 224);
     lv_obj_remove_flag(_wifiSsid, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_wifiPassword, LV_OBJ_FLAG_HIDDEN);
     for (size_t row = 6; row < 8; ++row) lv_obj_remove_flag(_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
+    for (auto* obj : {_wifiProfiles, _wifiForgetButton, _wifiOpenButton, _wifiSaveButton, _wifiRestartButton, _wifiSaveState})
+        lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_border_width(_wifiOpenButton, 0, 0);
     if (!animate) { lv_obj_add_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN); lv_obj_set_y(_settingsPage, 64); return; }
     lv_anim_t anim; lv_anim_init(&anim); lv_anim_set_var(&anim, this);
@@ -403,21 +423,38 @@ void CodexMicroView::wifiFieldEvent(lv_event_t* event) {
     if (code == LV_EVENT_VALUE_CHANGED) return;
     if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
         lv_keyboard_set_textarea(self->_wifiKeyboard, nullptr); lv_obj_add_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
-        place(self->_wifiSsid, 12, 142); place(self->_wifiPassword, 12, 198);
+        place(self->_wifiSsid, 12, 170); place(self->_wifiPassword, 12, 224);
         lv_obj_remove_flag(self->_wifiSsid, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(self->_wifiPassword, LV_OBJ_FLAG_HIDDEN);
         for (size_t row = 6; row < 8; ++row) lv_obj_remove_flag(self->_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
+        for (auto* obj : {self->_wifiProfiles, self->_wifiForgetButton, self->_wifiOpenButton, self->_wifiSaveButton, self->_wifiRestartButton, self->_wifiSaveState})
+            lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
         if (code == LV_EVENT_CANCEL) lv_textarea_set_text(self->_wifiPassword, "");
     } else {
         if (self->_swipeConsumed) return;
         auto* field = static_cast<lv_obj_t*>(lv_event_get_current_target(event));
         if (code != LV_EVENT_CLICKED || (field != self->_wifiSsid && field != self->_wifiPassword)) return;
+        lv_dropdown_close(self->_wifiProfiles);
         // Only the active editor is visible above keyboard; radio/action rows are hidden.
         for (size_t row = 6; row < 8; ++row) lv_obj_add_flag(self->_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
+        for (auto* obj : {self->_wifiProfiles, self->_wifiForgetButton, self->_wifiOpenButton, self->_wifiSaveButton, self->_wifiRestartButton, self->_wifiSaveState})
+            lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
         auto* other = field == self->_wifiSsid ? self->_wifiPassword : self->_wifiSsid;
         lv_obj_add_flag(other, LV_OBJ_FLAG_HIDDEN); place(field, 12, 70);
         lv_keyboard_set_textarea(self->_wifiKeyboard, field); lv_obj_remove_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(self->_wifiKeyboard);
     }
+}
+void CodexMicroView::wifiSelectionEvent(lv_event_t* event) {
+    auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
+    if (!self->_settingsOpen || self->_settingsDetail != 4 || self->_settingsAnimating || self->_locked || self->_suppressed ||
+        self->_rotationFault || self->_rotationPhase != RotationPhase::Idle || self->otaBusy() ||
+        !lv_obj_has_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN)) return;
+    WifiSettingsSnapshot wifi{}; GetNetworkQuota().wifiSettingsSnapshot(wifi);
+    const auto index = lv_dropdown_get_selected(self->_wifiProfiles);
+    if (index >= wifi.count || index >= 6) return;
+    lv_textarea_set_text(self->_wifiSsid, wifi.names[index]); lv_textarea_set_text(self->_wifiPassword, "");
+    self->_wifiOpenNetwork = false; lv_obj_set_style_border_width(self->_wifiOpenButton, 0, 0);
+    self->_activity = lv_tick_get();
 }
 void CodexMicroView::wifiActionEvent(lv_event_t* event) {
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
@@ -429,9 +466,16 @@ void CodexMicroView::wifiActionEvent(lv_event_t* event) {
         lv_obj_set_style_border_width(self->_wifiOpenButton, self->_wifiOpenNetwork ? 2 : 0, 0);
         lv_obj_set_style_border_color(self->_wifiOpenButton, lv_color_hex(Orange), 0);
         if (self->_wifiOpenNetwork) lv_textarea_set_text(self->_wifiPassword, "");
+    } else if (target == self->_wifiForgetButton) {
+        char ssid[33]{}; lv_dropdown_get_selected_str(self->_wifiProfiles, ssid, sizeof(ssid));
+        const bool accepted = GetNetworkQuota().requestWifiForget(ssid);
+        lv_label_set_text(self->_wifiSaveState, accepted ? "SAVING" : "FORGET ERROR");
     } else if (target == self->_wifiSaveButton) {
         const char* ssid = lv_textarea_get_text(self->_wifiSsid); const char* password = lv_textarea_get_text(self->_wifiPassword);
-        if (!ssid[0] || std::strlen(ssid) > 32 || (!self->_wifiOpenNetwork && !password[0]) || std::strlen(password) > 64) {
+        WifiSettingsSnapshot wifi{}; GetNetworkQuota().wifiSettingsSnapshot(wifi);
+        bool saved = false;
+        for (size_t i = 0; i < wifi.count && i < 6; ++i) saved = saved || std::strcmp(ssid, wifi.names[i]) == 0;
+        if (!ssid[0] || std::strlen(ssid) > 32 || (!saved && !self->_wifiOpenNetwork && !password[0]) || std::strlen(password) > 64) {
             lv_label_set_text(self->_wifiSaveState, "SSID / PASSWORD REQUIRED"); return;
         }
         const bool accepted = GetNetworkQuota().requestWifiCredentials(ssid, self->_wifiOpenNetwork ? "" : password);
@@ -973,7 +1017,7 @@ void CodexMicroView::touchEvent(lv_event_t* e) {
         if (self->_settingsOpen && self->_settingsDetail == 4) {
             for (auto* target = static_cast<lv_obj_t*>(lv_event_get_target(e));
                  target && target != self->_settingsPage; target = lv_obj_get_parent(target)) {
-                if (target == self->_wifiSsid || target == self->_wifiPassword || target == self->_wifiKeyboard) {
+                if (target == self->_wifiSsid || target == self->_wifiPassword || target == self->_wifiKeyboard || target == self->_wifiProfiles) {
                     self->_touchOnEditor = true;
                     break;
                 }
@@ -1596,9 +1640,36 @@ void CodexMicroView::update(const CodexMicroState& state) {
     refreshDisplaySettings();
     if (_settingsOpen && _settingsDetail == 4) {
         WifiSettingsSnapshot wifi{}; GetNetworkQuota().wifiSettingsSnapshot(wifi);
-        if (wifi.pending || wifi.restartPending || wifi.restartError || wifi.error || wifi.rebootRequired || !wifi.available)
+        char options[199]{}; size_t used = 0;
+        for (size_t i = 0; i < wifi.count && i < 6; ++i) {
+            if (i) options[used++] = '\n';
+            const size_t length = std::strlen(wifi.names[i]);
+            if (length > 32 || used + length >= sizeof(options)) break;
+            std::memcpy(options + used, wifi.names[i], length); used += length; options[used] = 0;
+        }
+        const char* names = wifi.count ? options : "--";
+        if (std::strcmp(lv_dropdown_get_options(_wifiProfiles), names) != 0) {
+            lv_dropdown_close(_wifiProfiles); lv_dropdown_set_options(_wifiProfiles, names);
+            auto selected = lv_dropdown_get_option_index(_wifiProfiles, lv_textarea_get_text(_wifiSsid));
+            lv_dropdown_set_selected(_wifiProfiles, selected >= 0 ? selected : wifi.currentIndex < wifi.count ? wifi.currentIndex : 0);
+        }
+        if (wifi.count) lv_obj_remove_state(_wifiProfiles, LV_STATE_DISABLED); else lv_obj_add_state(_wifiProfiles, LV_STATE_DISABLED);
+        if (wifi.count > 1) lv_obj_remove_state(_wifiForgetButton, LV_STATE_DISABLED); else lv_obj_add_state(_wifiForgetButton, LV_STATE_DISABLED);
+        bool saved = false;
+        for (size_t i = 0; i < wifi.count && i < 6; ++i)
+            saved = saved || std::strcmp(lv_textarea_get_text(_wifiSsid), wifi.names[i]) == 0;
+        if (saved) {
+            // Empty passwords retain an existing secret; OPEN only creates a new profile.
+            _wifiOpenNetwork = false; lv_obj_set_style_border_width(_wifiOpenButton, 0, 0);
+            lv_obj_add_state(_wifiOpenButton, LV_STATE_DISABLED);
+        } else lv_obj_remove_state(_wifiOpenButton, LV_STATE_DISABLED);
+        const bool restartReady = wifi.available && !wifi.pending && !wifi.restartPending && !wifi.error &&
+            (wifi.rebootRequired || wifi.scanError);
+        if (restartReady) lv_obj_remove_state(_wifiRestartButton, LV_STATE_DISABLED);
+        else lv_obj_add_state(_wifiRestartButton, LV_STATE_DISABLED);
+        if (wifi.pending || wifi.restartPending || wifi.restartError || wifi.error || wifi.scanError || wifi.rebootRequired || !wifi.available)
             lv_label_set_text(_wifiSaveState, wifi.restartPending ? "REBOOT PENDING" : wifi.pending ? "SAVING" :
-                wifi.restartError ? "REBOOT ERROR" : wifi.error ? "SAVE ERROR" : !wifi.available ? "WIFI UNAVAILABLE" : "SAVED / REBOOT TO APPLY");
+                wifi.restartError ? "REBOOT ERROR" : wifi.error ? "SAVE ERROR" : wifi.scanError ? "SCAN ERROR" : !wifi.available ? "WIFI UNAVAILABLE" : "SAVED");
     }
     if (!_locked) refreshClock(tick);
     // Rendering/page callbacks can record activity after the entry tick.

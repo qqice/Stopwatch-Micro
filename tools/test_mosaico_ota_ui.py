@@ -338,15 +338,17 @@ template<class T> class initializer_list {
 }; }
 struct CodexMicroView;
 struct lv_point_t { int x=0,y=0; };
-struct lv_obj_t { int x=20; bool hidden=false; };
+struct lv_obj_t { int x=20; bool hidden=false; lv_obj_t* parent=nullptr; };
 struct lv_indev_t { lv_point_t point; };
 enum { LV_EVENT_PRESSED,LV_EVENT_PRESSING,LV_EVENT_RELEASED,LV_EVENT_PRESS_LOST,
        LV_INDEV_TYPE_POINTER,LV_OBJ_FLAG_HIDDEN };
-struct lv_event_t { int code; CodexMicroView* owner; lv_indev_t* input; };
+struct lv_event_t { int code; CodexMicroView* owner; lv_indev_t* input; lv_obj_t* target=nullptr; };
 struct lv_anim_t { CodexMicroView* var=nullptr; int duration=0; };
 constexpr int lv_event_get_code(lv_event_t* e) { return e->code; }
 constexpr CodexMicroView* lv_event_get_user_data(lv_event_t* e) { return e->owner; }
 constexpr lv_indev_t* lv_event_get_indev(lv_event_t* e) { return e->input; }
+constexpr lv_obj_t* lv_event_get_target(lv_event_t* e) { return e->target; }
+constexpr lv_obj_t* lv_obj_get_parent(lv_obj_t* o) { return o->parent; }
 constexpr int lv_indev_get_type(lv_indev_t*) { return LV_INDEV_TYPE_POINTER; }
 constexpr void lv_indev_get_point(lv_indev_t* i,lv_point_t* p) { *p=i->point; }
 constexpr unsigned lv_tick_get() { return 1; }
@@ -370,6 +372,8 @@ struct CodexMicroView {
  RotationPhase _rotationPhase=RotationPhase::Idle;
  bool _rotationFault=false,_settingsOpen=false,_settingsAnimating=false,_touchOnEditor=false;
  lv_obj_t keyboard{20,true}; lv_obj_t* _wifiKeyboard=&keyboard;
+ unsigned _settingsDetail=0; lv_obj_t editors[3]{};
+ lv_obj_t* _wifiSsid=&editors[0]; lv_obj_t* _wifiPassword=&editors[1]; lv_obj_t* _wifiProfiles=&editors[2];
  constexpr void openSettings() { _settingsOpen=true;_touchTracking=false;_swipeConsumed=true; }
  constexpr void closeSettings(bool=true) { _settingsOpen=false;_touchTracking=false;_swipeConsumed=true; }
  Page _page=Page::Command; lv_obj_t panels[5]{};
@@ -454,6 +458,20 @@ constexpr bool sheets() {
  input.point={240,300};e.code=LV_EVENT_PRESSING;v.touchEvent(&e);
  return !v._settingsOpen && v._page==CodexMicroView::Page::Sessions;
 }
+constexpr bool editorContacts() {
+ for(int which=0;which<3;++which) {
+  CodexMicroView v;v._settingsOpen=true;v._settingsDetail=4;
+  v.editors[which].parent=v._settingsPage;
+  lv_obj_t child;child.parent=&v.editors[which];
+  lv_indev_t input{{240,180}};lv_event_t e{LV_EVENT_PRESSED,&v,&input,&child};
+  v.touchEvent(&e);if(!v._touchOnEditor)return false;
+  input.point={240,360};e.code=LV_EVENT_PRESSING;v.touchEvent(&e);
+  if(!v._settingsOpen||v._slideTo)return false;
+  e.code=LV_EVENT_RELEASED;v.touchEvent(&e);
+  if(v._touchTracking||!v._settingsOpen)return false;
+ } return true;
+}
+static_assert(editorContacts(),"SSID/password/profiles descendant contact does not close or slide sheet");
 static_assert(sheets(),"vertical sheet gestures and Function preserve original page");
 static_assert(edgeCases(),"release fallback, press-lost, guards and Function");
 '''

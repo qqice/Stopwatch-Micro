@@ -58,6 +58,7 @@ private:
     static void settingsSheetCompleted(lv_anim_t* anim);
     static void settingsTileEvent(lv_event_t* event);
     static void wifiFieldEvent(lv_event_t* event);
+    static void wifiSelectionEvent(lv_event_t* event);
     static void wifiActionEvent(lv_event_t* event);
     void initSessions();
     void refreshSessionsLease();
@@ -131,6 +132,8 @@ private:
     lv_obj_t* _wifiSaveButton = nullptr;
     lv_obj_t* _wifiRestartButton = nullptr;
     lv_obj_t* _wifiSaveState = nullptr;
+    lv_obj_t* _wifiProfiles = nullptr;
+    lv_obj_t* _wifiForgetButton = nullptr;
     bool _settingsOpen = false, _settingsClosing = false, _settingsAnimating = false;
     bool _wifiOpenNetwork = false, _touchOnEditor = false;
     unsigned _settingsDetail = 0;

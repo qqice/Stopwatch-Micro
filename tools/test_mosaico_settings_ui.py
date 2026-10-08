@@ -30,8 +30,8 @@ class SettingsUiTests(unittest.TestCase):
                 for x,y,w,h in boxes:
                     self.assertLessEqual(x+w,440);self.assertLessEqual(y+h,346)
                 self.assertLessEqual(12+150,168);self.assertLessEqual(168+112,292)
-        for x,y,w,h in ((12,142,416,48),(12,198,416,48),(12,256,128,48),
-                        (156,256,128,48),(300,256,128,48),(12,314,416,24)):
+        for x,y,w,h in ((12,128,272,36),(300,128,128,36),(12,170,416,48),(12,224,416,48),(12,280,128,40),
+                        (156,280,128,40),(300,280,128,40),(12,324,416,18)):
             self.assertLessEqual(x+w,440);self.assertLessEqual(y+h,346)
         self.assertLessEqual(56+70+48,204) # Active editor does not overlap keyboard.
         self.assertEqual(204+198,402)
@@ -39,7 +39,7 @@ class SettingsUiTests(unittest.TestCase):
                       'lv_textarea_set_password_show_time(_wifiPassword, 0)',
                       'lv_textarea_set_max_length(_wifiSsid, 32)',
                       'lv_textarea_set_max_length(_wifiPassword, 64)',
-                      '!self->_wifiOpenNetwork && !password[0]',
+                      '!saved && !self->_wifiOpenNetwork && !password[0]',
                       'std::strlen(ssid) > 32', 'std::strlen(password) > 64',
                       'requestWifiCredentials(ssid, self->_wifiOpenNetwork ? "" : password)',
                       'lv_textarea_set_text(_wifiPassword, "")', 'SAVE ERROR'):

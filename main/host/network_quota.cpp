@@ -185,6 +185,93 @@ bool NetworkQuota::wifiSettingsSnapshot(WifiSettingsSnapshot& out)
     if (!guard.owns_lock()) return false;
     out = _wifi_settings; return true;
 }
+void NetworkQuota::scanEvent(void* arg,const char*,int32_t,void* data)
+{
+    if(!data) return;
+    auto& owner=*static_cast<NetworkQuota*>(arg);
+    const auto& event=*static_cast<const wifi_event_sta_scan_done_t*>(data);
+    // A canceled/completed generation is drained before another scan is allowed.
+    // No override/new scan or repeated stop before that DONE is consumed.
+    if(!owner._wifi_scan_started.load()) return;
+    owner._wifi_scan_id.store(event.scan_id); // Diagnostic only: async IDs need not be monotonic.
+    owner._wifi_scan_status.store(event.status);
+    owner._wifi_scan_done.store(true);
+}
+void NetworkQuota::cancelWifiScan()
+{
+    if(!_wifi_scan_started || _wifi_scan_cancelled) return;
+    _wifi_scan_cancelled=true;
+    _wifi_scan_deadline=esp_timer_get_time()+2000000;
+    if(_wifi_scan_done.load()) { drainWifiScan(); return; }
+    // Even a stop error is fail-closed: no new scan until DONE is acknowledged.
+    esp_wifi_scan_stop();
+}
+void NetworkQuota::drainWifiScan()
+{
+    if(!_wifi_scan_started || !_wifi_scan_cancelled) return;
+    if(!_wifi_scan_done.load()) {
+        if(!_wifi_scan_fault && esp_timer_get_time()>=_wifi_scan_deadline) {
+            _wifi_scan_fault=true;
+            std::lock_guard<std::mutex> guard(_wifi_settings_mutex);
+            _wifi_settings.scanError=ESP_ERR_TIMEOUT;
+        }
+        return;
+    }
+    esp_wifi_clear_ap_list();
+    _wifi_scan_started=false; _wifi_scan_cancelled=false; _wifi_scan_done=false;
+    _wifi_candidates={}; _wifi_scan_complete=true;
+}
+bool NetworkQuota::selectWifiCandidate(bool, int64_t now)
+{
+    // Called only by quota owner and outside TWT live state. Async scan has an
+    // explicit wall deadline, bounded AP buffer and unconditional result release.
+    drainWifiScan();
+    if(_wifi_scan_fault) return false;
+    if(_wifi_scan_started && _wifi_scan_cancelled) return false;
+    if(!_wifi_profiles.count) { _wifi_candidates={}; _wifi_scan_complete=true; return false; }
+    if(!_wifi_scan_complete) {
+        if(!_wifi_scan_started) {
+            _wifi_candidates={}; _wifi_scan_done=false;
+            wifi_scan_config_t scan{};
+            scan.show_hidden=false; scan.scan_type=WIFI_SCAN_TYPE_ACTIVE;
+            scan.scan_time.active.min=30; scan.scan_time.active.max=60;
+            _wifi_scan_started=true;
+            if(!_wifi_scan_handler || esp_wifi_scan_start(&scan,false)!=ESP_OK) {
+                _wifi_scan_started=false; esp_wifi_clear_ap_list(); _wifi_scan_complete=true; return false;
+            }
+            _wifi_scan_deadline=now+4000000;
+            return false;
+        }
+        if(!_wifi_scan_done) {
+            if(now>=_wifi_scan_deadline) cancelWifiScan();
+            return false;
+        }
+        wifi_ap_record_t records[24]{}; uint16_t count=24;
+        if(_wifi_scan_status.load()==0 && esp_wifi_scan_get_ap_records(&count,records)==ESP_OK) {
+            MosaicoWifiProfiles::Visible visible[24]{};
+            for(unsigned i=0;i<count && i<24;++i) {
+                std::memcpy(visible[i].ssid,records[i].ssid,32);
+                visible[i].rssi=records[i].rssi;
+            }
+            _wifi_candidates=MosaicoWifiProfiles::rank(_wifi_profiles,visible,std::min<unsigned>(count,24));
+        }
+        esp_wifi_clear_ap_list(); _wifi_scan_started=false; _wifi_scan_complete=true;
+    }
+    if(_wifi_candidates.next>=_wifi_candidates.count) return false;
+    const auto& profile=_wifi_profiles.entries[_wifi_candidates.indices[_wifi_candidates.next++]];
+    wifi_config_t config{};
+    config.sta.sae_pwe_h2e=WPA3_SAE_PWE_BOTH; config.sta.pmf_cfg.capable=true;
+    std::memcpy(config.sta.ssid,profile.ssid,32); std::memcpy(config.sta.password,profile.password,64);
+    // Abort any preceding unsuccessful association before changing profile.
+    esp_wifi_disconnect();
+    const esp_err_t error=esp_wifi_set_config(WIFI_IF_STA,&config);
+    MosaicoWifi::scrub(&config,sizeof(config));
+    if(error!=ESP_OK) return false;
+    std::memcpy(_ssid,profile.ssid,33); std::memcpy(_password,profile.password,65);
+    { std::lock_guard<std::mutex> guard(_wifi_settings_mutex);
+      std::memcpy(_wifi_settings.ssid,_ssid,sizeof(_ssid)); publishWifiProfiles(); }
+    return true;
+}
 bool NetworkQuota::requestWifiCredentials(const char* ssid, const char* password)
 {
     std::unique_lock<std::mutex> guard(_wifi_settings_mutex, std::try_to_lock);
@@ -192,15 +279,43 @@ bool NetworkQuota::requestWifiCredentials(const char* ssid, const char* password
     if (!_wifi_settings.available) { _wifi_settings.error=ESP_ERR_INVALID_STATE; return false; }
     if (_wifi_settings.pending || _wifi_settings.restartPending) return false;
     if (!MosaicoWifi::validCredentials(ssid,password)) { _wifi_settings.error=ESP_ERR_INVALID_ARG; return false; }
+    bool exists=false;
+    for(unsigned i=0;i<_wifi_settings.count;++i) if(!std::strcmp(ssid,_wifi_settings.names[i])) exists=true;
+    if(!exists && _wifi_settings.count==6) { _wifi_settings.error=ESP_ERR_NO_MEM; return false; }
+    _pending_forget=false;
     std::strcpy(_pending_ssid,ssid); std::strcpy(_pending_password,password);
     _wifi_settings.pending=true; _wifi_settings.error=0;
     xTaskNotifyGive(_task_handle); return true;
+}
+bool NetworkQuota::requestWifiForget(const char* ssid)
+{
+    std::unique_lock<std::mutex> guard(_wifi_settings_mutex,std::try_to_lock);
+    if(!guard.owns_lock()) return false;
+    if(!_wifi_settings.available || _wifi_settings.pending || _wifi_settings.restartPending) return false;
+    bool exists=false;
+    if(MosaicoWifi::validCredentials(ssid,"")) for(unsigned i=0;i<_wifi_settings.count;++i)
+        if(!std::strcmp(ssid,_wifi_settings.names[i])) exists=true;
+    if(!exists || _wifi_settings.count<=1) { _wifi_settings.error=ESP_ERR_INVALID_ARG; return false; }
+    std::strcpy(_pending_ssid,ssid); MosaicoWifi::scrub(_pending_password,sizeof(_pending_password));
+    _pending_forget=true; _wifi_settings.pending=true; _wifi_settings.error=0;
+    xTaskNotifyGive(_task_handle); return true;
+}
+void NetworkQuota::publishWifiProfiles()
+{
+    // Caller holds snapshot mutex; only the network owner changes private profiles.
+    _wifi_settings.count=_wifi_profiles.count;
+    _wifi_settings.currentIndex=255;
+    std::memset(_wifi_settings.names,0,sizeof(_wifi_settings.names));
+    for(unsigned i=0;i<_wifi_profiles.count;++i) {
+        std::memcpy(_wifi_settings.names[i],_wifi_profiles.entries[i].ssid,33);
+        if(!std::strcmp(_ssid,_wifi_profiles.entries[i].ssid)) _wifi_settings.currentIndex=i;
+    }
 }
 bool NetworkQuota::requestWifiRestart()
 {
     std::unique_lock<std::mutex> guard(_wifi_settings_mutex, std::try_to_lock);
     if (!guard.owns_lock()) return false;
-    if (!_wifi_settings.available || _wifi_settings.pending || _wifi_settings.error || !_wifi_settings.rebootRequired) return false;
+    if (!_wifi_settings.available || _wifi_settings.pending || _wifi_settings.error || (!_wifi_settings.rebootRequired && !_wifi_settings.scanError)) return false;
     _wifi_settings.restartPending=true; _wifi_settings.restartError=0; xTaskNotifyGive(_task_handle); return true;
 }
 void NetworkQuota::serviceWifiSettings()
@@ -216,13 +331,13 @@ void NetworkQuota::serviceWifiSettings()
     esp_ota_img_states_t state=ESP_OTA_IMG_UNDEFINED;
     if (!running || esp_ota_get_state_partition(running,&state)!=ESP_OK || state!=ESP_OTA_IMG_VALID) return;
     char ssid[33]{}, password[65]{};
-    bool restart=false;
+    bool restart=false, forget=false;
     {
         std::unique_lock<std::mutex> guard(_wifi_settings_mutex,std::try_to_lock);
         if (!guard.owns_lock()) return;
         restart=_wifi_settings.restartPending && !_wifi_settings.pending && !_wifi_settings.error;
         if (!restart && !_wifi_settings.pending) return;
-        if (!restart) { std::memcpy(ssid,_pending_ssid,sizeof(ssid)); std::memcpy(password,_pending_password,sizeof(password)); }
+        if (!restart) { forget=_pending_forget; std::memcpy(ssid,_pending_ssid,sizeof(ssid)); std::memcpy(password,_pending_password,sizeof(password)); }
     }
     if (restart) {
         MosaicoDisplay::Snapshot display;
@@ -236,21 +351,30 @@ void NetworkQuota::serviceWifiSettings()
         if (!MosaicoDisplay::rebootSaveReady(display)) return;
         esp_restart(); return;
     }
+    auto candidate=_wifi_profiles;
+    const bool valid=forget ? candidate.forget(ssid) : candidate.upsert(ssid,password);
+    auto blob=MosaicoWifiProfiles::encode(candidate);
+    auto previous=MosaicoWifiProfiles::encode(_wifi_profiles);
+    const bool changed=blob!=previous;
     nvs_handle_t h=0;
-    esp_err_t error=nvs_open("quota_net",NVS_READWRITE,&h);
-    if (error==ESP_OK) {
-        MosaicoWifi::Blob blob=MosaicoWifi::encode(ssid,password);
-        error=nvs_set_blob(h,"wifi_ui",blob.data(),blob.size());
-        MosaicoWifi::scrub(blob.data(),blob.size());
-        if (error==ESP_OK) error=nvs_commit(h);
-        nvs_close(h);
+    esp_err_t error=valid ? ESP_OK : ESP_ERR_INVALID_ARG;
+    if(valid && (changed || !_wifi_profiles_persisted)) {
+        error=nvs_open("quota_net",NVS_READWRITE,&h);
+        if(error==ESP_OK) {
+            error=nvs_set_blob(h,"wifi_profiles",blob.data(),blob.size());
+            if(error==ESP_OK) error=nvs_commit(h);
+            nvs_close(h);
+        }
     }
+    MosaicoWifi::scrub(blob.data(),blob.size());
+    MosaicoWifi::scrub(previous.data(),previous.size());
     MosaicoWifi::scrub(password,sizeof(password));
     std::lock_guard<std::mutex> guard(_wifi_settings_mutex);
     MosaicoWifi::scrub(_pending_password,sizeof(_pending_password));
     MosaicoWifi::scrub(_pending_ssid,sizeof(_pending_ssid));
     _wifi_settings.pending=false; _wifi_settings.error=error;
-    if (!error) { std::memcpy(_wifi_settings.ssid,ssid,sizeof(ssid)); _wifi_settings.rebootRequired=true; }
+    if(!error) { cancelWifiScan(); _wifi_candidates={}; _wifi_scan_complete=true; _wifi_profiles_persisted=true; _wifi_profiles=candidate; publishWifiProfiles(); if(changed) _wifi_settings.rebootRequired=true; }
+    MosaicoWifi::scrub(&candidate,sizeof(candidate));
 }
 #if SOC_WIFI_HE_SUPPORT
 bool NetworkQuota::requestTwtTrial(MosaicoTwt::Mode mode)
@@ -584,12 +708,44 @@ bool NetworkQuota::configure(const char* encoded)
                        (std::strncmp(url, "http://", 7) == 0 || std::strncmp(url, "https://", 8) == 0);
     cJSON_Delete(root);
     std::memset(decoded, 0, sizeof(decoded));
+#ifdef MOSAICO_BOARD
+    if(!valid || !MosaicoWifi::validCredentials(ssid,password)) {
+        MosaicoWifi::scrub(password,sizeof(password)); MosaicoWifi::scrub(token,sizeof(token)); return false;
+    }
+#else
     if (!valid) return false;
+#endif
     nvs_handle_t handle;
-    if (nvs_open("quota_net", NVS_READWRITE, &handle) != ESP_OK) return false;
+    if (nvs_open("quota_net", NVS_READWRITE, &handle) != ESP_OK) {
+        std::memset(password,0,sizeof(password)); std::memset(token,0,sizeof(token)); return false;
+    }
+#ifdef MOSAICO_BOARD
+    MosaicoWifiProfiles::Model profiles{};
+    MosaicoWifiProfiles::Blob profileBlob{}; size_t profileSize=profileBlob.size();
+    const esp_err_t profileRead=nvs_get_blob(handle,"wifi_profiles",profileBlob.data(),&profileSize);
+    if(profileRead==ESP_OK && profileSize==profileBlob.size())
+        MosaicoWifiProfiles::decode(profileBlob,profiles);
+    if(profileRead==ESP_ERR_NVS_NOT_FOUND) {
+        char oldSsid[33]{},oldPassword[65]{};
+        MosaicoWifi::Blob oldBlob{}; size_t oldSize=oldBlob.size();
+        bool oldValid=nvs_get_blob(handle,"wifi_ui",oldBlob.data(),&oldSize)==ESP_OK && oldSize==oldBlob.size() && MosaicoWifi::decode(oldBlob,oldSsid,oldPassword);
+        if(!oldValid) { size_t x=33,y=65;
+            oldValid=nvs_get_str(handle,"ssid",oldSsid,&x)==ESP_OK && nvs_get_str(handle,"password",oldPassword,&y)==ESP_OK; }
+        if(oldValid) profiles.upsert(oldSsid,oldPassword);
+        MosaicoWifi::scrub(oldPassword,sizeof(oldPassword)); MosaicoWifi::scrub(oldBlob.data(),oldBlob.size());
+    }
+    const bool profileValid=profiles.upsert(ssid,password);
+    if(!profileValid) {
+        nvs_close(handle); MosaicoWifi::scrub(&profiles,sizeof(profiles)); MosaicoWifi::scrub(profileBlob.data(),profileBlob.size());
+        MosaicoWifi::scrub(password,sizeof(password)); MosaicoWifi::scrub(token,sizeof(token)); return false;
+    }
+    profileBlob=MosaicoWifiProfiles::encode(profiles);
+#endif
     bool ok = nvs_set_str(handle, "ssid", ssid) == ESP_OK && nvs_set_str(handle, "password", password) == ESP_OK &&
               nvs_set_str(handle, "url", url) == ESP_OK && nvs_set_str(handle, "token", token) == ESP_OK;
 #ifdef MOSAICO_BOARD
+    if(ok) ok=nvs_set_blob(handle,"wifi_profiles",profileBlob.data(),profileBlob.size())==ESP_OK;
+    MosaicoWifi::scrub(profileBlob.data(),profileBlob.size()); MosaicoWifi::scrub(&profiles,sizeof(profiles));
     if (ok) {
         auto blob=MosaicoWifi::encode(ssid,password);
         ok=nvs_set_blob(handle,"wifi_ui",blob.data(),blob.size())==ESP_OK;
@@ -627,24 +783,42 @@ void NetworkQuota::begin()
 #endif
         return;
     }
-    size_t a = sizeof(_ssid), b = sizeof(_password), c = sizeof(_url), d = sizeof(_token);
-    bool ok = nvs_get_str(handle, "ssid", _ssid, &a) == ESP_OK &&
-              nvs_get_str(handle, "password", _password, &b) == ESP_OK &&
-              nvs_get_str(handle, "url", _url, &c) == ESP_OK && nvs_get_str(handle, "token", _token, &d) == ESP_OK;
-    #ifdef MOSAICO_BOARD
-    MosaicoWifi::Blob wifiBlob{}; size_t wifiSize=wifiBlob.size();
-    const esp_err_t wifiError=nvs_get_blob(handle,"wifi_ui",wifiBlob.data(),&wifiSize);
-    if (wifiError==ESP_OK) {
-        // Corruption falls back to the legacy pair; never rewrite automatically.
-        if (wifiSize==wifiBlob.size()) MosaicoWifi::decode(wifiBlob,_ssid,_password);
+    size_t a=sizeof(_ssid), b=sizeof(_password), c=sizeof(_url), d=sizeof(_token);
+    const bool endpointOk=nvs_get_str(handle,"url",_url,&c)==ESP_OK && nvs_get_str(handle,"token",_token,&d)==ESP_OK;
+    bool ok=nvs_get_str(handle,"ssid",_ssid,&a)==ESP_OK && nvs_get_str(handle,"password",_password,&b)==ESP_OK;
+#ifdef MOSAICO_BOARD
+    MosaicoWifiProfiles::Blob profilesBlob{}; size_t profilesSize=profilesBlob.size();
+    const esp_err_t profilesRead=nvs_get_blob(handle,"wifi_profiles",profilesBlob.data(),&profilesSize);
+    bool loaded=profilesRead==ESP_OK &&
+        profilesSize==profilesBlob.size() && MosaicoWifiProfiles::decode(profilesBlob,_wifi_profiles);
+    MosaicoWifi::scrub(profilesBlob.data(),profilesBlob.size());
+    _wifi_profiles_persisted=loaded;
+    if(profilesRead==ESP_ERR_NVS_NOT_FOUND) {
+        MosaicoWifi::Blob wifiBlob{}; size_t wifiSize=wifiBlob.size();
+        if(nvs_get_blob(handle,"wifi_ui",wifiBlob.data(),&wifiSize)==ESP_OK && wifiSize==wifiBlob.size())
+            ok=MosaicoWifi::decode(wifiBlob,_ssid,_password) || ok;
+        MosaicoWifi::scrub(wifiBlob.data(),wifiBlob.size());
+        if(ok) loaded=_wifi_profiles.upsert(_ssid,_password); // Read-only migration; save new blob only on edit.
     }
-    MosaicoWifi::scrub(wifiBlob.data(),wifiBlob.size());
+    ok=loaded;
+    if(!loaded) { MosaicoWifi::scrub(_ssid,sizeof(_ssid)); MosaicoWifi::scrub(_password,sizeof(_password)); }
+    if(ok) { const unsigned i=_wifi_profiles.lastSuccess<_wifi_profiles.count ? _wifi_profiles.lastSuccess : 0;
+        std::memcpy(_ssid,_wifi_profiles.entries[i].ssid,33); std::memcpy(_password,_wifi_profiles.entries[i].password,65); }
+#endif
+#ifdef MOSAICO_BOARD
+    ok=endpointOk; // Corrupt/missing Wi-Fi remains repairable by the live owner; no auto-connect.
+#else
+    ok=ok && endpointOk;
 #endif
     nvs_close(handle);
 #ifdef MOSAICO_BOARD
-    { std::lock_guard<std::mutex> guard(_wifi_settings_mutex); std::memcpy(_wifi_settings.ssid,_ssid,sizeof(_ssid)); }
+    { std::lock_guard<std::mutex> guard(_wifi_settings_mutex); std::memcpy(_wifi_settings.ssid,_ssid,sizeof(_ssid)); publishWifiProfiles(); }
 #endif
-    if (!ok || !_ssid[0] || !_url[0] || !_token[0]) {
+    if (!ok || !_url[0] || !_token[0]
+#ifndef MOSAICO_BOARD
+        || !_ssid[0]
+#endif
+        ) {
 #ifdef MOSAICO_BOARD
         MosaicoDisplay::startFallbackOwner();
 #endif
@@ -707,7 +881,12 @@ void NetworkQuota::run()
     std::memcpy(config.sta.ssid, _ssid, std::strlen(_ssid));
     std::memcpy(config.sta.password, _password, std::strlen(_password));
     if (esp_wifi_init(&init) != ESP_OK || esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK ||
-        esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK || esp_wifi_set_config(WIFI_IF_STA, &config) != ESP_OK ||
+        esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
+#ifdef MOSAICO_BOARD
+        (_wifi_profiles.count && esp_wifi_set_config(WIFI_IF_STA, &config) != ESP_OK) ||
+#else
+        esp_wifi_set_config(WIFI_IF_STA, &config) != ESP_OK ||
+#endif
         esp_wifi_start() != ESP_OK) {
         ++_failures;
 #ifdef MOSAICO_BOARD
@@ -717,6 +896,10 @@ void NetworkQuota::run()
     }
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
     _twt_handler_ready = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &NetworkQuota::twtEvent, this) == ESP_OK;
+#endif
+#ifdef MOSAICO_BOARD
+    _wifi_scan_handler=esp_event_handler_register(WIFI_EVENT,WIFI_EVENT_SCAN_DONE,&NetworkQuota::scanEvent,this)==ESP_OK;
+    MosaicoWifi::scrub(&config,sizeof(config));
 #endif
     recordWifiRunning(true);
     esp_sntp_config_t timeConfig = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
@@ -733,7 +916,7 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
     const bool ownsDisplaySettings = MosaicoDisplay::claimNetworkOwner();
     { std::lock_guard<std::mutex> guard(_wifi_settings_mutex);
-      std::memcpy(_wifi_settings.ssid,_ssid,sizeof(_ssid)); _wifi_settings.available=true; }
+      std::memcpy(_wifi_settings.ssid,_ssid,sizeof(_ssid)); publishWifiProfiles(); _wifi_settings.available=true; }
     uint32_t refreshIntervalMs=300000;
     int64_t refreshBaseUs=0;
     int64_t nextGaugeCheckUs = 0;
@@ -742,8 +925,15 @@ void NetworkQuota::run()
 #endif
     while (true) {
 #ifdef MOSAICO_BOARD
+        drainWifiScan();
 #if SOC_WIFI_HE_SUPPORT
-        serviceTwtTrial(esp_timer_get_time(), idleLocked());
+        if(_wifi_scan_started && (_twt.live() || _twt_request.load()!=-1)) {
+            cancelWifiScan(); drainWifiScan();
+        }
+        if(_wifi_scan_fault && _twt_request.exchange(-1)!=-1) {
+            _twt.state.error=ESP_ERR_TIMEOUT; _twt.end(MosaicoTwt::Stop::Timeout); publishTwt();
+        }
+        if(!_wifi_scan_started && !_wifi_scan_fault) serviceTwtTrial(esp_timer_get_time(), idleLocked());
         if (_twt.state.cleanupPending || _twt_cleanup_failed) {
             if (MosaicoOta::busy()) MosaicoOta::fail("twt_cleanup_not_ready");
             setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
@@ -793,13 +983,13 @@ void NetworkQuota::run()
             updateWindow = false;
         }
 #ifdef MOSAICO_BOARD
-        if (!locked && wasLocked) wifiRetry.reset(); // Explicit wake gets a fresh attempt.
+        if (!locked && wasLocked) { wifiRetry.reset(); _wifi_scan_complete=false; } // Explicit wake gets a fresh attempt.
 #endif
         wasLocked = locked;
         if (locked && !updateWindow && (_force_refresh.exchange(false) || now >= nextRefresh)) {
             updateWindow   = true;
 #ifdef MOSAICO_BOARD
-            wifiRetry.reset(); // New configured refresh window, not a task notification.
+            wifiRetry.reset(); _wifi_scan_complete=false; // New configured refresh window, not a task notification.
 #endif
             windowDeadline = now + updateWindowUs;
             nextRefresh    = now + refreshIntervalUs;
@@ -830,6 +1020,9 @@ void NetworkQuota::run()
                     continue;
                 }
                 if (!idleLocked()) continue;
+#ifdef MOSAICO_BOARD
+                cancelWifiScan(); drainWifiScan();
+#endif
                 esp_wifi_disconnect();
                 if (esp_wifi_stop() != ESP_OK) {
                     setPhase(4);
@@ -908,6 +1101,13 @@ void NetworkQuota::run()
             }
             const uint32_t remaining = wifiRetry.remainingMs(retryNow);
             if (remaining) { wait(std::min<uint32_t>(remaining, 5000)); continue; }
+            if(!selectWifiCandidate(locked,retryNow)) {
+                if(_wifi_scan_complete) {
+                    if(locked) updateWindow=false;
+                    else { wifiRetry.attempted(retryNow,false); _wifi_scan_complete=false; }
+                }
+                wait(100); continue;
+            }
             ++_wifi_connect_attempts;
             wifiRetry.attempted(retryNow, locked);
             }
@@ -917,7 +1117,12 @@ void NetworkQuota::run()
             continue;
         }
 #ifdef MOSAICO_BOARD
-        wifiRetry.reset(); // Link/IP recovered: no stale backoff after a later disconnect.
+        if(!hadConnection) {
+            const int i=_wifi_profiles.find(_ssid); if(i>=0) _wifi_profiles.lastSuccess=i;
+            std::lock_guard<std::mutex> guard(_wifi_settings_mutex);
+            std::memcpy(_wifi_settings.ssid,_ssid,sizeof(_ssid)); publishWifiProfiles();
+        }
+        if(!locked) wifiRetry.reset(); // Awake recovery clears backoff; locked total attempts remain window-scoped.
 #endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
         // No blocking HTTP, clock wait or tailnet initialization while the
