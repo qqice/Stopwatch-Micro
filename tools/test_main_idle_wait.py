@@ -5,6 +5,13 @@ from tools import serial_debug_test as host
 R=Path(__file__).resolve().parents[1]
 C=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
 class IdleWaitTests(unittest.TestCase):
+    def test_qualified_default_keeps_readiness_and_runtime_gates(self):
+        source=(R/'main/main_idle_wait.cpp').read_text()
+        self.assertIn('bool enabled=MAIN_IDLE_SUPPORTED;',source)
+        self.assertIn('gates.uart=uartComplete()',source)
+        self.assertIn('gates.gpio=gpioReady',source)
+        self.assertIn('gates.ota=ota;gates.usb=usb;gates.wifi=wifi;gates.ble=ble',source)
+        self.assertIn('enabled=value;return true;',source)
     def test_actual_model_all_gates_and_button_interrupt_grace(self):
         if not C:self.skipTest('cross compiler unavailable')
         code=r'''#include "main/main_idle_wait_model.h"
@@ -114,6 +121,14 @@ template<class T>struct Atom {
         source=source.replace('struct Actual {','struct Actual {'+stub,1)
         cases=r'''
 constexpr bool actualCases(){
+ // Default request remains short until each real readiness owner is ready.
+ Actual boot;if(!boot.enabled)return false;boot.begin();
+ boot.serialState(false,false);boot.viewState(true);
+ boot.wait(true,false,false,false,false);if(boot.requestedMs!=20)return false;
+ boot.uartOwner(true);boot.wait(true,false,false,false,false);if(boot.requestedMs!=20)return false;
+ boot.uartRxConfigured(true,0);boot.wait(true,false,false,false,false);if(boot.requestedMs!=20)return false;
+ boot.uartRecoveryConfigured(true,0);boot.wait(true,false,false,false,false);
+ if(boot.requestedMs!=500)return false;boot.end();
  Actual a;a.usbEvent();if(a.pending)return false;a.begin();
  if(!a.gpioReady||!a.masked6||a.setEnabled(true))return false;
  a.uartOwner(true);if(a.setEnabled(true))return false;
@@ -160,7 +175,7 @@ static_assert(actualCases(),"actual ISR notify latch, mask/rearm, release grace,
             self.assertEqual(out.returncode,0,str(log))
     def test_source_interrupt_ownership_and_no_power_gpio_side_effects(self):
         s=(R/'main/main_idle_wait.cpp').read_text()
-        self.assertIn('bool enabled=false',s)
+        self.assertIn('bool enabled=MAIN_IDLE_SUPPORTED;',s)
         self.assertIn('configTASK_NOTIFICATION_ARRAY_ENTRIES >= 2',s)
         self.assertIn('!CONFIG_UART_ISR_IN_IRAM',s)
         self.assertLess(s.index('gpio_intr_disable(GPIO_NUM_6)'),s.index('gpio_install_isr_service(0)'))

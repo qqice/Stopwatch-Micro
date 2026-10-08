@@ -16,8 +16,9 @@
 #endif
 namespace MainIdleWait {
 namespace {
-// Even an opt-in test build boots at the unchanged 20 ms baseline.
-bool enabled=false;
+// Qualified S31 profiles request event idle by default. Readiness, OTA, USB,
+// radio and view gates still fall back to the responsive 10/20 ms cadence.
+bool enabled=MAIN_IDLE_SUPPORTED;
 bool gpioReady=false, uartReady=false, handlerInstalled=false;
 std::atomic<bool> serialBusy{true}, safeView{false};
 std::atomic<uint32_t> gpioCount{0}, uartCount{0};
