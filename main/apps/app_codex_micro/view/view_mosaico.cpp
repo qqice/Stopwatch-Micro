@@ -351,7 +351,11 @@ void CodexMicroView::initSettings() {
     }
     _wifiSaveState = label(wireless, 12, 324, 416, "", &lv_font_montserrat_14);
     lv_obj_set_height(_wifiSaveState, 18); lv_label_set_long_mode(_wifiSaveState, LV_LABEL_LONG_MODE_DOTS);
-    _wifiKeyboard = lv_keyboard_create(_settingsPage); panel(_wifiKeyboard, 0, 204, 440, 198);
+    _wifiKeyboard = lv_keyboard_create(_settingsPage);
+    // LVGL creates keyboards BOTTOM_MID aligned; set_pos only changes offsets.
+    // The sheet uses absolute top-left geometry, not a 204px bottom offset.
+    lv_obj_set_align(_wifiKeyboard, LV_ALIGN_TOP_LEFT);
+    panel(_wifiKeyboard, 0, 204, 440, 198);
     lv_obj_set_style_text_font(_wifiKeyboard, &lv_font_montserrat_16, 0); lv_obj_add_flag(_wifiKeyboard, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
     lv_obj_add_event_cb(_wifiKeyboard, wifiFieldEvent, LV_EVENT_READY, this); lv_obj_add_event_cb(_wifiKeyboard, wifiFieldEvent, LV_EVENT_CANCEL, this);
     renderSettings();
