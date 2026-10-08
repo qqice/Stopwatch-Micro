@@ -2,6 +2,7 @@
 #include "view_mosaico.h"
 #include "dot_widgets.h"
 #include "reset_countdown.h"
+#include "credit_format.h"
 #include "quota_trend_geometry.h"
 #include "session_status_model.h"
 #include "lock_session_geometry.h"
@@ -1401,7 +1402,9 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         }
         if (bucket.creditsKnown) {
             lv_obj_remove_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN);
-            std::snprintf(buf, sizeof(buf), "%s Credits", bucket.creditsUnlimited ? "inf" : (bucket.creditBalance[0] ? bucket.creditBalance : "--"));
+            char balance[sizeof(bucket.creditBalance)];
+            mosaico_credit::formatBalance(bucket.creditBalance, balance, sizeof(balance));
+            std::snprintf(buf, sizeof(buf), "%s Credits", bucket.creditsUnlimited ? "inf" : balance);
             lv_label_set_text(_creditValues[i], buf);
         } else { lv_obj_add_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN); }
         lv_label_set_text(_cardMeta[i], bucket.reached);
