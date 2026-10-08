@@ -309,6 +309,9 @@ void CodexMicroView::initSettings() {
     for (auto* field : {_wifiSsid, _wifiPassword}) {
         lv_textarea_set_one_line(field, true); lv_obj_set_style_text_font(field, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(field, lv_color_hex(Cyan), 0); lv_obj_set_style_pad_all(field, 10, 0);
+        // one_line changes the height to LV_SIZE_CONTENT; retain the full touch target.
+        lv_obj_set_height(field, 48);
+        lv_obj_remove_flag(field, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
         lv_obj_add_flag(field, LV_OBJ_FLAG_EVENT_BUBBLE);
         lv_obj_add_event_cb(field, wifiFieldEvent, LV_EVENT_CLICKED, this);
         lv_obj_add_event_cb(field, wifiFieldEvent, LV_EVENT_VALUE_CHANGED, this);
@@ -394,7 +397,7 @@ void CodexMicroView::settingsTileEvent(lv_event_t* event) {
 }
 void CodexMicroView::wifiFieldEvent(lv_event_t* event) {
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
-    if (!self->_settingsOpen || self->_settingsAnimating || self->_locked || self->_suppressed ||
+    if (!self->_settingsOpen || self->_settingsDetail != 4 || self->_settingsAnimating || self->_locked || self->_suppressed ||
         self->_rotationFault || self->_rotationPhase != RotationPhase::Idle || self->otaBusy()) return;
     self->_activity = lv_tick_get(); const auto code = lv_event_get_code(event);
     if (code == LV_EVENT_VALUE_CHANGED) return;
@@ -406,7 +409,8 @@ void CodexMicroView::wifiFieldEvent(lv_event_t* event) {
         if (code == LV_EVENT_CANCEL) lv_textarea_set_text(self->_wifiPassword, "");
     } else {
         if (self->_swipeConsumed) return;
-        auto* field = static_cast<lv_obj_t*>(lv_event_get_target(event));
+        auto* field = static_cast<lv_obj_t*>(lv_event_get_current_target(event));
+        if (code != LV_EVENT_CLICKED || (field != self->_wifiSsid && field != self->_wifiPassword)) return;
         // Only the active editor is visible above keyboard; radio/action rows are hidden.
         for (size_t row = 6; row < 8; ++row) lv_obj_add_flag(self->_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
         auto* other = field == self->_wifiSsid ? self->_wifiPassword : self->_wifiSsid;
@@ -964,6 +968,17 @@ void CodexMicroView::touchEvent(lv_event_t* e) {
         self->_activity = lv_tick_get(); self->_touchStart = point;
         self->_touchTracking = true; self->_swipeConsumed = false;
         self->_touchOnEditor = self->_settingsOpen && !lv_obj_has_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
+        // Reserve the initial editor contact too, before its CLICKED opens the
+        // keyboard. Inspect the hit ancestry, not raw (pre-rotation) coordinates.
+        if (self->_settingsOpen && self->_settingsDetail == 4) {
+            for (auto* target = static_cast<lv_obj_t*>(lv_event_get_target(e));
+                 target && target != self->_settingsPage; target = lv_obj_get_parent(target)) {
+                if (target == self->_wifiSsid || target == self->_wifiPassword || target == self->_wifiKeyboard) {
+                    self->_touchOnEditor = true;
+                    break;
+                }
+            }
+        }
     } else if (self->_touchTracking && (code == LV_EVENT_PRESSING || code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST)) {
         const int dx = point.x - self->_touchStart.x;
         const int dy = point.y - self->_touchStart.y;
