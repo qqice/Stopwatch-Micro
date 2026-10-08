@@ -687,6 +687,12 @@ void SerialDebug::handleLine(char* line)
                       static_cast<unsigned long>(network.historyAccepted()),
                       static_cast<unsigned long>(network.historyFailures()));
         result("network", "PASS", details);
+#ifdef MOSAICO_BOARD
+        std::snprintf(details, sizeof(details), "connect_attempts=%lu locked_budget_closures=%lu locked_attempt_limit=3 awake_backoff_ms=5000,15000,60000 credentials_redacted=1",
+            static_cast<unsigned long>(network.wifiConnectAttempts()),
+            static_cast<unsigned long>(network.wifiBudgetClosures()));
+        debugPrintf("DBG WIFI_RETRY %s\r\n", details);
+#endif
         return;
     }
 #ifdef MOSAICO_BOARD

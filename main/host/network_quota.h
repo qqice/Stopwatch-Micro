@@ -46,6 +46,8 @@ public:
     bool requestWifiCredentials(const char* ssid, const char* password);
     bool wifiSettingsSnapshot(WifiSettingsSnapshot& out);
     bool requestWifiRestart();
+    uint32_t wifiConnectAttempts() const { return _wifi_connect_attempts.load(); }
+    uint32_t wifiBudgetClosures() const { return _wifi_budget_closures.load(); }
 #endif
     IdlePowerStats powerStats() const;
 #ifdef MOSAICO_BOARD
@@ -132,6 +134,7 @@ private:
     bool _cpu_light_sleep=false, _sleep_pm_fault=false;
     std::mutex _wifi_settings_mutex;
     WifiSettingsSnapshot _wifi_settings;
+    std::atomic<uint32_t> _wifi_connect_attempts{0}, _wifi_budget_closures{0};
     char _pending_ssid[33]{}, _pending_password[65]{};
 #endif
     std::atomic<uint32_t> _power_cycles{0};

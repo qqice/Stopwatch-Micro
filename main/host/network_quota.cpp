@@ -6,6 +6,7 @@
 #include "quota_monitor.h"
 #include "mosaico_display_settings.h"
 #include "mosaico_session_monitor.h"
+#include "wifi_retry_model.h"
 #include "system_clock.h"
 #include <ota/panic_capture.h>
 #include <hal/hal.h>
@@ -736,6 +737,7 @@ void NetworkQuota::run()
     uint32_t refreshIntervalMs=300000;
     int64_t refreshBaseUs=0;
     int64_t nextGaugeCheckUs = 0;
+    MosaicoWifiRetry::Policy wifiRetry;
 
 #endif
     while (true) {
@@ -790,9 +792,15 @@ void NetworkQuota::run()
 #endif
             updateWindow = false;
         }
+#ifdef MOSAICO_BOARD
+        if (!locked && wasLocked) wifiRetry.reset(); // Explicit wake gets a fresh attempt.
+#endif
         wasLocked = locked;
         if (locked && !updateWindow && (_force_refresh.exchange(false) || now >= nextRefresh)) {
             updateWindow   = true;
+#ifdef MOSAICO_BOARD
+            wifiRetry.reset(); // New configured refresh window, not a task notification.
+#endif
             windowDeadline = now + updateWindowUs;
             nextRefresh    = now + refreshIntervalUs;
 #ifdef MOSAICO_BOARD
@@ -886,10 +894,31 @@ void NetworkQuota::run()
                      ip.ip.addr != 0;
         if (!_connected) {
             hadConnection = false;
+#ifdef MOSAICO_BOARD
+            bool useRetryPolicy = true;
+#if SOC_WIFI_HE_SUPPORT
+            useRetryPolicy = !_twt.live(); // Do not inherit a 60s backoff into TWT's 10s setup owner.
+#endif
+            if (useRetryPolicy) {
+            const int64_t retryNow = esp_timer_get_time();
+            if (wifiRetry.exhausted(locked) && !wifiRetry.remainingMs(retryNow)) {
+                ++_wifi_budget_closures;
+                updateWindow = false;
+                continue; // Existing pause/disconnect/stop path; keep nextRefresh unchanged.
+            }
+            const uint32_t remaining = wifiRetry.remainingMs(retryNow);
+            if (remaining) { wait(std::min<uint32_t>(remaining, 5000)); continue; }
+            ++_wifi_connect_attempts;
+            wifiRetry.attempted(retryNow, locked);
+            }
+#endif
             esp_wifi_connect();
             wait(5000);
             continue;
         }
+#ifdef MOSAICO_BOARD
+        wifiRetry.reset(); // Link/IP recovered: no stale backoff after a later disconnect.
+#endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
         // No blocking HTTP, clock wait or tailnet initialization while the
         // asynchronous setup response/deadline must be serviced.
