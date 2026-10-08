@@ -15,6 +15,12 @@
 namespace view {
 class CodexMicroView {
 public:
+    // Numeric-only, GUI-published diagnostics. No LVGL access in the reader.
+    struct WifiEditorDebugSnapshot {
+        uint32_t presses = 0, clicks = 0, releases = 0, field = 0, guards = 0;
+        uint32_t keyboardVisible = 0, pending = 0;
+    };
+    static bool wifiEditorDebugSnapshot(WifiEditorDebugSnapshot& out);
     enum class Page : uint8_t { Command = 0, History, Agent, OTA, Settings, Sessions };
     ~CodexMicroView();
     void init(lv_obj_t* parent);
@@ -60,6 +66,10 @@ private:
     static void wifiFieldEvent(lv_event_t* event);
     static void wifiSelectionEvent(lv_event_t* event);
     static void wifiActionEvent(lv_event_t* event);
+    uint32_t wifiEditorGuards() const;
+    void publishWifiEditorDebug();
+    void cancelWifiEditorPending();
+    void serviceWifiEditorPending(bool touching);
     void initSessions();
     void refreshSessionsLease();
     void refreshSessions(const CodexMicroState& state);
@@ -125,6 +135,11 @@ private:
     std::array<lv_obj_t*, 4> _settingsDetails{};
     std::array<Hit, 4> _settingsTileHits{};
     lv_obj_t* _settingsTitle = nullptr;
+    lv_obj_t* _wifiEditorPending = nullptr;
+    lv_indev_t* _wifiEditorInput = nullptr;
+    lv_point_t _wifiEditorStart{};
+    bool _wifiEditorReleased = false;
+    WifiEditorDebugSnapshot _wifiEditorDebug{};
     lv_obj_t* _wifiSsid = nullptr;
     lv_obj_t* _wifiPassword = nullptr;
     lv_obj_t* _wifiKeyboard = nullptr;

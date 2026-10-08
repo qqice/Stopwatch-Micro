@@ -311,3 +311,10 @@ void AppCodexMicro::debugHistoryDetails(char* out, size_t capacity)
     }
     _view->historyDetails(out, capacity);
 }
+
+#ifdef MOSAICO_BOARD
+bool AppCodexMicro::debugWifiEditorSnapshot(view::CodexMicroView::WifiEditorDebugSnapshot& out)
+{
+    return view::CodexMicroView::wifiEditorDebugSnapshot(out);
+}
+#endif

@@ -37,6 +37,9 @@ public:
 
     bool otaReady();
     bool debugUiReady();
+#ifdef MOSAICO_BOARD
+    bool debugWifiEditorSnapshot(view::CodexMicroView::WifiEditorDebugSnapshot& out);
+#endif
     bool debugSetScreen(DebugScreen screen);
     const char* debugScreenName();
     void debugSetInputCapture(bool enabled);

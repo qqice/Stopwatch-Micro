@@ -373,6 +373,8 @@ struct CodexMicroView {
  bool _rotationFault=false,_settingsOpen=false,_settingsAnimating=false,_touchOnEditor=false;
  lv_obj_t keyboard{20,true}; lv_obj_t* _wifiKeyboard=&keyboard;
  unsigned _settingsDetail=0; lv_obj_t editors[3]{};
+ bool _wifiEditorReleased=false;
+ constexpr void cancelWifiEditorPending() { _wifiEditorReleased=false; }
  lv_obj_t* _wifiSsid=&editors[0]; lv_obj_t* _wifiPassword=&editors[1]; lv_obj_t* _wifiProfiles=&editors[2];
  constexpr void openSettings() { _settingsOpen=true;_touchTracking=false;_swipeConsumed=true; }
  constexpr void closeSettings(bool=true) { _settingsOpen=false;_touchTracking=false;_swipeConsumed=true; }

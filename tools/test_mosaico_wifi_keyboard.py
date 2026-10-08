@@ -15,7 +15,7 @@ class WifiKeyboardTests(unittest.TestCase):
         self.assertIn('lv_obj_set_height(field, 48)', fields)
         self.assertLess(fields.index('lv_textarea_set_one_line'), fields.index('lv_obj_set_height(field, 48)'))
         self.assertIn('lv_obj_remove_flag(field, LV_OBJ_FLAG_SCROLL_ON_FOCUS)', fields)
-        self.assertIn('wifiFieldEvent, LV_EVENT_CLICKED', fields)
+        self.assertIn('wifiFieldEvent, LV_EVENT_ALL', fields)
         self.assertIn('_wifiKeyboard = lv_keyboard_create(_settingsPage)', init)
         self.assertIn('panel(_wifiKeyboard, 0, 204, 440, 198)', init)
         self.assertLessEqual(64 + 402 + 2, 480)
@@ -32,28 +32,39 @@ class WifiKeyboardTests(unittest.TestCase):
         self.assertIn('requestWifiForget(ssid)', CPP)
         self.assertIn('wifi.count > 1', CPP)
 
+    def test_numeric_bridge_never_reads_widgets_or_secrets(self):
+        reader = CPP.split('bool CodexMicroView::wifiEditorDebugSnapshot(', 1)[1].split('void CodexMicroView::cancelWifiEditorPending', 1)[0]
+        self.assertNotIn('lv_', reader)
+        self.assertNotIn('password', reader.lower())
+        self.assertIn('attempt < 3', reader)
+        self.assertIn('std::atomic<uint32_t>::is_always_lock_free', CPP)
+        bridge = (ROOT / 'main/apps/app_codex_micro/app_codex_micro.cpp').read_text().split('bool AppCodexMicro::debugWifiEditorSnapshot(', 1)[1]
+        self.assertNotIn('_view', bridge)
+        self.assertIn('CodexMicroView::wifiEditorDebugSnapshot(out)', bridge)
+
     def test_actual_touch_and_field_callbacks(self):
         compilers = sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
         if not compilers:
             self.skipTest('embedded compiler unavailable')
         methods = []
-        for name in ('wifiFieldEvent', 'touchEvent', 'wifiSelectionEvent', 'wifiActionEvent'):
-            start = CPP.index('void CodexMicroView::' + name + '(')
+        for name in ('wifiEditorGuards', 'cancelWifiEditorPending', 'serviceWifiEditorPending', 'wifiFieldEvent', 'touchEvent', 'wifiSelectionEvent', 'wifiActionEvent'):
+            start = CPP.index(('uint32_t' if name == 'wifiEditorGuards' else 'void') + ' CodexMicroView::' + name + '(')
             body = CPP[start:CPP.index('\n}', start) + 2]
             body = body.replace('std::strlen', 'textLength').replace('std::strcmp', 'textCompare')
             body = body.replace('GetNetworkQuota()', 'self->network')
             methods.append('constexpr ' + body)
         harness = r'''
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <initializer_list>
 using std::size_t;
 enum { LV_EVENT_PRESSED, LV_EVENT_PRESSING, LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST,
        LV_EVENT_CLICKED, LV_EVENT_VALUE_CHANGED, LV_EVENT_READY, LV_EVENT_CANCEL };
 enum lv_obj_flag_t { LV_OBJ_FLAG_HIDDEN=1 };
-enum { LV_INDEV_TYPE_POINTER };
+enum { LV_INDEV_TYPE_POINTER, LV_INDEV_STATE_RELEASED, LV_INDEV_STATE_PRESSED };
 struct lv_point_t { int x=0,y=0; };
-struct lv_indev_t { lv_point_t point; };
+struct lv_indev_t { lv_point_t point; int state=LV_INDEV_STATE_RELEASED; bool scrolling=false; };
 struct lv_obj_t { lv_obj_t* parent=nullptr; int flags=0,x=0,y=0; bool empty=false; lv_obj_t* editor=nullptr; char text[65]{}; unsigned selected=0; };
 struct CodexMicroView;
 struct lv_event_t { CodexMicroView* owner; int code; lv_obj_t* target; lv_obj_t* current; lv_indev_t* input; };
@@ -63,6 +74,9 @@ constexpr auto lv_event_get_target(lv_event_t* e) { return e->target; }
 constexpr auto lv_event_get_current_target(lv_event_t* e) { return e->current; }
 constexpr auto lv_event_get_indev(lv_event_t* e) { return e->input; }
 constexpr int lv_indev_get_type(lv_indev_t*) { return LV_INDEV_TYPE_POINTER; }
+constexpr int lv_indev_get_state(lv_indev_t* i) { return i->state; }
+lv_obj_t scrollMock{};
+constexpr lv_obj_t* lv_indev_get_scroll_obj(lv_indev_t* i) { return i->scrolling ? &scrollMock : nullptr; }
 constexpr void lv_indev_get_point(lv_indev_t* i,lv_point_t* p) { *p=i->point; }
 constexpr auto lv_obj_get_parent(lv_obj_t* o) { return o->parent; }
 constexpr bool lv_obj_has_flag(lv_obj_t* o,lv_obj_flag_t f) { return o->flags&f; }
@@ -109,10 +123,17 @@ struct CodexMicroView {
  int navigation=0,closed=0;
  Network network;
  constexpr Network& GetNetworkQuota() { return network; }
- constexpr bool otaBusy() { return busy; }
+ constexpr bool otaBusy() const { return busy; }
  constexpr void openSettings() { _settingsOpen=true; }
  constexpr void closeSettings() { ++closed; }
  constexpr void navigatePage(int) { ++navigation; }
+ struct Debug { uint32_t presses=0,clicks=0,releases=0,field=0; } _wifiEditorDebug;
+ lv_obj_t* _wifiEditorPending=nullptr; lv_indev_t* _wifiEditorInput=nullptr;
+ lv_point_t _wifiEditorStart{}; bool _wifiEditorReleased=false;
+ constexpr uint32_t wifiEditorGuards() const;
+ constexpr void cancelWifiEditorPending();
+ constexpr void serviceWifiEditorPending(bool);
+ constexpr void publishWifiEditorDebug() {}
  static constexpr void wifiFieldEvent(lv_event_t*);
  static constexpr void touchEvent(lv_event_t*);
  static constexpr void wifiSelectionEvent(lv_event_t*);
@@ -128,6 +149,8 @@ constexpr bool exercise() {
  if(!v._touchOnEditor || v._swipeConsumed) return false;
  e.code=LV_EVENT_RELEASED;v.touchEvent(&e);
  e.code=LV_EVENT_CLICKED;e.current=&v.ssid;v.wifiFieldEvent(&e);
+ if(v.keyboard.editor || !v._wifiEditorPending)return false;
+ v.serviceWifiEditorPending(false);
  if(v.keyboard.editor!=&v.ssid || v.keyboard.flags || v.ssid.y!=70 || !(v.password.flags&1))return false;
  for(auto* o:{v._wifiProfiles,v._wifiForgetButton,v._wifiOpenButton,v._wifiSaveButton,v._wifiRestartButton,v._wifiSaveState})
   if(!(o->flags&1))return false;
@@ -147,7 +170,7 @@ constexpr bool exercise() {
  // A new contact resets the consumed drag and opens the password editor.
  input.point={200,340};e.code=LV_EVENT_PRESSED;e.target=&v.password;e.current=&v.page;v.touchEvent(&e);
  e.code=LV_EVENT_RELEASED;v.touchEvent(&e);
- e.code=LV_EVENT_CLICKED;e.current=&v.password;v.wifiFieldEvent(&e);
+ e.code=LV_EVENT_CLICKED;e.current=&v.password;v.wifiFieldEvent(&e);v.serviceWifiEditorPending(false);
  if(v.keyboard.editor!=&v.password)return false;
  e.code=LV_EVENT_CANCEL;e.current=&v.keyboard;v.wifiFieldEvent(&e);
  if(!v.password.empty || v.keyboard.editor || !(v.keyboard.flags&1))return false;
@@ -163,6 +186,47 @@ constexpr bool exercise() {
  }
  return true;
 }
+constexpr bool releaseOnly() {
+ CodexMicroView v;lv_indev_t input{{200,280},LV_INDEV_STATE_PRESSED};
+ lv_event_t e{&v,LV_EVENT_PRESSED,&v.child,&v.ssid,&input};
+ v.wifiFieldEvent(&e);e.current=&v.page;v.touchEvent(&e);
+ v.serviceWifiEditorPending(true);
+ if(v.keyboard.editor || v.ssid.y || !v._wifiEditorPending)return false;
+ e.current=&v.ssid;e.code=LV_EVENT_RELEASED;v.wifiFieldEvent(&e);
+ v.serviceWifiEditorPending(true);if(v.keyboard.editor)return false;
+ input.state=LV_INDEV_STATE_RELEASED;e.current=&v.page;v.touchEvent(&e);
+ v.serviceWifiEditorPending(false);
+ if(v.keyboard.editor!=&v.ssid || v._wifiEditorPending)return false;
+ e.current=&v.keyboard;e.code=LV_EVENT_CANCEL;v.wifiFieldEvent(&e);
+ // PRESS_LOST cancels an armed contact even without sheet touch tracking.
+ e.current=&v.password;e.code=LV_EVENT_PRESSED;v.wifiFieldEvent(&e);
+ e.code=LV_EVENT_PRESS_LOST;v.wifiFieldEvent(&e);
+ e.code=LV_EVENT_CLICKED;v.wifiFieldEvent(&e);v.serviceWifiEditorPending(false);
+ if(v.keyboard.editor || v._wifiEditorPending)return false;
+ // Release movement and LVGL scrolling reject activation.
+ for(int scroll=0;scroll<2;++scroll) {
+  v._swipeConsumed=false;input.point={200,280};input.scrolling=false;
+  e.code=LV_EVENT_PRESSED;v.wifiFieldEvent(&e);
+  input.point.y=scroll?280:320;input.scrolling=scroll;
+  e.code=LV_EVENT_RELEASED;v.wifiFieldEvent(&e);v.serviceWifiEditorPending(false);
+  if(v.keyboard.editor || v._wifiEditorPending)return false;
+ }
+ input.scrolling=false;v._swipeConsumed=false;
+ // Pending release canceled if a guard appears before GUI servicing.
+ for(int guard=0;guard<8;++guard) {
+  e.code=LV_EVENT_PRESSED;v.wifiFieldEvent(&e);
+  e.code=LV_EVENT_RELEASED;v.wifiFieldEvent(&e);
+  v._locked=guard==0;v._suppressed=guard==1;v.busy=guard==2;v._settingsAnimating=guard==3;
+  v._rotationFault=guard==4;v._rotationPhase=guard==5?CodexMicroView::RotationPhase::FadeOut:CodexMicroView::RotationPhase::Idle;
+  v._settingsOpen=guard!=6;v._settingsDetail=guard==7?0:4;
+  v.serviceWifiEditorPending(false);if(v.keyboard.editor || v._wifiEditorPending)return false;
+  v._locked=v._suppressed=v.busy=v._settingsAnimating=v._rotationFault=false;
+  v._rotationPhase=CodexMicroView::RotationPhase::Idle;v._settingsOpen=true;v._settingsDetail=4;
+ }
+ // Synthetic click without pointer cannot queue opening.
+ e.input=nullptr;e.code=LV_EVENT_CLICKED;v.wifiFieldEvent(&e);return !v._wifiEditorPending;
+}
+static_assert(releaseOnly(),"release-only arming defers layout, cancels loss, drag, scrolling and all lifecycle guards");
 static_assert(exercise(),"actual editor callbacks preserve contact boundaries and keyboard lifecycle");
 constexpr bool profiles() {
  CodexMicroView v;lv_event_t e{&v,LV_EVENT_VALUE_CHANGED,&v.profiles,&v.profiles,nullptr};

@@ -13,6 +13,7 @@
 #include <ota/mosaico_ota_power.h>
 #include <tusb.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -20,6 +21,9 @@
 #include <ctime>
 
 namespace {
+// Single GUI writer; bounded readers never inspect widget state or secrets.
+static_assert(std::atomic<uint32_t>::is_always_lock_free, "UI diagnostic words must be lock-free");
+std::atomic<uint32_t> wifiEditorSequence{0}, wifiEditorNumbers[7]{};
 constexpr int Margin = 20, Columns = 6, SlotWidth = 73, CellWidth = 66, CellHeight = 44;
 static_assert(SlotWidth >= 60 && Margin + Columns * SlotWidth <= 480 - Margin);
 static_assert(128 + 5 * CellHeight <= 348 && 380 + 80 <= 480 - Margin);
@@ -330,8 +334,7 @@ void CodexMicroView::initSettings() {
         lv_obj_set_height(field, 48);
         lv_obj_remove_flag(field, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
         lv_obj_add_flag(field, LV_OBJ_FLAG_EVENT_BUBBLE);
-        lv_obj_add_event_cb(field, wifiFieldEvent, LV_EVENT_CLICKED, this);
-        lv_obj_add_event_cb(field, wifiFieldEvent, LV_EVENT_VALUE_CHANGED, this);
+        lv_obj_add_event_cb(field, wifiFieldEvent, LV_EVENT_ALL, this);
     }
     lv_textarea_set_max_length(_wifiSsid, 32); lv_textarea_set_placeholder_text(_wifiSsid, "SSID");
     lv_textarea_set_max_length(_wifiPassword, 64); lv_textarea_set_placeholder_text(_wifiPassword, "PASSWORD");
@@ -377,6 +380,7 @@ void CodexMicroView::openSettings() {
     lv_anim_set_completed_cb(&anim, settingsSheetCompleted); lv_anim_start(&anim);
 }
 void CodexMicroView::closeSettings(bool animate) {
+    cancelWifiEditorPending();
     if (!_settingsPage || (!_settingsOpen && !_settingsAnimating)) return;
     lv_anim_delete(this, settingsDetailExec);
     lv_anim_delete(this, settingsSheetExec); _settingsOpen = false; _settingsAnimating = animate; _settingsClosing = animate;
@@ -397,6 +401,7 @@ void CodexMicroView::closeSettings(bool animate) {
     lv_anim_set_completed_cb(&anim, settingsSheetCompleted); lv_anim_start(&anim);
 }
 void CodexMicroView::showSettingsDetail(unsigned detail) {
+    cancelWifiEditorPending();
     for (auto* panel : _settingsDetails) lv_obj_set_y(panel, 56);
     _settingsDetail = detail;
     if (!detail) lv_obj_remove_flag(_settingsTiles, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_settingsTiles, LV_OBJ_FLAG_HIDDEN);
@@ -415,13 +420,97 @@ void CodexMicroView::settingsTileEvent(lv_event_t* event) {
     lv_anim_set_duration(&anim, 160); lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
     lv_anim_set_completed_cb(&anim, settingsSheetCompleted); lv_anim_start(&anim);
 }
+uint32_t CodexMicroView::wifiEditorGuards() const {
+    return (!_settingsOpen ? 1U : 0U) | (_settingsDetail != 4 ? 2U : 0U) |
+        (_settingsAnimating ? 4U : 0U) | (_locked ? 8U : 0U) | (_suppressed ? 16U : 0U) |
+        (_rotationFault ? 32U : 0U) | (_rotationPhase != RotationPhase::Idle ? 64U : 0U) |
+        (otaBusy() ? 128U : 0U) | (_slideTo ? 256U : 0U) | (_swipeConsumed ? 512U : 0U);
+}
+void CodexMicroView::publishWifiEditorDebug() {
+    _wifiEditorDebug.guards = wifiEditorGuards();
+    _wifiEditorDebug.keyboardVisible = _wifiKeyboard && !lv_obj_has_flag(_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
+    _wifiEditorDebug.pending = _wifiEditorPending ? (_wifiEditorReleased ? 2U : 1U) : 0U;
+    ++wifiEditorSequence;
+    const uint32_t values[] = {_wifiEditorDebug.presses, _wifiEditorDebug.clicks, _wifiEditorDebug.releases,
+        _wifiEditorDebug.field, _wifiEditorDebug.guards, _wifiEditorDebug.keyboardVisible, _wifiEditorDebug.pending};
+    for (unsigned i = 0; i < 7; ++i) wifiEditorNumbers[i].store(values[i]);
+    ++wifiEditorSequence;
+}
+bool CodexMicroView::wifiEditorDebugSnapshot(WifiEditorDebugSnapshot& out) {
+    for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        const uint32_t before = wifiEditorSequence.load();
+        if (before & 1U) continue;
+        uint32_t values[7];
+        for (unsigned i = 0; i < 7; ++i) values[i] = wifiEditorNumbers[i].load();
+        if (before != wifiEditorSequence.load()) continue;
+        out = {values[0], values[1], values[2], values[3], values[4], values[5], values[6]};
+        return true;
+    }
+    return false;
+}
+void CodexMicroView::cancelWifiEditorPending() {
+    _wifiEditorPending = nullptr; _wifiEditorInput = nullptr; _wifiEditorReleased = false;
+}
+void CodexMicroView::serviceWifiEditorPending(bool touching) {
+    if (wifiEditorGuards()) cancelWifiEditorPending();
+    if (!_wifiEditorPending || !_wifiEditorReleased || touching) return;
+    if (!_wifiEditorInput || lv_indev_get_state(_wifiEditorInput) != LV_INDEV_STATE_RELEASED ||
+        lv_indev_get_scroll_obj(_wifiEditorInput)) return;
+    auto* field = _wifiEditorPending;
+    cancelWifiEditorPending();
+    // Runs in the existing GUI update, after the opening contact is released.
+    lv_dropdown_close(_wifiProfiles);
+    // Only the active editor is visible above keyboard; radio/action rows are hidden.
+    for (size_t row = 6; row < 8; ++row) lv_obj_add_flag(_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
+    for (auto* obj : {_wifiProfiles, _wifiForgetButton, _wifiOpenButton, _wifiSaveButton, _wifiRestartButton, _wifiSaveState})
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    auto* other = field == _wifiSsid ? _wifiPassword : _wifiSsid;
+    lv_obj_add_flag(other, LV_OBJ_FLAG_HIDDEN); place(field, 12, 70);
+    lv_keyboard_set_textarea(_wifiKeyboard, field); lv_obj_remove_flag(_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(_wifiKeyboard);
+}
 void CodexMicroView::wifiFieldEvent(lv_event_t* event) {
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
-    if (!self->_settingsOpen || self->_settingsDetail != 4 || self->_settingsAnimating || self->_locked || self->_suppressed ||
-        self->_rotationFault || self->_rotationPhase != RotationPhase::Idle || self->otaBusy()) return;
-    self->_activity = lv_tick_get(); const auto code = lv_event_get_code(event);
-    if (code == LV_EVENT_VALUE_CHANGED) return;
-    if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    const auto code = lv_event_get_code(event);
+    if (code == LV_EVENT_VALUE_CHANGED) { self->_activity = lv_tick_get(); return; }
+    if (code != LV_EVENT_PRESSED && code != LV_EVENT_RELEASED && code != LV_EVENT_CLICKED &&
+        code != LV_EVENT_PRESS_LOST && code != LV_EVENT_READY && code != LV_EVENT_CANCEL) return;
+    auto* field = static_cast<lv_obj_t*>(lv_event_get_current_target(event));
+    const bool isField = field == self->_wifiSsid || field == self->_wifiPassword;
+    if (isField) {
+        if (code == LV_EVENT_PRESSED) ++self->_wifiEditorDebug.presses;
+        if (code == LV_EVENT_RELEASED) ++self->_wifiEditorDebug.releases;
+        if (code == LV_EVENT_CLICKED) ++self->_wifiEditorDebug.clicks;
+        if (code == LV_EVENT_PRESSED || code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED)
+            self->_wifiEditorDebug.field = field == self->_wifiSsid ? 1U : 2U;
+    }
+    auto* input = (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) ? nullptr : lv_event_get_indev(event);
+    if (code == LV_EVENT_PRESS_LOST) {
+        self->_swipeConsumed = true; self->cancelWifiEditorPending();
+    } else if (isField && code == LV_EVENT_PRESSED) {
+        self->cancelWifiEditorPending();
+        // PRESSED precedes the bubbled sheet callback that resets swipeConsumed.
+        if (!(self->wifiEditorGuards() & ~512U) && input && lv_indev_get_type(input) == LV_INDEV_TYPE_POINTER) {
+            self->_wifiEditorPending = field; self->_wifiEditorInput = input;
+            lv_indev_get_point(input, &self->_wifiEditorStart);
+        }
+    } else if (self->wifiEditorGuards()) {
+        self->cancelWifiEditorPending();
+    } else if (isField && (code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED)) {
+        if (input && lv_indev_get_type(input) == LV_INDEV_TYPE_POINTER) {
+            lv_point_t point{}; lv_indev_get_point(input, &point);
+            if (self->_wifiEditorPending == field && self->_wifiEditorInput == input) {
+                if (std::abs(point.x - self->_wifiEditorStart.x) >= 32 || std::abs(point.y - self->_wifiEditorStart.y) >= 32 ||
+                    lv_indev_get_scroll_obj(input)) {
+                    self->_swipeConsumed = true; self->cancelWifiEditorPending();
+                } else self->_wifiEditorReleased = true;
+            } else if (code == LV_EVENT_CLICKED && !lv_indev_get_scroll_obj(input)) {
+                // Pointer CLICKED fallback only; programmatic focus is not activation.
+                self->_wifiEditorPending = field; self->_wifiEditorInput = input; self->_wifiEditorReleased = true;
+            }
+        }
+    } else if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+        self->cancelWifiEditorPending();
         lv_keyboard_set_textarea(self->_wifiKeyboard, nullptr); lv_obj_add_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
         place(self->_wifiSsid, 12, 170); place(self->_wifiPassword, 12, 224);
         lv_obj_remove_flag(self->_wifiSsid, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(self->_wifiPassword, LV_OBJ_FLAG_HIDDEN);
@@ -429,20 +518,10 @@ void CodexMicroView::wifiFieldEvent(lv_event_t* event) {
         for (auto* obj : {self->_wifiProfiles, self->_wifiForgetButton, self->_wifiOpenButton, self->_wifiSaveButton, self->_wifiRestartButton, self->_wifiSaveState})
             lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
         if (code == LV_EVENT_CANCEL) lv_textarea_set_text(self->_wifiPassword, "");
-    } else {
-        if (self->_swipeConsumed) return;
-        auto* field = static_cast<lv_obj_t*>(lv_event_get_current_target(event));
-        if (code != LV_EVENT_CLICKED || (field != self->_wifiSsid && field != self->_wifiPassword)) return;
-        lv_dropdown_close(self->_wifiProfiles);
-        // Only the active editor is visible above keyboard; radio/action rows are hidden.
-        for (size_t row = 6; row < 8; ++row) lv_obj_add_flag(self->_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
-        for (auto* obj : {self->_wifiProfiles, self->_wifiForgetButton, self->_wifiOpenButton, self->_wifiSaveButton, self->_wifiRestartButton, self->_wifiSaveState})
-            lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
-        auto* other = field == self->_wifiSsid ? self->_wifiPassword : self->_wifiSsid;
-        lv_obj_add_flag(other, LV_OBJ_FLAG_HIDDEN); place(field, 12, 70);
-        lv_keyboard_set_textarea(self->_wifiKeyboard, field); lv_obj_remove_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(self->_wifiKeyboard);
     }
+    if (code == LV_EVENT_PRESSED || code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED ||
+        code == LV_EVENT_READY || code == LV_EVENT_CANCEL) self->_activity = lv_tick_get();
+    self->publishWifiEditorDebug();
 }
 void CodexMicroView::wifiSelectionEvent(lv_event_t* event) {
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
@@ -1003,8 +1082,11 @@ void CodexMicroView::touchEvent(lv_event_t* e) {
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(e));
     if (self->_rotationFault || self->_suppressed || self->_locked || self->otaBusy() || self->_slideTo || self->_settingsAnimating || self->_rotationPhase != RotationPhase::Idle) {
         self->_touchTracking = false; self->_swipeConsumed = true;
+        self->cancelWifiEditorPending();
         return;
     }
+    if (code == LV_EVENT_PRESS_LOST) { self->_swipeConsumed = true; self->cancelWifiEditorPending(); }
+    if (code == LV_EVENT_PRESSED && self->_wifiEditorReleased) self->cancelWifiEditorPending();
     auto* input = lv_event_get_indev(e);
     if (!input || lv_indev_get_type(input) != LV_INDEV_TYPE_POINTER) return;
     lv_point_t point{}; lv_indev_get_point(input, &point);
@@ -1027,7 +1109,7 @@ void CodexMicroView::touchEvent(lv_event_t* e) {
         const int dx = point.x - self->_touchStart.x;
         const int dy = point.y - self->_touchStart.y;
         // Large horizontal motion consumes this contact even if it later drifts vertically.
-        if (std::abs(dx) >= 32 || std::abs(dy) >= 32) self->_swipeConsumed = true;
+        if (std::abs(dx) >= 32 || std::abs(dy) >= 32) { self->_swipeConsumed = true; self->cancelWifiEditorPending(); }
         if (self->_touchOnEditor) {
             if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) self->_touchTracking = false;
             return;
@@ -1696,6 +1778,8 @@ void CodexMicroView::update(const CodexMicroState& state) {
     if (!_locked && GetHAL().millis() - _batteryReadTick >= 5000) refreshBattery(GetHAL().millis());
     applyBurnInShift(touching);
     updateAnimations(tick);
+    serviceWifiEditorPending(touching);
+    publishWifiEditorDebug();
     StandbySleep::viewState(_locked,standbyDimEligible() && !_settingsAnimating && !_slideTo,_rotationFault);
 }
 }

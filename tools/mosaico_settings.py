@@ -29,6 +29,8 @@ FIELDS = {
 SAFE_KEYS = set(FIELDS) | set("temporary lease_remaining_s runtime_revision revision saved_revision pending error ble_name_b64 ble_name_mutable wifi_available wifi_count wifi_current_index wifi_pending wifi_reboot_required reboot_required restart_pending restart_error scan_error wifi_scan_error credentials_redacted accepted_owner_pending verify_wifi_list accepted_persist_pending verify_saved_revision accepted_ram_only use_get_for_state no_changes".split())
 
 
+SAFE_KEYS.update("presses clicks releases field guards keyboard_visible numeric_only".split())
+
 def valid_ssid(ssid: str) -> bool:
     return (isinstance(ssid, str) and 1 <= len(ssid.encode("utf-8")) <= 32
             and all(ord(c) >= 32 and not 0x7f <= ord(c) <= 0x9f for c in ssid))
@@ -109,7 +111,7 @@ def parser():
     p.add_argument("--port", required=True)
     p.add_argument("--uart", action="store_true", help="CRC-framed local UART; default is USB CDC")
     sub = p.add_subparsers(dest="action", required=True)
-    for action in ("get", "restore", "wifi-list"):
+    for action in ("get", "restore", "wifi-list", "ui"):
         sub.add_parser(action)
     edit = sub.add_parser("set")
     edit.add_argument("field", choices=FIELDS)
