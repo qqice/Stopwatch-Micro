@@ -1,4 +1,14 @@
 menu "Mosaico application power policy"
+    config MOSAICO_CST_SLEEP_TRIAL
+        bool "Build the unverified, one-shot CST9217 sleep trial"
+        depends on IDF_TARGET_ESP32S31
+        default n
+        help
+            Boots OFF. Only a RAM single-use debug touch-sleep 120 lease enables
+            the exact D11E/D101/D105 reference candidate. Restore D109 must echo
+            09 and a valid released D000 report is required before touch resumes.
+            No reset GPIO, rail, NVS, new task or timer. Failed restore may use
+            the normal app restart only outside OTA; not a production policy.
     config MOSAICO_UART_FIFO_RECOVERY
         bool "Experimental fixed FIFO UART recovery for interruptible idle waits"
         depends on IDF_TARGET_ESP32S31

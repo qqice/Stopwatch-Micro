@@ -61,6 +61,8 @@ private:
     void updateAsyncTest();
     void cancelAsyncTest(const char* reason, bool report);
 
+    bool _touch_trial_uart=false, _touch_trial_observing=false;
+    uint32_t _touch_trial_revision=0;
     void printHelp();
     void printStatus();
     void runSelfTest();

@@ -1,0 +1,2 @@
+# One-shot CST capability. Default boot state remains OFF.
+CONFIG_MOSAICO_CST_SLEEP_TRIAL=y

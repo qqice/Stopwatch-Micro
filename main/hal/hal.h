@@ -227,6 +227,11 @@ public:
     // idle=true pauses touch reads; wake is Function/explicit caller only.
     void setTouchIdlePolling(bool idle);
     TouchPollingInfo touchPollingInfo() const;
+    bool touchSleepAdapterReady() const;
+    int32_t touchSleepWrite(uint16_t command);
+    int32_t touchSleepRead(uint16_t reg,uint8_t* bytes,std::size_t count);
+    int32_t touchSleepProbe();
+    int32_t touchSleepReleaseProof(bool& released);
 #else
     void setTouchIdlePolling(bool) {}
     TouchPollingInfo touchPollingInfo() const { return {}; }

@@ -25,6 +25,7 @@ using namespace smooth_ui_toolkit;
 #include <host/mosaico_display_settings.h>
 #include <host/mosaico_session_monitor.h>
 #include <host/standby_sleep.h>
+#include <host/touch_sleep.h>
 #include "main_idle_wait.h"
 #include <tusb.h>
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
@@ -107,6 +108,7 @@ extern "C" void app_main(void)
         }
 #endif
 #ifdef MOSAICO_BOARD
+        TouchSleep::service(GetNetworkQuota().displayLocked(), MosaicoOta::busy() || MosaicoOta::healthPending());
         MosaicoSessions::service(GetNetworkQuota().displayLocked(), MosaicoOta::busy() || MosaicoOta::healthPending());
         MosaicoOta::healthPoll(ota_app->otaReady());
         const auto sleepBle=GetCodexMicroBle().diagnostics();

@@ -3,6 +3,7 @@
 #include "ota_public_key.h"
 #include <hal/hal.h>
 #include <host/standby_sleep.h>
+#include <host/touch_sleep.h>
 #include <cJSON.h>
 #include <esp_ota_ops.h>
 #include <esp_app_desc.h>
@@ -240,6 +241,7 @@ bool recordAttempt(const InstallPowerEvidence& power)
 }
 bool requestLocked(bool automatic, bool preserveAge = false)
 {
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (active.load() || approvedRequest.load() || imageReady || selected.load()) return false;
     if (!currentReady()) return reject("running_or_layout_not_ready");
     if (!downloadPowerSafe()) return reject("gauge_not_valid_sealed_cfg0_cal0");
@@ -346,6 +348,7 @@ uint32_t requestAgeMs()
 }
 bool request()
 {
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::lock_guard<std::mutex> guard(lock);
     { std::lock_guard<std::mutex> uiGuard(snapshotLock);
       if (busy() || imageReady || selected.load()) return false;
@@ -367,13 +370,19 @@ bool automaticCheckDue()
     std::lock_guard<std::mutex> guard(lock);
     const int64_t now = esp_timer_get_time();
     if (busy() || imageReady || selected.load() || now < nextAutomaticCheck) return false;
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (!currentReady()) { autoState.store("not_valid"); return false; }
     nextAutomaticCheck = now + 3600000000LL;
     autoState.store("checking");
+#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31
+    // Hold authoritative busy for the entire HTTP discovery interval, not just this call.
+    checking.store(true);StandbySleep::otaActivity();publish(UiStage::Checking);
+#endif
     return true;
 }
 bool discoverManifest(const char* json)
 {
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::lock_guard<std::mutex> guard(lock);
     if (active.load() || approvedRequest.load() || imageReady || selected.load()) return false;
     Descriptor d{}; const char* error = "manifest_invalid";
@@ -404,6 +413,7 @@ bool copyUiSnapshot(UiSnapshot& out)
 }
 bool approveUpdate(const char* expectedSha)
 {
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || !lowerHex(expectedSha) ||
         std::strcmp(expectedSha, ui.sha256) || !ui.signatureVerified || ui.imageVerified ||
@@ -434,6 +444,8 @@ bool setAutomaticInstall(bool enabled)
 bool takeRequest()
 {
     std::lock_guard<std::mutex> guard(lock);
+    if(!active.load() && !approvedRequest.load() && !pending.load())return false;
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (!active.load() && approvedRequest.load() && requestAgeMs() >= 120000) return reject("request_timeout");
     if (!active.load() && approvedRequest.exchange(false)) {
         if (!currentReady()) { publish(UiStage::Failed, "running_not_ready"); return false; }
@@ -452,6 +464,7 @@ void fail(const char* message)
 }
 bool beginManifest(const char* json)
 {
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || pending || writing || imageReady) return reject("manifest_out_of_sequence");
     Descriptor d{}; const char* error = "manifest_invalid";
@@ -521,6 +534,7 @@ bool installVerified()
 {
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !imageReady || selected.load()) return false;
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if ((usbBypass || automaticMode) && esp_timer_get_time() - readySince < 1500000) return false;
     // The physical bypass is explicitly confirmed by a local human/operator.
     // Use the existing manual battery-floor safety policy even when a full
@@ -550,6 +564,7 @@ bool installVerified()
 }
 bool requestCheck()
 {
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || selected.load() ||
         ui.stage == UiStage::ReadyInstall || ui.stage == UiStage::ReadyReboot ||
@@ -559,6 +574,8 @@ bool requestCheck()
 }
 bool takeCheckRequest()
 {
+    if(!checkQueued.load())return false;
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (!checkQueued.exchange(false)) return false;
     checking.store(true); StandbySleep::otaActivity(); publish(UiStage::Checking); return true;
 }
@@ -570,6 +587,7 @@ void finishCheck(bool transportOk)
 }
 bool approveInstall(const char* expectedSha)
 {
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || !lowerHex(expectedSha) || std::strcmp(expectedSha, ui.sha256) ||
         !ui.signatureVerified || !ui.imageVerified || !imageReady.load() || selected.load() ||
@@ -579,12 +597,14 @@ bool approveInstall(const char* expectedSha)
 }
 bool requestReboot()
 {
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || ui.stage != UiStage::ReadyReboot || !selected.load()) return false;
     rebootQueued.store(true); StandbySleep::otaActivity(); return true;
 }
 bool rebootWithFreshPower()
 {
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (!installPowerSafe(useManualInstallPolicy(usbBypass, automaticMode))) {
         active.store(false);
         // Boot selection is already committed; never erase the retained image
@@ -596,6 +616,11 @@ bool rebootWithFreshPower()
 }
 void processLocalRequests()
 {
+    const auto pendingStage=statusStage.load();
+    const bool installWork=active.load() && imageReady.load() && !selected.load() &&
+        (pendingStage==UiStage::ReadyInstall || pendingStage==UiStage::WaitingPower || pendingStage==UiStage::Installing);
+    if(!rebootQueued.load() && !installQueued.load() && !installWork)return;
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return;
     if (rebootQueued.exchange(false) && selected.load()) { rebootWithFreshPower(); return; }
     if (installQueued.exchange(false)) {
         automaticMode = usbBypass = false; installSince = 0; active.store(true); StandbySleep::otaActivity();
@@ -755,6 +780,7 @@ void healthPoll(bool appLoopReady)
 }
 bool rollbackTest()
 {
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::lock_guard<std::mutex> guard(lock);
     if (busy() || imageReady || selected.load() || !gaugeSafe()) return false;
     // SDK checks that another bootable image exists before changing the state.

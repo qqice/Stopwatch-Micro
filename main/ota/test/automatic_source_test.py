@@ -212,8 +212,15 @@ class AutomaticOtaSourceTests(unittest.TestCase):
 
     def test_only_manual_check_publishes_busy_checking(self):
         due = body('bool automaticCheckDue()', 'bool discoverManifest(')
-        self.assertNotIn('publish(', due)
-        self.assertNotIn('checking.store', due)
+        trial = re.search(r'#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31\n(.*?)#endif', due, re.S)
+        self.assertIsNotNone(trial)
+        default_due = due[:trial.start()] + due[trial.end():]
+        self.assertNotIn('publish(', default_due)
+        self.assertNotIn('checking.store', default_due)
+        self.assertIn('checking.store(true)', trial[1])
+        self.assertIn('publish(UiStage::Checking)', trial[1])
+        finish_check = body('void finishCheck(', 'bool approveInstall(')
+        self.assertIn('checking.store(false)', finish_check)
         manual = body('bool takeCheckRequest()', 'void finishCheck(')
         self.assertIn('checking.store(true)', manual)
         self.assertIn('publish(UiStage::Checking)', manual)

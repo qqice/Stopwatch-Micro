@@ -47,6 +47,7 @@
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include <host/standby_sleep.h>
+#include <host/touch_sleep.h>
 #include "esp_clk_tree.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
@@ -76,6 +77,9 @@ constexpr int WakeDimThreshold = 8;
 esp_lcd_panel_io_handle_t panel_io = nullptr;
 esp_lcd_panel_handle_t panel = nullptr;
 esp_lcd_touch_handle_t touch = nullptr;
+#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31
+i2c_master_dev_handle_t touch_control = nullptr; // One app-owned control adapter, same existing bus/address.
+#endif
 lv_display_t* display = nullptr;
 std::atomic<bool> port_ready{false};
 uint32_t lvgl_timer_period_ms=0; // Immutable after release publication of port_ready.
@@ -286,7 +290,7 @@ void observe_flush(lv_event_t* event)
 
 void read_touch(lv_indev_t*, lv_indev_data_t* data)
 {
-    if (touch_idle_polling.load(std::memory_order_relaxed) || !orientation_healthy.load()) {
+    if (touch_idle_polling.load(std::memory_order_relaxed) || TouchSleep::blocksTouch() || !orientation_healthy.load()) {
         // Also protects against a forced/event-driven indev read while its
         // timer is paused. Software RELEASE only: no driver I2C or read count.
         data->state = LV_INDEV_STATE_RELEASED;
@@ -1525,9 +1529,71 @@ void Hal::touchpad_init()
     config.levels.reset = 0;
     config.levels.interrupt = 0;
     ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst9217(io, &config, &touch));
+#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31
+    i2c_device_config_t control{};control.dev_addr_length=I2C_ADDR_BIT_LEN_7;
+    control.device_address=ESP_LCD_TOUCH_IO_I2C_CST9217_ADDRESS;control.scl_speed_hz=400000;
+    // Registration failure leaves the capability disabled; don't disturb the existing touch driver.
+    if(i2c_master_bus_add_device(_i2c_bus,&control,&touch_control)!=ESP_OK)touch_control=nullptr;
+#endif
 }
 
 bool Hal::touch_ready() const { return touch && lvTouchpad; }
+bool Hal::touchSleepAdapterReady() const {
+#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31
+ return touch_control && touch && port_ready.load(std::memory_order_acquire) && orientation_healthy.load() && touch_idle_polling.load();
+#else
+ return false;
+#endif
+}
+int32_t Hal::touchSleepWrite(uint16_t command) {
+#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31
+ if(!touch_control || !TouchSleep::blocksTouch())return ESP_ERR_INVALID_STATE;
+ if(command!=0xD11E && command!=0xD101 && command!=0xD105 && command!=0xD109)return ESP_ERR_INVALID_ARG;
+ // Exact two-byte wire command. Never add guessed register values or resets.
+ const uint8_t bytes[]={uint8_t(command>>8),uint8_t(command)};
+ return i2c_master_transmit(touch_control,bytes,sizeof(bytes),25);
+#else
+ (void)command;return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+int32_t Hal::touchSleepRead(uint16_t reg,uint8_t* bytes,std::size_t count) {
+#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31
+ if(!touch_control || !TouchSleep::blocksTouch() || !bytes || !count || count>10)return ESP_ERR_INVALID_STATE;
+ if(!((reg==0x0002 && (count==2 || count==4)) || (reg==0xD000 && count==10) ||
+     ((reg==0xD204 || reg==0xD1F8 || reg==0xD1FC) && count==4)))return ESP_ERR_INVALID_ARG;
+ const uint8_t address[]={uint8_t(reg>>8),uint8_t(reg)};
+ return i2c_master_transmit_receive(touch_control,address,sizeof(address),bytes,count,25);
+#else
+ (void)reg;(void)bytes;(void)count;return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+int32_t Hal::touchSleepProbe() {
+ uint8_t chip[4]{},resolution[4]{},check[4]{};
+ int32_t rc=touchSleepRead(0xD204,chip,sizeof(chip));if(rc)return rc;
+ rc=touchSleepRead(0xD1F8,resolution,sizeof(resolution));if(rc)return rc;
+ rc=touchSleepRead(0xD1FC,check,sizeof(check));if(rc)return rc;
+ const uint16_t type=uint16_t(chip[2]) | uint16_t(chip[3])<<8;
+ const uint16_t x=uint16_t(resolution[0]) | uint16_t(resolution[1])<<8;
+ const uint16_t y=uint16_t(resolution[2]) | uint16_t(resolution[3])<<8;
+ return (type==0x9217 || type==0x9220) && x==Resolution && y==Resolution && check[2]==0xCA && check[3]==0xCA ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
+}
+int32_t Hal::touchSleepReleaseProof(bool& released) {
+ released=false;uint8_t data[10]{};
+ const int32_t rc=touchSleepRead(0xD000,data,sizeof(data));if(rc)return rc;
+ if(data[6]!=0xAB)return ESP_ERR_INVALID_RESPONSE;
+ released=(data[5]&0x7F)==0;
+ // Leave a proven release available for the original driver/latch to consume
+ // immediately on resume. A held report is ACKed so a new release can arrive.
+ if(released)return ESP_OK;
+#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31
+ // Same exact acknowledgment as the reference, one bounded packet.
+ const uint8_t ack[]={0xD0,0x00,0xAB};
+ return i2c_master_transmit(touch_control,ack,sizeof(ack),25);
+#else
+ return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 
 void Hal::lvgl_init()
 {
@@ -1625,6 +1691,7 @@ void Hal::lvglUnlock() { if (port_ready) lvgl_port_unlock(); }
 
 void Hal::setTouchIdlePolling(bool idle)
 {
+    if(!idle && TouchSleep::blocksTouch()) {TouchSleep::wakeRequested();return;}
     if (!port_ready) {
         // Preserve a startup request; lvgl_init applies it to the new timer.
         touch_idle_polling.store(idle, std::memory_order_relaxed);

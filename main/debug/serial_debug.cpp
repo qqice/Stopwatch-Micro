@@ -8,6 +8,7 @@
 #include <host/system_clock.h>
 #include <host/mosaico_display_settings.h>
 #include <host/standby_sleep.h>
+#include <host/touch_sleep.h>
 #include <main_idle_wait.h>
 #include <host/uart_fifo_recovery_model.h>
 #include <host/mosaico_session_monitor.h>
@@ -208,6 +209,7 @@ void SerialDebug::end()
     cancelAsyncTest("shutdown", false);
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
     StandbySleep::cancelForActivity(); StandbySleep::uartReady(false);
+    TouchSleep::off();
     MainIdleWait::uartOwner(false);
     MainIdleWait::uartRxConfigured(false,0);
     MainIdleWait::uartRecoveryConfigured(false,0);
@@ -276,6 +278,21 @@ void SerialDebug::poll()
 #endif
     SerialDebug* previous = _writer;
     _writer = this; _reply_uart = _async_uart;
+#ifdef MOSAICO_BOARD
+    if(_touch_trial_observing) {
+        const auto trial=TouchSleep::snapshot();
+        const auto phase=trial.model.phase;
+        if(trial.model.revision!=_touch_trial_revision && (phase==TouchSleep::Phase::SleepRequested || phase==TouchSleep::Phase::Complete ||
+            phase==TouchSleep::Phase::HeldClosed || phase==TouchSleep::Phase::FailedRestored || phase==TouchSleep::Phase::RebootPending)) {
+            _touch_trial_revision=trial.model.revision;
+            _reply_uart=_touch_trial_uart;
+            char details[1000]{};TouchSleep::status(details,sizeof(details));
+            result("touch-sleep",trial.model.failed?"FAIL":phase==TouchSleep::Phase::HeldClosed?"OBSERVE":"PASS",details);
+            if(phase!=TouchSleep::Phase::SleepRequested)_touch_trial_observing=false;
+            _reply_uart=_async_uart;
+        }
+    }
+#endif
     updateAsyncTest();
     if (_async_test == AsyncTest::None) _async_uart = false;
     _reply_uart = false; _writer = previous;
@@ -427,6 +444,31 @@ void SerialDebug::handleLine(char* line)
             static_cast<unsigned long long>(s.currentRead),static_cast<unsigned long long>(s.currentSelected),static_cast<unsigned long long>(s.currentNormalSame),static_cast<unsigned long long>(s.currentFailed),pins,normal);
         if(count<0 || static_cast<size_t>(count)>=sizeof(details)) {result(command,"FAIL","reason=diagnostic_capacity");return;}
         result(command,s.error?"FAIL":"PASS",details);return;
+    }
+    if (command && !std::strcmp(command,"touch-sleep")) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        if(!action || (std::strcmp(action,"120") && std::strcmp(action,"off") && std::strcmp(action,"status")) || ::strtok_r(nullptr," \t",&save)) {
+            result(command,"FAIL","expected=120_off_status no_changes=1");return;
+        }
+        if(!std::strcmp(action,"120")) {
+            const auto sleep=StandbySleep::snapshot();
+            if(!TouchSleep::request120(_app.debugDisplayLocked(),_app.debugUiReady() && sleep.eligible,_async_test!=AsyncTest::None)) {
+                result(command,"BUSY","reason=unsupported_consumed_or_safety_gate no_changes=1");return;
+            }
+        } else if(!std::strcmp(action,"off"))TouchSleep::off();
+        const bool wait=std::strcmp(action,"status") && TouchSleep::active();
+        if(wait) {_touch_trial_uart=_reply_uart;_touch_trial_observing=true;_touch_trial_revision=TouchSleep::snapshot().model.revision;}
+        char details[1000]{};TouchSleep::status(details,sizeof(details));
+        result(command,wait?"RUNNING":"PASS",details);return;
+    }
+    if(TouchSleep::active() && command && (!std::strcmp(command,"ota-check") || !std::strcmp(command,"ota-download") ||
+        !std::strcmp(command,"ota-install") || !std::strcmp(command,"ota-update") || !std::strcmp(command,"ota-bypass") ||
+        !std::strcmp(command,"ota-reboot") || !std::strcmp(command,"ota-rollback-test"))) {
+        TouchSleep::off();result(command,"BUSY","reason=touch_sleep_restore_required no_changes=1");return;
+    }
+    if(TouchSleep::active() && command && (!std::strcmp(command,"mic") || !std::strcmp(command,"inputs") || !std::strcmp(command,"ui") ||
+        !std::strcmp(command,"transport") || !std::strcmp(command,"perf") || !std::strcmp(command,"trace") || !std::strcmp(command,"selftest"))) {
+        result(command,"BUSY","reason=touch_sleep_lease no_changes=1");return;
     }
     if (command && !std::strcmp(command,"idle-wait")) {
         const char* action=::strtok_r(nullptr," \t",&save);
@@ -1224,6 +1266,7 @@ void SerialDebug::printHelp()
 {
 #ifdef MOSAICO_BOARD
     debugPrintf("DBG HELP sleep-io report_only=1 registered_outputs_only=1\r\n");
+    debugPrintf("DBG HELP touch-sleep 120 | off | status single_use_ram_lease=1 unverified_candidate=1 sleep_verified=0\r\n");
     debugPrintf("DBG HELP idle-wait on | off | status ram_only=1 locked_event_wait_ms=500 safe_gates_required=1\r\n");
     debugPrintf("DBG HELP standby-sleep on [lease_s=180,30..300] | standby-sleep off | standby-sleep auto CONFIRM | standby-sleep status automatic_default=profile UART_wake_preamble_required=1\r\n");
     debugPrintf("DBG HELP settings get | settings set <field> <int> [lease_s=180,30..600] | settings restore | settings save CONFIRM\r\n");
