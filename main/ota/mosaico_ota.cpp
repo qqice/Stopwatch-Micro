@@ -46,7 +46,6 @@ std::atomic<bool> active{false};
 std::atomic<uint32_t> requestedAtMs{0};
 std::atomic<bool> pending{false};
 bool writing = false, hashLive = false, automaticMode = false, usbBypass = false;
-int64_t nextAutomaticCheck = 0;
 std::atomic<const char*> autoState{"idle"};
 bool currentHashChecked = false, currentHashValid = false;
 char currentHash[65]{};
@@ -367,18 +366,9 @@ bool request()
 }
 bool automaticCheckDue()
 {
-    std::lock_guard<std::mutex> guard(lock);
-    const int64_t now = esp_timer_get_time();
-    if (busy() || imageReady || selected.load() || now < nextAutomaticCheck) return false;
-    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
-    if (!currentReady()) { autoState.store("not_valid"); return false; }
-    nextAutomaticCheck = now + 3600000000LL;
-    autoState.store("checking");
-#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31
-    // Hold authoritative busy for the entire HTTP discovery interval, not just this call.
-    checking.store(true);StandbySleep::otaActivity();publish(UiStage::Checking);
-#endif
-    return true;
+    // Permanent user opt-out: discovery is manual-only, not a timed trial pause.
+    // Do not touch clocks, sleep admission, UI, or OTA state in the idle path.
+    return false;
 }
 bool discoverManifest(const char* json)
 {
@@ -669,7 +659,7 @@ void status(char* out, size_t length)
     const size_t used = std::strlen(out);
     const char* stages[] = {"idle", "checking", "available", "waiting_power", "downloading", "verifying", "ready_install", "installing", "ready_reboot", "boot_checking", "complete", "failed"};
     const unsigned stage = static_cast<unsigned>(statusStage.load());
-    std::snprintf(out + used, length - used, " stage=%s image_verified=%d selected=%d",
+    std::snprintf(out + used, length - used, " automatic_check=0 stage=%s image_verified=%d selected=%d",
         stage < sizeof(stages)/sizeof(stages[0]) ? stages[stage] : "unknown", verified.load(), selected.load());
     // Diagnostic evidence only: old journals remain valid when this key is absent.
     // Do not read NVS during OTA writes or block behind the network owner.

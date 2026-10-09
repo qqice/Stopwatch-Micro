@@ -29,7 +29,7 @@ bool busy();
 bool healthPending();
 uint32_t requestAgeMs();
 bool request(); // Caller must obtain explicit confirmation of USB/external power.
-bool automaticCheckDue(); // Network owner only; online hourly discovery, never wakes radio.
+bool automaticCheckDue(); // Always false: permanent manual-only discovery policy.
 bool requestAutomatic(const char* manifest);
 bool takeRequest(); // Only the network owner consumes requests and writes images.
 bool beginManifest(const char* json);

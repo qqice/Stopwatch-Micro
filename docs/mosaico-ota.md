@@ -5,6 +5,16 @@ Device-initiated update to0.6.1, failing-candidate rollback and persistent faile
 suppression were observed using read-only USB diagnostics, with no update/wake trigger.
 Factory build/layout remains separate from the new rollback-enabled OTA build.
 
+## Current discovery policy: manual-only
+
+Automatic background discovery is permanently disabled by user choice, including
+sleep-trial builds; it is not an hourly delay or temporary measurement override.
+`debug ota-status` reports `automatic_check=0`. Use the existing CHECK action
+(or `debug ota-check`) to discover releases, then DOWNLOAD / UPGRADE / REBOOT.
+The automatic-install preference and explicitly authorized UART/USB `ota-bypass`
+flow are unchanged. Signature, health, power, slot and rollback gates still apply.
+The unattended acceptance above records historical behavior, not current policy.
+
 ## Exact S31 layout
 
 | Region | Offset | Size | Action |

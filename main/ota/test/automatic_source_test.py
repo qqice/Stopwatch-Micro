@@ -4,7 +4,6 @@ import pathlib
 import re
 import types
 import unittest
-from esptool.bin_image import LoadFirmwareImage
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 SOURCE = (ROOT / 'main/ota/mosaico_ota.cpp').read_text()
@@ -30,14 +29,14 @@ class AutomaticOtaSourceTests(unittest.TestCase):
         self.assertIn('GaugeBootReloadStatus::Critical', power)
         self.assertNotIn('reportedSoc', power)
 
-    def test_due_valid_and_hour_cadence_without_power_gate(self):
-        due = body('bool automaticCheckDue()', 'bool requestAutomatic(')
-        self.assertLess(due.index('now < nextAutomaticCheck'), due.index('currentReady()'))
-        self.assertNotIn('automaticPowerSafe()', due)
-        self.assertIn('nextAutomaticCheck = now + 3600000000LL;', due)
-        self.assertNotRegex(due, r'wake|wifi_|nvs_set|nvs_commit')
+    def test_due_permanently_disabled_without_side_effects(self):
+        due = body('bool automaticCheckDue()', 'bool discoverManifest(')
+        code = re.sub(r'//[^\n]*', '', due)
+        self.assertEqual(' '.join(code.split()), '{ return false; }')
+        self.assertNotIn('nextAutomaticCheck', SOURCE)
 
     def test_sdk_image_length_and_whole_bin_hash_model(self):
+        from esptool.bin_image import LoadFirmwareImage
         sdk = pathlib.Path('C:/esp/v6.1/esp-idf/components/bootloader_support/src/esp_image_format.c').read_text()
         appended = sdk.split('static esp_err_t process_appended_hash_and_sig(', 2)[-1].split('uint32_t sig_block_len', 1)[0]
         self.assertIn('if (data->image.hash_appended)', appended)
@@ -171,8 +170,6 @@ class AutomaticOtaSourceTests(unittest.TestCase):
             self.assertNotRegex(queue, r'batteryTelemetry|esp_ota_|esp_restart|nvs_|requestJson')
         install_queue = body('bool approveInstall(', 'bool requestReboot()')
         self.assertIn('std::strcmp(expectedSha, ui.sha256)', install_queue)
-        due = body('bool automaticCheckDue()', 'bool discoverManifest(')
-        self.assertIn('imageReady || selected.load()', due)
         # A bounded TWT event-drain loop precedes run(); only the actual network
         # owner loop is relevant to offline INSTALL/REBOOT ordering.
         owner = (ROOT / 'main/host/network_quota.cpp').read_text().split('void NetworkQuota::run()', 1)[1].split('while (true) {', 1)[1]
@@ -212,13 +209,8 @@ class AutomaticOtaSourceTests(unittest.TestCase):
 
     def test_only_manual_check_publishes_busy_checking(self):
         due = body('bool automaticCheckDue()', 'bool discoverManifest(')
-        trial = re.search(r'#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31\n(.*?)#endif', due, re.S)
-        self.assertIsNotNone(trial)
-        default_due = due[:trial.start()] + due[trial.end():]
-        self.assertNotIn('publish(', default_due)
-        self.assertNotIn('checking.store', default_due)
-        self.assertIn('checking.store(true)', trial[1])
-        self.assertIn('publish(UiStage::Checking)', trial[1])
+        self.assertNotIn('publish(', due)
+        self.assertNotIn('checking.store', due)
         finish_check = body('void finishCheck(', 'bool approveInstall(')
         self.assertIn('checking.store(false)', finish_check)
         manual = body('bool takeCheckRequest()', 'void finishCheck(')
