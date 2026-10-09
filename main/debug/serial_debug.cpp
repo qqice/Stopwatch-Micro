@@ -837,6 +837,12 @@ void SerialDebug::handleLine(char* line)
                       static_cast<unsigned long>(network.historyAccepted()),
                       static_cast<unsigned long>(network.historyFailures()));
         result("network", "PASS", details);
+        for (unsigned path = 0; path < 4; ++path) {
+            const auto d = GetTailnetQuota().fetchDiagnostics(static_cast<TailnetQuota::FetchPath>(path));
+            debugPrintf("DBG TAIL_FETCH path=%u stage=%u http=%d received=%lu content_length=%lu elapsed_ms=%lu result=%u\r\n",
+                        path, static_cast<unsigned>(d.stage), d.httpStatus, static_cast<unsigned long>(d.received),
+                        static_cast<unsigned long>(d.contentLength), static_cast<unsigned long>(d.elapsedMs), d.result ? 1U : 0U);
+        }
 #ifdef MOSAICO_BOARD
         std::snprintf(details, sizeof(details), "connect_attempts=%lu locked_budget_closures=%lu locked_attempt_limit=3 awake_backoff_ms=5000,15000,60000 credentials_redacted=1",
             static_cast<unsigned long>(network.wifiConnectAttempts()),

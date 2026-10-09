@@ -6,6 +6,7 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -16,6 +17,7 @@ extern "C" esp_err_t ml_noise_selftest(void);
 
 namespace {
 TailnetQuota instance;
+portMUX_TYPE fetchDiagnosticsMux = portMUX_INITIALIZER_UNLOCKED;
 bool parseUrl(const char* url, char* host, uint16_t& port, uint32_t& peer, char* path)
 {
     unsigned a, b, c, d, p;
@@ -141,12 +143,42 @@ uint32_t TailnetQuota::ip() const
 {
     return _client ? microlink_get_vpn_ip(_client) : 0;
 }
+TailnetQuota::FetchDiagnostics TailnetQuota::fetchDiagnostics(FetchPath path) const
+{
+    const unsigned index = static_cast<unsigned>(path);
+    if (index >= 4) return {};
+    portENTER_CRITICAL(&fetchDiagnosticsMux);
+    const auto value = _fetch_diagnostics[index];
+    portEXIT_CRITICAL(&fetchDiagnosticsMux);
+    return value;
+}
+void TailnetQuota::publishFetchDiagnostics(FetchPath path, const FetchDiagnostics& value)
+{
+    portENTER_CRITICAL(&fetchDiagnosticsMux);
+    _fetch_diagnostics[static_cast<unsigned>(path)] = value;
+    portEXIT_CRITICAL(&fetchDiagnosticsMux);
+}
 bool TailnetQuota::fetch(const char* token, char* body, size_t capacity, int& length, const char* pathOverride)
 {
+    const int64_t started = esp_timer_get_time();
+    const char* path = pathOverride ? pathOverride : _path;
+    const FetchPath kind = !std::strcmp(path, "/v1/history") || !std::strcmp(path, "/v2/history") ? FetchPath::History :
+        !std::strncmp(path, "/v1/ota/", 8) ? FetchPath::Ota :
+        !pathOverride || !std::strcmp(path, "/v2/status") ? FetchPath::Quota : FetchPath::Other;
+    FetchDiagnostics diagnostic{};
+    auto finish = [&](FetchStage stage, bool result) {
+        diagnostic.stage = stage;
+        diagnostic.result = result;
+        const int64_t ms = (esp_timer_get_time() - started) / 1000;
+        diagnostic.elapsedMs = ms <= 0 ? 0 : ms > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(ms);
+        publishFetchDiagnostics(kind, diagnostic);
+        return result;
+    };
     length = 0;
-    if (_pause_requested || !_client || !microlink_is_connected(_client) || !body || capacity < 2) return false;
+    if (_pause_requested || !_client || !microlink_is_connected(_client)) return finish(FetchStage::NotReady, false);
+    if (!body || capacity < 2) return finish(FetchStage::Input, false);
     auto* socket = microlink_tcp_connect(_client, _peer, _port, 7000);
-    if (!socket) return false;
+    if (!socket) return finish(FetchStage::Connect, false);
     char request[640]{};
     const int requestLength =
         std::snprintf(request, sizeof(request),
@@ -156,20 +188,24 @@ bool TailnetQuota::fetch(const char* token, char* body, size_t capacity, int& le
               microlink_tcp_send(socket, request, requestLength) == ESP_OK;
     std::memset(request, 0, sizeof(request));
     char* response         = static_cast<char*>(heap_caps_calloc(1, capacity + 2048, MALLOC_CAP_SPIRAM));
+    FetchStage failure = !ok ? FetchStage::Send : !response ? FetchStage::Allocation : FetchStage::None;
     size_t used            = 0;
     char* payload          = nullptr;
     size_t contentLength   = 0;
     const int64_t deadline = esp_timer_get_time() + 10000000;
     while (ok && response && used < capacity + 2047 && esp_timer_get_time() < deadline) {
         const int count = microlink_tcp_recv(socket, response + used, capacity + 2047 - used, 2000);
-        if (count < 0) break;
+        if (count < 0) { failure = FetchStage::Receive; break; }
         if (!count) continue;
         used += count;
+        diagnostic.received = static_cast<uint32_t>(used);
         response[used] = 0;
         if (!payload) {
+            if (std::strstr(response, "\r\n")) std::sscanf(response, "HTTP/%*u.%*u %3d", &diagnostic.httpStatus);
             char* split = std::strstr(response, "\r\n\r\n");
             if (!split) {
                 if (used >= 2048) {
+                    failure = FetchStage::Header;
                     ok = false;
                     break;
                 }
@@ -177,18 +213,25 @@ bool TailnetQuota::fetch(const char* token, char* body, size_t capacity, int& le
             }
             payload = split + 4;
             *split  = 0;
+            const char* header = strcasestr(response, "\r\nContent-Length:");
+            if (header) {
+                const unsigned long n = std::strtoul(header + 17, nullptr, 10);
+                diagnostic.contentLength = n > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(n);
+            }
             if (std::strncmp(response, "HTTP/1.1 200 ", 13) != 0 && std::strncmp(response, "HTTP/1.0 200 ", 13) != 0) {
+                failure = FetchStage::HttpStatus;
                 ok = false;
                 break;
             }
-            const char* header = strcasestr(response, "\r\nContent-Length:");
             if (!header || strcasestr(response, "\r\nTransfer-Encoding:")) {
+                failure = FetchStage::Header;
                 ok = false;
                 break;
             }
             char* end       = nullptr;
             unsigned long n = std::strtoul(header + 17, &end, 10);
             if (!end || (*end != '\r' && *end != 0) || !n || n >= capacity) {
+                failure = end && (*end == '\r' || *end == 0) && n >= capacity ? FetchStage::Oversize : FetchStage::Header;
                 ok = false;
                 break;
             }
@@ -205,5 +248,8 @@ bool TailnetQuota::fetch(const char* token, char* body, size_t capacity, int& le
     }
     free(response);
     microlink_tcp_close(socket);
-    return ok;
+    if (!ok && failure == FetchStage::None)
+        failure = used >= capacity + 2047 ? FetchStage::Oversize :
+            esp_timer_get_time() >= deadline ? FetchStage::Deadline : FetchStage::Incomplete;
+    return finish(ok ? FetchStage::Success : failure, ok);
 }
