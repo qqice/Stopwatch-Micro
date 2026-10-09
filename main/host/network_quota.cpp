@@ -5,6 +5,7 @@
 #include "token_history.h"
 #ifdef MOSAICO_BOARD
 #include "quota_monitor.h"
+#include "mosaico_quota_request_policy.h"
 #include "mosaico_display_settings.h"
 #include "mosaico_session_monitor.h"
 #include "wifi_retry_model.h"
@@ -1245,6 +1246,9 @@ void NetworkQuota::run()
         const bool twtMeasure = _twt.live();
         const uint16_t twtFetchId = _twt.state.id;
 #endif
+#ifdef MOSAICO_BOARD
+        const MosaicoQuota::RequestPolicy requestPolicy{displayLocked()};
+#endif
         const bool quotaOk = fetch();
         if (quotaOk)
             ++_accepted;
@@ -1258,8 +1262,15 @@ void NetworkQuota::run()
             _twt.state.stage != MosaicoTwt::Stage::Armed && _twt.state.stage != MosaicoTwt::Stage::Negotiating &&
             (!twtMeasure || (_twt.live() && _twt.state.id == twtFetchId));
 #endif
+        // Re-read the authoritative UI lock after quota and trial servicing:
+        // a newly locked view must not start the larger history transfer.
+#ifdef MOSAICO_BOARD
+        const bool historyRequired = requestPolicy.historyRequired(displayLocked());
+#else
+        const bool historyRequired = true;
+#endif
         bool historyOk = false, historyAttempted = false;
-        if ((!GetTailnetQuota().enabled() || GetTailnetQuota().ready())
+        if (historyRequired && (!GetTailnetQuota().enabled() || GetTailnetQuota().ready())
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
             && twtHistoryAllowed
 #endif
@@ -1271,18 +1282,27 @@ void NetworkQuota::run()
             else
                 ++_history_failures;
         }
+#ifdef MOSAICO_BOARD
+        const bool requestsOk = MosaicoQuota::requestsSucceeded(quotaOk, historyRequired, historyOk);
+#else
+        const bool requestsOk = quotaOk && historyOk;
+#endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
         recordTwtCycle(MosaicoTwt::CyclePhase::Fetch, MosaicoTwt::CycleReason::None,
             1 | (quotaOk ? 2 : 0) | (historyAttempted ? 4 : 0) | (historyOk ? 8 : 0));
         serviceTwtTrial(esp_timer_get_time(), idleLocked()); // Also before the next wait/idle transition.
-        if (twtMeasure && _twt.state.id == twtFetchId) {
+        if (twtMeasure && _twt.state.id == twtFetchId && _twt.live()) {
             ++_twt.state.fetchAttempts;
-            if (quotaOk && historyOk) ++_twt.state.fetchOk;
+            if (requestsOk) ++_twt.state.fetchOk;
             _twt.state.fetchUs += static_cast<uint64_t>(esp_timer_get_time() - twtFetchStart);
             publishTwt();
         }
 #endif
-        if (locked && quotaOk && historyOk) {
+        if (locked && requestsOk
+#ifdef MOSAICO_BOARD
+            && updateWindow && idleLocked()
+#endif
+            ) {
             ++_power_cycles;
             closeWindow(MosaicoTwt::CycleReason::Success);
             continue;
