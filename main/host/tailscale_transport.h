@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
+#include <wireguardif_rx_stats.h>
 struct microlink_s;
 class TailnetQuota {
 public:
@@ -19,6 +20,7 @@ public:
         bool result = false;
     };
     FetchDiagnostics fetchDiagnostics(FetchPath path) const;
+    wireguardif_rx_stats_t rxDiagnostics() const;
     void load();
     bool configure(const char* base64);
     bool enabled() const

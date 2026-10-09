@@ -110,7 +110,8 @@ static_assert(unsigned(FetchStage::None)==0 && unsigned(FetchStage::Success)==12
             source = Path(directory) / 'diagnostics.cpp'
             source.write_text(harness, encoding='utf8')
             result = subprocess.run([str(compilers[-1]), '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                                     '-fsyntax-only', '-I', str(R / 'main/host'), str(source)],
+                                     '-fsyntax-only', '-I', str(R / 'main/host'),
+                                     '-I', str(R / 'components/microlink-source/components/microlink/components/wireguard_lwip/src'), str(source)],
                                     capture_output=True, text=True)
         log = R / '.artifacts/mosaico/tailnet-fetch-diagnostics-source-harness.log'
         log.parent.mkdir(parents=True, exist_ok=True)

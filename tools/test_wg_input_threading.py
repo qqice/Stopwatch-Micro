@@ -17,7 +17,7 @@ WG = MICROLINK / "components/wireguard_lwip/src/wireguardif.c"
 MGR = MICROLINK / "src/ml_wg_mgr.c"
 DISPATCH = re.compile(
     r"if \(device->netif->input && device->netif->input\(pbuf, device->netif\) == ERR_OK\) \{"
-    r"\s*pbuf = NULL;\s*\}"
+    r"\s*pbuf = NULL;\s*wireguardif_rx_count\(WG_RX_INPUT_OK\);\s*\}"
 )
 CLEANUP = re.compile(r"if \(pbuf\) \{\s*pbuf_free\(pbuf\);\s*\}")
 
@@ -57,6 +57,8 @@ class WireguardInputTests(unittest.TestCase):
 #include <stddef.h>
 #define ERR_OK 0
 #define ERR_MEM -1
+#define WG_RX_INPUT_OK 0
+#define wireguardif_rx_count(x) ((void)(x))
 struct pbuf { int unused; };
 struct netif { int (*input)(struct pbuf *, struct netif *); };
 struct device { struct netif *netif; };

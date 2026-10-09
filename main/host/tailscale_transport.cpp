@@ -37,6 +37,10 @@ TailnetQuota& GetTailnetQuota()
 {
     return instance;
 }
+wireguardif_rx_stats_t TailnetQuota::rxDiagnostics() const
+{
+    return wireguardif_rx_stats();
+}
 bool TailnetQuota::configure(const char* encoded)
 {
     unsigned char decoded[768]{};

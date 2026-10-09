@@ -836,7 +836,24 @@ void SerialDebug::handleLine(char* line)
                       static_cast<unsigned long>(network.failures()),
                       static_cast<unsigned long>(network.historyAccepted()),
                       static_cast<unsigned long>(network.historyFailures()));
-        result("network", "PASS", details);
+        const auto rx = GetTailnetQuota().rxDiagnostics();
+        debugPrintf("DBG TAIL_RX derp_frame=%lu derp_enqueue=%lu derp_drop=%lu wg_dequeue=%lu wg_unavailable=%lu pbuf_fail=%lu receiver_index_miss=%lu key_reject=%lu inner_pbuf_fail=%lu decrypt_fail=%lu replay_drop=%lu inner_reject=%lu inner_ok=%lu input_ok=%lu input_error=%lu tcp_synack=%lu\r\n",
+                    static_cast<unsigned long>(rx.derp_frame),
+                    static_cast<unsigned long>(rx.derp_enqueue),
+                    static_cast<unsigned long>(rx.derp_drop),
+                    static_cast<unsigned long>(rx.wg_dequeue),
+                    static_cast<unsigned long>(rx.wg_unavailable),
+                    static_cast<unsigned long>(rx.pbuf_fail),
+                    static_cast<unsigned long>(rx.receiver_index_miss),
+                    static_cast<unsigned long>(rx.key_reject),
+                    static_cast<unsigned long>(rx.inner_pbuf_fail),
+                    static_cast<unsigned long>(rx.decrypt_fail),
+                    static_cast<unsigned long>(rx.replay_drop),
+                    static_cast<unsigned long>(rx.inner_reject),
+                    static_cast<unsigned long>(rx.inner_ok),
+                    static_cast<unsigned long>(rx.input_ok),
+                    static_cast<unsigned long>(rx.input_error),
+                    static_cast<unsigned long>(rx.tcp_synack));
         for (unsigned path = 0; path < 4; ++path) {
             const auto d = GetTailnetQuota().fetchDiagnostics(static_cast<TailnetQuota::FetchPath>(path));
             debugPrintf("DBG TAIL_FETCH path=%u stage=%u http=%d received=%lu content_length=%lu elapsed_ms=%lu result=%u\r\n",
@@ -844,11 +861,13 @@ void SerialDebug::handleLine(char* line)
                         static_cast<unsigned long>(d.contentLength), static_cast<unsigned long>(d.elapsedMs), d.result ? 1U : 0U);
         }
 #ifdef MOSAICO_BOARD
-        std::snprintf(details, sizeof(details), "connect_attempts=%lu locked_budget_closures=%lu locked_attempt_limit=3 awake_backoff_ms=5000,15000,60000 credentials_redacted=1",
+        char retryDetails[192]{};
+        std::snprintf(retryDetails, sizeof(retryDetails), "connect_attempts=%lu locked_budget_closures=%lu locked_attempt_limit=3 awake_backoff_ms=5000,15000,60000 credentials_redacted=1",
             static_cast<unsigned long>(network.wifiConnectAttempts()),
             static_cast<unsigned long>(network.wifiBudgetClosures()));
-        debugPrintf("DBG WIFI_RETRY %s\r\n", details);
+        debugPrintf("DBG WIFI_RETRY %s\r\n", retryDetails);
 #endif
+        result("network", "PASS", details);
         return;
     }
 #ifdef MOSAICO_BOARD
