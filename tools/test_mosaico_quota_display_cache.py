@@ -23,10 +23,14 @@ struct Harness {
  QuotaMonitorSnapshot snapshot{}, replacement{};
  QuotaMonitorSnapshot* _quota = &snapshot;
  uint32_t _quotaRevision = UINT32_MAX;
+ DisplayAge _quotaAge;
  bool copyValid = false;
  constexpr bool CopyQuotaMonitor(QuotaMonitorSnapshot& out, uint32_t now) {
   if (!copyValid) return false;
-  out = replacement; ageCache(out, now); return true;
+  out = replacement;
+  const uint64_t age=static_cast<uint64_t>(out.ageSecondsAtReceipt)+(now-out.receivedAtMs)/1000U;
+  out.ageSeconds=static_cast<uint32_t>(age);out.stale=age>130;out.available=age<=600;
+  return true;
  }
  constexpr bool refresh(uint32_t now) {
 ''' + acquisition + r'''
@@ -67,6 +71,34 @@ constexpr bool cases() {
  empty.capturedEpoch=1;if(hasSnapshot(empty,false))return false;
  empty.bucketCount=0;return !hasSnapshot(empty,true);
 }
+constexpr bool wrapCases() {
+ Harness h;h.copyValid=true;h.replacement.bucketCount=1;h.replacement.capturedEpoch=100000;
+ h.replacement.revision=10;h.replacement.receivedAtMs=1000;
+ h.replacement.buckets[0].windows[0]={true,8123,300,110000};
+ if(!h.refresh(1000))return false;
+ uint32_t now=1000;uint64_t elapsed=0;
+ // Frequent GUI deltas span a complete 49.7-day cycle, with success/failure interleaved.
+ for(unsigned i=0;i<4294;++i) {
+  now+=1000000U;elapsed+=1000000ULL;h.copyValid=(i%2)==0;
+  if(!h.refresh(now) || h._quotaAge.secondsAt(now)!=elapsed/1000)return false;
+  if(elapsed>=11000000 && (h.snapshot.available || !h.snapshot.stale ||
+      percentKnown(h.snapshot.buckets[0].windows[0],100000+h._quotaAge.secondsAt(now))))return false;
+ }
+ // At the original millis timestamp modulo a full cycle, raw copy appears fresh.
+ now=1000;h.copyValid=true;
+ if(!h.refresh(now) || h.snapshot.available || !h.snapshot.stale)return false;
+ const uint64_t epoch=100000+h._quotaAge.secondsAt(now);
+ const auto& w=h.snapshot.buckets[0].windows[0];
+ if(percentKnown(w,epoch) || w.remainingBasisPoints!=8123)return false;
+ const auto time=mosaico_time::countdown(w.available,h.snapshot.capturedEpoch,w.resetEpoch,epoch);
+ if(!time.known || time.minutes!=0)return false;
+ // Only an actually accepted new revision can restart age/replace the old deadline.
+ h.replacement.revision=11;h.replacement.receivedAtMs=now;h.replacement.capturedEpoch=200000;
+ h.replacement.buckets[0].windows[0]={true,9234,300,210000};
+ if(!h.refresh(now) || h._quotaAge.secondsAt(now)!=0 || !h.snapshot.available || h.snapshot.stale)return false;
+ return percentKnown(h.snapshot.buckets[0].windows[0],200000);
+}
+static_assert(wrapCases(),"millis full wrap and repeated modulo copies cannot revive an old window");
 static_assert(cases(),"last validated cache survives age/copy failures without extending reset deadlines");
 '''
         with tempfile.TemporaryDirectory() as directory:

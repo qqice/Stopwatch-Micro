@@ -1333,7 +1333,7 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
     for (auto* obj : {_otaChips[0], _otaChips[1]}) setMotion(obj, meterPhase, otaMotion);
     setMotion(_batteryIcon, phase, _batteryValid && _batteryCharging);
     const uint32_t now = GetHAL().millis();
-    const uint64_t age = static_cast<uint64_t>(_quota->ageSecondsAtReceipt) + (now - _quota->receivedAtMs) / 1000U;
+    const uint64_t age = _quotaAge.secondsAt(now);
     const bool quotaActive = _page == Page::Command && _quotaRevision != UINT32_MAX && _quota->available && !_quota->stale && age <= 130 && GetNetworkQuota().connected();
     for (size_t i = 0; i < _resetIcons.size(); ++i) {
         const bool active = quotaActive && _quota->resetCreditsKnown && _quota->resetCredits && !lv_obj_has_flag(_resetIcons[i], LV_OBJ_FLAG_HIDDEN);
@@ -1356,12 +1356,11 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
     }
 }
 void CodexMicroView::refreshQuota(uint32_t now) {
-    if (CopyQuotaMonitor(*_quota, now)) {
-        _quotaRevision = _quota->revision;
-    } else if (_quotaRevision != UINT32_MAX) {
-        // Failed mutex acquisition must not freeze cached freshness indefinitely.
-        mosaico_quota_display::ageCache(*_quota, now);
-    }
+    const bool copied = CopyQuotaMonitor(*_quota, now);
+    // Incremental uptime keeps the same validated revision aging across millis wrap,
+    // including failed copies and successful copies whose backend age wrapped.
+    _quotaAge.refresh(*_quota, copied, _quotaRevision != UINT32_MAX, now);
+    if (copied) _quotaRevision = _quota->revision;
     const bool displayKnown = mosaico_quota_display::hasSnapshot(*_quota, _quotaRevision != UINT32_MAX);
     char buf[128];
     if (!_batterySeen || _locked || now - _batteryReadTick >= 5000) refreshBattery(now);
@@ -1381,7 +1380,7 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     else lv_obj_remove_flag(_quotaStatus, LV_OBJ_FLAG_HIDDEN);
     if (displayKnown && _quota->bucketCount > 1) lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_SCROLLABLE);
     else { lv_obj_remove_flag(_quotaPage, LV_OBJ_FLAG_SCROLLABLE); lv_obj_scroll_to_y(_quotaPage, 0, LV_ANIM_OFF); }
-    const uint64_t epoch = static_cast<uint64_t>(_quota->capturedEpoch) + _quota->ageSeconds;
+    const uint64_t epoch = static_cast<uint64_t>(_quota->capturedEpoch) + _quotaAge.secondsAt(now);
     for (size_t i = 0; i < _cards.size(); ++i) {
         if (!displayKnown || i >= _quota->bucketCount) { lv_obj_add_flag(_cards[i], LV_OBJ_FLAG_HIDDEN); continue; }
         lv_obj_remove_flag(_cards[i], LV_OBJ_FLAG_HIDDEN);

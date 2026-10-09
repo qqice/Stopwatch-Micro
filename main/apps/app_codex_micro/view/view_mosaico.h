@@ -11,6 +11,7 @@
 #include <host/mosaico_display_settings.h>
 #include <host/mosaico_session_monitor.h>
 #include "charge_supply_state.h"
+#include "quota_display_cache.h"
 
 namespace view {
 class CodexMicroView {
@@ -223,6 +224,7 @@ private:
     lv_obj_t* _trendHint = nullptr;
     uint32_t _trendAgeKey = UINT32_MAX;
     std::unique_ptr<QuotaMonitorSnapshot> _quota;
+    mosaico_quota_display::DisplayAge _quotaAge;
     std::unique_ptr<TokenHistorySnapshot> _history;
     Page _page = Page::Command;
     int _standbyDimBrightness = -1; // RAM-only lease; zero is valid.
