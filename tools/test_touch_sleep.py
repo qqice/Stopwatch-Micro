@@ -100,13 +100,14 @@ static_assert(cases(),"touch-first and OTA-first fence, nested guards, HTTP inte
 ''','admission')
  def test_actual_ota_noop_prefix_does_not_construct_restore_guard(self):
   ota=(R/'main/ota/mosaico_ota.cpp').read_text()
-  for name in ['bool automaticCheckDue()', 'bool takeCheckRequest()', 'bool takeRequest()', 'void processLocalRequests()', 'bool installVerified()']:
+  for name in ['bool takeCheckRequest()', 'bool takeRequest()', 'void processLocalRequests()', 'bool installVerified()']:
    body=function(ota,name);prefix=body[:body.index('TouchSleep::OtaAdmission')]
    self.assertIn('return',prefix,name)
   due=function(ota,'bool automaticCheckDue()');finish=function(ota,'void finishCheck(')
-  self.assertLess(due.index('now < nextAutomaticCheck'),due.index('TouchSleep::OtaAdmission'))
-  self.assertIn('checking.store(true);StandbySleep::otaActivity();publish(UiStage::Checking)',due)
-  self.assertIn('#if CONFIG_MOSAICO_CST_SLEEP_TRIAL && CONFIG_IDF_TARGET_ESP32S31',due)
+  self.assertEqual(' '.join(re.sub(r'//[^\n]*','',due).split()),'bool automaticCheckDue() { return false; }')
+  self.assertIn('TouchSleep::OtaAdmission',function(ota,'bool requestCheck()'))
+  manual=function(ota,'bool takeCheckRequest()')
+  self.assertIn('checking.store(true); StandbySleep::otaActivity(); publish(UiStage::Checking)',manual)
   self.assertIn('checking.store(false)',finish)
   network=(R/'main/host/network_quota.cpp').read_text()
   self.assertIn('MosaicoOta::finishCheck(downloaded)',network)
@@ -114,8 +115,9 @@ static_assert(cases(),"touch-first and OTA-first fence, nested guards, HTTP inte
   ota=(R/'main/ota/mosaico_ota.cpp').read_text()
   due=function(ota,'bool automaticCheckDue()').replace('bool automaticCheckDue()', 'constexpr bool automaticCheckDue()')
   finish=function(ota,'void finishCheck(').replace('void finishCheck(', 'constexpr void finishCheck(')
-  snippets=[due,finish]
-  for signature in ['bool takeCheckRequest()', 'bool takeRequest()', 'void processLocalRequests()', 'bool installVerified()']:
+  take=function(ota,'bool takeCheckRequest()').replace('bool takeCheckRequest()', 'constexpr bool takeCheckRequest()')
+  snippets=[due,take,finish]
+  for signature in ['bool takeRequest()', 'void processLocalRequests()', 'bool installVerified()']:
    full=function(ota,signature);prefix=full[:full.index('TouchSleep::OtaAdmission')]
    ret='return;' if signature.startswith('void') else 'return true;'
    snippets.append('constexpr '+prefix+'const auto touchGuard=admit(); if(!touchGuard)'+('return;' if signature.startswith('void') else 'return false;')+ret+'}')
@@ -129,27 +131,34 @@ struct Actor {
  TouchSleep::AdmissionModel gate;
  Value<bool> imageReady{false},selected{false},checking{false},checkQueued{false},active{false},approvedRequest{false},pending{false},installQueued{false},rebootQueued{false};
  Value<UiStage> statusStage{UiStage::Idle};Value<const char*> autoState{nullptr};
- int64_t now=0,nextAutomaticCheck=100;unsigned guardCalls=0,restoreRequests=0;
+ int64_t now=0;unsigned guardCalls=0,restoreRequests=0,clockCalls=0,activityCalls=0,publishCalls=0;
  constexpr bool busy(){return checking.load()||checkQueued.load()||active.load()||approvedRequest.load()||installQueued.load()||rebootQueued.load();}
  constexpr bool admit(){++guardCalls;if(!gate.enterOta()){++restoreRequests;return false;}gate.leaveOta();return true;}
- constexpr int64_t esp_timer_get_time(){return now;}
+ constexpr int64_t esp_timer_get_time(){++clockCalls;return now;}
  constexpr bool currentReady(){return true;}
- constexpr void otaActivity(){}
- constexpr void publish(UiStage stage,const char* =nullptr){statusStage.store(stage);}
+ constexpr void otaActivity(){++activityCalls;}
+ constexpr void publish(UiStage stage,const char* =nullptr){++publishCalls;statusStage.store(stage);}
 '''+actual+r'''
 };
 constexpr bool cases(){
  Actor a;a.gate.reserveTouch(false);
  if(a.automaticCheckDue()||a.takeCheckRequest()||a.takeRequest()||a.installVerified())return false;
  a.processLocalRequests();if(a.guardCalls||a.restoreRequests)return false;
- a.now=100;if(a.automaticCheckDue()||a.guardCalls!=1||a.restoreRequests!=1||a.checking.load())return false;
- a.gate.releaseTouch();if(!a.automaticCheckDue()||!a.checking.load()||a.statusStage.load()!=UiStage::Checking)return false;
- // Same production due/finish bodies: HTTP interval remains busy after the guard function returns.
+ // Automatic discovery is permanently inert, even beyond the former hourly cadence.
+ for(int i=0;i<10;++i){a.now+=3600000000LL;if(a.automaticCheckDue())return false;}
+ if(a.guardCalls||a.restoreRequests||a.clockCalls||a.activityCalls||a.publishCalls||a.checking.load()||a.autoState.load()!=nullptr||a.statusStage.load()!=UiStage::Idle||!a.gate.touchReserved)return false;
+ // Actual manual consumer retains its request if touch admission is denied.
+ a.checkQueued.store(true);
+ if(a.takeCheckRequest()||a.guardCalls!=1||a.restoreRequests!=1||a.checking.load()||!a.checkQueued.load())return false;
+ a.gate.releaseTouch();if(!a.takeCheckRequest()||!a.checking.load()||a.checkQueued.load()||a.statusStage.load()!=UiStage::Checking)return false;
+ // Same production manual take/finish bodies: HTTP busy outlives the flight token.
+ const unsigned guards=a.guardCalls,activities=a.activityCalls,publishes=a.publishCalls;
+ if(a.automaticCheckDue()||a.guardCalls!=guards||a.activityCalls!=activities||a.publishCalls!=publishes||!a.checking.load()||a.statusStage.load()!=UiStage::Checking)return false;
  if(a.gate.reserveTouch(a.busy()))return false;
  a.finishCheck(true);if(a.busy()||a.statusStage.load()!=UiStage::Idle)return false;
  return a.gate.reserveTouch(a.busy());
 }
-static_assert(cases(),"actual no-op probe prefixes cannot cancel lease; actual due/finish hold checking across HTTP");
+static_assert(cases(),"automatic discovery never touches lease/state; actual manual take/finish fence HTTP lifetime");
 ''','actual-ota-probes')
  def test_hal_exact_narrow_wire_deadlines_and_no_gpio_fallback(self):
   hal=(R/'main/hal/mosaico/hal_mosaico.cpp').read_text();source=(R/'main/host/touch_sleep.cpp').read_text()
