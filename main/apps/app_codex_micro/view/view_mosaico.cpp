@@ -323,7 +323,12 @@ void CodexMicroView::initSettings() {
     lv_obj_add_event_cb(_wifiProfiles, wifiSelectionEvent, LV_EVENT_VALUE_CHANGED, this);
     _wifiForgetButton = lv_button_create(wireless); panel(_wifiForgetButton, 332, 124, 96, 48);
     auto* forget = label(_wifiForgetButton, 4, 14, 88, "FORGET", &lv_font_montserrat_14);
-    lv_obj_set_style_text_align(forget, LV_TEXT_ALIGN_CENTER, 0); lv_obj_set_style_text_color(forget, lv_color_hex(Cyan), 0);
+    lv_obj_set_style_text_align(forget, LV_TEXT_ALIGN_CENTER, 0);
+    // label() supplies a local text color; remove it so disabled parent color inherits.
+    lv_obj_remove_local_style_prop(forget, LV_STYLE_TEXT_COLOR, 0);
+    lv_obj_set_style_text_color(_wifiForgetButton, lv_color_hex(Cyan), 0);
+    lv_obj_set_style_text_color(_wifiForgetButton, lv_color_hex(Gray), LV_STATE_DISABLED);
+    lv_obj_set_style_border_color(_wifiForgetButton, lv_color_hex(Gray), LV_STATE_DISABLED);
     lv_obj_remove_flag(forget, LV_OBJ_FLAG_CLICKABLE); lv_obj_add_flag(_wifiForgetButton, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_add_event_cb(_wifiForgetButton, wifiActionEvent, LV_EVENT_CLICKED, this);
     _wifiNewButton = lv_button_create(wireless); panel(_wifiNewButton, 224, 124, 96, 48);
@@ -332,7 +337,6 @@ void CodexMicroView::initSettings() {
     lv_obj_set_style_text_color(newProfile, lv_color_hex(Orange), 0);
     lv_obj_remove_flag(newProfile, LV_OBJ_FLAG_CLICKABLE); lv_obj_add_flag(_wifiNewButton, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_add_event_cb(_wifiNewButton, wifiActionEvent, LV_EVENT_CLICKED, this);
-    lv_obj_set_style_opa(_wifiForgetButton, LV_OPA_40, LV_STATE_DISABLED);
     _wifiSsid = lv_textarea_create(wireless); panel(_wifiSsid, 12, 178, 416, 48);
     _wifiPassword = lv_textarea_create(wireless); panel(_wifiPassword, 12, 232, 416, 48);
     for (auto* field : {_wifiSsid, _wifiPassword}) {

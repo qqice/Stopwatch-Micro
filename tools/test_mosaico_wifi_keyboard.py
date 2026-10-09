@@ -63,6 +63,10 @@ class WifiKeyboardTests(unittest.TestCase):
         self.assertNotIn('lv_textarea_set_text', refresh)
         self.assertNotIn('lv_dropdown_set_text', refresh)
         self.assertIn('wifi.count > 1 && !_wifiNewProfile', refresh)
+        self.assertIn('lv_obj_set_style_text_color(_wifiForgetButton, lv_color_hex(Gray), LV_STATE_DISABLED)', init)
+        self.assertNotIn('lv_obj_set_style_text_color(forget,', init)
+        self.assertIn('lv_obj_remove_local_style_prop(forget, LV_STYLE_TEXT_COLOR, 0)', init)
+        self.assertNotIn('lv_obj_set_style_opa(', init)
         # Pointer list selection sends VALUE_CHANGED even for the previously selected row.
         dropdown = (ROOT / 'components/lvgl/src/widgets/dropdown/lv_dropdown.c').read_text(encoding='utf8')
         release = dropdown.split('static lv_result_t list_release_handler(lv_obj_t * list_obj)', 1)[1]
