@@ -172,7 +172,7 @@ static_assert(partialAndBoundedTx());
         text=HEADER.read_text(); allowed=set(re.findall(r'"([a-z0-9-]+)"',text.split('allowed[] =',1)[1]))
         for command in ('ota-check','ota-download','ota-install','ota-reboot','ota-update','ota-rollback-test','runtime-restart','gauge-access','gauge-reconcile','gauge-nominal','network-config','tailscale-config','pairing-reset','host-usage'):
             self.assertNotIn(command,allowed)
-        for command in ('status','power','gauge','display-lock','display-wake','display-test-frequency','display-idle-frequency','boot','mic','inputs','cancel'):
+        for command in ('status','network','power','gauge','display-lock','display-wake','display-test-frequency','display-idle-frequency','boot','mic','inputs','cancel'):
             self.assertIn(command,allowed)
         self.assertIn('ota-bypass',allowed)
         bypass=SOURCE.split('if (command && (!std::strcmp(command, "ota-update")',1)[1].split('if (command && std::strcmp(command, "ota-rollback-test")',1)[0]
@@ -184,6 +184,28 @@ static_assert(partialAndBoundedTx());
         self.assertIn('uartAllowed(command)',gate)
         self.assertIn('std::strcmp(value, "160") && std::strcmp(value, "320")',gate)
         self.assertIn('cancel_first=1',gate)
+
+    def test_network_uart_diagnostics_are_readonly(self):
+        # Exact allowlist matching must not grant the adjacent config command.
+        policy=HEADER.read_text().split('inline bool uartAllowed',1)[1]
+        self.assertIn('!std::strcmp(command, item)',policy)
+        self.assertIn('"network"',policy)
+        self.assertNotIn('"network-config"',policy)
+        self.assertNotIn('"tailscale-config"',policy)
+        self.assertIn('"settings"',policy) # Existing guarded settings contract is unchanged.
+        handler=SOURCE.split('if (std::strcmp(command, "network") == 0) {',1)[1].split('        return;',1)[0]
+        self.assertNotIn('strtok_r',handler) # No argument-directed mutator in this command.
+        for mutator in ('request(', 'configure(', 'load(', 'rebind(', 'pause(', 'start(',
+                        'nvs_', 'restart(', 'setWifi', 'requestWifi'):
+            self.assertNotIn(mutator,handler)
+        getters=set(re.findall(r'network\.([A-Za-z]+)\(',handler))
+        self.assertEqual(getters,{'configured','connected','accepted','failures','historyAccepted',
+                                 'historyFailures','wifiConnectAttempts','wifiBudgetClosures'})
+        self.assertIn('fetchDiagnostics(',handler)
+        numeric=handler.split('DBG TAIL_FETCH ',1)[1].split(');',1)[0]
+        self.assertNotIn('%s',numeric)
+        for sensitive in ('token','url','_key','body'):
+            self.assertNotIn(sensitive,numeric)
 
     def test_budgets_flow_clock_and_error_discard(self):
         poll=method('poll')
