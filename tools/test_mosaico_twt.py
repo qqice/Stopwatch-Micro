@@ -173,6 +173,8 @@ static_assert(deadlines(), "finite bootstrap then fixed dispatch deadline, manua
         service = source.split('void NetworkQuota::serviceTwtTrial',1)[1]
         block = service.split('    if (_twt.live() && _wifi_running) {',1)[1].split('    reconcileTwtCycleIdentity();',1)[0]
         block = '    if (_twt.live() && _wifi_running) {' + block
+        request_block = service.split('    if (request >= 0) {', 1)[1].split('    if (_twt.live() && _wifi_running) {', 1)[0]
+        request_block = '    if (request >= 0) {' + request_block
         bootstrap_run = '#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT\n// Armed must allow DHCP/clock/tailnet bootstrap.' + source.split('// Armed must allow DHCP/clock/tailnet bootstrap.',1)[1].split('        // Reuse an already-online quota window.',1)[0]
         bootstrap_run = bootstrap_run.rsplit('#ifdef MOSAICO_BOARD',1)[0].replace('std::time(nullptr)', 'bootTime()')
         dispatch_run = source.split('        // Dispatch only after normal bootstrap has completed, before HTTP.',1)[1].split('        const int64_t twtFetchStart',1)[0]
@@ -183,21 +185,23 @@ static_assert(deadlines(), "finite bootstrap then fixed dispatch deadline, manua
 #include <initializer_list>
 using namespace MosaicoTwt;
 using esp_err_t=int;using wifi_phy_mode_t=int;using wifi_ps_type_t=int;
-constexpr int ESP_OK=0,WIFI_PHY_MODE_HE20=1,WIFI_PS_MIN_MODEM=1,TWT_SUGGEST=1;
+constexpr int ESP_OK=0,ESP_ERR_INVALID_STATE=-1,WIFI_PHY_MODE_HE20=1,WIFI_PS_MIN_MODEM=1,TWT_SUGGEST=1;
 struct wifi_ap_record_t { bool phy_11ax=true; };
 struct wifi_itwt_setup_config_t { int setup_cmd=0,trigger=0,flow_type=0,flow_id=0,wake_invl_expn=0,wake_invl_mant=0,min_wake_dura=0,wake_duration_unit=0,twt_id=0,timeout_time_ms=0; };
 struct Tailnet { bool configured=true,online=false;int starts=0;constexpr bool enabled(){return configured;}constexpr bool ready(){return online;} constexpr void start(){++starts;} constexpr void rebind(){} };
 struct Owner {
- Model _twt; Tailnet tail;
+ Model _twt; Tailnet tail; bool _twt_handler_ready=true;
+ constexpr bool twtOtaBlocked(){return false;}
  bool _wifi_running=true,_connected=false,associated=true,_twt_cleanup_failed=false;
  bool _twt_ps_saved=false,_twt_submitted=false,_twt_negotiation_pending=false,_twt_cleanup_barrier_needed=false;
+ wifi_itwt_setup_config_t submitted{};
  int _twt_saved_ps=0,setups=0,psCalls=0;int64_t now=1;
  constexpr Tailnet& GetTailnetQuota(){return tail;}
  constexpr int esp_wifi_sta_get_ap_info(wifi_ap_record_t*){return associated?0:1;}
  constexpr int esp_wifi_sta_get_negotiated_phymode(int* p){*p=1;return 0;}
  constexpr int esp_wifi_get_ps(int* p){*p=2;return 0;}
  constexpr int esp_wifi_set_ps(int){++psCalls;return 0;}
- constexpr int esp_wifi_sta_itwt_setup(wifi_itwt_setup_config_t*){++setups;return 0;}
+ constexpr int esp_wifi_sta_itwt_setup(wifi_itwt_setup_config_t* config){submitted=*config;++setups;return 0;}
  constexpr int64_t esp_timer_get_time(){return now;}
  constexpr void cancelTwtTrial(Stop stop){_twt.end(stop);}
  constexpr void publishTwt(){}
@@ -211,6 +215,9 @@ struct Owner {
   if(pendingOff)_twt.start(Mode::Off,now);
   if(_twt.live())dispatch(locked && !lateUnlock);
  }
+ constexpr void processRequest(int request,bool locked=true){
+''' + request_block + r'''
+ }
  constexpr void dispatch(bool locked=true){
 ''' + block + r'''
  }
@@ -222,6 +229,35 @@ struct Owner {
   }
  }
 };
+constexpr bool profiles() {
+ if(encodeRequest(Mode::On,600)!=2 || encodeRequest(Mode::On,1800)!=6 ||
+    encodeRequest(Mode::Baseline,600)!=1 || encodeRequest(Mode::Baseline,1800)!=5 ||
+    encodeRequest(Mode::Off,600,Profile::AnnouncedTrigger)!=0)return false;
+ for(unsigned lease : {600u,1800u}) {
+  const int request=encodeRequest(Mode::On,lease,Profile::AnnouncedTrigger);
+  Owner o;o._connected=o.tail.online=true;
+  if(o._twt.state.profile!=Profile::Default)return false;
+  o.processRequest(request);
+  o.dispatch();
+  if(o.setups!=1 || o.submitted.trigger!=1 || o.submitted.flow_type!=0 ||
+     o.submitted.wake_invl_expn!=11 || o.submitted.wake_invl_mant!=512 ||
+     o.submitted.min_wake_dura!=64 || o.submitted.wake_duration_unit!=0 ||
+     o.submitted.flow_id!=0 || o.submitted.timeout_time_ms!=5000)return false;
+  for(Stop reason : {Stop::Explicit,Stop::Expired,Stop::Driver,Stop::Rejected}) {
+   o._twt.start(Mode::On,0,lease,Profile::AnnouncedTrigger);
+   if(reason==Stop::Explicit)o.processRequest(0);
+   else if(reason==Stop::Expired)o._twt.check(int64_t(lease)*1000000,false,true);
+   else o.cancelTwtTrial(reason);
+   if(o._twt.state.profile!=Profile::Default)return false;
+   o.processRequest(encodeRequest(Mode::On,lease));o.dispatch();
+   if(o.submitted.trigger!=0 || o.submitted.flow_type!=1 || o._twt.state.profile!=Profile::Default)return false;
+  }
+  o._twt.start(Mode::Baseline,0,lease);int setups=o.setups;o.dispatch();
+  if(o.setups!=setups || o._twt.state.profile!=Profile::Default)return false;
+ }
+ return true;
+}
+static_assert(profiles(), "production setup selects only temporary announced trigger profile and resets on termination");
 constexpr bool gates() {
  for(Mode mode : {Mode::Baseline,Mode::On}) {
   Owner o;o._twt.start(mode,0);o.dispatch();
@@ -267,6 +303,20 @@ constexpr bool gates() {
 }
 static_assert(gates(), "production dispatch block requires DHCP and configured tailnet for both arms");
 ''')
+
+    def test_announced_command_and_status_wire_budget(self):
+        import re
+        serial = (ROOT/'main/debug/serial_debug.cpp').read_text()
+        command = serial.split('if (std::strcmp(command, "twt")', 1)[1].split('#endif', 1)[0]
+        self.assertIn('const bool announced = !std::strcmp(mode, "on-announced")', command)
+        self.assertIn('announced && !option', command)
+        self.assertIn('MosaicoTwt::Profile::AnnouncedTrigger : MosaicoTwt::Profile::Default', command)
+        fmt = re.search(r'"(lease_s=%lu mode=%u profile=%u[^"\n]+)"', command).group(1)
+        widths = {'lu':10, 'u':10, 'lld':20, 'llu':20, 'd':11}
+        longest = re.sub(r'%(llu|lld|lu|u|d)', lambda m: '9'*widths[m.group(1)], fmt)
+        details_size = int(re.search(r'char details\[(\d+)\]', command).group(1))
+        self.assertLess(len(longest), details_size)
+        self.assertLess(len(longest) + len('DBG twt PASS ') + 2, 1536)
 
     def test_bootstrap_run_ordering(self):
         source = (ROOT/'main/host/network_quota.cpp').read_text()
@@ -371,7 +421,7 @@ static_assert(identityTransitions(), "actual owner identity changes never mix ev
         command = serial.split('if (std::strcmp(command, "twt")', 1)[1].split('#endif', 1)[0]
         self.assertNotIn('esp_wifi_', command)
         self.assertIn('requestTwtTrial', command); self.assertIn('twtSnapshot', command)
-        self.assertIn('requestTwtTrial(requested, leaseSeconds)', command)
+        self.assertIn('requestTwtTrial(requested, leaseSeconds, announced ?', command)
         self.assertIn('MosaicoTwt::validLease(leaseSeconds)', command)
         self.assertIn('requestTwtObserve', command)
         self.assertIn('recordTwtCycle(MosaicoTwt::CyclePhase::Start)', source)

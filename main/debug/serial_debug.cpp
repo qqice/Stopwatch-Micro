@@ -895,7 +895,7 @@ void SerialDebug::handleLine(char* line)
         const char* mode = ::strtok_r(nullptr, " \t", &save);
         const char* option = ::strtok_r(nullptr, " \t", &save);
         if (!mode || ::strtok_r(nullptr, " \t", &save)) {
-            result("twt", "FAIL", "expected=baseline_on_600_or_1800_off_status_observe_on_off ram_only=1"); return;
+            result("twt", "FAIL", "expected=baseline_on_on-announced_600_or_1800_off_status_observe_on_off ram_only=1"); return;
         }
         if (!std::strcmp(mode, "observe")) {
             if (!option || (std::strcmp(option, "on") && std::strcmp(option, "off"))) {
@@ -905,17 +905,19 @@ void SerialDebug::handleLine(char* line)
             GetNetworkQuota().requestTwtObserve(!std::strcmp(option, "on"));
             result("twt", "PASS", "observe_only=1 connection_policy_unchanged=1"); return;
         }
+        const bool announced = !std::strcmp(mode, "on-announced");
+        if (announced && !option) { result("twt", "FAIL", "expected=on-announced_600_or_1800 no_changes=1"); return; }
         uint32_t leaseSeconds = 600;
-        if (option && ((std::strcmp(mode, "baseline") && std::strcmp(mode, "on")) ||
+        if (option && ((std::strcmp(mode, "baseline") && std::strcmp(mode, "on") && !announced) ||
             !serial_debug_transport::settingsInteger(option, 1800, leaseSeconds) || !MosaicoTwt::validLease(leaseSeconds))) {
-            result("twt", "FAIL", "expected=baseline_or_on_600_or_1800 no_changes=1"); return;
+            result("twt", "FAIL", "expected=baseline_or_on_or_on-announced_600_or_1800 no_changes=1"); return;
         }
         if (!std::strcmp(mode, "status")) {
             const auto t = GetNetworkQuota().twtSnapshot();
             char details[896]{};
             std::snprintf(details, sizeof(details),
-                "lease_s=%lu mode=%u stage=%u stop=%u id=%u expiry_us=%lld bootstrap_deadline_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld ram_only=1",
-                static_cast<unsigned long>(t.leaseSeconds), unsigned(t.requested), unsigned(t.stage), unsigned(t.stop), unsigned(t.id),
+                "lease_s=%lu mode=%u profile=%u stage=%u stop=%u id=%u expiry_us=%lld bootstrap_deadline_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld ram_only=1",
+                static_cast<unsigned long>(t.leaseSeconds), unsigned(t.requested), unsigned(t.profile), unsigned(t.stage), unsigned(t.stop), unsigned(t.id),
                 static_cast<long long>(t.expiryUs), static_cast<long long>(t.bootstrapDeadlineUs), static_cast<long long>(t.setupDeadlineUs), t.associated, t.apAx, t.phy,
                 t.actual.status, unsigned(t.actual.reason), unsigned(t.actual.flow),
                 static_cast<unsigned long long>(t.intervalUs), static_cast<unsigned long long>(t.durationUs),
@@ -928,10 +930,10 @@ void SerialDebug::handleLine(char* line)
         }
         MosaicoTwt::Mode requested;
         if (!std::strcmp(mode, "baseline")) requested = MosaicoTwt::Mode::Baseline;
-        else if (!std::strcmp(mode, "on")) requested = MosaicoTwt::Mode::On;
+        else if (!std::strcmp(mode, "on") || announced) requested = MosaicoTwt::Mode::On;
         else if (!std::strcmp(mode, "off")) requested = MosaicoTwt::Mode::Off;
-        else { result("twt", "FAIL", "expected=baseline_on_off_status"); return; }
-        const bool queued = GetNetworkQuota().requestTwtTrial(requested, leaseSeconds);
+        else { result("twt", "FAIL", "expected=baseline_on_on-announced_off_status"); return; }
+        const bool queued = GetNetworkQuota().requestTwtTrial(requested, leaseSeconds, announced ? MosaicoTwt::Profile::AnnouncedTrigger : MosaicoTwt::Profile::Default);
         if (queued) twtCycleUart = _reply_uart;
         char details[160]{};
         std::snprintf(details, sizeof(details), "lease_s=%lu setup_cap_s=10 locked_trial_only=1 no_nvs=1 no_power_claim=1", static_cast<unsigned long>(leaseSeconds));

@@ -41,7 +41,7 @@ public:
     void wakeForFirmwareUpdate();
     void serviceStandbySleep(); // Existing main loop; preserves the current CPU/RF target.
 #if SOC_WIFI_HE_SUPPORT
-    bool requestTwtTrial(MosaicoTwt::Mode mode, uint32_t leaseSeconds = 600);
+    bool requestTwtTrial(MosaicoTwt::Mode mode, uint32_t leaseSeconds = 600, MosaicoTwt::Profile profile = MosaicoTwt::Profile::Default);
     void requestTwtObserve(bool enabled);
     bool popTwtCycle(MosaicoTwt::Cycle& cycle);
     MosaicoTwt::Snapshot twtSnapshot() const;

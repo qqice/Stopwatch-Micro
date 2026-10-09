@@ -3,11 +3,12 @@
 
 namespace MosaicoTwt {
 enum class Mode : uint8_t { Off, Baseline, On };
+enum class Profile : uint8_t { Default, AnnouncedTrigger };
 enum class Stage : uint8_t { Off, Armed, Negotiating, Active, Baseline, Failed };
 enum class Stop : uint8_t { None, Explicit, Expired, Unsupported, Rejected, Timeout, Lost, Ota, Awake, Driver, Invalid };
 constexpr bool validLease(uint32_t seconds) { return seconds == 600 || seconds == 1800; }
-constexpr int encodeRequest(Mode mode, uint32_t seconds) {
-    return mode == Mode::Off ? 0 : validLease(seconds) ? static_cast<int>(mode) | (seconds == 1800 ? 4 : 0) : -1;
+constexpr int encodeRequest(Mode mode, uint32_t seconds, Profile profile = Profile::Default) {
+    return mode == Mode::Off ? 0 : validLease(seconds) ? static_cast<int>(mode) | (seconds == 1800 ? 4 : 0) | (mode == Mode::On && profile == Profile::AnnouncedTrigger ? 8 : 0) : -1;
 }
 enum class CyclePhase : uint8_t { Start, Fetch, End };
 enum class CycleReason : uint8_t { None, Success, Deadline, Awake, RetryBudget, NoCandidate, Cancel };
@@ -42,6 +43,7 @@ struct Result {
 };
 struct Snapshot {
     Mode requested = Mode::Off;
+    Profile profile = Profile::Default;
     Stage stage = Stage::Off;
     Stop stop = Stop::None;
     Stop lastFailure = Stop::None;
@@ -61,17 +63,19 @@ struct Model {
     constexpr bool live() const { return state.stage == Stage::Armed || state.stage == Stage::Negotiating ||
         state.stage == Stage::Active || state.stage == Stage::Baseline; }
     constexpr void end(Stop why) {
+        state.profile = Profile::Default; // Temporary profile never survives trial termination.
         state.stop = why;
         state.stage = why == Stop::Explicit || why == Stop::Expired || why == Stop::Ota || why == Stop::Awake
             ? Stage::Off : Stage::Failed;
         if (state.stage == Stage::Failed) state.lastFailure = why;
         state.expiryUs = state.bootstrapDeadlineUs = state.setupDeadlineUs = 0;
     }
-    constexpr bool start(Mode mode, int64_t now, uint32_t leaseSeconds = 600) {
+    constexpr bool start(Mode mode, int64_t now, uint32_t leaseSeconds = 600, Profile profile = Profile::Default) {
         if (mode == Mode::Off) { state.requested = mode; end(Stop::Explicit); return true; }
         // No identifier reuse this boot: stale SDK responses cannot become a new trial.
         if (!validLease(leaseSeconds) || nextId == 32767) return false;
         state = Snapshot{};
+        state.profile = mode == Mode::On ? profile : Profile::Default;
         state.requested = mode; state.id = ++nextId;
         state.leaseSeconds = leaseSeconds;
         state.stage = Stage::Armed; state.expiryUs = now + int64_t(leaseSeconds) * 1000000;
