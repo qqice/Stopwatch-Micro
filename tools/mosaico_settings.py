@@ -29,7 +29,7 @@ FIELDS = {
 SAFE_KEYS = set(FIELDS) | set("temporary lease_remaining_s runtime_revision revision saved_revision pending error ble_name_b64 ble_name_mutable wifi_available wifi_count wifi_current_index wifi_pending wifi_reboot_required reboot_required restart_pending restart_error scan_error wifi_scan_error credentials_redacted accepted_owner_pending verify_wifi_list accepted_persist_pending verify_saved_revision accepted_ram_only use_get_for_state no_changes".split())
 
 
-SAFE_KEYS.update("mounted connected suspended effective_active mounts unmounts suspends resumes rx_events physical_power_proof".split())
+SAFE_KEYS.update("mounted connected suspended effective_active mounts unmounts suspends resumes rx_events wakeup_ready wakeup_error sleep_safe physical_power_proof".split())
 SAFE_KEYS.update("presses clicks releases field guards keyboard_visible numeric_only".split())
 
 def valid_ssid(ssid: str) -> bool:

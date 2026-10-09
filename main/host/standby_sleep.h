@@ -14,6 +14,7 @@ struct Snapshot {
 };
 bool monitoring();
 void uartReady(bool ready);
+void usbActivity(); // TinyUSB task callbacks only, never ISR; immediate existing recovery lock.
 void uartWake(); // Existing UART event consumer, never ISR/callback.
 void uartTraffic(bool pending, bool activity);
 void viewState(bool locked, bool safe, bool fault);

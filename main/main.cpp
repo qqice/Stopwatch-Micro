@@ -31,7 +31,7 @@ using namespace smooth_ui_toolkit;
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
 #include <ota/panic_capture.h>
 #endif
-extern "C" void mosaico_idle_usb_notify(void) { MainIdleWait::usbEvent(); }
+extern "C" void mosaico_idle_usb_notify(void) { StandbySleep::usbActivity(); MainIdleWait::usbEvent(); }
 #endif
 extern "C" void app_main(void)
 {

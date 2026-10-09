@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "standby_sleep.h"
 #include <main_idle_wait.h>
+#include <hal/mosaico/usb_console.h>
 #include "uart_fifo_recovery_model.h"
 #include "standby_sleep_model.h"
 #include <sdkconfig.h>
@@ -66,7 +67,7 @@ void lockRecovery(bool need) {
 void refreshRecovery(int64_t now) {
     // Off requests block immediately until the existing PM owner disables LS.
     const bool requested=model.requested(now);
-    lockRecovery((applied || requested) && (!wanted || model.uartBlocked(now) || !requested));
+    lockRecovery((applied || requested) && (!wanted || !mosaico_console_usb_snapshot().sleep_safe || model.uartBlocked(now) || !requested));
 }
 bool initialize() {
 #if STANDBY_SLEEP_SUPPORTED
@@ -127,6 +128,12 @@ bool monitoring() { std::lock_guard<std::mutex> guard(mutex);return model.automa
 void uartReady(bool value) {
     std::lock_guard<std::mutex> guard(mutex);ready=value;
     if(!ready) { model.pause();wanted=false;refreshRecovery(esp_timer_get_time()); }
+}
+void usbActivity() {
+    std::lock_guard<std::mutex> guard(mutex);
+    const int64_t now=esp_timer_get_time();
+    // Task-context only: invalidate stale allow() before notifying main.
+    model.wake(now);wanted=false;refreshRecovery(now);
 }
 void uartWake() {
     std::lock_guard<std::mutex> guard(mutex);model.wake(esp_timer_get_time());refreshRecovery(esp_timer_get_time());
@@ -189,7 +196,8 @@ bool allow(uint32_t cpu, bool locked, bool wifi) {
     const bool ioSafe=GetHAL().sleepIoRetentionReady();
     if(!ioSafe || wifi || bleActive)model.pause();
     model.service(now);
-    const bool safe=ioSafe && !fatal && ready && model.eligible(now,cpu,locked,wifi || bleActive);
+    const bool usbSafe=mosaico_console_usb_snapshot().sleep_safe;
+    const bool safe=usbSafe && ioSafe && !fatal && ready && model.eligible(now,cpu,locked,wifi || bleActive);
     wanted=safe && (initialized || initialize());
     refreshRecovery(now);return wanted;
 }
@@ -208,7 +216,7 @@ Snapshot snapshot() {
     if(MosaicoOta::busy() || MosaicoOta::healthPending())model.otaBlocked=true;
     model.service(now);
     out.supported=STANDBY_SLEEP_SUPPORTED;out.lease=model.leaseUntil!=0;out.configured=applied;
-    out.eligible=wanted && model.requested(now) && model.displaySafe && !model.otaBlocked && !model.fault;
+    out.eligible=wanted && mosaico_console_usb_snapshot().sleep_safe && model.requested(now) && model.displaySafe && !model.otaBlocked && !model.fault;
     out.uartBlocked=model.uartBlocked(now);out.uartReady=ready;
     out.automaticPolicy=model.automaticPolicy;out.policyMode=model.mode(now);
     out.activeMode=out.configured && out.eligible && !out.uartBlocked ? out.policyMode : Mode::Off;

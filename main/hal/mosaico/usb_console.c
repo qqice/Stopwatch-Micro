@@ -7,6 +7,9 @@
 #include <stdatomic.h>
 #include <esp_system.h>
 #include <esp_err.h>
+#include <esp_sleep.h>
+#include <sdkconfig.h>
+#include <soc/soc_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <tinyusb.h>
@@ -16,6 +19,8 @@
 #include <soc/lp_system_reg.h>
 #include "usb_console.h"
 extern void mosaico_idle_usb_notify(void); // Existing app_main owner, task context.
+static atomic_bool wakeup_ready;
+static atomic_int wakeup_error;
 static atomic_uint mounts, unmounts, suspends, resumes, rx_events;
 static void suspended_event(void) { atomic_fetch_add(&suspends, 1); }
 static void resumed_event(void)
@@ -65,6 +70,10 @@ mosaico_usb_snapshot_t mosaico_console_usb_snapshot(void)
     mosaico_usb_snapshot_t s = {0};
     s.mounted = tud_mounted(); s.connected = tud_connected(); s.suspended = tud_suspended();
     s.effective_active = s.mounted && !s.suspended;
+    s.wakeup_ready = atomic_load(&wakeup_ready);
+    s.wakeup_error = atomic_load(&wakeup_error);
+    // Fail closed until boot-scoped public wake setup succeeds, even detached.
+    s.sleep_safe = s.wakeup_ready && !s.effective_active;
     s.mounts = atomic_load(&mounts); s.unmounts = atomic_load(&unmounts);
     s.suspends = atomic_load(&suspends); s.resumes = atomic_load(&resumes);
     s.rx_events = atomic_load(&rx_events);
@@ -78,6 +87,8 @@ static void coding_changed(int interface, cdcacm_event_t *event)
     if (event->line_coding_changed_data.p_line_coding->bit_rate == 1200) {
         atomic_store(&download_requested, true);
         xTaskNotifyGive(recovery_task);
+    } else {
+        mosaico_idle_usb_notify();
     }
 }
 static void recovery_watch(void *arg)
@@ -100,6 +111,14 @@ void mosaico_console_init(void)
     const tinyusb_config_cdcacm_t cdc = {.callback_rx = received, .callback_line_coding_changed = coding_changed};
     ESP_ERROR_CHECK(tinyusb_cdcacm_init(&cdc));
     ESP_ERROR_CHECK(tinyusb_console_init(TINYUSB_CDC_ACM_0));
+    // S31 USB peripheral wake is public and boot-scoped. Do not reinitialize
+    // TinyUSB or claim that host remote-wakeup/VBUS proves external power.
+    esp_err_t wake_err = ESP_ERR_NOT_SUPPORTED;
+#if CONFIG_IDF_TARGET_ESP32S31 && SOC_PM_SUPPORT_USB_WAKEUP
+    wake_err = esp_sleep_enable_usb_wakeup();
+#endif
+    atomic_store(&wakeup_error, wake_err);
+    atomic_store(&wakeup_ready, wake_err == ESP_OK);
     vTaskDelay(pdMS_TO_TICKS(3000));
     printf("DBG BOOT board=esp-mosaico console=tinyusb-cdc reset_reason=%d\n", esp_reset_reason());
     fflush(stdout);
