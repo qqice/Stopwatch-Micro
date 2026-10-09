@@ -6,6 +6,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -122,6 +123,7 @@ bool ApplyQuotaMonitor(const char* json, std::size_t length, uint32_t receivedAt
         xSemaphoreGive(mutex);
         return true; // Acknowledge without replacing newer data.
     }
+    next->receivedAtUs = static_cast<uint64_t>(esp_timer_get_time());
     next->revision = current ? current->revision + 1 : 1;
     auto* old = current;
     current = next.release();
@@ -135,9 +137,13 @@ bool CopyQuotaMonitor(QuotaMonitorSnapshot& out, uint32_t nowMs)
     if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(10)) != pdTRUE) return false;
     const bool valid = current != nullptr;
     if (valid) out = *current;
+    const uint64_t nowUs = static_cast<uint64_t>(esp_timer_get_time());
     xSemaphoreGive(mutex);
     if (!valid) return false;
-    const uint64_t age = static_cast<uint64_t>(out.ageSecondsAtReceipt) + (nowMs - out.receivedAtMs) / 1000U;
+    (void)nowMs; // Kept for caller compatibility; millis wraps while this cache can outlive a view.
+    const uint64_t elapsedUs = nowUs >= out.receivedAtUs ? nowUs - out.receivedAtUs : 0;
+    out.ageMilliseconds = static_cast<uint64_t>(out.ageSecondsAtReceipt) * 1000U + elapsedUs / 1000U;
+    const uint64_t age = out.ageMilliseconds / 1000U;
     out.ageSeconds = static_cast<uint32_t>(age > UINT32_MAX ? UINT32_MAX : age);
     out.stale = age > 130;
     out.available = age <= 600;

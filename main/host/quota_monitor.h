@@ -31,6 +31,8 @@ struct QuotaMonitorSnapshot {
     bool stale = false;
     uint32_t capturedEpoch = 0;
     uint32_t receivedAtMs = 0;
+    uint64_t receivedAtUs = 0;
+    uint64_t ageMilliseconds = 0;
     uint32_t ageSecondsAtReceipt = 0;
     uint32_t ageSeconds = 0;
     uint32_t revision = 0;

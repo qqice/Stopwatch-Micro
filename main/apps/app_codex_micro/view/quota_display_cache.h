@@ -7,8 +7,8 @@ namespace mosaico_quota_display {
 constexpr bool hasSnapshot(const QuotaMonitorSnapshot& snapshot, bool knownRevision) {
     return knownRevision && snapshot.bucketCount > 0 && snapshot.capturedEpoch > 0;
 }
-// GUI-owned age, advanced on every refresh. Backend copy age is modulo 32-bit
-// uptime; repeated copies of the same revision must never reset display time.
+// GUI-owned age advances through copy failures. Trusted backend 64-bit age
+// seeds recreated views; repeated copies of one revision cannot move time back.
 struct DisplayAge {
     uint64_t ageMs = 0;
     uint32_t previousNowMs = 0, revision = 0;
@@ -18,15 +18,16 @@ struct DisplayAge {
     }
     constexpr void refresh(QuotaMonitorSnapshot& snapshot, bool copied, bool known, uint32_t nowMs) {
         if (copied && (!initialized || revision != snapshot.revision)) {
-            ageMs = static_cast<uint64_t>(snapshot.ageSecondsAtReceipt) * 1000U +
-                    static_cast<uint32_t>(nowMs - snapshot.receivedAtMs);
+            ageMs = snapshot.ageMilliseconds;
             revision = snapshot.revision;
             initialized = true;
         } else if (initialized) {
             ageMs += static_cast<uint32_t>(nowMs - previousNowMs);
+            if (copied && snapshot.ageMilliseconds > ageMs) ageMs = snapshot.ageMilliseconds;
         }
         previousNowMs = nowMs;
         if (!initialized || (!copied && !known)) return;
+        snapshot.ageMilliseconds = ageMs;
         const uint64_t age = ageMs / 1000U;
         snapshot.ageSeconds = static_cast<uint32_t>(age > UINT32_MAX ? UINT32_MAX : age);
         snapshot.stale = age > 130;

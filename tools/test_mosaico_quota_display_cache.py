@@ -17,20 +17,27 @@ class QuotaDisplayCacheTests(unittest.TestCase):
         acquisition = refresh.split('    char buf[128];', 1)[0]
         code = '#include "' + (VIEW / 'quota_display_cache.h').as_posix() + '"\n'
         code += '#include "' + (VIEW / 'reset_countdown.h').as_posix() + '"\n'
+        backend = (ROOT / 'main/host/quota_monitor.cpp').read_text(encoding='utf8')
+        copy_body = backend.split('bool CopyQuotaMonitor(QuotaMonitorSnapshot& out, uint32_t nowMs)\n{', 1)[1].split('bool QuotaMonitorRejectionSelfTest()', 1)[0].rsplit('}', 1)[0]
+        self.assertIn('next->receivedAtUs = static_cast<uint64_t>(esp_timer_get_time())', backend)
         code += r'''
 using namespace mosaico_quota_display;
+constexpr int pdTRUE=1;
+constexpr uint32_t pdMS_TO_TICKS(uint32_t value) { return value; }
 struct Harness {
  QuotaMonitorSnapshot snapshot{}, replacement{};
  QuotaMonitorSnapshot* _quota = &snapshot;
  uint32_t _quotaRevision = UINT32_MAX;
  DisplayAge _quotaAge;
  bool copyValid = false;
- constexpr bool CopyQuotaMonitor(QuotaMonitorSnapshot& out, uint32_t now) {
-  if (!copyValid) return false;
-  out = replacement;
-  const uint64_t age=static_cast<uint64_t>(out.ageSecondsAtReceipt)+(now-out.receivedAtMs)/1000U;
-  out.ageSeconds=static_cast<uint32_t>(age);out.stale=age>130;out.available=age<=600;
-  return true;
+ uint64_t clockUs=1000000;
+ bool mutex=true;
+ QuotaMonitorSnapshot* current=&replacement;
+ constexpr int xSemaphoreTake(bool,uint32_t) { return copyValid ? 1 : 0; }
+ constexpr void xSemaphoreGive(bool) {}
+ constexpr int64_t esp_timer_get_time() const { return static_cast<int64_t>(clockUs); }
+ constexpr bool CopyQuotaMonitor(QuotaMonitorSnapshot& out, uint32_t nowMs) {
+''' + copy_body + r'''
  }
  constexpr bool refresh(uint32_t now) {
 ''' + acquisition + r'''
@@ -41,7 +48,7 @@ constexpr bool cases() {
  Harness h;
  if(h.refresh(3600000) || h.snapshot.bucketCount || h.snapshot.available)return false; // Cold start.
  h.replacement.bucketCount=1;h.replacement.capturedEpoch=100000;
- h.replacement.revision=7;h.replacement.receivedAtMs=1000;
+ h.replacement.revision=7;h.replacement.receivedAtMs=1000;h.replacement.receivedAtUs=1000000;
  h.replacement.buckets[0].windows[0]={true,8123,300,110000};
  h.copyValid=true;
  if(!h.refresh(1000) || h._quotaRevision!=7 || !h.snapshot.available || h.snapshot.stale)return false;
@@ -63,6 +70,7 @@ constexpr bool cases() {
  b.windows[0].available=false;b.windows[1]={true,9700,10080,120000};
  if(primaryWindow(b,103600)!=1 || b.windows[primaryWindow(b,103600)].remainingBasisPoints!=9700)return false;
  h.copyValid=true;h.replacement.capturedEpoch=110001;h.replacement.receivedAtMs=10001000;
+ h.replacement.receivedAtUs=10001000000ULL;h.clockUs=h.replacement.receivedAtUs;
  h.replacement.revision=8;h.replacement.buckets[0].windows[0]={true,9234,300,120000};
  if(!h.refresh(10001000) || h._quotaRevision!=8 || !h.snapshot.available || h.snapshot.stale)return false;
  if(!percentKnown(h.snapshot.buckets[0].windows[0],110001) || h.snapshot.buckets[0].windows[0].remainingBasisPoints!=9234)return false;
@@ -71,29 +79,51 @@ constexpr bool cases() {
  empty.capturedEpoch=1;if(hasSnapshot(empty,false))return false;
  empty.bucketCount=0;return !hasSnapshot(empty,true);
 }
+constexpr bool backendAgeCases() {
+ Harness h;h.copyValid=true;h.replacement.ageSecondsAtReceipt=120;h.replacement.receivedAtUs=5000000;
+ QuotaMonitorSnapshot copied;
+ for(uint64_t elapsed : {10ULL,11ULL,480ULL,481ULL}) {
+  h.clockUs=h.replacement.receivedAtUs+elapsed*1000000;
+  if(!h.CopyQuotaMonitor(copied,0) || copied.ageMilliseconds!=(120+elapsed)*1000 ||
+     copied.ageSeconds!=120+elapsed || copied.stale!=((120+elapsed)>130) ||
+     copied.available!=((120+elapsed)<=600))return false;
+ }
+ return true;
+}
+static_assert(backendAgeCases(),"backend true age preserves receipt age and stale/availability boundaries");
 constexpr bool wrapCases() {
  Harness h;h.copyValid=true;h.replacement.bucketCount=1;h.replacement.capturedEpoch=100000;
- h.replacement.revision=10;h.replacement.receivedAtMs=1000;
+ h.replacement.revision=10;h.replacement.receivedAtMs=1000;h.replacement.receivedAtUs=1000000;
  h.replacement.buckets[0].windows[0]={true,8123,300,110000};
  if(!h.refresh(1000))return false;
  uint32_t now=1000;uint64_t elapsed=0;
  // Frequent GUI deltas span a complete 49.7-day cycle, with success/failure interleaved.
  for(unsigned i=0;i<4294;++i) {
-  now+=1000000U;elapsed+=1000000ULL;h.copyValid=(i%2)==0;
+  now+=1000000U;elapsed+=1000000ULL;h.clockUs=(1000+elapsed)*1000;h.copyValid=(i%2)==0;
   if(!h.refresh(now) || h._quotaAge.secondsAt(now)!=elapsed/1000)return false;
   if(elapsed>=11000000 && (h.snapshot.available || !h.snapshot.stale ||
       percentKnown(h.snapshot.buckets[0].windows[0],100000+h._quotaAge.secondsAt(now))))return false;
  }
- // At the original millis timestamp modulo a full cycle, raw copy appears fresh.
- now=1000;h.copyValid=true;
+ // At the original millis timestamp, backend true age remains old even in a new view.
+ now=1000;h.clockUs=(1000+0x100000000ULL)*1000;h.copyValid=true;
  if(!h.refresh(now) || h.snapshot.available || !h.snapshot.stale)return false;
  const uint64_t epoch=100000+h._quotaAge.secondsAt(now);
  const auto& w=h.snapshot.buckets[0].windows[0];
  if(percentKnown(w,epoch) || w.remainingBasisPoints!=8123)return false;
  const auto time=mosaico_time::countdown(w.available,h.snapshot.capturedEpoch,w.resetEpoch,epoch);
  if(!time.known || time.minutes!=0)return false;
+ Harness recreated;recreated.copyValid=true;recreated.replacement=h.replacement;recreated.clockUs=h.clockUs;
+ if(!recreated.refresh(now) || recreated.snapshot.available || !recreated.snapshot.stale)return false;
+ const auto& rw=recreated.snapshot.buckets[0].windows[0];
+ const uint64_t recreatedEpoch=recreated.snapshot.capturedEpoch+recreated._quotaAge.secondsAt(now);
+ if(percentKnown(rw,recreatedEpoch) || mosaico_time::countdown(rw.available,recreated.snapshot.capturedEpoch,rw.resetEpoch,recreatedEpoch).minutes!=0)return false;
+ // A lower raw age injected for the same revision must not move display time backwards.
+ auto injected=h.snapshot;injected.ageMilliseconds=0;
+ const uint64_t retainedAge=h._quotaAge.secondsAt(now);
+ h._quotaAge.refresh(injected,true,true,now);
+ if(h._quotaAge.secondsAt(now)!=retainedAge || injected.available || !injected.stale)return false;
  // Only an actually accepted new revision can restart age/replace the old deadline.
- h.replacement.revision=11;h.replacement.receivedAtMs=now;h.replacement.capturedEpoch=200000;
+ h.replacement.revision=11;h.replacement.receivedAtMs=now;h.replacement.receivedAtUs=h.clockUs;h.replacement.capturedEpoch=200000;
  h.replacement.buckets[0].windows[0]={true,9234,300,210000};
  if(!h.refresh(now) || h._quotaAge.secondsAt(now)!=0 || !h.snapshot.available || h.snapshot.stale)return false;
  return percentKnown(h.snapshot.buckets[0].windows[0],200000);

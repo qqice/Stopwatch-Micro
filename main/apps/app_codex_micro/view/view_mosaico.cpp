@@ -1358,7 +1358,7 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
 void CodexMicroView::refreshQuota(uint32_t now) {
     const bool copied = CopyQuotaMonitor(*_quota, now);
     // Incremental uptime keeps the same validated revision aging across millis wrap,
-    // including failed copies and successful copies whose backend age wrapped.
+    // including failed copies; trusted backend age also seeds recreated views.
     _quotaAge.refresh(*_quota, copied, _quotaRevision != UINT32_MAX, now);
     if (copied) _quotaRevision = _quota->revision;
     const bool displayKnown = mosaico_quota_display::hasSnapshot(*_quota, _quotaRevision != UINT32_MAX);
