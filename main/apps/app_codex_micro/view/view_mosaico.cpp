@@ -4,6 +4,7 @@
 #include "reset_countdown.h"
 #include "credit_format.h"
 #include "quota_trend_geometry.h"
+#include "quota_display_cache.h"
 #include "session_status_model.h"
 #include "lock_session_geometry.h"
 #include <hal/hal.h>
@@ -1348,7 +1349,7 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
         setMotion(_creditIcons[i], phase, visible && top + 278 < viewportHeight && top + 306 > 0 && bucket.creditsKnown && !lv_obj_has_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN));
         for (size_t j = 0; j < 2; ++j) {
             const auto& window = bucket.windows[j];
-            setMotion(_windowBars[i][j], meterPhase, visible && top + 110 < viewportHeight && top + 134 > 0 && window.available && window.remainingBasisPoints > 0);
+            setMotion(_windowBars[i][j], meterPhase, visible && top + 110 < viewportHeight && top + 134 > 0 && window.available && window.remainingBasisPoints > 0 && mosaico_quota_display::percentKnown(window, epoch));
             const bool knownTime = window.available && window.resetEpoch && _quota->capturedEpoch && window.durationMinutes && window.resetEpoch > epoch;
             setMotion(_resetBars[i][j], meterPhase, visible && top + 222 < viewportHeight && top + 246 > 0 && knownTime);
         }
@@ -1359,11 +1360,9 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         _quotaRevision = _quota->revision;
     } else if (_quotaRevision != UINT32_MAX) {
         // Failed mutex acquisition must not freeze cached freshness indefinitely.
-        const uint64_t age = static_cast<uint64_t>(_quota->ageSecondsAtReceipt) + (now - _quota->receivedAtMs) / 1000U;
-        _quota->ageSeconds = static_cast<uint32_t>(std::min<uint64_t>(age, UINT32_MAX));
-        _quota->stale = age > 130;
-        _quota->available = age <= 600;
+        mosaico_quota_display::ageCache(*_quota, now);
     }
+    const bool displayKnown = mosaico_quota_display::hasSnapshot(*_quota, _quotaRevision != UINT32_MAX);
     char buf[128];
     if (!_batterySeen || _locked || now - _batteryReadTick >= 5000) refreshBattery(now);
     const bool online = GetNetworkQuota().connected();
@@ -1378,13 +1377,13 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     else if (_quota->resetCredits > 3) std::snprintf(buf, sizeof(buf), "+%u", _quota->resetCredits - 3);
     else buf[0] = 0;
     lv_label_set_text(_resetCount, buf);
-    if (_quota->available && _quota->bucketCount) lv_obj_add_flag(_quotaStatus, LV_OBJ_FLAG_HIDDEN);
+    if (displayKnown) lv_obj_add_flag(_quotaStatus, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_remove_flag(_quotaStatus, LV_OBJ_FLAG_HIDDEN);
-    if (_quota->available && _quota->bucketCount > 1) lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_SCROLLABLE);
+    if (displayKnown && _quota->bucketCount > 1) lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_SCROLLABLE);
     else { lv_obj_remove_flag(_quotaPage, LV_OBJ_FLAG_SCROLLABLE); lv_obj_scroll_to_y(_quotaPage, 0, LV_ANIM_OFF); }
     const uint64_t epoch = static_cast<uint64_t>(_quota->capturedEpoch) + _quota->ageSeconds;
     for (size_t i = 0; i < _cards.size(); ++i) {
-        if (!_quota->available || i >= _quota->bucketCount) { lv_obj_add_flag(_cards[i], LV_OBJ_FLAG_HIDDEN); continue; }
+        if (!displayKnown || i >= _quota->bucketCount) { lv_obj_add_flag(_cards[i], LV_OBJ_FLAG_HIDDEN); continue; }
         lv_obj_remove_flag(_cards[i], LV_OBJ_FLAG_HIDDEN);
         const auto& bucket = _quota->buckets[i];
         std::snprintf(buf, sizeof(buf), "%s%s%s", bucket.name[0] ? bucket.name : bucket.id, bucket.plan[0] ? " / " : "", bucket.plan);
@@ -1412,10 +1411,13 @@ void CodexMicroView::refreshQuota(uint32_t now) {
             const int pitch = validWindows == 1 ? 8 : 4;
             place(_quotaIcons[i][j], x, 62); lv_obj_set_size(_quotaIcons[i][j], iconSize, iconSize);
             const uint32_t quotaColor = quotaLevelColor(w.remainingBasisPoints, _quota->stale);
-            setIcon(_quotaIcons[i][j], Icon::Quota, quotaColor);
+            const bool percentKnown = mosaico_quota_display::percentKnown(w, epoch);
+            const uint32_t displayColor = percentKnown ? quotaColor : Gray;
+            setIcon(_quotaIcons[i][j], Icon::Quota, displayColor);
             place(value, x + textOffset, 48); lv_obj_set_width(value, textWidth); setTextPitch(value, pitch);
-            percent(w.remainingBasisPoints, buf, sizeof(buf)); setText(value, buf, quotaColor);
-            place(_windowBars[i][j], x, 110); lv_obj_set_width(_windowBars[i][j], width); setMeter(_windowBars[i][j], w.remainingBasisPoints, true, quotaColor);
+            if (percentKnown) { percent(w.remainingBasisPoints, buf, sizeof(buf)); setText(value, buf, quotaColor); }
+            else { std::snprintf(buf, sizeof(buf), "--"); setText(value, buf, Gray); }
+            place(_windowBars[i][j], x, 110); lv_obj_set_width(_windowBars[i][j], width); setMeter(_windowBars[i][j], w.remainingBasisPoints, percentKnown, displayColor);
             place(_hourglassIcons[i][j], x, 174); lv_obj_set_size(_hourglassIcons[i][j], iconSize, iconSize);
             place(_resetTimes[i][j], x + textOffset, 160); lv_obj_set_width(_resetTimes[i][j], textWidth); setTextPitch(_resetTimes[i][j], pitch);
             const bool resetKnown = w.resetEpoch && _quota->capturedEpoch;
@@ -1447,25 +1449,31 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     if (_page == Page::Command && _clockMinute >= 0 && !_quota->truncated) lv_obj_remove_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(_clockDate, LV_OBJ_FLAG_HIDDEN);
     char lockText[64] = "--";
-    if (_quota->available && _quota->bucketCount) {
+    if (displayKnown) {
         const auto& b = _quota->buckets[0]; char a[24] = "", z[24] = "";
-        if (b.windows[0].available) percent(b.windows[0].remainingBasisPoints, a, sizeof(a));
-        if (b.windows[1].available) percent(b.windows[1].remainingBasisPoints, z, sizeof(z));
+        if (b.windows[0].available) {
+            if (mosaico_quota_display::percentKnown(b.windows[0], epoch)) percent(b.windows[0].remainingBasisPoints, a, sizeof(a));
+            else std::snprintf(a, sizeof(a), "--");
+        }
+        if (b.windows[1].available) {
+            if (mosaico_quota_display::percentKnown(b.windows[1], epoch)) percent(b.windows[1].remainingBasisPoints, z, sizeof(z));
+            else std::snprintf(z, sizeof(z), "--");
+        }
         if (a[0] && z[0]) std::snprintf(lockText, sizeof(lockText), "%s %s", a, z);
         else if (a[0] || z[0]) std::snprintf(lockText, sizeof(lockText), "%s", a[0] ? a : z);
     }
     const auto& firstWindow = _quota->buckets[0].windows;
-    const uint16_t lockBp = firstWindow[0].available ? firstWindow[0].remainingBasisPoints : firstWindow[1].remainingBasisPoints;
-    const bool lockKnown = _quota->available && _quota->bucketCount &&
-                           (firstWindow[0].available || firstWindow[1].available);
+    const uint16_t lockBp = firstWindow[mosaico_quota_display::primaryWindow(_quota->buckets[0], epoch)].remainingBasisPoints;
+    const bool lockKnown = displayKnown && (mosaico_quota_display::percentKnown(firstWindow[0], epoch) ||
+                                           mosaico_quota_display::percentKnown(firstWindow[1], epoch));
     setText(_lockQuota, lockText, lockKnown ? quotaLevelColor(lockBp, _quota->stale) : Gray);
     char lockReset[64] = "--", leftReset[32]{}, rightReset[32]{};
-    const auto leftTime = mosaico_time::countdown(lockKnown && firstWindow[0].available,
+    const auto leftTime = mosaico_time::countdown(displayKnown && firstWindow[0].available,
         _quota->capturedEpoch, firstWindow[0].resetEpoch, epoch);
-    const auto rightTime = mosaico_time::countdown(lockKnown && firstWindow[1].available,
+    const auto rightTime = mosaico_time::countdown(displayKnown && firstWindow[1].available,
         _quota->capturedEpoch, firstWindow[1].resetEpoch, epoch);
-    if (lockKnown && firstWindow[0].available) formatCountdown(leftTime, leftReset, sizeof(leftReset), true);
-    if (lockKnown && firstWindow[1].available) formatCountdown(rightTime, rightReset, sizeof(rightReset), true);
+    if (displayKnown && firstWindow[0].available) formatCountdown(leftTime, leftReset, sizeof(leftReset), true);
+    if (displayKnown && firstWindow[1].available) formatCountdown(rightTime, rightReset, sizeof(rightReset), true);
     if (leftReset[0] && rightReset[0]) std::snprintf(lockReset, sizeof(lockReset), "%s %s", leftReset, rightReset);
     else if (leftReset[0] || rightReset[0]) std::snprintf(lockReset, sizeof(lockReset), "%s", leftReset[0] ? leftReset : rightReset);
     const int glyphs = static_cast<int>(std::min<size_t>(std::strlen(lockReset), 32));
