@@ -912,11 +912,11 @@ void SerialDebug::handleLine(char* line)
         }
         if (!std::strcmp(mode, "status")) {
             const auto t = GetNetworkQuota().twtSnapshot();
-            char details[640]{};
+            char details[896]{};
             std::snprintf(details, sizeof(details),
-                "lease_s=%lu mode=%u stage=%u stop=%u id=%u expiry_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld ram_only=1",
+                "lease_s=%lu mode=%u stage=%u stop=%u id=%u expiry_us=%lld bootstrap_deadline_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld ram_only=1",
                 static_cast<unsigned long>(t.leaseSeconds), unsigned(t.requested), unsigned(t.stage), unsigned(t.stop), unsigned(t.id),
-                static_cast<long long>(t.expiryUs), static_cast<long long>(t.setupDeadlineUs), t.associated, t.apAx, t.phy,
+                static_cast<long long>(t.expiryUs), static_cast<long long>(t.bootstrapDeadlineUs), static_cast<long long>(t.setupDeadlineUs), t.associated, t.apAx, t.phy,
                 t.actual.status, unsigned(t.actual.reason), unsigned(t.actual.flow),
                 static_cast<unsigned long long>(t.intervalUs), static_cast<unsigned long long>(t.durationUs),
                 static_cast<unsigned long long>(t.actual.targetWakeUs), static_cast<unsigned long>(t.fetchAttempts),

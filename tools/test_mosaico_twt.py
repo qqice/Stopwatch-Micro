@@ -105,7 +105,7 @@ constexpr bool traces() {
  if(!m.accept(good(m.state.id))||m.state.intervalUs!=1048576||m.state.durationUs!=16384)return false;
  if(!m.check(3,false,true))return false;
  if(m.check(m.state.expiryUs,false,true)||m.state.stop!=Stop::Expired)return false;
- m.start(Mode::On,4);m.state.stage=Stage::Negotiating;
+ m.start(Mode::On,4);m.bootstrapReady(4);
  if(m.check(m.state.setupDeadlineUs,false,true)||m.state.stop!=Stop::Timeout)return false;
  auto late=good(m.state.id);
  m.start(Mode::Off,5);
@@ -138,6 +138,129 @@ static_assert(traces(), "trial safety traces");
 '''
         self.compile_cpp(code)
 
+    def test_bootstrap_and_negotiation_deadlines(self):
+        self.compile_cpp(r'''
+#include "main/host/mosaico_twt_model.h"
+#include <initializer_list>
+using namespace MosaicoTwt;
+constexpr bool deadlines() {
+ for(Mode mode : {Mode::Baseline,Mode::On}) {
+  Model m;m.start(mode,7,1800);
+  if(m.state.bootstrapDeadlineUs!=60000007 || m.state.setupDeadlineUs)return false;
+  for(int64_t now=7;now<60000007;now+=5000000)
+   if(!m.check(now,false,true)||m.state.bootstrapDeadlineUs!=60000007)return false;
+  if(m.check(60000007,false,true)||m.state.stop!=Stop::Timeout)return false;
+  m.start(mode,100);const auto expiry=m.state.expiryUs;
+  if(!m.bootstrapReady(50000100)||m.state.bootstrapDeadlineUs||m.state.expiryUs!=expiry)return false;
+  if(mode==Mode::On) {
+   if(m.state.setupDeadlineUs!=60000100 || m.bootstrapReady(51000100))return false;
+   if(!m.check(60000099,false,true)||m.state.setupDeadlineUs!=60000100)return false;
+   if(m.check(60000100,false,true)||m.state.stop!=Stop::Timeout)return false;
+  } else if(m.state.stage!=Stage::Baseline||m.state.setupDeadlineUs)return false;
+  m.start(mode,0);if(m.bootstrapReady(60000000)||m.state.stop!=Stop::Timeout)return false;
+  m.start(mode,0);if(m.check(m.state.expiryUs,false,true)||m.state.stop!=Stop::Expired)return false;
+  m.start(mode,0);if(m.check(60000000,false,false)||m.state.stop!=Stop::Awake)return false;
+  m.start(mode,0);if(m.check(60000000,true,true)||m.state.stop!=Stop::Ota)return false;
+  m.start(mode,0);m.start(Mode::Off,60000000);if(m.live()||m.state.stop!=Stop::Explicit)return false;
+ }
+ return true;
+}
+static_assert(deadlines(), "finite bootstrap then fixed dispatch deadline, manual priority");
+''')
+
+    def test_actual_bootstrap_dispatch_gate(self):
+        source = (ROOT/'main/host/network_quota.cpp').read_text()
+        service = source.split('void NetworkQuota::serviceTwtTrial',1)[1]
+        block = service.split('    if (_twt.live() && _wifi_running) {',1)[1].split('    reconcileTwtCycleIdentity();',1)[0]
+        block = '    if (_twt.live() && _wifi_running) {' + block
+        bootstrap_run = '#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT\n// Armed must allow DHCP/clock/tailnet bootstrap.' + source.split('// Armed must allow DHCP/clock/tailnet bootstrap.',1)[1].split('        // Reuse an already-online quota window.',1)[0]
+        bootstrap_run = bootstrap_run.rsplit('#ifdef MOSAICO_BOARD',1)[0].replace('std::time(nullptr)', 'bootTime()')
+        dispatch_run = source.split('        // Dispatch only after normal bootstrap has completed, before HTTP.',1)[1].split('        const int64_t twtFetchStart',1)[0]
+        self.compile_cpp(r'''
+#define MOSAICO_BOARD 1
+#define SOC_WIFI_HE_SUPPORT 1
+#include "main/host/mosaico_twt_model.h"
+#include <initializer_list>
+using namespace MosaicoTwt;
+using esp_err_t=int;using wifi_phy_mode_t=int;using wifi_ps_type_t=int;
+constexpr int ESP_OK=0,WIFI_PHY_MODE_HE20=1,WIFI_PS_MIN_MODEM=1,TWT_SUGGEST=1;
+struct wifi_ap_record_t { bool phy_11ax=true; };
+struct wifi_itwt_setup_config_t { int setup_cmd=0,trigger=0,flow_type=0,flow_id=0,wake_invl_expn=0,wake_invl_mant=0,min_wake_dura=0,wake_duration_unit=0,twt_id=0,timeout_time_ms=0; };
+struct Tailnet { bool configured=true,online=false;int starts=0;constexpr bool enabled(){return configured;}constexpr bool ready(){return online;} constexpr void start(){++starts;} constexpr void rebind(){} };
+struct Owner {
+ Model _twt; Tailnet tail;
+ bool _wifi_running=true,_connected=false,associated=true,_twt_cleanup_failed=false;
+ bool _twt_ps_saved=false,_twt_submitted=false,_twt_negotiation_pending=false,_twt_cleanup_barrier_needed=false;
+ int _twt_saved_ps=0,setups=0,psCalls=0;int64_t now=1;
+ constexpr Tailnet& GetTailnetQuota(){return tail;}
+ constexpr int esp_wifi_sta_get_ap_info(wifi_ap_record_t*){return associated?0:1;}
+ constexpr int esp_wifi_sta_get_negotiated_phymode(int* p){*p=1;return 0;}
+ constexpr int esp_wifi_get_ps(int* p){*p=2;return 0;}
+ constexpr int esp_wifi_set_ps(int){++psCalls;return 0;}
+ constexpr int esp_wifi_sta_itwt_setup(wifi_itwt_setup_config_t*){++setups;return 0;}
+ constexpr int64_t esp_timer_get_time(){return now;}
+ constexpr void cancelTwtTrial(Stop stop){_twt.end(stop);}
+ constexpr void publishTwt(){}
+ int http=0,waits=0;unsigned tailnetHeapBefore=0,tailnetHeapAfter=0;
+ constexpr int64_t bootTime(){return 1800000000;}
+ constexpr void sampleNetworkHeap(const char*,unsigned&){}
+ constexpr void wait(int){++waits;}
+ constexpr bool idleLocked(){return true;}
+ constexpr void serviceTwtTrial(int64_t,bool locked){if(_twt.check(now,false,locked))dispatch(locked);}
+ constexpr void dispatch(bool locked=true){
+''' + block + r'''
+ }
+ constexpr void runBootstrap(bool updateWindow=true) {
+  bool locked=true,hadConnection=true;
+  for(int once=0;once<1;++once) {
+''' + bootstrap_run + '#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT\n' + dispatch_run + '#endif\n' + r'''
+   ++http;
+  }
+ }
+};
+constexpr bool gates() {
+ for(Mode mode : {Mode::Baseline,Mode::On}) {
+  Owner o;o._twt.start(mode,0);o.dispatch();
+  if(o.setups||o.psCalls||o._twt.state.stage!=Stage::Armed)return false;
+  o._connected=true;o.dispatch(); // tailnet false still forbids PS/baseline/setup
+  if(o.setups||o.psCalls||o._twt.state.stage!=Stage::Armed)return false;
+  o.tail.online=true;o.associated=false;o.dispatch();
+  if(o.setups||o.psCalls||o._twt.state.stage!=Stage::Armed)return false;
+  o.associated=true;o.now=50000000;o.dispatch();
+  if(o.psCalls!=1||o._twt.state.bootstrapDeadlineUs)return false;
+  if(mode==Mode::On && (o.setups!=1||o._twt.state.stage!=Stage::Negotiating||o._twt.state.setupDeadlineUs!=60000000))return false;
+  if(mode==Mode::Baseline && (o.setups||o._twt.state.stage!=Stage::Baseline))return false;
+  o.now++;o.dispatch();if(o.psCalls!=1||o.setups!=(mode==Mode::On?1:0))return false;
+  o.tail.online=false;o.dispatch();if(o._twt.live()||o._twt.state.stop!=Stop::Lost)return false;
+  Owner starting;starting._connected=true;starting._twt.start(mode,0);starting.runBootstrap();
+  if(starting.tail.starts!=1||starting.http||starting._twt.state.stage!=Stage::Armed)return false;
+  starting.tail.online=true;starting.runBootstrap();
+  if(mode==Mode::On && (starting.http||starting._twt.state.stage!=Stage::Negotiating))return false;
+  if(mode==Mode::Baseline && starting.http!=1)return false;
+  if(mode==Mode::On)starting._twt.state.stage=Stage::Active;
+  starting.http=0;starting.runBootstrap(false);if(starting.http)return false;
+  Owner lan;lan.tail.configured=false;lan._connected=true;lan._twt.start(mode,0);lan.dispatch();
+  if(lan._twt.state.stage!=(mode==Mode::On?Stage::Negotiating:Stage::Baseline))return false;
+ }
+ return true;
+}
+static_assert(gates(), "production dispatch block requires DHCP and configured tailnet for both arms");
+''')
+
+    def test_bootstrap_run_ordering(self):
+        source = (ROOT/'main/host/network_quota.cpp').read_text()
+        run = source.split('// Armed must allow DHCP/clock/tailnet bootstrap.',1)[1]
+        pre = run.split('GetTailnetQuota().start();',1)[0]
+        self.assertIn('Stage::Negotiating', pre)
+        self.assertNotIn('Stage::Armed', pre)
+        before_fetch = run.split('const bool quotaOk = fetch();',1)[0]
+        self.assertLess(before_fetch.index('GetTailnetQuota().start();'), before_fetch.index('serviceTwtTrial('))
+        self.assertIn('!GetTailnetQuota().ready()', before_fetch)
+        gate = before_fetch.split('serviceTwtTrial(',1)[1]
+        self.assertIn('Stage::Armed', gate); self.assertIn('Stage::Negotiating', gate)
+        self.assertIn('wait(50); continue;', gate)
+        self.assertIn('if (locked && !updateWindow && _twt.live()) continue;', gate)
+
     def test_long_lease_and_cycle_ring(self):
         self.compile_cpp(r'''
 #include "main/host/mosaico_twt_model.h"
@@ -145,7 +268,7 @@ static_assert(traces(), "trial safety traces");
 using namespace MosaicoTwt;
 constexpr bool longLease() {
  Model m; if(!m.start(Mode::Baseline, 7, 1800)) return false;
- if(m.state.expiryUs!=1800000007LL || m.state.setupDeadlineUs!=10000007LL) return false;
+ if(m.state.expiryUs!=1800000007LL || m.state.bootstrapDeadlineUs!=60000007LL || m.state.setupDeadlineUs!=0) return false;
  if(m.start(Mode::On,8,1200)||m.state.id!=1) return false;
  m.state.stage=Stage::Baseline; m.state.setupDeadlineUs=0;
  if(!m.check(1799999999LL,false,true)||m.check(1800000007LL,false,true)) return false;

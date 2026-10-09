@@ -47,7 +47,7 @@ struct Snapshot {
     Stop lastFailure = Stop::None;
     uint16_t id = 0;
     uint32_t leaseSeconds = 600;
-    int64_t expiryUs = 0, setupDeadlineUs = 0, cleanupDeadlineUs = 0;
+    int64_t expiryUs = 0, bootstrapDeadlineUs = 0, setupDeadlineUs = 0, cleanupDeadlineUs = 0;
     uint8_t cleanupStage = 0; // 0 clean, 1 setup drain, 2 teardown ack, 3 ioctl barrier, 4 PS restore, 5 failed
     bool apAx = false, associated = false, cleanupPending = false, cleanupFailed = false;
     int phy = -1, error = 0, restoreError = 0, teardownError = 0;
@@ -65,7 +65,7 @@ struct Model {
         state.stage = why == Stop::Explicit || why == Stop::Expired || why == Stop::Ota || why == Stop::Awake
             ? Stage::Off : Stage::Failed;
         if (state.stage == Stage::Failed) state.lastFailure = why;
-        state.expiryUs = state.setupDeadlineUs = 0;
+        state.expiryUs = state.bootstrapDeadlineUs = state.setupDeadlineUs = 0;
     }
     constexpr bool start(Mode mode, int64_t now, uint32_t leaseSeconds = 600) {
         if (mode == Mode::Off) { state.requested = mode; end(Stop::Explicit); return true; }
@@ -75,7 +75,7 @@ struct Model {
         state.requested = mode; state.id = ++nextId;
         state.leaseSeconds = leaseSeconds;
         state.stage = Stage::Armed; state.expiryUs = now + int64_t(leaseSeconds) * 1000000;
-        state.setupDeadlineUs = now + 10LL * 1000000;
+        state.bootstrapDeadlineUs = now + 60LL * 1000000;
         return true;
     }
     constexpr bool check(int64_t now, bool ota, bool locked) {
@@ -83,8 +83,18 @@ struct Model {
         if (ota) end(Stop::Ota);
         else if (now >= state.expiryUs) end(Stop::Expired);
         else if (!locked) end(Stop::Awake);
-        else if ((state.stage == Stage::Armed || state.stage == Stage::Negotiating) && now >= state.setupDeadlineUs) end(Stop::Timeout);
+        else if (state.stage == Stage::Armed && now >= state.bootstrapDeadlineUs) end(Stop::Timeout);
+        else if (state.stage == Stage::Negotiating && now >= state.setupDeadlineUs) end(Stop::Timeout);
         return live();
+    }
+    // Called only after association, DHCP and configured tailnet readiness.
+    // Polls never reset either stage deadline or the overall lease.
+    constexpr bool bootstrapReady(int64_t now) {
+        if (state.stage != Stage::Armed || !check(now, false, true)) return false;
+        state.bootstrapDeadlineUs = 0;
+        state.stage = state.requested == Mode::Baseline ? Stage::Baseline : Stage::Negotiating;
+        state.setupDeadlineUs = state.stage == Stage::Negotiating ? now + 10LL * 1000000 : 0;
+        return true;
     }
     constexpr bool accept(const Result& r) {
         if (state.stage != Stage::Negotiating || r.id != state.id) { ++state.lateEvents; return false; }

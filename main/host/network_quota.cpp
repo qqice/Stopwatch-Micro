@@ -622,9 +622,11 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
         wifi_ap_record_t ap{};
         const bool associated = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
         _twt.state.associated = associated;
-        if (!associated && (_twt.state.stage == Stage::Active || _twt.state.stage == Stage::Baseline)) {
+        const bool bootstrapReady = associated && _connected &&
+            (!GetTailnetQuota().enabled() || GetTailnetQuota().ready());
+        if (!bootstrapReady && _twt.state.stage != Stage::Armed) {
             ++_twt.state.losses; cancelTwtTrial(Stop::Lost);
-        } else if (associated && locked && _twt.state.stage == Stage::Armed) {
+        } else if (bootstrapReady && locked && _twt.state.stage == Stage::Armed) {
             wifi_phy_mode_t phy{};
             _twt.state.apAx = ap.phy_11ax;
             const esp_err_t phyError = esp_wifi_sta_get_negotiated_phymode(&phy);
@@ -640,7 +642,7 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
                 }
                 if (_twt.state.error != ESP_OK) cancelTwtTrial(Stop::Driver);
                 else if (_twt.state.requested == Mode::Baseline) {
-                    _twt.state.stage = Stage::Baseline; _twt.state.setupDeadlineUs = 0;
+                    if (!_twt.bootstrapReady(esp_timer_get_time())) cancelTwtTrial(_twt.state.stop);
                 } else {
                     wifi_itwt_setup_config_t config{};
                     config.setup_cmd = TWT_SUGGEST;
@@ -648,7 +650,10 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
                     config.wake_invl_expn = 11; config.wake_invl_mant = 512;
                     config.min_wake_dura = 64; config.wake_duration_unit = 0;
                     config.twt_id = _twt.state.id; config.timeout_time_ms = 5000;
-                    _twt.state.stage = Stage::Negotiating;
+                    if (!_twt.bootstrapReady(esp_timer_get_time())) {
+                        cancelTwtTrial(_twt.state.stop);
+                        publishTwt(); return;
+                    }
                     _twt_submitted = true;
                     _twt_negotiation_pending = true;
                     _twt.state.error = esp_wifi_sta_itwt_setup(&config);
@@ -1063,7 +1068,7 @@ void NetworkQuota::run()
         if (locked && !updateWindow) {
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
             // Hold association/tailnet, but never fetch outside the existing refresh window.
-            // Armed state may start/reconnect via the normal owner path, bounded by 10s.
+            // Armed may bootstrap via the normal owner path, bounded by 60s.
             const bool trialHold = _twt.live();
             if (trialHold && _wifi_running && _twt.state.associated && _connected &&
                 (!GetTailnetQuota().enabled() || GetTailnetQuota().ready())) {
@@ -1152,7 +1157,7 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
             bool useRetryPolicy = true;
 #if SOC_WIFI_HE_SUPPORT
-            useRetryPolicy = !_twt.live(); // Do not inherit a 60s backoff into TWT's 10s setup owner.
+            useRetryPolicy = !_twt.live(); // Do not inherit retry backoff into TWT's finite bootstrap owner.
 #endif
             if (useRetryPolicy) {
             const int64_t retryNow = esp_timer_get_time();
@@ -1191,9 +1196,9 @@ void NetworkQuota::run()
         if(!locked) wifiRetry.reset(); // Awake recovery clears backoff; locked total attempts remain window-scoped.
 #endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
-        // No blocking HTTP, clock wait or tailnet initialization while the
-        // asynchronous setup response/deadline must be serviced.
-        if (_twt.state.stage == MosaicoTwt::Stage::Armed || _twt.state.stage == MosaicoTwt::Stage::Negotiating) {
+        // Armed must allow DHCP/clock/tailnet bootstrap. Only dispatched
+        // negotiation forbids blocking work while its response is pending.
+        if (_twt.state.stage == MosaicoTwt::Stage::Negotiating) {
             wait(50); continue;
         }
 #endif
@@ -1238,6 +1243,14 @@ void NetworkQuota::run()
             updateFirmware();
 
             continue;
+        }
+#endif
+#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
+        // Dispatch only after normal bootstrap has completed, before HTTP.
+        serviceTwtTrial(esp_timer_get_time(), idleLocked());
+        if (_twt.state.cleanupPending || _twt_cleanup_failed ||
+            _twt.state.stage == MosaicoTwt::Stage::Armed || _twt.state.stage == MosaicoTwt::Stage::Negotiating) {
+            wait(50); continue;
         }
 #endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT

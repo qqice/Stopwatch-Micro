@@ -85,3 +85,20 @@ disconnected/no advertising and audio suspended. Across 65 seconds, refreshes
 1->2 and completed display frames 22->23. Hardware self-test 17/17 and host
 regression 36/36 passed. Evidence: `.artifacts/idle-audio-runtime.log`.
 These API/state checks do not measure current or enclosure temperature.
+
+### APP TWT bootstrap ordering
+
+Both RAM-only `twt baseline` and `twt on` arms wait in Armed (stage 1)
+for AP association, DHCP/IP readiness and, when enabled, configured tailnet
+readiness. Armed permits normal clock/tailnet startup but never quota HTTP.
+The bootstrap cap is 60 seconds from owner acceptance of the request; polls
+do not renew it. Baseline (stage 4) then enters modem sleep without an AP TWT
+setup; On starts Negotiating (stage 2) with a separate 10-second deadline from
+setup dispatch, and forbids blocking bootstrap/HTTP until Active (stage 3).
+The overall 600/1800-second lease remains anchored to the original request.
+`twt status` exposes `bootstrap_deadline_us` and `setup_deadline_us` separately;
+zero means that stage deadline is not running. Loss of association/IP/tailnet
+readiness after bootstrap cancels the trial as Lost. Off, unlock, OTA, expiry,
+callback cleanup barriers and boot-local identifier non-reuse remain intact.
+These ordering tests are source/compile-time evidence, not hardware or power
+acceptance. Validate working quota refresh and cleanup before energy comparison.
