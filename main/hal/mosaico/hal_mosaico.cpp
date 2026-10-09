@@ -137,6 +137,10 @@ std::recursive_mutex gauge_transaction_mutex;
 // Private, transaction-mutex owned privilege: only a durable boot intent may
 // enable it. Public manual access/nominal/restore retains its strict policy.
 bool boot_factory_reload_scope = false;
+// Per-call cleanup outcome, exclusively owned by gauge_transaction_mutex.
+// Boot must not repeat an OPEN abort's protective Seal, even if it failed.
+bool gauge_access_cleanup_attempted = false;
+bool gauge_access_cleanup_succeeded = false;
 Hal::GaugeBootReloadInfo gauge_boot_info;
 bool battery_valid = false;
 uint8_t battery_soc = 0;
@@ -767,6 +771,8 @@ bool Hal::gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize)
     using namespace mosaico_gauge;
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     std::lock_guard<std::mutex> lock(battery_mutex);
+    gauge_access_cleanup_attempted = false;
+    gauge_access_cleanup_succeeded = false;
     const auto report = [&](bool success, const char* why) {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
         sample_battery_locked(true);
@@ -786,7 +792,9 @@ bool Hal::gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize)
         if (!gauge_identity()) return report(false, "critical_access_restore_identity");
         // Closing prior SEALED is protective cleanup, not a capacity write:
         // it must remain reachable after nominal reinit changes SOC/mirrors.
+        gauge_access_cleanup_attempted = true;
         const bool restored = gauge_return_access(journal);
+        gauge_access_cleanup_succeeded = restored;
         journal.lastSecurity = gauge_observed_security();
         journal.state = static_cast<uint8_t>(restored ? AccessState::Restored : AccessState::Failed);
         const bool recorded = gauge_store_access(journal, mac.data());
@@ -828,7 +836,9 @@ bool Hal::gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize)
     const auto abort = [&]() {
         // Same bounded protective restore as the explicit RESTORE command;
         // no guessed/retried unseal or full-access words in the abort path.
+        gauge_access_cleanup_attempted = true;
         const bool restored = gauge_return_access(journal);
+        gauge_access_cleanup_succeeded = restored;
         journal.lastSecurity = gauge_observed_security();
         journal.state = static_cast<uint8_t>(restored ? AccessState::Restored : AccessState::Failed);
         const bool recorded = gauge_store_access(journal, mac.data());
@@ -1365,10 +1375,15 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
     } reloadScope;
     char phaseReason[128]{}, closeReason[128]{};
     const bool opened = gaugeAccess(GaugeAccessAction::Open, phaseReason, sizeof(phaseReason));
+    const bool openCleanupAttempted = gauge_access_cleanup_attempted;
+    const bool openCleanupSucceeded = gauge_access_cleanup_succeeded;
     const bool applied = opened && gaugeSetNominalCapacity(FactoryMah, NominalMah, false, phaseReason, sizeof(phaseReason));
-    // Finally is unconditional only after OPEN is attempted. No key
-    // or parameter retries are scheduled, regardless of which step failed.
-    const bool closed = gaugeAccess(GaugeAccessAction::Restore, closeReason, sizeof(closeReason));
+    // After OPEN, exactly one owner performs cleanup. Failed OPEN may already
+    // have attempted protective Seal internally: never repeat that attempt,
+    // successful or not. Its result plus the readonly audit below closes this
+    // boot attempt; failure keeps the persistent Failed latch.
+    const bool closed = !opened && openCleanupAttempted ? openCleanupSucceeded :
+                        gaugeAccess(GaugeAccessAction::Restore, closeReason, sizeof(closeReason));
     bool safelySealed = false;
     uint16_t finalOperation = 0;
     bool finalStatusRead = false;

@@ -393,7 +393,10 @@ factory SEC2, existing journal-bound access RESTORE first normalizes to prior
 SEALED, then identity, unchanged3000/3000 and physical bounds are rechecked.
 Normalization failure records Failed and read-only SEC/CFG/CAL diagnostics,
 returns Critical and performs no OPEN or second Seal. Only after OPEN is attempted
-does unconditional finally RESTORE run; success requires SEALED,
+does final cleanup run: OPEN's internal abort owns cleanup if it attempted it,
+and the wrapper must not issue another Seal even if that abort failed. Otherwise
+the wrapper runs finally RESTORE. Successful OPEN retains one final cleanup;
+the cold-POR normalization and final cleanup are distinct scopes. Success requires SEALED,
 CFG/CAL clear and initialized status. Success includes target readback
 and an observed sealed endpoint. A recursive transaction lock excludes interleaved
 manual access/nominal/reconciliation calls; battery reads retain their own lock.

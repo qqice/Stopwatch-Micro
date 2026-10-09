@@ -90,7 +90,7 @@ inline void seal(Journal& journal) { journal.crc = crc32(&journal, offsetof(Jour
 inline void seal(AccessJournal& journal) { journal.crc = crc32(&journal, offsetof(AccessJournal, crc)); }
 inline void seal(ReloadJournal& journal) { journal.crc = crc32(&journal, offsetof(ReloadJournal, crc)); }
 inline constexpr bool reasonableFcc(uint16_t value) { return value > 0 && value <= MaxReasonableFcc; }
-inline bool configExitAccepted(uint16_t operation)
+inline constexpr bool configExitAccepted(uint16_t operation)
 {
     const unsigned security = (operation >> 1) & 3;
     // SEC3 after REINIT is a compatibility observation on this unit, not a
