@@ -66,13 +66,13 @@ int tinyusb_console_init(int), esp_reset_reason(void);
 #define atomic_load(p) (*(p))
 struct Harness {
  StandbySleep::Model model=StandbySleep::initialModel(true,true);
- bool mounted=false,suspended=false,wakeup_ready=true;
+ bool mounted=false,connected=false,suspended=false,wakeup_ready=true;
  int wakeup_error=0;unsigned mounts=0,unmounts=0,suspends=0,resumes=0,rx_events=0;
  bool wanted=true,applied=true,ready=true,fatal=false,initialized=true,bleActive=false,held=false;
  int64_t now=1000000;
  constexpr Harness() {model.viewLocked=true;model.displaySafe=true;}
  constexpr bool tud_mounted() {return mounted;}
- constexpr bool tud_connected() {return mounted;}
+ constexpr bool tud_connected() {return connected;}
  constexpr bool tud_suspended() {return suspended;}
  constexpr int64_t esp_timer_get_time() {return now;}
  constexpr bool initialize() {return true;}
@@ -82,9 +82,12 @@ struct Harness {
 constexpr bool cases() {
  Harness h;
  if(!h.allow(160,true,false)||h.held)return false; // detached wake-ready
+ h.connected=true;if(h.allow(160,true,false)||!h.held)return false; // enumeration before mount
+ if(h.mosaico_console_usb_snapshot().effective_active)return false; // cadence stays mounted-only
  h.mounted=true;if(h.allow(160,true,false)||!h.held)return false; // active even DTR closed
  h.suspended=true;if(!h.allow(160,true,false)||h.held)return false; // suspended
- h.mounted=false;h.suspended=false;if(!h.allow(160,true,false)||h.held)return false;
+ h.mounted=false;if(!h.allow(160,true,false)||h.held)return false; // connected suspend before mount
+ h.connected=false;h.suspended=false;if(!h.allow(160,true,false)||h.held)return false; // detached
  h.wakeup_ready=false;h.wakeup_error=0x106;
  if(h.allow(160,true,false)||!h.held||h.mosaico_console_usb_snapshot().wakeup_error!=0x106)return false;
  h.wakeup_ready=true;h.allow(160,true,false);
@@ -93,7 +96,7 @@ constexpr bool cases() {
  h.mounted=true;h.suspended=true;h.allow(160,true,false);
  if(!h.held)return false; // no early release within 500 ms callback window
  h.now+=500000;h.allow(160,true,false);if(h.held)return false;
- h.mounted=false;return h.allow(160,true,false)&&!h.held;
+ h.mounted=false;h.connected=false;h.suspended=false;return h.allow(160,true,false)&&!h.held;
 }
 static_assert(cases(),"actual USB snapshot and StandbySleep gate/recovery lifecycle");
 '''

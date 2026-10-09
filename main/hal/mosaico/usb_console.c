@@ -73,7 +73,8 @@ mosaico_usb_snapshot_t mosaico_console_usb_snapshot(void)
     s.wakeup_ready = atomic_load(&wakeup_ready);
     s.wakeup_error = atomic_load(&wakeup_error);
     // Fail closed until boot-scoped public wake setup succeeds, even detached.
-    s.sleep_safe = s.wakeup_ready && !s.effective_active;
+    // Enumeration traffic precedes mount; connected is not power proof.
+    s.sleep_safe = s.wakeup_ready && !((s.mounted || s.connected) && !s.suspended);
     s.mounts = atomic_load(&mounts); s.unmounts = atomic_load(&unmounts);
     s.suspends = atomic_load(&suspends); s.resumes = atomic_load(&resumes);
     s.rx_events = atomic_load(&rx_events);
