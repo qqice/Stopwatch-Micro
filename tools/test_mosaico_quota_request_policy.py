@@ -11,7 +11,7 @@ COMPILER = Path('C:/Espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-
 class QuotaRequestPolicyTests(unittest.TestCase):
     def test_actual_request_block(self):
         source = (ROOT / 'main/host/network_quota.cpp').read_text(encoding='utf8')
-        start = source.index('#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT\n        if (locked && !updateWindow && _twt.live()) continue;')
+        start = source.index('#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT\n        // A late Off/unlock/expiry/timeout')
         end = source.index('        wait(locked ? 5000 : 60000);', start)
         block = source[start:end] + '        wait(locked ? 5000 : 60000);\n'
         code = r'''

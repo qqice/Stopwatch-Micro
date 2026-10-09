@@ -1254,7 +1254,10 @@ void NetworkQuota::run()
         }
 #endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
-        if (locked && !updateWindow && _twt.live()) continue;
+        // A late Off/unlock/expiry/timeout may end the trial above. The
+        // locked refresh-window boundary must not depend on trial liveness;
+        // return to the owner loop for normal idle/stop or awake recovery.
+        if (locked && !updateWindow) continue;
         const int64_t twtFetchStart = esp_timer_get_time();
         const bool twtMeasure = _twt.live();
         const uint16_t twtFetchId = _twt.state.id;

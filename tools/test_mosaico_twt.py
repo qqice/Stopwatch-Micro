@@ -201,12 +201,16 @@ struct Owner {
  constexpr int64_t esp_timer_get_time(){return now;}
  constexpr void cancelTwtTrial(Stop stop){_twt.end(stop);}
  constexpr void publishTwt(){}
- int http=0,waits=0;unsigned tailnetHeapBefore=0,tailnetHeapAfter=0;
+ int http=0,waits=0;bool pendingOff=false,lateUnlock=false;unsigned tailnetHeapBefore=0,tailnetHeapAfter=0;
  constexpr int64_t bootTime(){return 1800000000;}
  constexpr void sampleNetworkHeap(const char*,unsigned&){}
  constexpr void wait(int){++waits;}
  constexpr bool idleLocked(){return true;}
- constexpr void serviceTwtTrial(int64_t,bool locked){if(_twt.check(now,false,locked))dispatch(locked);}
+ constexpr void serviceTwtTrial(int64_t,bool locked){
+  _twt.check(now,false,locked && !lateUnlock);
+  if(pendingOff)_twt.start(Mode::Off,now);
+  if(_twt.live())dispatch(locked && !lateUnlock);
+ }
  constexpr void dispatch(bool locked=true){
 ''' + block + r'''
  }
@@ -239,6 +243,23 @@ constexpr bool gates() {
   if(mode==Mode::Baseline && starting.http!=1)return false;
   if(mode==Mode::On)starting._twt.state.stage=Stage::Active;
   starting.http=0;starting.runBootstrap(false);if(starting.http)return false;
+  // Late service cancellation must return to owner idle/stop, even when
+  // no SDK setup/cleanup exists and the trial has become Off or Failed.
+  for(int action=0;action<4;++action) {
+   Owner ended;ended._connected=ended.tail.online=true;ended._twt.start(mode,0);
+   ended.pendingOff=action==0;ended.lateUnlock=action==1;
+   ended.now=action==2?60000000:action==3?600000000:1;
+   ended.runBootstrap(false);
+   if(ended.http||ended._twt.live()||ended.setups||ended._twt.state.cleanupPending)return false;
+   const auto expected=action==0?Stop::Explicit:action==1?Stop::Awake:action==2?Stop::Timeout:Stop::Expired;
+   if(ended._twt.state.stop!=expected)return false;
+  }
+  Owner manual;manual._connected=manual.tail.online=true;manual._twt.start(mode,0);
+  manual.now=60000000;manual.pendingOff=true;manual.runBootstrap(false);
+  if(manual.http||manual._twt.state.stop!=Stop::Explicit)return false;
+  Owner expiredManual;expiredManual._connected=expiredManual.tail.online=true;expiredManual._twt.start(mode,0);
+  expiredManual.now=600000000;expiredManual.pendingOff=true;expiredManual.runBootstrap(false);
+  if(expiredManual.http||expiredManual._twt.state.stop!=Stop::Explicit)return false;
   Owner lan;lan.tail.configured=false;lan._connected=true;lan._twt.start(mode,0);lan.dispatch();
   if(lan._twt.state.stage!=(mode==Mode::On?Stage::Negotiating:Stage::Baseline))return false;
  }
@@ -259,7 +280,7 @@ static_assert(gates(), "production dispatch block requires DHCP and configured t
         gate = before_fetch.split('serviceTwtTrial(',1)[1]
         self.assertIn('Stage::Armed', gate); self.assertIn('Stage::Negotiating', gate)
         self.assertIn('wait(50); continue;', gate)
-        self.assertIn('if (locked && !updateWindow && _twt.live()) continue;', gate)
+        self.assertIn('if (locked && !updateWindow) continue;', gate)
 
     def test_long_lease_and_cycle_ring(self):
         self.compile_cpp(r'''
