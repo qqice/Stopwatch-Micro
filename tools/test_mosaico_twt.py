@@ -135,6 +135,40 @@ constexpr bool traces() {
  return true;
 }
 static_assert(traces(), "trial safety traces");
+constexpr bool disconnectRetention() {
+ for (Mode mode : {Mode::On, Mode::Baseline}) {
+  Model m;
+  if (m.state.staDisconnect.valid || m.state.staDisconnect.eventUs) return false;
+  if (!m.start(mode, 100)) return false;
+  const auto ownerId = m.state.id;
+  // Valid zero reason is not missing data; timestamp is the original callback time.
+  m.recordStaDisconnect(0, 9000000123LL, true);
+  m.end(Stop::Lost);
+  if (!m.start(Mode::Off, 200)) return false;
+  if (!m.state.staDisconnect.valid || m.state.staDisconnect.reason != 0 ||
+      m.state.staDisconnect.eventUs != 9000000123LL || m.state.staDisconnect.ownerTrialId != ownerId) return false;
+  for (Mode next : {Mode::On, Mode::Baseline}) {
+   if (!m.start(next, 300)) return false;
+   if (m.state.id == ownerId || !m.state.staDisconnect.valid || m.state.staDisconnect.reason != 0 ||
+       m.state.staDisconnect.eventUs != 9000000123LL || m.state.staDisconnect.ownerTrialId != ownerId) return false;
+  }
+  // Consumption identity is the current owner id, including after check/cleanup ended it.
+  const auto consumingId = m.state.id;
+  m.end(Stop::Timeout);
+  m.recordStaDisconnect(204, 9000000000LL, true);
+  if (m.state.staDisconnect.ownerTrialId != consumingId || m.state.staDisconnect.reason != 204 ||
+      m.state.staDisconnect.eventUs != 9000000000LL || !m.state.staDisconnect.valid || m.live()) return false;
+  // A later event with absent data replaces, rather than fabricates, reason validity.
+  m.recordStaDisconnect(0, 9000000999LL, false);
+  m.start(Mode::Off, 400);
+  if (!m.start(mode, 500)) return false;
+  if (m.state.staDisconnect.valid || m.state.staDisconnect.reason != 0 ||
+      m.state.staDisconnect.eventUs != 9000000999LL || m.state.staDisconnect.ownerTrialId != consumingId) return false;
+ }
+ return true;
+}
+static_assert(disconnectRetention(), "actual disconnect record/end/off/start retention and owner identity");
+
 '''
         self.compile_cpp(code)
 
@@ -312,11 +346,15 @@ static_assert(gates(), "production dispatch block requires DHCP and configured t
         self.assertIn('announced && !option', command)
         self.assertIn('MosaicoTwt::Profile::AnnouncedTrigger : MosaicoTwt::Profile::Default', command)
         fmt = re.search(r'"(lease_s=%lu mode=%u profile=%u[^"\n]+)"', command).group(1)
-        widths = {'lu':10, 'u':10, 'lld':20, 'llu':20, 'd':11}
-        longest = re.sub(r'%(llu|lld|lu|u|d)', lambda m: '9'*widths[m.group(1)], fmt)
+        widths = {'lu':10, 'u':10, 'hu':5, 'hhu':3, 'lld':20, 'llu':20, 'd':11}
+        # Snapshot enums and Result fields are uint8_t, id is uint16_t.
+        bounded = {name:3 for name in ('mode', 'profile', 'stage', 'stop', 'reason', 'flow', 'last_failure', 'cleanup_stage')}
+        bounded['id'] = 5
+        longest = re.sub(r'(\w+)=%(llu|lld|lu|hhu|hu|u|d)',
+                         lambda m: m.group(1)+'='+'9'*bounded.get(m.group(1), widths[m.group(2)]), fmt)
         details_size = int(re.search(r'char details\[(\d+)\]', command).group(1))
         self.assertLess(len(longest), details_size)
-        self.assertLess(len(longest) + len('DBG twt PASS ') + 2, 1536)
+        self.assertLess(len(longest) + len('DBG RESULT command=twt status=PASS ') + 2, 1536)
 
     def test_bootstrap_run_ordering(self):
         source = (ROOT/'main/host/network_quota.cpp').read_text()
@@ -411,6 +449,51 @@ constexpr bool identityTransitions() {
 static_assert(actualOwner(), "actual network owner anchors");
 static_assert(identityTransitions(), "actual owner identity changes never mix evidence");
 ''')
+
+    def test_sta_disconnect_numeric_copy_and_latch_traces(self):
+        import re
+        from types import SimpleNamespace
+        source = (ROOT/'main/host/network_quota.cpp').read_text()
+        header = (ROOT/'main/host/network_quota.h').read_text()
+        model = (ROOT/'main/host/mosaico_twt_model.h').read_text()
+        serial = (ROOT/'main/debug/serial_debug.cpp').read_text()
+        callback = source.split('void NetworkQuota::twtEvent',1)[1].split('void NetworkQuota::cancelTwtTrial',1)[0]
+        sta = callback.split('event == WIFI_EVENT_STA_DISCONNECTED)',1)[1].split('else if (event == WIFI_EVENT_ITWT_TEARDOWN',1)[0]
+        for text in ('copied.kind = 2;', 'copied.eventUs = esp_timer_get_time();',
+                     'copied.staReason = e.reason;', 'copied.staReasonValid = true;',
+                     'const wifi_event_sta_disconnected_t*'):
+            self.assertIn(text, sta)
+        for forbidden in ('._twt.', '._twt_cache', 'ssid', 'bssid', 'password', 'esp_wifi_', 'ESP_LOG'):
+            self.assertNotIn(forbidden, sta)
+        self.assertIn('uint16_t staReason = 0;', header)
+        drain = source.split('} else if (e.kind == 2) {',1)[1].split('} else if (e.kind == 3)',1)[0]
+        self.assertLess(drain.index('_twt.recordStaDisconnect'), drain.index('if (_twt.live())'))
+        self.assertIn('if (_twt.live()) { ++_twt.state.losses; cancelTwtTrial(Stop::Lost); }', drain)
+        record = model.split('constexpr void recordStaDisconnect',1)[1].split('}',1)[0].split('{',1)[1]
+        # Execute the four actual production numeric assignments with mock state.
+        assignments = '\n'.join(line.strip().rstrip(';') for line in record.strip().splitlines())
+        self.assertEqual(len(assignments.splitlines()), 4)
+        for mode in ('On', 'Baseline'):
+            state = SimpleNamespace(id=29, staDisconnect=SimpleNamespace())
+            for live in (True, False): # event can drain after prior check/cleanup ended trial
+                for valid, reason in ((True, 204), (True, 0), (False, 0)):
+                    exec(assignments, {}, dict(state=state, reason=reason, eventUs=123456789, valid=valid))
+                    self.assertEqual(vars(state.staDisconnect), dict(reason=reason,eventUs=123456789,valid=valid,ownerTrialId=29))
+                    # End/Off keep the same state, next start retains only the last diagnostic.
+                    last = state.staDisconnect
+                    self.assertIn('const auto lastDisconnect = state.staDisconnect;', model)
+                    self.assertIn('state.staDisconnect = lastDisconnect;', model)
+                    next_state = SimpleNamespace(id=30, staDisconnect=last)
+                    self.assertEqual(next_state.staDisconnect.ownerTrialId,29)
+        self.assertIn('copied.setup.trigger = e.config.trigger;', callback)
+        self.assertIn('copied.setup.flowType = e.config.flow_type;', callback)
+        accept = model.split('constexpr bool accept(',1)[1]
+        self.assertNotIn('.trigger', accept)
+        self.assertNotIn('.flowType', accept)
+        for name in ('sta_disconnect_valid=', 'sta_disconnect_reason=', 'sta_disconnect_time_us=',
+                     'sta_owner_trial_id=', 'actual_trigger=', 'actual_flow_type='):
+            self.assertIn(name, serial)
+        self.assertIn('t.actual.status, unsigned(t.actual.reason)', serial)
 
     def test_owner_and_serial_boundaries(self):
         source = (ROOT/'main/host/network_quota.cpp').read_text()

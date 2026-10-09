@@ -456,9 +456,17 @@ void NetworkQuota::twtEvent(void* arg, const char*, int32_t event, void* data)
         copied.setup.id = e.config.twt_id; copied.setup.flow = e.config.flow_id;
         copied.setup.mantissa = e.config.wake_invl_mant; copied.setup.exponent = e.config.wake_invl_expn;
         copied.setup.duration = e.config.min_wake_dura; copied.setup.unit = e.config.wake_duration_unit;
+        copied.setup.trigger = e.config.trigger; copied.setup.flowType = e.config.flow_type;
         copied.setup.status = e.status; copied.setup.reason = e.reason; copied.setup.targetWakeUs = e.target_wake_time;
-    } else if (event == WIFI_EVENT_STA_DISCONNECTED) copied.kind = 2;
-    else if (event == WIFI_EVENT_ITWT_TEARDOWN && data) {
+    } else if (event == WIFI_EVENT_STA_DISCONNECTED) {
+        copied.kind = 2;
+        copied.eventUs = esp_timer_get_time();
+        if (data) {
+            const auto& e = *static_cast<const wifi_event_sta_disconnected_t*>(data);
+            copied.staReason = e.reason;
+            copied.staReasonValid = true;
+        }
+    } else if (event == WIFI_EVENT_ITWT_TEARDOWN && data) {
         const auto& e = *static_cast<const wifi_event_sta_itwt_teardown_t*>(data);
         copied.kind = 3; copied.flow = e.flow_id; copied.setup.status = e.status;
     } else return; // No per-wake logging, APIs, allocations, NVS or HAL calls.
@@ -586,8 +594,10 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
                 _twt_submitted = true;
                 cancelTwtTrial(Stop::Lost);
             }
-        } else if (e.kind == 2 && _twt.live()) {
-            ++_twt.state.losses; cancelTwtTrial(Stop::Lost);
+        } else if (e.kind == 2) {
+            // Latch even when check/cleanup already ended this trial. No callback model reads.
+            _twt.recordStaDisconnect(e.staReason, e.eventUs, e.staReasonValid);
+            if (_twt.live()) { ++_twt.state.losses; cancelTwtTrial(Stop::Lost); }
         } else if (e.kind == 3) {
             if (_twt_teardown_sent && e.flow == FLOW_ID_ALL) {
                 if (e.setup.status == ITWT_TEARDOWN_SUCCESS) _twt_teardown_ack = true;

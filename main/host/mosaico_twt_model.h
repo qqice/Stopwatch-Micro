@@ -38,8 +38,14 @@ struct CycleRing {
 struct Result {
     uint16_t id = 0, mantissa = 0;
     uint8_t flow = 0, exponent = 0, duration = 0, unit = 0, reason = 0;
+    uint8_t trigger = 0, flowType = 0; // Actual AP-returned configuration, not requested profile.
     int status = 0;
     uint64_t targetWakeUs = 0;
+};
+struct StaDisconnect {
+    uint16_t reason = 0, ownerTrialId = 0; // Owner consumption identity, not callback-time identity.
+    int64_t eventUs = 0; // Original STA_DISCONNECTED callback timestamp.
+    bool valid = false; // Distinguishes missing event data from a supplied zero reason.
 };
 struct Snapshot {
     Mode requested = Mode::Off;
@@ -54,6 +60,7 @@ struct Snapshot {
     bool apAx = false, associated = false, cleanupPending = false, cleanupFailed = false;
     int phy = -1, error = 0, restoreError = 0, teardownError = 0;
     Result actual{};
+    StaDisconnect staDisconnect{};
     uint64_t intervalUs = 0, durationUs = 0, fetchUs = 0;
     uint32_t fetchAttempts = 0, fetchOk = 0, losses = 0, lateEvents = 0;
 };
@@ -74,13 +81,21 @@ struct Model {
         if (mode == Mode::Off) { state.requested = mode; end(Stop::Explicit); return true; }
         // No identifier reuse this boot: stale SDK responses cannot become a new trial.
         if (!validLease(leaseSeconds) || nextId == 32767) return false;
+        const auto lastDisconnect = state.staDisconnect;
         state = Snapshot{};
+        state.staDisconnect = lastDisconnect; // Boot-latched until the next disconnect event.
         state.profile = mode == Mode::On ? profile : Profile::Default;
         state.requested = mode; state.id = ++nextId;
         state.leaseSeconds = leaseSeconds;
         state.stage = Stage::Armed; state.expiryUs = now + int64_t(leaseSeconds) * 1000000;
         state.bootstrapDeadlineUs = now + 60LL * 1000000;
         return true;
+    }
+    constexpr void recordStaDisconnect(uint16_t reason, int64_t eventUs, bool valid) {
+        state.staDisconnect.reason = reason;
+        state.staDisconnect.eventUs = eventUs;
+        state.staDisconnect.valid = valid;
+        state.staDisconnect.ownerTrialId = state.id;
     }
     constexpr bool check(int64_t now, bool ota, bool locked) {
         if (!live()) return false;

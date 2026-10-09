@@ -935,16 +935,17 @@ void SerialDebug::handleLine(char* line)
             const auto t = GetNetworkQuota().twtSnapshot();
             char details[896]{};
             std::snprintf(details, sizeof(details),
-                "lease_s=%lu mode=%u profile=%u stage=%u stop=%u id=%u expiry_us=%lld bootstrap_deadline_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld ram_only=1",
+                "lease_s=%lu mode=%u profile=%u stage=%u stop=%u id=%u expiry_us=%lld bootstrap_deadline_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u actual_trigger=%hhu actual_flow_type=%hhu interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld sta_disconnect_valid=%d sta_disconnect_reason=%hu sta_disconnect_time_us=%lld sta_owner_trial_id=%hu ram_only=1",
                 static_cast<unsigned long>(t.leaseSeconds), unsigned(t.requested), unsigned(t.profile), unsigned(t.stage), unsigned(t.stop), unsigned(t.id),
                 static_cast<long long>(t.expiryUs), static_cast<long long>(t.bootstrapDeadlineUs), static_cast<long long>(t.setupDeadlineUs), t.associated, t.apAx, t.phy,
-                t.actual.status, unsigned(t.actual.reason), unsigned(t.actual.flow),
+                t.actual.status, unsigned(t.actual.reason), unsigned(t.actual.flow), unsigned(t.actual.trigger), unsigned(t.actual.flowType),
                 static_cast<unsigned long long>(t.intervalUs), static_cast<unsigned long long>(t.durationUs),
                 static_cast<unsigned long long>(t.actual.targetWakeUs), static_cast<unsigned long>(t.fetchAttempts),
                 static_cast<unsigned long>(t.fetchOk), static_cast<unsigned long long>(t.fetchUs),
                 static_cast<unsigned long>(t.losses), static_cast<unsigned long>(t.lateEvents), t.error, t.restoreError, t.teardownError,
                 t.cleanupPending, t.cleanupFailed, unsigned(t.lastFailure), unsigned(t.cleanupStage),
-                static_cast<long long>(t.cleanupDeadlineUs));
+                static_cast<long long>(t.cleanupDeadlineUs), t.staDisconnect.valid, unsigned(t.staDisconnect.reason),
+                static_cast<long long>(t.staDisconnect.eventUs), unsigned(t.staDisconnect.ownerTrialId));
             result("twt", "PASS", details); return;
         }
         MosaicoTwt::Mode requested;

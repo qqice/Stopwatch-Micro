@@ -130,7 +130,13 @@ private:
     std::atomic<bool> _twt_observe{false};
     MosaicoTwt::Model _twt;
     MosaicoTwt::Snapshot _twt_cache;
-    struct TwtEvent { uint8_t kind = 0, flow = 0; MosaicoTwt::Result setup{}; };
+    struct TwtEvent {
+        uint8_t kind = 0, flow = 0;
+        MosaicoTwt::Result setup{};
+        uint16_t staReason = 0;
+        int64_t eventUs = 0;
+        bool staReasonValid = false;
+    };
     TwtEvent _twt_events[8]{};
     uint8_t _twt_event_read = 0, _twt_event_write = 0;
     bool _twt_event_overflow = false, _twt_handler_ready = false;
