@@ -22,11 +22,17 @@ def parse_event(line, receipt):
     return event
 
 
-def select_anchors(events, cycles, trial_id):
+def select_anchors(events, cycles, trial_id, required_fetch_flags=15):
+    # Legacy quota+history remains the default. Quota-only callers explicitly
+    # opt in; unexpected history/unknown bits must not be reinterpreted as QoS.
+    if type(required_fetch_flags) is not int or required_fetch_flags not in (3, 15):
+        raise ValueError("required_fetch_flags must be 3 or 15")
     starts = [e for e in events if e["trial_id"] == trial_id and e["phase"] == 0]
     if len(starts) != cycles + 1:
         raise ValueError("requires exactly cycles+1 real refresh starts")
     selected = [e for e in events if e["trial_id"] == trial_id and starts[0]["cycle_seq"] <= e["cycle_seq"] <= starts[-1]["cycle_seq"]]
+    if required_fetch_flags == 3 and any(e["fetch_flags"] & ~3 for e in selected):
+        raise ValueError("quota-only contract contains history or unknown fetch bits")
     if any(e["dropped"] for e in selected):
         raise ValueError("firmware cycle ring dropped evidence")
     if trial_id and any(not e["associated"] for e in selected):
@@ -43,7 +49,7 @@ def select_anchors(events, cycles, trial_id):
             raise ValueError("refresh cancelled by wake/trial cancellation")
         # Deadline/retry/no-candidate are structural endings, never QoS success.
         fetch_qos_ok = fetch_qos_ok and ends[0]["reason"] == 1 and any(
-            e["fetch_flags"] == 15 and a["device_us"] <= e["device_us"] <= ends[0]["device_us"]
+            e["fetch_flags"] == required_fetch_flags and a["device_us"] <= e["device_us"] <= ends[0]["device_us"]
             for e in fetches)
     return {"timebase": "host_monotonic_s", "anchors": [
         {"time_s": e["receive_monotonic_s"], "phase": "refresh_start", "device_us": e["device_us"],
@@ -51,6 +57,7 @@ def select_anchors(events, cycles, trial_id):
         "actual_events": selected, "receipt_not_sample_timestamp": True,
         "structural_window_coverage_complete": True,
         "cycle_fetch_qos_ok": fetch_qos_ok,
+        "required_fetch_flags": required_fetch_flags,
         "cycle_events_associated": all(e["associated"] for e in selected),
         "qos_passed": None if fetch_qos_ok else False,
         "trial_valid": False,  # No state/continuous-association evidence in this reader.
