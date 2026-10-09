@@ -1268,6 +1268,7 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         return gauge_boot_info.status;
     }
     ReloadJournal latch{};
+    bool normalizePriorSealed = false;
     const auto mac = getFactoryMac();
     {
         // Release the nonrecursive battery mutex BEFORE calling public methods.
@@ -1299,18 +1300,20 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         sample_battery_locked(true);
         const auto sample = battery_telemetry;
         if (!sample.valid || !sample.capacityValid) return finish(Status::Deferred, "boot_deferred_readonly_telemetry");
-        if (!configExitAccepted(sample.operationStatus) || ((sample.operationStatus >> 1) & 3) != 3)
-            return finish(Status::Deferred, "boot_deferred_not_idle_sealed_cfg_clear");
         if (keepLearnedNominal(sample.designMah, sample.fullMah))
             return finish(Status::Skipped, "boot_skip_already65_preserve_learned_fcc");
         if (!bootFactoryPairEligible(nominal, sample.designMah, sample.fullMah))
             return finish(Status::Skipped, "boot_skip_nonfactory_or_backup_mismatch_no_writes");
+        if (!bootFactorySecurityEligible(nominal, access, sample.designMah, sample.fullMah, sample.operationStatus))
+            return finish(Status::Deferred, "boot_deferred_not_idle_known_factory_sec2_or3");
         uint16_t operation = 0;
         GaugePair profile;
-        if (!gauge_access_preflight(operation, profile, true) || ((operation >> 1) & 3) != 3 ||
-            !bootFactoryPairEligible(nominal, profile.design, profile.fcc))
+        if (!gauge_access_preflight(operation, profile, true) ||
+            !bootFactorySecurityEligible(nominal, access, profile.design, profile.fcc, operation) ||
+            ((operation >> 1) & 3) != ((sample.operationStatus >> 1) & 3))
             return finish(Status::Deferred, "boot_deferred_reload_voltage_temperature_load");
         if (!gauge_identity()) return finish(Status::Deferred, "boot_deferred_readonly_identity");
+        normalizePriorSealed = ((operation >> 1) & 3) == 2;
         // Durable per-unit Pending latch BEFORE any automatic access attempt.
         // Unknown/pending/corrupt records on a later boot never retry themselves.
         latch = {};
@@ -1321,6 +1324,38 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         if (!gauge_store_reload(latch, mac.data())) return finish(Status::Critical, "boot_critical_prepare_failure_latch");
     }
     gauge_boot_info.attempted = true; // one attempt per boot, even when OPEN later refuses/aborts.
+    if (normalizePriorSealed) {
+        // Durable Pending and attempted precede even protective Seal. Reuse
+        // only the known journal's RESTORE, outside the nonrecursive battery
+        // lock. A failed normalization must NOT reach OPEN or finally Seal.
+        char normalizeReason[128]{};
+        bool normalized = gaugeAccess(GaugeAccessAction::Restore, normalizeReason, sizeof(normalizeReason));
+        uint16_t observedOperation = 0;
+        bool observed = false;
+        {
+            std::lock_guard<std::mutex> battery(battery_mutex);
+            GaugePair recheck;
+            observed = gauge_word(0x3A, observedOperation);
+            normalized = normalized && observed && configExitAccepted(observedOperation) &&
+                         ((observedOperation >> 1) & 3) == 3 && gauge_identity() &&
+                         gauge_access_preflight(observedOperation, recheck, true) &&
+                         ((observedOperation >> 1) & 3) == 3 &&
+                         recheck.design == FactoryMah && recheck.fcc == FactoryMah;
+            if (!normalized) {
+                latch.state = static_cast<uint8_t>(ReloadState::Failed);
+                if (!gauge_store_reload(latch, mac.data()))
+                    return finish(Status::Critical, "boot_critical_normalize_failure_latch_readback");
+            }
+        }
+        if (!normalized) {
+            char details[128]{};
+            if (observed) std::snprintf(details, sizeof(details),
+                "boot_critical_normalize_failed_no_retry observed_sec=%u cfg=%u cal=%u",
+                (observedOperation >> 1) & 3, !!(observedOperation & 0x0400), !!(observedOperation & 1));
+            else std::snprintf(details, sizeof(details), "boot_critical_normalize_failed_no_retry_security_unreadable");
+            return finish(Status::Critical, details);
+        }
+    }
     // Permission begins only AFTER history/factory checks and durable Pending.
     // The recursive transaction lock above prevents any manual caller sharing
     // this permission; all exits (including finally failures) revoke it.
@@ -1331,7 +1366,7 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
     char phaseReason[128]{}, closeReason[128]{};
     const bool opened = gaugeAccess(GaugeAccessAction::Open, phaseReason, sizeof(phaseReason));
     const bool applied = opened && gaugeSetNominalCapacity(FactoryMah, NominalMah, false, phaseReason, sizeof(phaseReason));
-    // Finally is unconditional after entering the access-attempt scope. No key
+    // Finally is unconditional only after OPEN is attempted. No key
     // or parameter retries are scheduled, regardless of which step failed.
     const bool closed = gaugeAccess(GaugeAccessAction::Restore, closeReason, sizeof(closeReason));
     bool safelySealed = false;

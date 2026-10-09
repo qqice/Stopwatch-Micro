@@ -89,7 +89,7 @@ inline uint32_t crc32(const void* data, size_t size)
 inline void seal(Journal& journal) { journal.crc = crc32(&journal, offsetof(Journal, crc)); }
 inline void seal(AccessJournal& journal) { journal.crc = crc32(&journal, offsetof(AccessJournal, crc)); }
 inline void seal(ReloadJournal& journal) { journal.crc = crc32(&journal, offsetof(ReloadJournal, crc)); }
-inline bool reasonableFcc(uint16_t value) { return value > 0 && value <= MaxReasonableFcc; }
+inline constexpr bool reasonableFcc(uint16_t value) { return value > 0 && value <= MaxReasonableFcc; }
 inline bool configExitAccepted(uint16_t operation)
 {
     const unsigned security = (operation >> 1) & 3;
@@ -123,7 +123,7 @@ inline bool quietAccess(uint16_t op, uint16_t soc, uint16_t mv, uint16_t tempera
            quietFull(static_cast<uint16_t>((op & ~0x0006U) | 0x0002U), soc, mv, temperature, current, average);
 }
 
-inline bool bootReloadPhysical(uint16_t op, uint16_t mv, uint16_t temperature,
+inline constexpr bool bootReloadPhysical(uint16_t op, uint16_t mv, uint16_t temperature,
                                int16_t current, int16_t average)
 {
     // Project admission bounds, NOT TI accuracy guarantees or calibration.
@@ -149,7 +149,7 @@ inline bool validAccessJournal(const AccessJournal& journal, const uint8_t mac[6
            journal.crc == crc32(&journal, offsetof(AccessJournal, crc));
 }
 
-inline bool failedDefaultAttempt(const AccessJournal& journal)
+inline constexpr bool failedDefaultAttempt(const AccessJournal& journal)
 {
     // Persisted BEFORE sending words: a crash or missing confirmation never
     // authorizes replaying unknown keys on the next OPEN request.
@@ -165,7 +165,7 @@ inline bool validReloadJournal(const ReloadJournal& journal, const uint8_t mac[6
            std::memcmp(journal.mac, mac, 6) == 0 && journal.crc == crc32(&journal, offsetof(ReloadJournal, crc));
 }
 
-inline bool bootHistoryEligible(const Journal& nominal, const AccessJournal& access)
+inline constexpr bool bootHistoryEligible(const Journal& nominal, const AccessJournal& access)
 {
     // Actual CRC/MAC validation is mandatory at the caller before this policy.
     return nominal.action == 1 && nominal.state == static_cast<uint8_t>(State::VerifiedSealedPrior3) &&
@@ -175,16 +175,27 @@ inline bool bootHistoryEligible(const Journal& nominal, const AccessJournal& acc
            access.lastSecurity == 3 && access.unsealVerified && access.fullVerified && !failedDefaultAttempt(access);
 }
 
-inline bool keepLearnedNominal(uint16_t design, uint16_t fcc)
+inline constexpr bool keepLearnedNominal(uint16_t design, uint16_t fcc)
 {
     return design == NominalMah && reasonableFcc(fcc);
 }
 
-inline bool bootFactoryPairEligible(const Journal& nominal, uint16_t design, uint16_t fcc)
+inline constexpr bool bootFactoryPairEligible(const Journal& nominal, uint16_t design, uint16_t fcc)
 {
     // The public nominal transaction will preserve this exact original backup.
     return design == FactoryMah && fcc == FactoryMah && nominal.originalDesign == FactoryMah &&
            nominal.originalFcc == FactoryMah && nominal.changedFcc == 1;
+}
+
+inline constexpr bool bootFactorySecurityEligible(const Journal& nominal, const AccessJournal& access,
+                                        uint16_t design, uint16_t fcc, uint16_t operation)
+{
+    // Caller must validate CRC/MAC/type and physical/readback gates. Only this
+    // known factory-profile recovery may normalize cold-POR UNSEALED to the
+    // journal's verified prior SEALED. This is not a generic SEC2 acceptance.
+    const unsigned security = (operation >> 1) & 3;
+    return bootHistoryEligible(nominal, access) && bootFactoryPairEligible(nominal, design, fcc) &&
+           (security == 2 || security == 3) && !(operation & 0x0401) && (operation & 0x0020);
 }
 
 inline bool recoveryState(uint8_t state)
@@ -305,6 +316,12 @@ inline bool selftest()
     bootNominal.lastDesign = NominalMah; bootNominal.lastFcc = NominalMah;
     if (!bootHistoryEligible(bootNominal, access) || !keepLearnedNominal(65, 62) || keepLearnedNominal(65, 3000) ||
         !bootFactoryPairEligible(bootNominal, 3000, 3000) || bootFactoryPairEligible(bootNominal, 65, 3000)) return false;
+    if (!bootFactorySecurityEligible(bootNominal, access, 3000, 3000, 0x00a4) ||
+        !bootFactorySecurityEligible(bootNominal, access, 3000, 3000, 0x00a6) ||
+        bootFactorySecurityEligible(bootNominal, access, 3000, 3000, 0x04a4) ||
+        bootFactorySecurityEligible(bootNominal, access, 3000, 3000, 0x00a5) ||
+        bootFactorySecurityEligible(bootNominal, access, 3000, 3000, 0x0084) ||
+        bootFactorySecurityEligible(bootNominal, access, 65, 62, 0x00a4)) return false;
     bootNominal.state = static_cast<uint8_t>(State::ExitFailed);
     if (bootHistoryEligible(bootNominal, access)) return false;
     bootNominal.state = static_cast<uint8_t>(State::VerifiedSealedPrior3);

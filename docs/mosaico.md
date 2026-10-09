@@ -373,9 +373,11 @@ complete characterized CEDV profile. The first check runs after gauge/NVS init
 and before display/radios. Already-correct DC65 with a sane live FCC is untouched,
 including learned FCC. Unrecognized history or a nonfactory pair is not rewritten.
 Only matching MAC/type/unit/CRC nominal and access records proving the previous
-sealed65 endpoint authorize default3000/3000 reload. Identity0220, SEC3/CFG0/CAL0,
-initialized complete telemetry and the original near-full/quiet/temperature gates
-must all pass. No guessed SOC, voltage correction, gain/EDV or OTP write is added.
+sealed65 endpoint authorize default3000/3000 reload. Identity0220, SEC2 or SEC3,
+CFG0/CAL0 and INIT complete telemetry must pass. The factory-only startup bounds
+are 3500..4350mV, 2832..3181 in 0.1K, and instantaneous/average current within
+plus/minus130mA; factory SOC is not used. Manual near-full/quiet gates are unchanged.
+No guessed SOC, voltage correction, gain/EDV or OTP write is added.
 
 If read-only safety preconditions are not yet met, the configured quota worker
 may revisit them once/minute while locked and radios are off. A low-battery,
@@ -386,8 +388,13 @@ completion marker.
 
 A separate CRC/unit-bound reload journal is committed and read back BEFORE
 access. Pending, failed or corrupt reload records block automatic retries even
-across reset. After one real attempt per boot, cleanup always restores SEALED
-and checks CFG/CAL clear and initialized status. Success includes target readback
+across reset. Attempted is set before any protective Seal. For known-history
+factory SEC2, existing journal-bound access RESTORE first normalizes to prior
+SEALED, then identity, unchanged3000/3000 and physical bounds are rechecked.
+Normalization failure records Failed and read-only SEC/CFG/CAL diagnostics,
+returns Critical and performs no OPEN or second Seal. Only after OPEN is attempted
+does unconditional finally RESTORE run; success requires SEALED,
+CFG/CAL clear and initialized status. Success includes target readback
 and an observed sealed endpoint. A recursive transaction lock excludes interleaved
 manual access/nominal/reconciliation calls; battery reads retain their own lock.
 No keys are logged or changed, no generic profile executor is introduced.
@@ -403,12 +410,15 @@ writes and requires explicit protective `debug gauge-access restore` inspection.
 A corrupt/foreign record is never used to guess keys or resume a parameter write.
 The new reload does not persist a learned FCC across gauge power loss, audit the
 full cell profile, or qualify a discharge. Live learned FCC is merely preserved.
-A true gauge POR may return UNSEALED2 rather than the validated SEALED3 state.
-That case remains Deferred: old history does not authorize guessing a return
-path, self-sealing an unknown prior2 state, or silently escalating access. This
-conditional feature is not universal recovery at arbitrary battery/security
-states. Inspect and explicitly recover such a unit before claiming a power-loss
-cycle succeeded.
+A true gauge POR defaults to UNSEALED2 (TI SLUUBD4A section3.2) and loses RAM
+configuration. Earlier firmware left SEC2 Deferred. The narrow known-history
+factory path above now uses its verified prior3 return path; unknown history,
+nonfactory pairs or invalid telemetry still authorize no writes. This is not
+generic prior2 OPEN, universal SEC2 config-exit acceptance, or a claim that a
+POR flag exists in BatteryStatus/OperationStatus bit7. A sane live DC65/FCC
+is preserved without writes even if security is unusual. This conditional
+feature is not universal recovery at arbitrary battery/security states;
+physical power-cycle acceptance remains separate from source/build tests.
 Protective access-restore does not clear the reload failure latch. Re-enabling
 an interrupted/failed automatic reload requires an explicitly reviewed unit-bound
 journal repair; there is deliberately no generic failure-reset/retry command.
