@@ -1,5 +1,6 @@
 """Offline actual-callback regression harness; not physical touch acceptance."""
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -32,6 +33,42 @@ class WifiKeyboardTests(unittest.TestCase):
         self.assertIn('requestWifiForget(ssid)', CPP)
         self.assertIn('wifi.count > 1', CPP)
 
+    def test_actual_wireless_layout_and_draft_refresh(self):
+        init = CPP.split('void CodexMicroView::initSettings()', 1)[1].split('void CodexMicroView::settingsDetailExec', 1)[0]
+        rects = {}
+        for name in ('Profiles', 'NewButton', 'ForgetButton', 'Ssid', 'Password', 'OpenButton', 'SaveButton', 'RestartButton', 'Keyboard'):
+            match = re.search(r'panel\(_wifi' + name + r', (\d+), (\d+), (\d+), (\d+)\)', init)
+            self.assertIsNotNone(match, name)
+            rects[name] = tuple(map(int, match.groups()))
+        match = re.search(r'label\(wireless, (\d+), (\d+), (\d+), "",', init)
+        rects['SaveState'] = (*map(int, match.groups()), 18)
+        rects.update({'Radio1': (0, 8, 440, 54), 'Radio2': (0, 70, 440, 54)})
+        def check(rectangles):
+            for x, y, w, h in rectangles:
+                self.assertTrue(0 <= x and 0 <= y and x+w <= 480 and y+h <= 480)
+            for i, (x, y, w, h) in enumerate(rectangles):
+                for a, b, c, d in rectangles[i+1:]:
+                    self.assertTrue(x+w <= a or a+c <= x or y+h <= b or b+d <= y)
+        hidden = [(20+x, 120+y, w, h) for name, (x,y,w,h) in rects.items() if name != 'Keyboard']
+        keyboard = rects['Keyboard']
+        active = re.search(r'place\(field, (\d+), (\d+)\)', CPP)
+        shown = [(20+int(active[1]), 120+int(active[2]), 416, 48), (20+keyboard[0], 64+keyboard[1], keyboard[2], keyboard[3])]
+        for layout in (hidden, shown):
+            for rotation in range(4):
+                check(layout)
+                layout = [(480-y-h, x, h, w) for x,y,w,h in layout]
+        for name in ('Profiles', 'NewButton', 'ForgetButton'):
+            self.assertEqual(rects[name][3], 48)
+        refresh = CPP.split('if (_settingsOpen && _settingsDetail == 4)', 1)[1].split('if (!_locked) refreshClock', 1)[0]
+        self.assertNotIn('lv_textarea_set_text', refresh)
+        self.assertNotIn('lv_dropdown_set_text', refresh)
+        self.assertIn('wifi.count > 1 && !_wifiNewProfile', refresh)
+        # Pointer list selection sends VALUE_CHANGED even for the previously selected row.
+        dropdown = (ROOT / 'components/lvgl/src/widgets/dropdown/lv_dropdown.c').read_text(encoding='utf8')
+        release = dropdown.split('static lv_result_t list_release_handler(lv_obj_t * list_obj)', 1)[1]
+        release = release[release.index('{'):].split('static void list_press_handler', 1)[0]
+        self.assertIn('lv_obj_send_event(dropdown_obj, LV_EVENT_VALUE_CHANGED, &id)', release)
+
     def test_numeric_bridge_never_reads_widgets_or_secrets(self):
         reader = CPP.split('bool CodexMicroView::wifiEditorDebugSnapshot(', 1)[1].split('void CodexMicroView::cancelWifiEditorPending', 1)[0]
         self.assertNotIn('lv_', reader)
@@ -62,10 +99,11 @@ using std::size_t;
 enum { LV_EVENT_PRESSED, LV_EVENT_PRESSING, LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST,
        LV_EVENT_CLICKED, LV_EVENT_VALUE_CHANGED, LV_EVENT_READY, LV_EVENT_CANCEL };
 enum lv_obj_flag_t { LV_OBJ_FLAG_HIDDEN=1 };
+enum { LV_STATE_DISABLED=1 };
 enum { LV_INDEV_TYPE_POINTER, LV_INDEV_STATE_RELEASED, LV_INDEV_STATE_PRESSED };
 struct lv_point_t { int x=0,y=0; };
 struct lv_indev_t { lv_point_t point; int state=LV_INDEV_STATE_RELEASED; bool scrolling=false; };
-struct lv_obj_t { lv_obj_t* parent=nullptr; int flags=0,x=0,y=0; bool empty=false; lv_obj_t* editor=nullptr; char text[65]{}; unsigned selected=0; };
+struct lv_obj_t { lv_obj_t* parent=nullptr; int flags=0,x=0,y=0; bool empty=false; lv_obj_t* editor=nullptr; char text[65]{}; unsigned selected=0; int states=0; const char* dropdownText=nullptr; };
 struct CodexMicroView;
 struct lv_event_t { CodexMicroView* owner; int code; lv_obj_t* target; lv_obj_t* current; lv_indev_t* input; };
 constexpr auto lv_event_get_user_data(lv_event_t* e) { return e->owner; }
@@ -78,6 +116,10 @@ constexpr int lv_indev_get_state(lv_indev_t* i) { return i->state; }
 lv_obj_t scrollMock{};
 constexpr lv_obj_t* lv_indev_get_scroll_obj(lv_indev_t* i) { return i->scrolling ? &scrollMock : nullptr; }
 constexpr void lv_indev_get_point(lv_indev_t* i,lv_point_t* p) { *p=i->point; }
+constexpr bool lv_obj_has_state(lv_obj_t* o,int state) { return o->states&state; }
+constexpr void lv_obj_add_state(lv_obj_t* o,int state) { o->states|=state; }
+constexpr void lv_obj_remove_state(lv_obj_t* o,int state) { o->states&=~state; }
+constexpr void lv_dropdown_set_text(lv_obj_t* o,const char* text) { o->dropdownText=text; }
 constexpr auto lv_obj_get_parent(lv_obj_t* o) { return o->parent; }
 constexpr bool lv_obj_has_flag(lv_obj_t* o,lv_obj_flag_t f) { return o->flags&f; }
 constexpr void lv_obj_add_flag(lv_obj_t* o,lv_obj_flag_t f) { o->flags|=f; }
@@ -110,14 +152,14 @@ struct CodexMicroView {
  enum class RotationPhase { Idle,FadeOut };
  RotationPhase _rotationPhase=RotationPhase::Idle;
  bool _settingsOpen=true,_settingsAnimating=false,_locked=false,_suppressed=false,_rotationFault=false,busy=false;
- bool _touchTracking=false,_swipeConsumed=true,_touchOnEditor=false,_wifiOpenNetwork=false;
+ bool _touchTracking=false,_swipeConsumed=true,_touchOnEditor=false,_wifiOpenNetwork=false,_wifiNewProfile=false;
  unsigned _settingsDetail=4,_activity=0;
  lv_point_t _touchStart;
  lv_obj_t page{},ssid{&page},password{&page},keyboard{&page,1},child{&ssid},rows[8]{};
  lv_obj_t* _wifiSsid=&ssid; lv_obj_t* _wifiPassword=&password; lv_obj_t* _wifiKeyboard=&keyboard;
  lv_obj_t* _settingsPage=&page; lv_obj_t* _slideTo=nullptr;
- lv_obj_t profiles{&page},forget{},open{},save{},restart{},state{};
- lv_obj_t* _wifiProfiles=&profiles;lv_obj_t* _wifiForgetButton=&forget;lv_obj_t* _wifiOpenButton=&open;
+ lv_obj_t profiles{&page},newButton{},forget{},open{},save{},restart{},state{};
+ lv_obj_t* _wifiNewButton=&newButton;lv_obj_t* _wifiProfiles=&profiles;lv_obj_t* _wifiForgetButton=&forget;lv_obj_t* _wifiOpenButton=&open;
  lv_obj_t* _wifiSaveButton=&save;lv_obj_t* _wifiRestartButton=&restart;lv_obj_t* _wifiSaveState=&state;
  lv_obj_t* _settingsRows[8]={&rows[0],&rows[1],&rows[2],&rows[3],&rows[4],&rows[5],&rows[6],&rows[7]};
  int navigation=0,closed=0;
@@ -152,11 +194,11 @@ constexpr bool exercise() {
  if(v.keyboard.editor || !v._wifiEditorPending)return false;
  v.serviceWifiEditorPending(false);
  if(v.keyboard.editor!=&v.ssid || v.keyboard.flags || v.ssid.y!=70 || !(v.password.flags&1))return false;
- for(auto* o:{v._wifiProfiles,v._wifiForgetButton,v._wifiOpenButton,v._wifiSaveButton,v._wifiRestartButton,v._wifiSaveState})
+ for(auto* o:{v._wifiProfiles,v._wifiNewButton,v._wifiForgetButton,v._wifiOpenButton,v._wifiSaveButton,v._wifiRestartButton,v._wifiSaveState})
   if(!(o->flags&1))return false;
  e.code=LV_EVENT_READY;e.current=&v.keyboard;v.wifiFieldEvent(&e);
- if(v.keyboard.editor || !(v.keyboard.flags&1) || v.ssid.y!=170 || v.password.y!=224 || v.password.flags)return false;
- for(auto* o:{v._wifiProfiles,v._wifiForgetButton,v._wifiOpenButton,v._wifiSaveButton,v._wifiRestartButton,v._wifiSaveState})
+ if(v.keyboard.editor || !(v.keyboard.flags&1) || v.ssid.y!=178 || v.password.y!=232 || v.password.flags)return false;
+ for(auto* o:{v._wifiProfiles,v._wifiNewButton,v._wifiForgetButton,v._wifiOpenButton,v._wifiSaveButton,v._wifiRestartButton,v._wifiSaveState})
   if(o->flags&1)return false;
  // First-contact drags on either textarea must not navigate or close settings.
  for(auto* field:{&v.ssid,&v.password}) {
@@ -229,7 +271,7 @@ constexpr bool releaseOnly() {
 static_assert(releaseOnly(),"release-only arming defers layout, cancels loss, drag, scrolling and all lifecycle guards");
 static_assert(exercise(),"actual editor callbacks preserve contact boundaries and keyboard lifecycle");
 constexpr bool profiles() {
- CodexMicroView v;lv_event_t e{&v,LV_EVENT_VALUE_CHANGED,&v.profiles,&v.profiles,nullptr};
+ CodexMicroView v;v._swipeConsumed=false;lv_event_t e{&v,LV_EVENT_VALUE_CHANGED,&v.profiles,&v.profiles,nullptr};
  lv_textarea_set_text(&v.password,"not-returned-to-list");
  v.profiles.selected=1;v.wifiSelectionEvent(&e);
  if(textCompare(v.ssid.text,"other") || !v.password.empty)return false;
@@ -244,6 +286,42 @@ constexpr bool profiles() {
  v._wifiOpenNetwork=true;v.wifiActionEvent(&e);if(!v.network.queued)return false;
  e.target=&v.forget;v.wifiActionEvent(&e);return v.network.forgotten;
 }
+constexpr bool newDraft() {
+ CodexMicroView v; v._swipeConsumed=false;
+ lv_textarea_set_text(&v.ssid,"saved");lv_textarea_set_text(&v.password,"secret");v._wifiOpenNetwork=true;
+ lv_event_t e{&v,LV_EVENT_CLICKED,&v.newButton,&v.newButton,nullptr};
+ // NEW obeys every action lifecycle guard, including stale swipes and the keyboard.
+ for(int guard=0;guard<10;++guard) {
+  v._locked=guard==0;v._suppressed=guard==1;v.busy=guard==2;v._settingsAnimating=guard==3;
+  v._rotationFault=guard==4;v._rotationPhase=guard==5?CodexMicroView::RotationPhase::FadeOut:CodexMicroView::RotationPhase::Idle;
+  v._settingsOpen=guard!=6;v._settingsDetail=guard==7?0:4;v._swipeConsumed=guard==8;v.keyboard.flags=guard==9?0:1;
+  v.wifiActionEvent(&e);if(v._wifiNewProfile || textCompare(v.ssid.text,"saved"))return false;
+ }
+ v._locked=v._suppressed=v.busy=v._settingsAnimating=v._rotationFault=v._swipeConsumed=false;
+ v._rotationPhase=CodexMicroView::RotationPhase::Idle;v._settingsOpen=true;v._settingsDetail=4;v.keyboard.flags=1;
+ v._wifiEditorPending=&v.password;v.wifiActionEvent(&e);
+ if(!v._wifiNewProfile || !v.ssid.empty || !v.password.empty || v._wifiOpenNetwork || v._wifiEditorPending)return false;
+ if(!v.profiles.dropdownText || !(v.forget.states&LV_STATE_DISABLED) || v.network.queued || v.network.forgotten)return false;
+ e.target=&v.forget;v.wifiActionEvent(&e);if(v.network.forgotten)return false;
+ // NEW does not shortcut the accepted press/release keyboard guard.
+ lv_indev_t input{{200,280},LV_INDEV_STATE_PRESSED};e.input=&input;e.target=&v.ssid;e.current=&v.ssid;e.code=LV_EVENT_PRESSED;
+ v.wifiFieldEvent(&e);e.current=&v.page;v.touchEvent(&e);v.serviceWifiEditorPending(true);
+ if(v.keyboard.editor)return false;
+ e.current=&v.ssid;e.code=LV_EVENT_RELEASED;v.wifiFieldEvent(&e);input.state=LV_INDEV_STATE_RELEASED;
+ e.current=&v.page;v.touchEvent(&e);v.serviceWifiEditorPending(false);
+ if(v.keyboard.editor!=&v.ssid || !(v.newButton.flags&1))return false;
+ e.current=&v.keyboard;e.code=LV_EVENT_READY;v.wifiFieldEvent(&e);
+ if(!v._wifiNewProfile || !v.ssid.empty || v.newButton.flags)return false;
+ // Selecting the prior saved profile exits the draft without exposing its secret.
+ e.target=&v.profiles;e.current=&v.profiles;e.code=LV_EVENT_VALUE_CHANGED;v.profiles.selected=0;v.wifiSelectionEvent(&e);
+ if(v._wifiNewProfile || v.profiles.dropdownText || textCompare(v.ssid.text,"saved") || !v.password.empty)return false;
+ // A new secure draft stays a draft until accepted SAVE; open/new is the existing upsert request.
+ e.target=&v.newButton;e.code=LV_EVENT_CLICKED;v.wifiActionEvent(&e);lv_textarea_set_text(&v.ssid,"new");
+ e.target=&v.save;v.wifiActionEvent(&e);if(v.network.queued || !v._wifiNewProfile)return false;
+ lv_textarea_set_text(&v.password,"12345678");v.wifiActionEvent(&e);
+ return v.network.queued && !v.network.forgotten && !v._wifiNewProfile && v.password.empty && !v.profiles.dropdownText;
+}
+static_assert(newDraft(),"NEW draft is RAM-only, lifecycle guarded, keyboard safe and save/selection exits correctly");
 static_assert(profiles(),"selection never reads a secret and saved/new/open queues retain policy");
 '''
         with tempfile.TemporaryDirectory() as directory:

@@ -149,6 +149,8 @@ private:
     lv_obj_t* _wifiSaveState = nullptr;
     lv_obj_t* _wifiProfiles = nullptr;
     lv_obj_t* _wifiForgetButton = nullptr;
+    lv_obj_t* _wifiNewButton = nullptr;
+    bool _wifiNewProfile = false;
     bool _settingsOpen = false, _settingsClosing = false, _settingsAnimating = false;
     bool _wifiOpenNetwork = false, _touchOnEditor = false;
     unsigned _settingsDetail = 0;
