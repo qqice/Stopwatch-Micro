@@ -14,7 +14,8 @@ owner_processed transport_rx invalid_packet empty_keepalive header_short_read
 header_resumed header_timeout derp_read_eof'''.split()
 DIAG_COUNTERS = '''derp_tx_want derp_tx_retry_exhausted derp_tx_zero derp_tx_fatal
 derp_upgrade_short_error derp_ignored_tx_fail ctrl_noise_start ctrl_noise_fail
-ctrl_h2_ping_fail ctrl_map_poll_fail ctrl_watchdog ctrl_reconnect'''.split()
+ctrl_h2_ping_fail ctrl_map_poll_fail ctrl_watchdog ctrl_reconnect
+ctrl_rx_idle ctrl_rx_partial_timeout ctrl_rx_eof ctrl_rx_invalid ctrl_rx_auth_fail ctrl_upgrade_fragmented'''.split()
 METADATA = '''derp_tx_last_stage derp_tx_last_ret derp_tx_last_ms
 ctrl_reconnect_ms ctrl_last_reason ctrl_last_ret ctrl_last_ms'''.split()
 
@@ -24,7 +25,7 @@ class RxDiagnosticsTests(unittest.TestCase):
         sources = C + (B/'src/ml_derp.c').read_text(encoding='utf8') + (B/'src/ml_wg_mgr.c').read_text(encoding='utf8') + coord
         self.assertEqual(FIELDS[:25], RX_FIELDS)
         self.assertEqual(set(FIELDS), set(RX_FIELDS + DIAG_COUNTERS + METADATA))
-        self.assertEqual(len(FIELDS), 44)
+        self.assertEqual(len(FIELDS), 50)
         for field in RX_FIELDS + DIAG_COUNTERS:
             symbol = 'WG_RX_' + field.upper()
             if field in ('ctrl_noise_fail', 'ctrl_h2_ping_fail', 'ctrl_map_poll_fail', 'ctrl_watchdog'):

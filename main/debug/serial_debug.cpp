@@ -898,6 +898,10 @@ void SerialDebug::handleLine(char* line)
             static_cast<unsigned long>(rx.ctrl_watchdog), static_cast<unsigned long>(rx.ctrl_reconnect),
             static_cast<unsigned long>(rx.ctrl_last_reason), static_cast<long>(static_cast<int32_t>(rx.ctrl_last_ret)),
             static_cast<unsigned long>(rx.ctrl_last_ms), static_cast<unsigned long>(rx.ctrl_reconnect_ms));
+        debugPrintf("DBG TAIL_CTRL_RX idle=%lu partial_timeout=%lu eof=%lu invalid=%lu auth_fail=%lu upgrade_fragmented=%lu counters_include_intentional_stop=1\r\n",
+            static_cast<unsigned long>(rx.ctrl_rx_idle), static_cast<unsigned long>(rx.ctrl_rx_partial_timeout),
+            static_cast<unsigned long>(rx.ctrl_rx_eof), static_cast<unsigned long>(rx.ctrl_rx_invalid),
+            static_cast<unsigned long>(rx.ctrl_rx_auth_fail), static_cast<unsigned long>(rx.ctrl_upgrade_fragmented));
         for (unsigned path = 0; path < 4; ++path) {
             const auto d = GetTailnetQuota().fetchDiagnostics(static_cast<TailnetQuota::FetchPath>(path));
             debugPrintf("DBG TAIL_FETCH path=%u stage=%u http=%d received=%lu content_length=%lu elapsed_ms=%lu result=%u\r\n",

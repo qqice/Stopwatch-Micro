@@ -105,7 +105,7 @@ index a11aefd..30704e9 100644
 diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/components/microlink/components/wireguard_lwip/src/wireguardif.c
 --- a/components/microlink/components/wireguard_lwip/src/wireguardif.c
 +++ b/components/microlink/components/wireguard_lwip/src/wireguardif.c
-@@ -30,7 +30,60 @@
+@@ -30,7 +30,66 @@
   * Author: Daniel Hope <daniel.hope@smartalock.com>
   */
  
@@ -157,6 +157,12 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
 +    value.ctrl_last_reason = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_LAST_REASON], __ATOMIC_RELAXED);
 +    value.ctrl_last_ret = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_LAST_RET], __ATOMIC_RELAXED);
 +    value.ctrl_last_ms = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_LAST_MS], __ATOMIC_RELAXED);
++    value.ctrl_rx_idle = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_RX_IDLE], __ATOMIC_RELAXED);
++    value.ctrl_rx_partial_timeout = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_RX_PARTIAL_TIMEOUT], __ATOMIC_RELAXED);
++    value.ctrl_rx_eof = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_RX_EOF], __ATOMIC_RELAXED);
++    value.ctrl_rx_invalid = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_RX_INVALID], __ATOMIC_RELAXED);
++    value.ctrl_rx_auth_fail = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_RX_AUTH_FAIL], __ATOMIC_RELAXED);
++    value.ctrl_upgrade_fragmented = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_UPGRADE_FRAGMENTED], __ATOMIC_RELAXED);
 +    return value;
 +}
 +
@@ -166,7 +172,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  
  #include <string.h>
  #include <stdlib.h>
-@@ -68,7 +121,21 @@
+@@ -68,7 +127,21 @@
  // Flag to disable internal UDP socket binding (for magicsock mode)
  static bool g_disable_socket_bind = false;
  
@@ -188,7 +194,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	g_disable_socket_bind = true;
  }
  
-@@ -327,7 +394,19 @@
+@@ -327,7 +400,19 @@
  
  // This is used as the output function for the Wireguard netif
  // The ipaddr here is the one inside the VPN which we use to lookup the correct peer/endpoint
@@ -208,7 +214,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
  	// Send to peer that matches dest IP
  	// Convert ip4_addr_t to ip_addr_t for lookup
-@@ -461,6 +540,7 @@
+@@ -461,6 +546,7 @@
  				// Decrypt the packet
  				memset(pbuf->payload, 0, pbuf->tot_len);
  				bool decrypt_ok = wireguard_decrypt_packet(pbuf->payload, src, src_len, nonce, keypair);
@@ -216,7 +222,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  				WG_DEBUG("[WG_DECRYPT] result=%d, src_len=%u, nonce=%llu\n",
  				       decrypt_ok, (unsigned)src_len, (unsigned long long)nonce);
  				if (decrypt_ok) {
-@@ -539,21 +619,32 @@
+@@ -539,21 +625,32 @@
  								if (dest_ok) {
  									// Send packet to be processed by LWIP
  									WG_DEBUG("[WG_RX_IP] Passing %u bytes to IP layer\n", (unsigned)pbuf->tot_len);
@@ -252,7 +258,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  						// This was a keep-alive packet
  					}
  				}
-@@ -561,6 +652,8 @@
+@@ -561,6 +658,8 @@
  				if (pbuf) {
  					pbuf_free(pbuf);
  				}
@@ -261,7 +267,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  			}
  
  
-@@ -568,10 +661,12 @@
+@@ -568,10 +667,12 @@
  			//After Reject-After-Messages transport data messages or after the current secure session is Reject- After-Time seconds old,
  			// whichever comes first, WireGuard will refuse to send or receive any more transport data messages using the current secure session,
  			// until a new secure session is created through the 1-RTT handshake
@@ -274,7 +280,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  		// Could not locate valid keypair for remote index
  	}
  }
-@@ -739,9 +834,25 @@
+@@ -739,9 +840,25 @@
  }
  
  
@@ -300,7 +306,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	// We have received a packet from the base_netif to our UDP port - process this as a possible Wireguard packet
  	struct wireguard_device *device = (struct wireguard_device *)arg;
  	struct wireguard_peer *peer;
-@@ -755,8 +866,8 @@
+@@ -755,8 +872,8 @@
  
  	uint8_t type = wireguard_get_message_type(data, len);
  
@@ -311,7 +317,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  		type,
  		type == 1 ? "INIT" : type == 2 ? "RESP" : type == 3 ? "COOKIE" : type == 4 ? "DATA" : "?",
  		(unsigned)len,
-@@ -821,7 +932,10 @@
+@@ -821,7 +938,10 @@
  				if (peer) {
  					printf("[WG_RX] Peer found for handshake, processing response\n");
  					// Process the handshake response
@@ -323,7 +329,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  				} else {
  					printf("[WG_RX] ERROR: No peer found for receiver_idx=%lu\n", (unsigned long)msg_response->receiver);
  				}
-@@ -844,20 +958,28 @@
+@@ -844,20 +964,28 @@
  			break;
  
  		case MESSAGE_TRANSPORT_DATA:
@@ -354,7 +360,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  }
  
  static err_t wireguard_start_handshake(struct netif *netif, struct wireguard_peer *peer) {
-@@ -910,7 +1032,19 @@
+@@ -910,7 +1038,19 @@
  	return result;
  }
  
@@ -374,7 +380,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -932,7 +1066,19 @@
+@@ -932,7 +1072,19 @@
  	return result;
  }
  
@@ -394,7 +400,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -947,7 +1093,19 @@
+@@ -947,7 +1099,19 @@
  	return result;
  }
  
@@ -414,7 +420,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -966,7 +1124,19 @@
+@@ -966,7 +1130,19 @@
  	return result;
  }
  
@@ -434,7 +440,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -977,7 +1147,20 @@
+@@ -977,7 +1153,20 @@
  	return result;
  }
  
@@ -455,7 +461,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	if (!netif || !netif->state) {
  		return;
  	}
-@@ -988,7 +1171,19 @@
+@@ -988,7 +1177,19 @@
  	sys_untimeout(wireguardif_tmr, device);
  }
  
@@ -475,7 +481,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -1000,7 +1195,19 @@
+@@ -1000,7 +1201,19 @@
  }
  
  
@@ -495,7 +501,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	LWIP_ASSERT("p != NULL", (p != NULL));
-@@ -1159,7 +1366,20 @@
+@@ -1159,7 +1372,20 @@
  	}
  }
  
@@ -516,7 +522,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	if (!netif || !netif->state) {
  		return;
  	}
-@@ -1209,7 +1429,19 @@
+@@ -1209,7 +1435,19 @@
  	}
  }
  
@@ -536,7 +542,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	err_t result;
  	struct wireguardif_init_data *init_data;
  	struct wireguard_device *device;
-@@ -1355,7 +1587,20 @@
+@@ -1355,7 +1593,20 @@
  	peer->preshared_key = NULL;
  }
  
@@ -557,7 +563,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1365,7 +1610,20 @@
+@@ -1365,7 +1616,20 @@
  	}
  }
  
@@ -578,7 +584,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1376,7 +1634,20 @@
+@@ -1376,7 +1640,20 @@
  	}
  }
  
@@ -599,7 +605,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1386,7 +1657,19 @@
+@@ -1386,7 +1663,19 @@
  	}
  }
  
@@ -619,7 +625,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -1408,8 +1691,21 @@
+@@ -1408,8 +1697,21 @@
  	return result;
  }
  
@@ -694,9 +700,10 @@ index 0000000..3ec90d5
 +#endif
 diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif_rx_stats.h b/components/microlink/components/wireguard_lwip/src/wireguardif_rx_stats.h
 new file mode 100644
+index 0000000..965e206
 --- /dev/null
 +++ b/components/microlink/components/wireguard_lwip/src/wireguardif_rx_stats.h
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,145 @@
 +/* Boot-cumulative numeric-only observations. No reset or packet retention.
 + * Relaxed 32-bit atomics: snapshot fields are independent, not transactional;
 + * increments wrap modulo 2^32. No locks, timers, or network operations. */
@@ -752,6 +759,12 @@ new file mode 100644
 +    uint32_t ctrl_last_reason;
 +    uint32_t ctrl_last_ret;
 +    uint32_t ctrl_last_ms;
++    uint32_t ctrl_rx_idle;
++    uint32_t ctrl_rx_partial_timeout;
++    uint32_t ctrl_rx_eof;
++    uint32_t ctrl_rx_invalid;
++    uint32_t ctrl_rx_auth_fail;
++    uint32_t ctrl_upgrade_fragmented;
 +} wireguardif_rx_stats_t;
 +enum {
 +    WG_RX_DERP_FRAME,
@@ -798,6 +811,12 @@ new file mode 100644
 +    WG_RX_CTRL_LAST_REASON,
 +    WG_RX_CTRL_LAST_RET,
 +    WG_RX_CTRL_LAST_MS,
++    WG_RX_CTRL_RX_IDLE,
++    WG_RX_CTRL_RX_PARTIAL_TIMEOUT,
++    WG_RX_CTRL_RX_EOF,
++    WG_RX_CTRL_RX_INVALID,
++    WG_RX_CTRL_RX_AUTH_FAIL,
++    WG_RX_CTRL_UPGRADE_FRAGMENTED,
 +    WG_RX_COUNT
 +};
 +extern uint32_t wireguardif_rx_counters[WG_RX_COUNT];
@@ -1227,6 +1246,7 @@ index 237f039..fd5379a 100644
      /* Delete event group */
      if (ml->events) vEventGroupDelete(ml->events);
 diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_coord.c
+index 8da8d4d..df7a350 100644
 --- a/components/microlink/src/ml_coord.c
 +++ b/components/microlink/src/ml_coord.c
 @@ -22,6 +22,7 @@
@@ -1250,7 +1270,194 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
  
  /* Effective control plane host: NVS override or compiled default */
  #define CTRL_HOST(ml) ((ml)->ctrl_host[0] ? (ml)->ctrl_host : ML_CTRL_HOST)
-@@ -723,7 +730,7 @@
+@@ -103,20 +110,24 @@ static int coord_send(microlink_t *ml, const uint8_t *data, size_t len) {
+     return 0;
+ }
+ 
+-static int coord_recv(microlink_t *ml, uint8_t *buf, size_t len) {
++typedef enum { COORD_RX_FATAL = -1, COORD_RX_IDLE = -2, COORD_RX_COMPLETE = 0 } coord_rx_result_t;
++
++static coord_rx_result_t coord_recv(microlink_t *ml, uint8_t *buf, size_t len) {
+     size_t recvd = 0;
+     int retries = 0;
+     while (recvd < len) {
+         int n = ml_recv(ml->coord_sock, buf + recvd, len - recvd, 0);
+         if (n <= 0) {
+-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
++            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                 if (recvd == 0) {
+-                    /* No data consumed yet — timeout is fine, caller can retry */
+-                    return -1;
++                    /* Only this explicit result permits an outside retry. */
++                    wireguardif_rx_count(WG_RX_CTRL_RX_IDLE);
++                    return COORD_RX_IDLE;
+                 }
+                 /* Partial data consumed — we MUST finish this read or the
+                  * Noise frame stream will be misaligned. Retry with backoff. */
+                 if (++retries > 300) {  /* ~3 seconds */
++                    wireguardif_rx_count(WG_RX_CTRL_RX_PARTIAL_TIMEOUT);
+                     ESP_LOGE(TAG, "coord_recv partial timeout: %d/%d bytes",
+                              (int)recvd, (int)len);
+                     return -1;
+@@ -124,6 +135,7 @@ static int coord_recv(microlink_t *ml, uint8_t *buf, size_t len) {
+                 vTaskDelay(pdMS_TO_TICKS(10));
+                 continue;
+             }
++            if (n == 0) wireguardif_rx_count(WG_RX_CTRL_RX_EOF);
+             ESP_LOGE(TAG, "coord_recv failed: %d (errno %d, recvd %d/%d)",
+                      n, errno, (int)recvd, (int)len);
+             return -1;
+@@ -168,17 +180,24 @@ static int noise_recv(microlink_t *ml, ml_noise_state_t *noise,
+                         uint8_t *plaintext, size_t max_len) {
+     /* Read 3-byte frame header */
+     uint8_t hdr[3];
+-    if (coord_recv(ml, hdr, 3) < 0) return -1;
++    coord_rx_result_t header_ret = coord_recv(ml, hdr, 3);
++    if (header_ret == COORD_RX_IDLE) return 0;
++    if (header_ret != COORD_RX_COMPLETE) return -1;
+ 
+     if (hdr[0] != 0x04) {
++        wireguardif_rx_count(WG_RX_CTRL_RX_INVALID);
+         ESP_LOGE(TAG, "Unexpected Noise frame type: 0x%02x", hdr[0]);
+         return -1;
+     }
+ 
+     uint16_t ct_len = (hdr[1] << 8) | hdr[2];
+-    if (ct_len < 16) return -1;
++    if (ct_len < 16) {
++        wireguardif_rx_count(WG_RX_CTRL_RX_INVALID);
++        return -1;
++    }
+     size_t pt_len = ct_len - 16;
+     if (pt_len > max_len) {
++        wireguardif_rx_count(WG_RX_CTRL_RX_INVALID);
+         ESP_LOGE(TAG, "Noise frame too large: %d > %d", (int)pt_len, (int)max_len);
+         return -1;
+     }
+@@ -186,15 +205,18 @@ static int noise_recv(microlink_t *ml, ml_noise_state_t *noise,
+     uint8_t *ciphertext = ml_psram_malloc(ct_len);
+     if (!ciphertext) return -1;
+ 
+-    /* Header already consumed — payload read MUST complete or stream
+-     * alignment is permanently lost. Retry EAGAIN (coord_recv returns -1
+-     * with errno==EAGAIN if recvd==0 on first byte). */
++    /* Only zero-byte idle may retry here. Partial reads retain their offset
++     * inside coord_recv; fatal must never restart at ciphertext[0]. */
+     int payload_retries = 0;
+-    while (coord_recv(ml, ciphertext, ct_len) < 0) {
+-        if ((errno == EAGAIN || errno == EWOULDBLOCK) && ++payload_retries <= 300) {
++    for (;;) {
++        coord_rx_result_t payload_ret = coord_recv(ml, ciphertext, ct_len);
++        if (payload_ret == COORD_RX_COMPLETE) break;
++        if (payload_ret == COORD_RX_IDLE && ++payload_retries <= 300) {
+             vTaskDelay(pdMS_TO_TICKS(10));
+             continue;
+         }
++        if (payload_ret == COORD_RX_IDLE)
++            wireguardif_rx_count(WG_RX_CTRL_RX_PARTIAL_TIMEOUT);
+         ESP_LOGE(TAG, "noise_recv payload failed: ct_len=%d retries=%d errno=%d",
+                  ct_len, payload_retries, errno);
+         free(ciphertext);
+@@ -205,6 +227,7 @@ static int noise_recv(microlink_t *ml, ml_noise_state_t *noise,
+                           NULL, 0,
+                           ciphertext, ct_len,
+                           plaintext) != ESP_OK) {
++        wireguardif_rx_count(WG_RX_CTRL_RX_AUTH_FAIL);
+         ESP_LOGE(TAG, "Noise decrypt failed (nonce=%llu)", (unsigned long long)noise->rx_nonce);
+         free(ciphertext);
+         return -1;
+@@ -283,6 +306,46 @@ static int do_tcp_connect(microlink_t *ml) {
+ static uint8_t *s_server_extra_data = NULL;
+ static int s_server_extra_data_len = 0;
+ 
++/* Collect only the bounded HTTP upgrade prefix, retaining any Noise tail.
++ * One overall 10s budget, not a new 10s timeout for each TCP fragment. */
++static int coord_recv_upgrade(microlink_t *ml, uint8_t *resp, size_t capacity) {
++    uint64_t start_ms = ml_get_time_ms();
++    size_t total = 0;
++    unsigned reads = 0;
++    int result = -1;
++    while (total + 1 < capacity) {
++        uint64_t elapsed = ml_get_time_ms() - start_ms;
++        if (elapsed >= 10000) break;
++        uint64_t remaining = 10000 - elapsed;
++        struct timeval tv = { .tv_sec = remaining / 1000,
++                              .tv_usec = (remaining % 1000) * 1000 };
++        ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++        if (++reads == 2) wireguardif_rx_count(WG_RX_CTRL_UPGRADE_FRAGMENTED);
++        int n = ml_recv(ml->coord_sock, resp + total, capacity - total - 1, 0);
++        if (n <= 0) {
++            if (n == 0) wireguardif_rx_count(WG_RX_CTRL_RX_EOF);
++            break;
++        }
++        total += n;
++        resp[total] = '\0';
++        if (ml_get_time_ms() - start_ms >= 10000) break;
++        if (strstr((char *)resp, "\r\n\r\n")) {
++            /* Status must be the first status line, not an arbitrary 101 in
++             * a header or Noise body. Never print received body on failure. */
++            if (total >= 14 &&
++                (!memcmp(resp, "HTTP/1.1 101", 12) ||
++                 !memcmp(resp, "HTTP/1.0 101", 12)) &&
++                (resp[12] == ' ' || (resp[12] == '\r' && resp[13] == '\n')))
++                result = (int)total;
++            else wireguardif_rx_count(WG_RX_CTRL_RX_INVALID);
++            break;
++        }
++    }
++    struct timeval normal_tv = { .tv_sec = 10, .tv_usec = 0 };
++    ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &normal_tv, sizeof(normal_tv));
++    return result;
++}
++
+ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
+     int64_t t_noise_start = esp_timer_get_time();
+ 
+@@ -334,7 +397,7 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
+     uint8_t *resp = ml_psram_malloc(2048);
+     if (!resp) return -1;
+ 
+-    int total = ml_recv(ml->coord_sock, resp, 2047, 0);
++    int total = coord_recv_upgrade(ml, resp, 2048);
+     if (total <= 0) {
+         ESP_LOGE(TAG, "Handshake recv failed: %d (errno=%d)", total, errno);
+         free(resp);
+@@ -344,12 +407,6 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
+ 
+     ESP_LOGI(TAG, "HTTP response received: %d bytes", total);
+ 
+-    /* Verify 101 Switching Protocols */
+-    if (strstr((char *)resp, "101") == NULL) {
+-        ESP_LOGE(TAG, "Noise upgrade rejected: %.200s", resp);
+-        free(resp);
+-        return -1;
+-    }
+     ESP_LOGI(TAG, "HTTP 101 received, looking for Noise msg2...");
+ 
+     /* Find end of HTTP headers */
+@@ -369,7 +426,8 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
+     int body_buf_len = 0;
+ 
+     if (body_len > 0) {
+-        body_buf = ml_psram_malloc(body_len);
++        body_buf = ml_psram_malloc(body_len < 3 ? 3 : body_len);
++        if (!body_buf) { free(resp); return -1; }
+         if (body_buf) {
+             memcpy(body_buf, body_start, body_len);
+             body_buf_len = body_len;
+@@ -671,8 +729,10 @@ static int do_h2_preface(microlink_t *ml, ml_noise_state_t *noise) {
+     uint8_t recv_buf[4096];
+     int recv_len = noise_recv(ml, noise, recv_buf, sizeof(recv_buf));
+     if (recv_len < 0) {
++        ESP_LOGE(TAG, "Fatal Noise receive in H2 preface");
++        return -1;
++    } else if (recv_len == 0) {
+         ESP_LOGW(TAG, "No immediate H2 response from server (may come later)");
+-        /* Not fatal - server may send its frames later */
+     } else {
+         ESP_LOGI(TAG, "Server H2 response: %d bytes", recv_len);
+     }
+@@ -723,7 +783,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
      {
          cJSON *netinfo = cJSON_CreateObject();
          if (netinfo) {
@@ -1259,7 +1466,26 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
              cJSON_AddItemToObject(hostinfo, "NetInfo", netinfo);
          }
      }
-@@ -990,10 +997,7 @@
+@@ -811,13 +871,14 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
+     bool got_register_end = false;
+     for (int frame_count = 0; frame_count < 10 && !got_register_end; frame_count++) {
+         uint8_t *frame_buf = ml_psram_malloc(4096);
+-        if (!frame_buf) break;
++        if (!frame_buf) { free(h2_resp); free(resp_buf); return -1; }
+ 
+         int frame_len = noise_recv(ml, noise, frame_buf, 4096);
+-        if (frame_len <= 0) {
+-            free(frame_buf);
+-            break;
++        if (frame_len < 0) {
++            free(frame_buf); free(h2_resp); free(resp_buf);
++            return -1;
+         }
++        if (frame_len == 0) { free(frame_buf); break; }
+ 
+         ESP_LOGI(TAG, "RegisterResponse Noise frame %d: %d bytes", frame_count, frame_len);
+ 
+@@ -990,10 +1051,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
          }
          cJSON *self_key = cJSON_GetObjectItem(node, "Key");
          if (self_key && self_key->valuestring) {
@@ -1271,11 +1497,10 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
          }
      }
  
-@@ -1008,6 +1012,25 @@
- /* ============================================================================
+@@ -1009,6 +1067,25 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
   * State: FETCH_PEERS - Send MapRequest, parse MapResponse
   * ========================================================================== */
-+
+ 
 +/* Only map contents matter; repeated initial maps must not cause reconnect loops. */
 +static uint32_t derp_map_hash(cJSON *regions) {
 +    char *json = cJSON_PrintUnformatted(regions);
@@ -1294,24 +1519,25 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
 +    else ml->derp_home_region = value;
 +    if (ml->derp_map_lock) xSemaphoreGive(ml->derp_map_lock);
 +}
- 
++
  static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
      /* Try all field names used by Tailscale (copied from v1 lines 3176-3184):
-@@ -1092,6 +1115,13 @@
-                     update->derp_region = (uint16_t)dr;
-                 }
+      *   "Peers"        - Full peer list (initial Stream=false response)
+@@ -1094,6 +1171,13 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
              }
-+        }
-+
+         }
+ 
 +        if (update->vpn_ip == ml->config.priority_peer_ip) {
 +            cJSON *id = cJSON_GetObjectItem(peer, "ID");
 +            if (cJSON_IsNumber(id)) ml->priority_peer_node_id = (uint64_t)id->valuedouble;
 +            memcpy(ml->priority_peer_key, update->public_key, 32);
 +            if (update->derp_region) set_derp_region(ml, true, update->derp_region);
-         }
- 
++        }
++
          /* Endpoints */
-@@ -1160,6 +1190,18 @@
+         cJSON *endpoints = cJSON_GetObjectItem(peer, "Endpoints");
+         if (endpoints) {
+@@ -1160,6 +1244,18 @@ check_removed:
  
      /* Handle PeersChangedPatch — lightweight endpoint-only updates */
      cJSON *patches = cJSON_GetObjectItem(root, "PeersChangedPatch");
@@ -1330,17 +1556,17 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
      if (patches && cJSON_IsObject(patches)) {
          ESP_LOGI(TAG, "PeersChangedPatch: processing lightweight updates");
          cJSON *patch = patches->child;
-@@ -1188,6 +1230,9 @@
-                             }
+@@ -1189,6 +1285,9 @@ check_removed:
                          }
                      }
-+
+ 
 +                    if (update->derp_region && memcmp(update->public_key, ml->priority_peer_key, 32) == 0)
 +                        set_derp_region(ml, true, update->derp_region);
- 
++
                      /* Parse endpoints if present */
                      cJSON *endpoints = cJSON_GetObjectItem(patch, "Endpoints");
-@@ -1339,7 +1384,7 @@
+                     if (endpoints) {
+@@ -1339,7 +1438,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
       * to populate Node.HomeDERP for other peers. */
      cJSON *netinfo = cJSON_CreateObject();
      if (netinfo) {
@@ -1349,7 +1575,32 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
          if (ml->stun_nat_checked) {
              cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
          }
-@@ -1579,10 +1624,20 @@
+@@ -1413,13 +1512,20 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+     bool got_end_stream = false;
+     for (int read_count = 0; read_count < 200; read_count++) {
+         uint8_t *frame_buf = ml_psram_malloc(65536);
+-        if (!frame_buf) break;
++        if (!frame_buf) {
++            rcv_tv.tv_sec = 5;
++            ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
++            free(h2_recv); free(resp_buf); return -1;
++        }
+ 
+         int frame_len = noise_recv(ml, noise, frame_buf, 65536);
+-        if (frame_len <= 0) {
+-            free(frame_buf);
+-            break;
++        if (frame_len < 0) {
++            rcv_tv.tv_sec = 5;
++            ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
++            free(frame_buf); free(h2_recv); free(resp_buf);
++            return -1;
+         }
++        if (frame_len == 0) { free(frame_buf); break; }
+ 
+         /* Append decrypted data to h2_recv */
+         if (h2_total + frame_len < ML_H2_BUFFER_SIZE) {
+@@ -1579,11 +1685,21 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
  
      if (!map_json) {
          const char *err = cJSON_GetErrorPtr();
@@ -1361,17 +1612,18 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
          free(resp_buf);
          return -1;
      }
-+
+ 
 +    ESP_LOGI("Quota-Map", "snapshot node=%d peers=%d derp=%d keepalive=%d h2_bytes=%u json_bytes=%u cap=%u",
 +             cJSON_IsObject(cJSON_GetObjectItem(map_json, "Node")),
 +             cJSON_GetArraySize(cJSON_GetObjectItem(map_json, "Peers")),
 +             cJSON_IsObject(cJSON_GetObjectItem(map_json, "DERPMap")),
 +             cJSON_IsTrue(cJSON_GetObjectItem(map_json, "KeepAlive")),
 +             (unsigned)h2_total, (unsigned)json_total, (unsigned)ML_JSON_BUFFER_SIZE);
- 
++
      /* Debug: log all top-level fields in MapResponse (from v1 lines 3053-3072) */
      {
-@@ -1630,7 +1685,7 @@
+         ESP_LOGI(TAG, "MapResponse top-level fields:");
+@@ -1630,7 +1746,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
               * then fall back to legacy DERP string (format: "127.3.3.40:REGION") */
              cJSON *home_derp = cJSON_GetObjectItem(node, "HomeDERP");
              if (home_derp && cJSON_IsNumber(home_derp) && home_derp->valueint > 0) {
@@ -1380,7 +1632,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
                  ESP_LOGI(TAG, "Home DERP region: %d (from server, HomeDERP)", ml->derp_home_region);
              } else {
                  cJSON *self_derp = cJSON_GetObjectItem(node, "DERP");
-@@ -1640,7 +1695,7 @@
+@@ -1640,7 +1756,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
                      if (colon) {
                          int region = atoi(colon + 1);
                          if (region > 0) {
@@ -1389,7 +1641,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
                              ESP_LOGI(TAG, "Home DERP region: %d (from server, legacy DERP)", region);
                          }
                      }
-@@ -1648,15 +1703,12 @@
+@@ -1648,15 +1764,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
              }
              /* Fallback: if server didn't assign a DERP region, use our configured default */
              if (ml->derp_home_region == 0) {
@@ -1407,7 +1659,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
              }
  
              /* Parse KeyExpiry (ISO 8601: "YYYY-MM-DDTHH:MM:SSZ") */
-@@ -1702,6 +1754,12 @@
+@@ -1702,6 +1815,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
      if (derp_map) {
          cJSON *regions = cJSON_GetObjectItem(derp_map, "Regions");
          if (regions) {
@@ -1420,20 +1672,20 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
              ml->derp_region_count = 0;
              cJSON *region_obj;
              cJSON_ArrayForEach(region_obj, regions) {
-@@ -1732,6 +1790,12 @@
-                         cJSON *hn = cJSON_GetObjectItem(node_obj, "HostName");
-                         if (hn && hn->valuestring) {
+@@ -1734,6 +1853,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
                              strncpy(n->hostname, hn->valuestring, sizeof(n->hostname) - 1);
-+                        }
-+
+                         }
+ 
 +                        cJSON *cn = cJSON_GetObjectItem(node_obj, "CertName");
 +                        if (cJSON_IsString(cn)) {
 +                            if (strlen(cn->valuestring) >= sizeof(n->cert_name)) continue;
 +                            strcpy(n->cert_name, cn->valuestring);
-                         }
- 
++                        }
++
                          cJSON *ip4 = cJSON_GetObjectItem(node_obj, "IPv4");
-@@ -1772,10 +1836,15 @@
+                         if (ip4 && ip4->valuestring) {
+                             strncpy(n->ipv4, ip4->valuestring, sizeof(n->ipv4) - 1);
+@@ -1772,10 +1897,15 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
  
                  ml->derp_region_count++;
              }
@@ -1449,7 +1701,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
      cJSON_Delete(map_json);
      free(resp_buf);
  
-@@ -1825,7 +1894,7 @@
+@@ -1825,7 +1955,7 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
       * to populate Node.HomeDERP for other peers. */
      cJSON *netinfo = cJSON_CreateObject();
      if (netinfo) {
@@ -1458,7 +1710,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
          if (ml->stun_nat_checked) {
              cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
          }
-@@ -1888,10 +1957,6 @@
+@@ -1888,10 +2018,6 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
   * Uses H2 stream 7. Response body is discarded (only HTTP status matters).
   * Returns 0 on success, -1 on send failure. */
  static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
@@ -1469,7 +1721,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
  
      cJSON *root = cJSON_CreateObject();
      if (!root) return -1;
-@@ -1926,7 +1991,7 @@
+@@ -1926,7 +2052,7 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
  
          cJSON *netinfo = cJSON_CreateObject();
          if (netinfo) {
@@ -1478,7 +1730,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
              if (ml->stun_nat_checked) {
                  cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
              }
-@@ -1978,6 +2043,7 @@
+@@ -1978,6 +2104,7 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
      }
      free(h2_buf);
  
@@ -1486,7 +1738,26 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
      ESP_LOGI(TAG, "Endpoint update sent on H2 stream %lu", (unsigned long)sid);
      /* Response body is discarded — server may send empty response or
       * we'll consume it in the next poll_map_update() iteration.
-@@ -2117,6 +2183,13 @@
+@@ -2000,16 +2127,11 @@ static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
+     ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv));
+ 
+     uint8_t *frame_buf = ml_psram_malloc(65536);
+-    if (!frame_buf) return 0;
+-
+-    int frame_len = noise_recv(ml, noise, frame_buf, 65536);
++    int frame_len = frame_buf ? noise_recv(ml, noise, frame_buf, 65536) : -1;
+ 
+     if (frame_len <= 0) {
+         free(frame_buf);
+-        int saved_errno = errno;
+-        /* EAGAIN/EWOULDBLOCK = no data yet = not an error */
+-        if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK) return 0;
+-        return frame_len;  /* Real error or connection closed */
++        return frame_len == 0 ? 0 : -1;  /* Explicit idle versus fatal, never errno. */
+     }
+ 
+     /* Extract DATA frame payload from H2 frames, track flow control */
+@@ -2117,6 +2239,13 @@ static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
              }
          }
  
@@ -1500,7 +1771,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
          /* Parse peer updates */
          parse_peers_from_map_response(ml, update_json);
          cJSON_Delete(update_json);
-@@ -2150,8 +2223,7 @@
+@@ -2150,8 +2279,7 @@ void ml_coord_task(void *arg) {
                               pdFALSE, pdFALSE, portMAX_DELAY);
          if (wb & ML_EVT_SHUTDOWN_REQUEST) {
              ESP_LOGI(TAG, "Shutdown requested before WiFi, exiting");
@@ -1510,7 +1781,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
          }
      }
  
-@@ -2166,6 +2238,7 @@
+@@ -2166,6 +2294,7 @@ void ml_coord_task(void *arg) {
                  }
                  break;
              case ML_CMD_DISCONNECT:
@@ -1518,7 +1789,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
                  if (ml->coord_sock >= 0) {
                      ml_close_sock(ml->coord_sock);
                      ml->coord_sock = -1;
-@@ -2174,6 +2247,7 @@
+@@ -2174,6 +2303,7 @@ void ml_coord_task(void *arg) {
                  ml->state = ML_STATE_IDLE;
                  break;
              case ML_CMD_FORCE_RECONNECT:
@@ -1526,7 +1797,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
                  state = COORD_RECONNECTING;
                  break;
              case ML_CMD_UPDATE_ENDPOINTS:
-@@ -2229,9 +2303,13 @@
+@@ -2229,9 +2359,13 @@ void ml_coord_task(void *arg) {
              state = COORD_NOISE_HANDSHAKE;
              break;
  
@@ -1542,7 +1813,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
                  ESP_LOGE(TAG, "Noise handshake failed");
                  ml_close_sock(ml->coord_sock);
                  ml->coord_sock = -1;
-@@ -2245,6 +2323,7 @@
+@@ -2245,6 +2379,7 @@ void ml_coord_task(void *arg) {
              state = COORD_H2_PREFACE;
              break;
  
@@ -1550,7 +1821,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
          case COORD_H2_PREFACE:
              if (do_h2_preface(ml, &noise) < 0) {
                  ESP_LOGE(TAG, "H2 preface failed");
-@@ -2269,6 +2348,7 @@
+@@ -2269,6 +2404,7 @@ void ml_coord_task(void *arg) {
              break;
  
          case COORD_FETCH_PEERS:
@@ -1558,7 +1829,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
              ESP_LOGI(TAG, "Fetching peers...");
              if (do_fetch_peers(ml, &noise) < 0) {
                  ESP_LOGW(TAG, "MapRequest failed, will retry");
-@@ -2294,11 +2374,9 @@
+@@ -2294,11 +2430,9 @@ void ml_coord_task(void *arg) {
                  ESP_LOGW(TAG, "Failed to start long-poll (non-fatal)");
              }
  
@@ -1573,7 +1844,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
  
              /* Send initial HTTP/2 PING immediately to keep connection active
               * before the periodic 5s timer kicks in (server has ~20s idle timeout) */
-@@ -2328,8 +2406,23 @@
+@@ -2328,8 +2462,23 @@ void ml_coord_task(void *arg) {
              {
                  uint64_t now = ml_get_time_ms();
  
@@ -1597,7 +1868,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
                      ESP_LOGW(TAG, "Control plane watchdog timeout");
                      state = COORD_RECONNECTING;
                      break;
-@@ -2524,7 +2617,8 @@
+@@ -2524,7 +2673,8 @@ void ml_coord_task(void *arg) {
                          last_h2_ping_ms = now;
                          last_activity_ms = now;
                      } else {
@@ -1607,7 +1878,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
                          state = COORD_RECONNECTING;
                          break;
                      }
-@@ -2535,6 +2629,7 @@
+@@ -2535,6 +2685,7 @@ void ml_coord_task(void *arg) {
                  if (poll_ret > 0) {
                      last_activity_ms = now;  /* Reset watchdog */
                  } else if (poll_ret < 0) {
@@ -1615,7 +1886,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
                      ESP_LOGW(TAG, "Long-poll connection lost");
                      state = COORD_RECONNECTING;
                      break;
-@@ -2545,6 +2640,10 @@
+@@ -2545,6 +2696,10 @@ void ml_coord_task(void *arg) {
              break;
  
          case COORD_RECONNECTING:
@@ -1626,7 +1897,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
              {
                  uint32_t backoff_ms = 1000 << (reconnect_attempts > 4 ? 4 : reconnect_attempts);
                  if (backoff_ms > ML_CTRL_BACKOFF_MAX_MS) backoff_ms = ML_CTRL_BACKOFF_MAX_MS;
-@@ -2581,6 +2680,8 @@
+@@ -2581,6 +2736,8 @@ void ml_coord_task(void *arg) {
          }
      }
  
@@ -1635,7 +1906,7 @@ diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_c
      /* Cleanup */
      if (ml->coord_sock >= 0) {
          ml_close_sock(ml->coord_sock);
-@@ -2588,6 +2689,33 @@
+@@ -2588,6 +2745,33 @@ void ml_coord_task(void *arg) {
      }
      memset(&noise, 0, sizeof(noise));
  
