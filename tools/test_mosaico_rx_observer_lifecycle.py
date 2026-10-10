@@ -2,6 +2,11 @@ import unittest
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 class Lifecycle(unittest.TestCase):
+    def test_observer_commands_allowed_on_uart(self):
+        s=(ROOT/'main/debug/serial_debug_transport.h').read_text()
+        allowed=s.split('const char* allowed[] = {',1)[1].split('};',1)[0]
+        self.assertIn('"rx-observe"',allowed)
+        self.assertIn('"derp-tx-budget"',allowed)
     def test_owner_wait_is_ttl_bounded(self):
         s=(ROOT/'main/host/network_quota.cpp').read_text()
         wait=s.split('void NetworkQuota::wait(uint32_t milliseconds)',1)[1].split('void NetworkQuota::setCpu',1)[0]
