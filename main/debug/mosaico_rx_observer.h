@@ -10,13 +10,16 @@ struct Record {
     uint64_t tsf = 0;
     uint32_t tsfMillis = 0;
     uint16_t srcPort = 0, dstPort = 0, ipLength = 0, transportPayloadLength = 0;
-    uint8_t protocol = 0, tcpFlags = 0, wgType = 0;
+    uint8_t protocol = 0, tcpFlags = 0, wgType = 0, tracePhase = 0;
+    uint64_t counter = 0;
+    int32_t traceResult = 0;
     Checksum ipChecksum = Checksum::Unknown, tcpChecksum = Checksum::Unknown;
 };
 struct Snapshot {
     bool active = false, queued = false, reporting = false;
     uint32_t deadlineMs = 0, seen = 0, malformed = 0, fragments = 0, tcp = 0;
     uint32_t udp = 0, otherUdp = 0, wireguard[4] = {}, ringDrops = 0;
+    uint32_t txTrace[8] = {}, txRingDrops = 0;
     uint32_t rxEvents = 0, txEvents = 0, eventMillis = 0;
     uint32_t wakeEvents = 0, suspendEvents = 0, probeEvents = 0, twtEventMillis = 0;
     int32_t lastError = 0;

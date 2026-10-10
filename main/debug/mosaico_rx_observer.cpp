@@ -138,5 +138,23 @@ extern "C" int mosaico_rx_ip4_input(pbuf* p, netif* inp) {
     portEXIT_CRITICAL(&mux);
     return 0;
 }
+// Weak consumers in MicroLink only supply SYN fields or public WG transport headers.
+extern "C" void mosaico_wg_tx_trace(uint32_t phase, uint32_t receiver, uint32_t counterLo,
+                                    uint32_t counterHi, uint32_t srcPort, uint32_t dstPort,
+                                    uint32_t seq, int32_t result) {
+    using namespace mosaico_rx_observer;
+    if (!phase || phase > 7) return;
+    const uint32_t now = nowMs();
+    portENTER_CRITICAL(&mux);
+    if (state.active && detail::alive(now, state.deadlineMs)) {
+        ++state.txTrace[phase];
+        Record r; r.millis = now; r.tracePhase = uint8_t(phase); r.receiverIndex = receiver;
+        r.counter = (uint64_t(counterHi) << 32) | counterLo;
+        r.srcPort = uint16_t(srcPort); r.dstPort = uint16_t(dstPort); r.seq = seq; r.traceResult = result;
+        r.tsf = state.tsf; r.tsfMillis = state.tsfMillis;
+        if (!ring.push(r)) ++state.txRingDrops;
+    }
+    portEXIT_CRITICAL(&mux);
+}
 #endif // ESP_PLATFORM
 
