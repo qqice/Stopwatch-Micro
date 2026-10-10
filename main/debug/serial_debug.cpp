@@ -827,6 +827,28 @@ void SerialDebug::handleLine(char* line)
                ok ? (running ? "restart_required=1" : "restart_required=0") : "invalid_config");
         return;
     }
+#ifdef MOSAICO_BOARD
+    if (std::strcmp(command, "derp-tx-budget") == 0) {
+        const char* option = ::strtok_r(nullptr, " \t", &save);
+        if (::strtok_r(nullptr, " \t", &save)) {
+            result("derp-tx-budget", "FAIL", "expected=status_or_500_or_5000 no_changes=1"); return;
+        }
+        if (option && std::strcmp(option, "status")) {
+            uint32_t value = 0;
+            if (!serial_debug_transport::settingsInteger(option, 5000, value) ||
+                (value != 500 && value != 5000) || MosaicoOta::healthPending()) {
+                result("derp-tx-budget", "FAIL", "reason=range_or_health_pending no_changes=1"); return;
+            }
+            if (!GetTailnetQuota().setDerpTxRetryBudgetMs(value)) {
+                result("derp-tx-budget", "FAIL", "reason=transport_unavailable no_changes=1"); return;
+            }
+        }
+        char details[160]{};
+        std::snprintf(details, sizeof(details), "nominal_retry_ms=%lu ram_only=1 next_frame_snapshot=1 positive_progress_resets_retry=1",
+            static_cast<unsigned long>(GetTailnetQuota().derpTxRetryBudgetMs()));
+        result("derp-tx-budget", "PASS", details); return;
+    }
+#endif
     if (std::strcmp(command, "network") == 0) {
         char details[192]{};
         auto& network = GetNetworkQuota();
@@ -863,6 +885,19 @@ void SerialDebug::handleLine(char* line)
                     static_cast<unsigned long>(rx.header_resumed),
                     static_cast<unsigned long>(rx.header_timeout),
                     static_cast<unsigned long>(rx.derp_read_eof));
+        debugPrintf("DBG TAIL_TX want=%lu retry_exhausted=%lu zero=%lu fatal=%lu upgrade_short_error=%lu ignored_tx_fail=%lu last_stage=%lu last_ret=%ld last_ms=%lu nominal_retry_ms=%lu snapshots_independent=1\r\n",
+            static_cast<unsigned long>(rx.derp_tx_want), static_cast<unsigned long>(rx.derp_tx_retry_exhausted),
+            static_cast<unsigned long>(rx.derp_tx_zero), static_cast<unsigned long>(rx.derp_tx_fatal),
+            static_cast<unsigned long>(rx.derp_upgrade_short_error), static_cast<unsigned long>(rx.derp_ignored_tx_fail),
+            static_cast<unsigned long>(rx.derp_tx_last_stage),
+            static_cast<long>(static_cast<int32_t>(rx.derp_tx_last_ret)), static_cast<unsigned long>(rx.derp_tx_last_ms),
+            static_cast<unsigned long>(GetTailnetQuota().derpTxRetryBudgetMs()));
+        debugPrintf("DBG TAIL_CTRL noise_start=%lu noise_fail=%lu h2_ping_fail=%lu map_poll_fail=%lu watchdog=%lu reconnect=%lu last_reason=%lu last_ret=%ld last_ms=%lu reconnect_ms=%lu snapshots_independent=1\r\n",
+            static_cast<unsigned long>(rx.ctrl_noise_start), static_cast<unsigned long>(rx.ctrl_noise_fail),
+            static_cast<unsigned long>(rx.ctrl_h2_ping_fail), static_cast<unsigned long>(rx.ctrl_map_poll_fail),
+            static_cast<unsigned long>(rx.ctrl_watchdog), static_cast<unsigned long>(rx.ctrl_reconnect),
+            static_cast<unsigned long>(rx.ctrl_last_reason), static_cast<long>(static_cast<int32_t>(rx.ctrl_last_ret)),
+            static_cast<unsigned long>(rx.ctrl_last_ms), static_cast<unsigned long>(rx.ctrl_reconnect_ms));
         for (unsigned path = 0; path < 4; ++path) {
             const auto d = GetTailnetQuota().fetchDiagnostics(static_cast<TailnetQuota::FetchPath>(path));
             debugPrintf("DBG TAIL_FETCH path=%u stage=%u http=%d received=%lu content_length=%lu elapsed_ms=%lu result=%u\r\n",

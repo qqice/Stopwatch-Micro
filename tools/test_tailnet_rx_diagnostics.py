@@ -7,17 +7,47 @@ W = B / 'components/wireguard_lwip/src'
 H = (W / 'wireguardif_rx_stats.h').read_text(encoding='utf8')
 C = (W / 'wireguardif.c').read_text(encoding='utf8')
 FIELDS = re.findall(r'uint32_t (\w+);', H)
+RX_FIELDS = '''derp_frame derp_enqueue derp_drop wg_dequeue wg_unavailable
+pbuf_fail receiver_index_miss key_reject inner_pbuf_fail decrypt_fail replay_drop
+inner_reject inner_ok input_ok input_error tcp_synack owner_dispatch_drop
+owner_processed transport_rx invalid_packet empty_keepalive header_short_read
+header_resumed header_timeout derp_read_eof'''.split()
+DIAG_COUNTERS = '''derp_tx_want derp_tx_retry_exhausted derp_tx_zero derp_tx_fatal
+derp_upgrade_short_error derp_ignored_tx_fail ctrl_noise_start ctrl_noise_fail
+ctrl_h2_ping_fail ctrl_map_poll_fail ctrl_watchdog ctrl_reconnect'''.split()
+METADATA = '''derp_tx_last_stage derp_tx_last_ret derp_tx_last_ms
+ctrl_reconnect_ms ctrl_last_reason ctrl_last_ret ctrl_last_ms'''.split()
 
 class RxDiagnosticsTests(unittest.TestCase):
     def test_all_boundary_counters_and_independent_snapshot(self):
-        sources = C + (B/'src/ml_derp.c').read_text(encoding='utf8') + (B/'src/ml_wg_mgr.c').read_text(encoding='utf8')
+        coord = (B/'src/ml_coord.c').read_text(encoding='utf8')
+        sources = C + (B/'src/ml_derp.c').read_text(encoding='utf8') + (B/'src/ml_wg_mgr.c').read_text(encoding='utf8') + coord
+        self.assertEqual(FIELDS[:25], RX_FIELDS)
+        self.assertEqual(set(FIELDS), set(RX_FIELDS + DIAG_COUNTERS + METADATA))
+        self.assertEqual(len(FIELDS), 44)
+        for field in RX_FIELDS + DIAG_COUNTERS:
+            symbol = 'WG_RX_' + field.upper()
+            if field in ('ctrl_noise_fail', 'ctrl_h2_ping_fail', 'ctrl_map_poll_fail', 'ctrl_watchdog'):
+                self.assertIn('coord_observe('+symbol+',', coord)
+            else:
+                self.assertIn('wireguardif_rx_count('+symbol+')', sources)
+        # All seven numeric metadata slots are stores, never increments.
+        for field in METADATA:
+            symbol = 'WG_RX_' + field.upper()
+            self.assertIn('wireguardif_rx_store('+symbol+',', sources)
+            self.assertNotIn('wireguardif_rx_count('+symbol+')', sources)
         for field in FIELDS:
-            self.assertIn('wireguardif_rx_count(WG_RX_'+field.upper()+')', sources)
-            self.assertIn('value.'+field+' = __atomic_load_n(', C)
+            self.assertIn('value.'+field+' = __atomic_load_n(&wireguardif_rx_counters[WG_RX_'+field.upper()+'], __ATOMIC_RELAXED);', C)
+        self.assertIn('wireguardif_rx_count(counter);', coord)
+        self.assertIn('wireguardif_rx_store(WG_RX_CTRL_LAST_REASON, reason);', coord)
+        self.assertIn('wireguardif_rx_store(WG_RX_CTRL_LAST_RET, (uint32_t)ret);', coord)
+        self.assertIn('wireguardif_rx_store(WG_RX_CTRL_LAST_MS, (uint32_t)ml_get_time_ms());', coord)
+        noise_start = coord.split('case COORD_NOISE_HANDSHAKE:',1)[1].split('int handshake_ret',1)[0]
+        self.assertIn('wireguardif_rx_count(WG_RX_CTRL_NOISE_START);', noise_start)
+        self.assertNotIn('coord_observe', noise_start)
         self.assertIn('__ATOMIC_RELAXED', H)
         self.assertIn('__atomic_fetch_add', H)
         self.assertNotRegex(H, r'ESP_LOG|vTaskDelay|malloc|memcpy')
-        self.assertEqual(len(FIELDS), 25)
         # Queue, timeout, input ownership, and encryption policy are untouched.
         self.assertIn('xQueueSend(target, &pkt, 0)', sources)
         self.assertIn('if (device->netif->input && device->netif->input(pbuf, device->netif) == ERR_OK)', C)

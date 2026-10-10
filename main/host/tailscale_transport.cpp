@@ -41,6 +41,14 @@ wireguardif_rx_stats_t TailnetQuota::rxDiagnostics() const
 {
     return wireguardif_rx_stats();
 }
+bool TailnetQuota::setDerpTxRetryBudgetMs(uint32_t milliseconds)
+{
+    return microlink_set_derp_tx_retry_budget_ms(_client.load(), milliseconds) == ESP_OK;
+}
+uint32_t TailnetQuota::derpTxRetryBudgetMs() const
+{
+    return microlink_get_derp_tx_retry_budget_ms(_client.load());
+}
 bool TailnetQuota::configure(const char* encoded)
 {
     unsigned char decoded[768]{};

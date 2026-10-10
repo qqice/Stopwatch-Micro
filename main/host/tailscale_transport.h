@@ -21,6 +21,8 @@ public:
     };
     FetchDiagnostics fetchDiagnostics(FetchPath path) const;
     wireguardif_rx_stats_t rxDiagnostics() const;
+    bool setDerpTxRetryBudgetMs(uint32_t milliseconds); // Physical diagnostic only; RAM, never NVS.
+    uint32_t derpTxRetryBudgetMs() const;
     void load();
     bool configure(const char* base64);
     bool enabled() const
