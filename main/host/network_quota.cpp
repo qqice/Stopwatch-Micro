@@ -61,11 +61,7 @@ void sampleNetworkHeap(const char* stage, unsigned& budget) {
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
 bool twtOtaBlocked()
 {
-    if (MosaicoOta::busy() || MosaicoOta::healthPending()) return true;
-    MosaicoOta::UiSnapshot ota{};
-    if (!MosaicoOta::copyUiSnapshot(ota)) return true;
-    return (ota.imageVerified && ota.stage != MosaicoOta::UiStage::Complete) ||
-        ota.stage == MosaicoOta::UiStage::ReadyReboot || ota.stage == MosaicoOta::UiStage::BootChecking;
+    return MosaicoOta::blocksTwt(); // UI snapshot try-lock failure is not an OTA request.
 }
 #endif
 bool copyString(cJSON* root, const char* key, char* out, size_t capacity, bool empty = false)

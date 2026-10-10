@@ -342,6 +342,12 @@ void healthTimeout(void*)
 
 bool busy() { return active.load() || approvedRequest.load() || checkQueued.load() || checking.load() || installQueued.load() || rebootQueued.load() || bootPending.load(); }
 bool healthPending() { return bootPending.load(); }
+bool blocksTwt()
+{
+    const auto stage = statusStage.load();
+    return busy() || (imageReady.load() && stage != UiStage::Complete) || selected.load() ||
+        stage == UiStage::ReadyReboot || stage == UiStage::BootChecking;
+}
 uint32_t requestAgeMs()
 {
     return busy() ? static_cast<uint32_t>(esp_timer_get_time() / 1000) - requestedAtMs.load() : 0;

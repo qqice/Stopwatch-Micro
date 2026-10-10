@@ -26,6 +26,7 @@ bool discoverManifest(const char* json); // Network owner: signature verificatio
 bool finishDownload();
 bool installVerified(); // Network owner only, explicit consent or full-pipeline mode; manual flow does not reboot.
 bool busy();
+bool blocksTwt(); // Atomic control state, independent of UI snapshot lock contention.
 bool healthPending();
 uint32_t requestAgeMs();
 bool request(); // Caller must obtain explicit confirmation of USB/external power.
