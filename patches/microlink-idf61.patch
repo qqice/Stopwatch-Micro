@@ -3269,10 +3269,156 @@ index 1b0fac2..0d94a4b 100644
  /**
   * Parse Noise message 2 (responder -> initiator)
 diff --git a/components/microlink/src/ml_tcp.c b/components/microlink/src/ml_tcp.c
-index e65d72d..d64d23c 100644
+index e65d72d..a072088 100644
 --- a/components/microlink/src/ml_tcp.c
 +++ b/components/microlink/src/ml_tcp.c
-@@ -94,22 +94,22 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
+@@ -5,9 +5,9 @@
+  * Provides TCP connections over the Tailscale VPN tunnel.
+  * Uses standard BSD sockets routed through the WireGuard netif.
+  *
+- * lwIP routes 100.64.0.0/10 traffic through the WG netif automatically
+- * (set up in ml_wg_mgr.c). This module triggers the WG handshake,
+- * waits for tunnel establishment, then lets standard TCP through.
++ * Source binding alone does not constrain egress when WG is down.
++ * Pin every TCP PCB to the current WG interface as well as its VPN IP.
++ * Missing/down interfaces or binding failures must not use a default route.
+  */
+ 
+ #include "microlink_internal.h"
+@@ -15,6 +15,9 @@
+ #include "esp_timer.h"
+ #include "lwip/sockets.h"
+ #include "lwip/netdb.h"
++#include "lwip/netif.h"
++#include "wireguardif_owner.h"
++#include "wireguardif_rx_stats.h"
+ #include <string.h>
+ 
+ static const char *TAG = "ml_tcp";
+@@ -31,6 +34,104 @@ struct microlink_tcp_socket {
+     bool connected;
+ };
+ 
++/* Snapshot only under the TCPIP owner; BSD socket calls dispatch separately. */
++typedef struct {
++    microlink_t *ml;
++    struct netif *netif;
++    uint32_t vpn_ip;
++    uint8_t index;
++    uint8_t flags; /* normalized: up=1, link=2, VPN identity match=4 */
++    struct ifreq iface;
++    int error;
++} ml_tcp_vpn_bind_ctx;
++
++static void ml_tcp_vpn_snapshot(void *arg) {
++    ml_tcp_vpn_bind_ctx *c = arg;
++    struct netif *n;
++    LWIP_ASSERT_CORE_LOCKED();
++    c->error = ENODEV;
++    if (!c->ml->wg_netif || c->ml->vpn_ip == 0) return;
++    /* Check membership before dereferencing a potentially removed netif. */
++    NETIF_FOREACH(n) {
++        if (n == (struct netif *)c->ml->wg_netif) break;
++    }
++    if (!n) return;
++    c->index = netif_get_index(n);
++    c->flags = (netif_is_up(n) ? 1 : 0) | (netif_is_link_up(n) ? 2 : 0);
++    if (!IP_IS_V4(&n->ip_addr) ||
++        ip4_addr_get_u32(netif_ip4_addr(n)) != htonl(c->ml->vpn_ip)) {
++        c->error = EADDRNOTAVAIL;
++        return;
++    }
++    c->flags |= 4;
++    if (!netif_is_up(n) || !netif_is_link_up(n)) {
++        c->error = ENETDOWN;
++        return;
++    }
++    if (c->index == NETIF_NO_INDEX ||
++        !netif_index_to_name(c->index, c->iface.ifr_name) ||
++        c->iface.ifr_name[0] == 0 || netif_find(c->iface.ifr_name) != n) return;
++    c->netif = n;
++    c->vpn_ip = c->ml->vpn_ip;
++    c->error = 0;
++}
++
++static void ml_tcp_close_error(int fd, int error) {
++    close(fd);
++    errno = error;
++}
++
++/* SDK 6.1 SO_BINDTODEVICE expects struct ifreq, not a string. It calls
++ * tcp_bind_netif: tcp_route uses the pinned index without a STA fallback.
++ * Initial and retry sockets must both pass this fail-closed setup. */
++static bool ml_tcp_bind_vpn(int fd, microlink_t *ml, uint32_t dest_ip,
++                            uint16_t dest_port) {
++    ml_tcp_vpn_bind_ctx c = { .ml = ml };
++    ml_tcp_vpn_bind_ctx check = { .ml = ml };
++    int error;
++    if (wireguardif_owner_current()) {
++        /* BSD sockets cannot run under the non-recursive core lock. */
++        error = EDEADLK;
++        goto fail;
++    }
++    if (wireguardif_owner_call(ml_tcp_vpn_snapshot, &c) != ERR_OK) {
++        error = EIO;
++        goto fail;
++    }
++    if (c.error) { error = c.error; goto fail; }
++    if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, &c.iface, sizeof(c.iface)) != 0) {
++        error = errno;
++        goto fail;
++    }
++    struct sockaddr_in src = {
++        .sin_family = AF_INET,
++        .sin_port = 0,
++        .sin_addr.s_addr = htonl(c.vpn_ip),
++    };
++    if (bind(fd, (struct sockaddr *)&src, sizeof(src)) != 0) {
++        error = errno;
++        goto fail;
++    }
++    /* Reject teardown/address changes during the socket operations. */
++    if (wireguardif_owner_call(ml_tcp_vpn_snapshot, &check) != ERR_OK) {
++        error = EIO;
++        goto fail;
++    }
++    if (check.error) { c = check; error = check.error; goto fail; }
++    if (check.netif != c.netif || check.index != c.index ||
++        check.vpn_ip != c.vpn_ip || strcmp(check.iface.ifr_name, c.iface.ifr_name)) {
++        error = ENODEV;
++        goto fail;
++    }
++    wireguardif_tx_note(8, 0, c.index, c.flags, 0, dest_port, dest_ip, 0);
++    return true;
++fail:
++    ESP_LOGE(TAG, "VPN socket pin/bind failed: errno=%d", error);
++    ml_tcp_close_error(fd, error);
++    wireguardif_tx_note(8, 0, c.index, c.flags, 0, dest_port, dest_ip, -error);
++    return false;
++}
++
+ /* ============================================================================
+  * Public API
+  * ========================================================================== */
+@@ -42,6 +143,10 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
+         ESP_LOGE(TAG, "Invalid args");
+         return NULL;
+     }
++    if (wireguardif_owner_current()) {
++        errno = EDEADLK;
++        return NULL;
++    }
+     if (ml->state != ML_STATE_CONNECTED) {
+         ESP_LOGE(TAG, "Not connected to Tailscale (state=%d)", ml->state);
+         return NULL;
+@@ -90,27 +195,13 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
+     /* Create TCP socket */
+     int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+     if (fd < 0) {
+-        ESP_LOGE(TAG, "socket() failed: %d", errno);
++        int socket_err = errno;
++        ESP_LOGE(TAG, "socket() failed: %d", socket_err);
++        errno = socket_err;
          return NULL;
      }
  
@@ -3292,26 +3438,12 @@ index e65d72d..d64d23c 100644
 -            microlink_ip_to_str(ml->vpn_ip, src_str);
 -            ESP_LOGI(TAG, "TCP socket bound to VPN IP %s", src_str);
 -        }
-+    /* Fail closed: a missing or failed VPN bind must never use a LAN/default
-+     * route, because callers use this API only for encrypted tunnel traffic. */
-+    if (ml->vpn_ip == 0) {
-+        ESP_LOGE(TAG, "VPN IP is unavailable");
-+        close(fd);
-+        return NULL;
-+    }
-+    struct sockaddr_in src = {
-+        .sin_family = AF_INET,
-+        .sin_port = 0,  /* ephemeral */
-+        .sin_addr.s_addr = htonl(ml->vpn_ip),
-+    };
-+    if (bind(fd, (struct sockaddr *)&src, sizeof(src)) != 0) {
-+        ESP_LOGE(TAG, "bind() to VPN IP failed: errno=%d", errno);
-+        close(fd);
-+        return NULL;
-     }
+-    }
++    if (!ml_tcp_bind_vpn(fd, ml, dest_ip, dest_port)) return NULL;
  
      /* Set connect/send timeout */
-@@ -163,15 +163,17 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
+     uint32_t remaining = (timeout_ms > wait_ms) ? (timeout_ms - wait_ms) : 10000;
+@@ -163,15 +254,7 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
              fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
              if (fd < 0) return NULL;
  
@@ -3324,20 +3456,27 @@ index e65d72d..d64d23c 100644
 -                };
 -                bind(fd, (struct sockaddr *)&retry_src, sizeof(retry_src));
 -            }
-+            /* Retry must keep the same fail-closed VPN routing guarantee. */
-+            struct sockaddr_in retry_src = {
-+                .sin_family = AF_INET,
-+                .sin_port = 0,
-+                .sin_addr.s_addr = htonl(ml->vpn_ip),
-+            };
-+            if (bind(fd, (struct sockaddr *)&retry_src, sizeof(retry_src)) != 0) {
-+                ESP_LOGE(TAG, "retry bind() to VPN IP failed: errno=%d", errno);
-+                close(fd);
-+                return NULL;
-+            }
++            if (!ml_tcp_bind_vpn(fd, ml, dest_ip, dest_port)) return NULL;
  
              setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
              setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
+@@ -179,12 +262,13 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
+             setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+ 
+             if (connect(fd, (struct sockaddr *)&dest, sizeof(dest)) != 0) {
+-                ESP_LOGE(TAG, "Retry connect() failed: errno=%d", errno);
+-                close(fd);
++                int retry_err = errno;
++                ESP_LOGE(TAG, "Retry connect() failed: errno=%d", retry_err);
++                ml_tcp_close_error(fd, retry_err);
+                 return NULL;
+             }
+         } else {
+-            close(fd);
++            ml_tcp_close_error(fd, err);
+             return NULL;
+         }
+     }
 diff --git a/components/microlink/src/ml_udp.c b/components/microlink/src/ml_udp.c
 index 3919101..4a1e7f0 100644
 --- a/components/microlink/src/ml_udp.c

@@ -810,6 +810,11 @@ void SerialDebug::handleLine(char* line)
             const auto n = mosaico_rx_observer::drain(records,16);
             for (size_t i=0;i<n;++i) {
                 const auto& r=records[i];
+                if (r.tracePhase == 8) {
+                    debugPrintf("DBG TX_BIND ms=%lu if_index=%lu flags=%lu dest=%lu port=%u result=%ld\r\n",
+                        (unsigned long)r.millis,(unsigned long)uint32_t(r.counter),(unsigned long)(r.counter >> 32),(unsigned long)r.seq,r.dstPort,(long)r.traceResult);
+                    continue;
+                }
                 if (r.tracePhase) {
                     debugPrintf("DBG TX_PACKET ms=%lu phase=%u receiver=%lu counter_hi=%lu counter_lo=%lu sport=%u dport=%u seq=%lu result=%ld tsf_ref=%llu tsf_ms=%lu\r\n",
                         (unsigned long)r.millis,r.tracePhase,(unsigned long)r.receiverIndex,(unsigned long)(r.counter >> 32),(unsigned long)uint32_t(r.counter),r.srcPort,r.dstPort,(unsigned long)r.seq,(long)r.traceResult,(unsigned long long)r.tsf,(unsigned long)r.tsfMillis);
@@ -827,8 +832,8 @@ void SerialDebug::handleLine(char* line)
         debugPrintf("DBG RX_OBSERVER active=%d queued=%d reporting=%d deadline_ms=%lu seen=%lu malformed=%lu fragments=%lu tcp=%lu udp=%lu other_udp=%lu wg=%lu,%lu,%lu,%lu ring_drop=%lu error=%ld\r\n",
             r.active,r.queued,r.reporting,(unsigned long)r.deadlineMs,(unsigned long)r.seen,(unsigned long)r.malformed,(unsigned long)r.fragments,(unsigned long)r.tcp,(unsigned long)r.udp,(unsigned long)r.otherUdp,
             (unsigned long)r.wireguard[0],(unsigned long)r.wireguard[1],(unsigned long)r.wireguard[2],(unsigned long)r.wireguard[3],(unsigned long)r.ringDrops,(long)r.lastError);
-        debugPrintf("DBG TX_TRACE syn=%lu encrypted_syn=%lu dispatch=%lu enqueue=%lu dequeue=%lu frame_done=%lu gate=%lu ring_drop=%lu public_header_only=1\r\n",
-            (unsigned long)r.txTrace[1],(unsigned long)r.txTrace[2],(unsigned long)r.txTrace[3],(unsigned long)r.txTrace[4],(unsigned long)r.txTrace[5],(unsigned long)r.txTrace[6],(unsigned long)r.txTrace[7],(unsigned long)r.txRingDrops);
+        debugPrintf("DBG TX_TRACE syn=%lu encrypted_syn=%lu dispatch=%lu enqueue=%lu dequeue=%lu frame_done=%lu gate=%lu bind=%lu ring_drop=%lu public_header_only=1\r\n",
+            (unsigned long)r.txTrace[1],(unsigned long)r.txTrace[2],(unsigned long)r.txTrace[3],(unsigned long)r.txTrace[4],(unsigned long)r.txTrace[5],(unsigned long)r.txTrace[6],(unsigned long)r.txTrace[7],(unsigned long)r.txTrace[8],(unsigned long)r.txRingDrops);
         debugPrintf("DBG RX_TIMING rx_event_lower_bound=%lu tx_event_lower_bound=%lu event_ms=%lu wake=%lu suspend=%lu probe=%lu twt_event_ms=%lu tsf_ref=%llu tsf_ms=%lu wake_posting_unknown=1\r\n",
             (unsigned long)r.rxEvents,(unsigned long)r.txEvents,(unsigned long)r.eventMillis,(unsigned long)r.wakeEvents,(unsigned long)r.suspendEvents,(unsigned long)r.probeEvents,(unsigned long)r.twtEventMillis,(unsigned long long)r.tsf,(unsigned long)r.tsfMillis);
         result(command,"PASS","prevalidation=1 payload=0 ram_only=1"); return;

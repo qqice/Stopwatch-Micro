@@ -12,9 +12,10 @@ namespace mosaico_rx_observer { Snapshot state;detail::MetadataRing ring;int mux
 int main(){using namespace mosaico_rx_observer;
  fakeNow=999;mosaico_wg_tx_trace(1,1,2,3,4,5,6,0);assert(!ring.count&&!state.txTrace[1]);
  state.active=true;state.deadlineMs=1000;
- mosaico_wg_tx_trace(0,0,0,0,0,0,0,0);mosaico_wg_tx_trace(8,0,0,0,0,0,0,0);assert(!ring.count);
+ mosaico_wg_tx_trace(0,0,0,0,0,0,0,0);mosaico_wg_tx_trace(9,0,0,0,0,0,0,0);assert(!ring.count);
  mosaico_wg_tx_trace(2,123,0xffffffffU,0xfedcba98U,40000,8765,123456,-11);
  Record r;assert(ring.pop(&r,1)==1&&r.tracePhase==2&&r.receiverIndex==123&&r.counter==0xfedcba98ffffffffULL&&r.srcPort==40000&&r.dstPort==8765&&r.seq==123456&&r.traceResult==-11);
+ mosaico_wg_tx_trace(8,0,3,7,0,8765,0x64616b16,0);assert(ring.pop(&r,1)==1&&r.tracePhase==8&&uint32_t(r.counter)==3&&(r.counter>>32)==7&&r.seq==0x64616b16&&r.traceResult==0);
  fakeNow=1000;mosaico_wg_tx_trace(2,0,0,0,0,0,0,0);assert(!ring.count&&state.txTrace[2]==1);
  fakeNow=0xfffffff0U;state.deadlineMs=0x20;
  for(unsigned i=0;i<129;++i)mosaico_wg_tx_trace(3,0,i,0,0,0,0,0);

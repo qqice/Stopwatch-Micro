@@ -138,12 +138,12 @@ extern "C" int mosaico_rx_ip4_input(pbuf* p, netif* inp) {
     portEXIT_CRITICAL(&mux);
     return 0;
 }
-// Weak consumers in MicroLink only supply SYN fields or public WG transport headers.
+// Weak consumers only supply SYN/public WG headers or socket interface metadata.
 extern "C" void mosaico_wg_tx_trace(uint32_t phase, uint32_t receiver, uint32_t counterLo,
                                     uint32_t counterHi, uint32_t srcPort, uint32_t dstPort,
                                     uint32_t seq, int32_t result) {
     using namespace mosaico_rx_observer;
-    if (!phase || phase > 7) return;
+    if (!phase || phase > 8) return;
     const uint32_t now = nowMs();
     portENTER_CRITICAL(&mux);
     if (state.active && detail::alive(now, state.deadlineMs)) {
