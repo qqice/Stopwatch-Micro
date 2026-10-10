@@ -202,6 +202,52 @@ constexpr bool deadlines() {
 static_assert(deadlines(), "finite bootstrap then fixed dispatch deadline, manual priority");
 ''')
 
+    def test_request_api_profile_validation_and_off_priority(self):
+        source = (ROOT/'main/host/network_quota.cpp').read_text()
+        body = source.split('bool NetworkQuota::requestTwtTrial(',1)[1].split('void NetworkQuota::requestTwtObserve',1)[0]
+        self.compile_cpp(r'''
+#include "main/host/mosaico_twt_model.h"
+#include <initializer_list>
+using namespace MosaicoTwt;
+struct Slot {
+ int value=-1;
+ constexpr void store(int v){value=v;}
+ constexpr bool compare_exchange_strong(int& expected,int desired){if(value!=expected){expected=value;return false;}value=desired;return true;}
+};
+struct Owner {
+ Slot _twt_request; bool _task_handle=true;int notifications=0;
+ constexpr void xTaskNotifyGive(bool){++notifications;}
+ constexpr bool requestTwtTrial(Mode,uint32_t,Profile);
+};
+constexpr bool Owner::requestTwtTrial(''' + body + r'''
+constexpr bool validation(){
+ for(unsigned lease : {600u,1800u}) {
+  for(Profile profile : {Profile::Default,Profile::AnnouncedTrigger,Profile::WideServiceWindow}) {
+   Owner o;
+   if(!o.requestTwtTrial(Mode::On,lease,profile)||o._twt_request.value!=encodeRequest(Mode::On,lease,profile))return false;
+   if(o.requestTwtTrial(Mode::On,lease,profile)||o.notifications!=1)return false;
+   if(!o.requestTwtTrial(Mode::Off,lease,Profile::Default)||o._twt_request.value!=0||o.notifications!=2)return false;
+  }
+ }
+ for(Profile profile : {Profile::AnnouncedTrigger,Profile::WideServiceWindow,static_cast<Profile>(255)}) {
+  Owner o;Model m;
+  if(o.requestTwtTrial(Mode::Baseline,600,profile)||encodeRequest(Mode::Baseline,600,profile)!=-1||
+     m.start(Mode::Baseline,0,600,profile)||m.nextId||o.notifications||o._twt_request.value!=-1)return false;
+ }
+ Owner o;Model m;const auto invalid=static_cast<Profile>(255);
+ for(Profile profile : {Profile::AnnouncedTrigger,Profile::WideServiceWindow,invalid})
+  if(o.requestTwtTrial(Mode::Off,600,profile)||o.notifications||o._twt_request.value!=-1)return false;
+ if(o.requestTwtTrial(Mode::Off,0,Profile::Default)||o.requestTwtTrial(Mode::Off,601,Profile::Default)||o.notifications)return false;
+ o._task_handle=false;if(o.requestTwtTrial(Mode::Off,600,Profile::Default))return false;
+ o._task_handle=true;
+ if(o.requestTwtTrial(Mode::On,600,invalid)||encodeRequest(Mode::On,600,invalid)!=-1||m.start(Mode::On,0,600,invalid))return false;
+ if(o.requestTwtTrial(Mode::On,601,Profile::WideServiceWindow)||m.start(Mode::On,0,601,Profile::WideServiceWindow))return false;
+ if(encodeRequest(Mode::Off,0,invalid)!=0||!m.start(Mode::Off,0,0,invalid)||m.state.profile!=Profile::Default)return false;
+ return true;
+}
+static_assert(validation(), "production request validation and Off priority");
+''')
+
     def test_actual_bootstrap_dispatch_gate(self):
         source = (ROOT/'main/host/network_quota.cpp').read_text()
         service = source.split('void NetworkQuota::serviceTwtTrial',1)[1]
@@ -288,26 +334,39 @@ constexpr bool profiles() {
     encodeRequest(Mode::Baseline,600)!=1 || encodeRequest(Mode::Baseline,1800)!=5 ||
     encodeRequest(Mode::Off,600,Profile::AnnouncedTrigger)!=0)return false;
  for(unsigned lease : {600u,1800u}) {
-  const int request=encodeRequest(Mode::On,lease,Profile::AnnouncedTrigger);
+  for(Profile profile : {Profile::AnnouncedTrigger,Profile::WideServiceWindow}) {
+  const bool wide=profile==Profile::WideServiceWindow;
+  const int request=encodeRequest(Mode::On,lease,profile);
+  if(request!=(wide ? 18 : 10)+(lease==1800 ? 4 : 0))return false;
   Owner o;o._connected=o.tail.online=true;
   if(o._twt.state.profile!=Profile::Default)return false;
   o.processRequest(request);
   o.serviceTwtBootstrap();
-  if(o.setups!=1 || o.submitted.trigger!=1 || o.submitted.flow_type!=0 ||
+  if(o.setups!=1 || o.submitted.trigger!=(wide ? 0 : 1) || o.submitted.flow_type!=(wide ? 1 : 0) ||
      o.submitted.wake_invl_expn!=11 || o.submitted.wake_invl_mant!=512 ||
-     o.submitted.min_wake_dura!=64 || o.submitted.wake_duration_unit!=0 ||
+     o.submitted.min_wake_dura!=(wide ? 255 : 64) || o.submitted.wake_duration_unit!=0 ||
      o.submitted.flow_id!=0 || o.submitted.timeout_time_ms!=5000)return false;
-  for(Stop reason : {Stop::Explicit,Stop::Expired,Stop::Driver,Stop::Rejected}) {
-   o._twt.start(Mode::On,0,lease,Profile::AnnouncedTrigger);
+  Result actual;actual.id=o._twt.state.id;actual.status=1;actual.mantissa=512;actual.exponent=11;
+  actual.duration=37;actual.unit=0;actual.trigger=1;actual.flowType=0;
+  if(!o._twt.accept(actual) || o._twt.state.durationUs!=9472 || o._twt.state.intervalUs!=1048576 ||
+     o._twt.state.actual.duration!=37 || o._twt.state.actual.trigger!=1 || o._twt.state.actual.flowType!=0)return false;
+  for(Stop reason : {Stop::Explicit,Stop::Expired,Stop::Driver,Stop::Rejected,Stop::Invalid,Stop::Lost,Stop::Ota,Stop::Awake}) {
+   o._twt.start(Mode::On,0,lease,profile);
    if(reason==Stop::Explicit)o.processRequest(0);
    else if(reason==Stop::Expired)o._twt.check(int64_t(lease)*1000000,false,true);
    else o.cancelTwtTrial(reason);
    if(o._twt.state.profile!=Profile::Default)return false;
    o.processRequest(encodeRequest(Mode::On,lease));o.serviceTwtBootstrap();
-   if(o.submitted.trigger!=0 || o.submitted.flow_type!=1 || o._twt.state.profile!=Profile::Default)return false;
+   if(o.submitted.trigger!=0 || o.submitted.flow_type!=1 || o.submitted.min_wake_dura!=64 || o.submitted.wake_duration_unit!=0 || o._twt.state.profile!=Profile::Default)return false;
   }
   o._twt.start(Mode::Baseline,0,lease);int setups=o.setups;o.serviceTwtBootstrap();
   if(o.setups!=setups || o._twt.state.profile!=Profile::Default)return false;
+  }
+ }
+ for(int request : {3,9,17,26,30,34,18|32}) {
+  Owner bad;bad._connected=bad.tail.online=true;bad.processRequest(request);bad.serviceTwtBootstrap();
+  if(bad.setups || bad.psCalls || bad._twt.live() || bad._twt.state.stage!=Stage::Failed ||
+     bad._twt.state.profile!=Profile::Default)return false;
  }
  return true;
 }
@@ -433,7 +492,9 @@ static_assert(ongoingReadiness(), "production owner keeps linked trial through c
         serial = (ROOT/'main/debug/serial_debug.cpp').read_text()
         command = serial.split('if (std::strcmp(command, "twt")', 1)[1].split('#endif', 1)[0]
         self.assertIn('const bool announced = !std::strcmp(mode, "on-announced")', command)
-        self.assertIn('announced && !option', command)
+        self.assertIn('(announced || wide) && !option', command)
+        self.assertIn('const bool wide = !std::strcmp(mode, "on-wide")', command)
+        self.assertIn('wide ? MosaicoTwt::Profile::WideServiceWindow', command)
         self.assertIn('MosaicoTwt::Profile::AnnouncedTrigger : MosaicoTwt::Profile::Default', command)
         fmt = re.search(r'"(lease_s=%lu mode=%u profile=%u[^"\n]+)"', command).group(1)
         widths = {'lu':10, 'u':10, 'hu':5, 'hhu':3, 'lld':20, 'llu':20, 'd':11}
@@ -623,7 +684,7 @@ static_assert(identityTransitions(), "actual owner identity changes never mix ev
         command = serial.split('if (std::strcmp(command, "twt")', 1)[1].split('#endif', 1)[0]
         self.assertNotIn('esp_wifi_', command)
         self.assertIn('requestTwtTrial', command); self.assertIn('twtSnapshot', command)
-        self.assertIn('requestTwtTrial(requested, leaseSeconds, announced ?', command)
+        self.assertIn('requestTwtTrial(requested, leaseSeconds, wide ?', command)
         self.assertIn('MosaicoTwt::validLease(leaseSeconds)', command)
         self.assertIn('requestTwtObserve', command)
         self.assertIn('recordTwtCycle(MosaicoTwt::CyclePhase::Start)', source)

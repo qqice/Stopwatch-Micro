@@ -390,12 +390,12 @@ void NetworkQuota::serviceWifiSettings()
 #if SOC_WIFI_HE_SUPPORT
 bool NetworkQuota::requestTwtTrial(MosaicoTwt::Mode mode, uint32_t leaseSeconds, MosaicoTwt::Profile profile)
 {
-    if (mode != MosaicoTwt::Mode::Off && mode != MosaicoTwt::Mode::Baseline && mode != MosaicoTwt::Mode::On) return false;
-    if (profile != MosaicoTwt::Profile::Default && (mode != MosaicoTwt::Mode::On || profile != MosaicoTwt::Profile::AnnouncedTrigger)) return false;
-    if (!_task_handle || !MosaicoTwt::validLease(leaseSeconds)) return false;
+    const int request = MosaicoTwt::encodeRequest(mode, leaseSeconds, profile);
+    if (!_task_handle || !MosaicoTwt::validLease(leaseSeconds) || request < 0 ||
+        (mode == MosaicoTwt::Mode::Off && profile != MosaicoTwt::Profile::Default)) return false;
     // Off always wins over a queued command; no Wi-Fi API on serial/GUI threads.
     if (mode == MosaicoTwt::Mode::Off) _twt_request.store(0);
-    else { int empty = -1; if (!_twt_request.compare_exchange_strong(empty, MosaicoTwt::encodeRequest(mode, leaseSeconds, profile))) return false; }
+    else { int empty = -1; if (!_twt_request.compare_exchange_strong(empty, request)) return false; }
     xTaskNotifyGive(_task_handle);
     return true;
 }
@@ -624,11 +624,12 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
         _twt_bootstrap_attempted = _twt_bootstrap_ok = false;
         const auto mode = static_cast<Mode>(request & 3);
         const uint32_t leaseSeconds = request & 4 ? 1800 : 600;
-        const auto profile = request & 8 ? Profile::AnnouncedTrigger : Profile::Default;
+        const auto profile = (request & 24) == 24 ? static_cast<Profile>(255) :
+            request & 16 ? Profile::WideServiceWindow : request & 8 ? Profile::AnnouncedTrigger : Profile::Default;
         if (_twt.state.cleanupPending || _twt_cleanup_failed) {
             _twt.state.error = ESP_ERR_INVALID_STATE;
             _twt.end(Stop::Driver);
-        } else if (!_twt.start(mode, now, leaseSeconds, profile)) { _twt.state.error = ESP_ERR_INVALID_STATE; _twt.end(Stop::Driver); }
+        } else if (encodeRequest(mode, leaseSeconds, profile) != request || !_twt.start(mode, now, leaseSeconds, profile)) { _twt.state.error = ESP_ERR_INVALID_STATE; _twt.end(Stop::Driver); }
         if (_twt.live() && !locked) cancelTwtTrial(Stop::Awake);
         if (mode != Mode::Off && (!_twt_handler_ready || twtOtaBlocked()))
             cancelTwtTrial(_twt_handler_ready ? Stop::Ota : Stop::Driver);
@@ -668,7 +669,9 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
                     const bool announced = _twt.state.profile == Profile::AnnouncedTrigger;
                     config.trigger = announced ? 1 : 0; config.flow_type = announced ? 0 : 1; config.flow_id = 0;
                     config.wake_invl_expn = 11; config.wake_invl_mant = 512;
-                    config.min_wake_dura = 64; config.wake_duration_unit = 0;
+                    // RAM-only discriminator: same interval/unit and unannounced non-trigger flow.
+                    config.min_wake_dura = _twt.state.profile == Profile::WideServiceWindow ? 255 : 64;
+                    config.wake_duration_unit = 0;
                     config.twt_id = _twt.state.id; config.timeout_time_ms = 5000;
                     if (!_twt.bootstrapReady(esp_timer_get_time())) {
                         cancelTwtTrial(_twt.state.stop);

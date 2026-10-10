@@ -3,12 +3,17 @@
 
 namespace MosaicoTwt {
 enum class Mode : uint8_t { Off, Baseline, On };
-enum class Profile : uint8_t { Default, AnnouncedTrigger };
+enum class Profile : uint8_t { Default = 0, AnnouncedTrigger = 1, WideServiceWindow = 2 };
 enum class Stage : uint8_t { Off, Armed, Negotiating, Active, Baseline, Failed };
 enum class Stop : uint8_t { None, Explicit, Expired, Unsupported, Rejected, Timeout, Lost, Ota, Awake, Driver, Invalid };
 constexpr bool validLease(uint32_t seconds) { return seconds == 600 || seconds == 1800; }
 constexpr int encodeRequest(Mode mode, uint32_t seconds, Profile profile = Profile::Default) {
-    return mode == Mode::Off ? 0 : validLease(seconds) ? static_cast<int>(mode) | (seconds == 1800 ? 4 : 0) | (mode == Mode::On && profile == Profile::AnnouncedTrigger ? 8 : 0) : -1;
+    if (mode == Mode::Off) return 0; // Off wins even over invalid lease/profile input.
+    if ((mode != Mode::Baseline && mode != Mode::On) || !validLease(seconds) ||
+        (profile != Profile::Default && profile != Profile::AnnouncedTrigger && profile != Profile::WideServiceWindow) ||
+        (mode == Mode::Baseline && profile != Profile::Default)) return -1;
+    return static_cast<int>(mode) | (seconds == 1800 ? 4 : 0) |
+        (profile == Profile::AnnouncedTrigger ? 8 : profile == Profile::WideServiceWindow ? 16 : 0);
 }
 enum class CyclePhase : uint8_t { Start, Fetch, End };
 enum class CycleReason : uint8_t { None, Success, Deadline, Awake, RetryBudget, NoCandidate, Cancel };
@@ -80,7 +85,7 @@ struct Model {
     constexpr bool start(Mode mode, int64_t now, uint32_t leaseSeconds = 600, Profile profile = Profile::Default) {
         if (mode == Mode::Off) { state.requested = mode; end(Stop::Explicit); return true; }
         // No identifier reuse this boot: stale SDK responses cannot become a new trial.
-        if (!validLease(leaseSeconds) || nextId == 32767) return false;
+        if (encodeRequest(mode, leaseSeconds, profile) < 0 || nextId == 32767) return false;
         const auto lastDisconnect = state.staDisconnect;
         state = Snapshot{};
         state.staDisconnect = lastDisconnect; // Boot-latched until the next disconnect event.
