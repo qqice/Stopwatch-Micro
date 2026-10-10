@@ -837,7 +837,7 @@ void SerialDebug::handleLine(char* line)
                       static_cast<unsigned long>(network.historyAccepted()),
                       static_cast<unsigned long>(network.historyFailures()));
         const auto rx = GetTailnetQuota().rxDiagnostics();
-        debugPrintf("DBG TAIL_RX derp_frame=%lu derp_enqueue=%lu derp_drop=%lu wg_dequeue=%lu wg_unavailable=%lu pbuf_fail=%lu receiver_index_miss=%lu key_reject=%lu inner_pbuf_fail=%lu decrypt_fail=%lu replay_drop=%lu inner_reject=%lu inner_ok=%lu input_ok=%lu input_error=%lu tcp_synack=%lu\r\n",
+        debugPrintf("DBG TAIL_RX derp_frame=%lu derp_enqueue=%lu derp_drop=%lu wg_dequeue=%lu wg_unavailable=%lu pbuf_fail=%lu receiver_index_miss=%lu key_reject=%lu inner_pbuf_fail=%lu decrypt_fail=%lu replay_drop=%lu inner_reject=%lu inner_ok=%lu input_ok=%lu input_error=%lu tcp_synack=%lu owner_dispatch_drop=%lu owner_processed=%lu transport_rx=%lu invalid_packet=%lu empty_keepalive=%lu\r\n",
                     static_cast<unsigned long>(rx.derp_frame),
                     static_cast<unsigned long>(rx.derp_enqueue),
                     static_cast<unsigned long>(rx.derp_drop),
@@ -853,7 +853,12 @@ void SerialDebug::handleLine(char* line)
                     static_cast<unsigned long>(rx.inner_ok),
                     static_cast<unsigned long>(rx.input_ok),
                     static_cast<unsigned long>(rx.input_error),
-                    static_cast<unsigned long>(rx.tcp_synack));
+                    static_cast<unsigned long>(rx.tcp_synack),
+                    static_cast<unsigned long>(rx.owner_dispatch_drop),
+                    static_cast<unsigned long>(rx.owner_processed),
+                    static_cast<unsigned long>(rx.transport_rx),
+                    static_cast<unsigned long>(rx.invalid_packet),
+                    static_cast<unsigned long>(rx.empty_keepalive));
         for (unsigned path = 0; path < 4; ++path) {
             const auto d = GetTailnetQuota().fetchDiagnostics(static_cast<TailnetQuota::FetchPath>(path));
             debugPrintf("DBG TAIL_FETCH path=%u stage=%u http=%d received=%lu content_length=%lu elapsed_ms=%lu result=%u\r\n",
@@ -935,9 +940,9 @@ void SerialDebug::handleLine(char* line)
             const auto t = GetNetworkQuota().twtSnapshot();
             char details[896]{};
             std::snprintf(details, sizeof(details),
-                "lease_s=%lu mode=%u profile=%u stage=%u stop=%u id=%u expiry_us=%lld bootstrap_deadline_us=%lld setup_deadline_us=%lld associated=%d ap_ax=%d phy=%d status=%d reason=%u flow=%u actual_trigger=%hhu actual_flow_type=%hhu interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld sta_disconnect_valid=%d sta_disconnect_reason=%hu sta_disconnect_time_us=%lld sta_owner_trial_id=%hu ram_only=1",
+                "lease_s=%lu mode=%u profile=%u stage=%u stop=%u id=%u expiry_us=%lld bootstrap_deadline_us=%lld setup_deadline_us=%lld associated=%d control_ready=%u ap_ax=%d phy=%d status=%d reason=%u flow=%u actual_trigger=%hhu actual_flow_type=%hhu interval_us=%llu duration_us=%llu target_wake_us=%llu fetch_attempts=%lu fetch_ok=%lu fetch_us=%llu losses=%lu late=%lu error=%d restore_error=%d teardown_error=%d cleanup_pending=%d cleanup_failed=%d last_failure=%u cleanup_stage=%u cleanup_deadline_us=%lld sta_disconnect_valid=%d sta_disconnect_reason=%hu sta_disconnect_time_us=%lld sta_owner_trial_id=%hu ram_only=1",
                 static_cast<unsigned long>(t.leaseSeconds), unsigned(t.requested), unsigned(t.profile), unsigned(t.stage), unsigned(t.stop), unsigned(t.id),
-                static_cast<long long>(t.expiryUs), static_cast<long long>(t.bootstrapDeadlineUs), static_cast<long long>(t.setupDeadlineUs), t.associated, t.apAx, t.phy,
+                static_cast<long long>(t.expiryUs), static_cast<long long>(t.bootstrapDeadlineUs), static_cast<long long>(t.setupDeadlineUs), t.associated, unsigned(t.controlReady), t.apAx, t.phy,
                 t.actual.status, unsigned(t.actual.reason), unsigned(t.actual.flow), unsigned(t.actual.trigger), unsigned(t.actual.flowType),
                 static_cast<unsigned long long>(t.intervalUs), static_cast<unsigned long long>(t.durationUs),
                 static_cast<unsigned long long>(t.actual.targetWakeUs), static_cast<unsigned long>(t.fetchAttempts),

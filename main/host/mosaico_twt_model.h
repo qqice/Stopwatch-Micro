@@ -57,7 +57,7 @@ struct Snapshot {
     uint32_t leaseSeconds = 600;
     int64_t expiryUs = 0, bootstrapDeadlineUs = 0, setupDeadlineUs = 0, cleanupDeadlineUs = 0;
     uint8_t cleanupStage = 0; // 0 clean, 1 setup drain, 2 teardown ack, 3 ioctl barrier, 4 PS restore, 5 failed
-    bool apAx = false, associated = false, cleanupPending = false, cleanupFailed = false;
+    bool apAx = false, associated = false, controlReady = false, cleanupPending = false, cleanupFailed = false;
     int phy = -1, error = 0, restoreError = 0, teardownError = 0;
     Result actual{};
     StaDisconnect staDisconnect{};

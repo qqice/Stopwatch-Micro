@@ -103,10 +103,10 @@ index a11aefd..30704e9 100644
  static const char *base64_lookup = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
  
 diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/components/microlink/components/wireguard_lwip/src/wireguardif.c
-index 6627fd0..077577e 100644
+index 6627fd0..5d52298 100644
 --- a/components/microlink/components/wireguard_lwip/src/wireguardif.c
 +++ b/components/microlink/components/wireguard_lwip/src/wireguardif.c
-@@ -30,7 +30,32 @@
+@@ -30,7 +30,37 @@
   * Author: Daniel Hope <daniel.hope@smartalock.com>
   */
  
@@ -130,6 +130,11 @@ index 6627fd0..077577e 100644
 +    value.input_ok = __atomic_load_n(&wireguardif_rx_counters[WG_RX_INPUT_OK], __ATOMIC_RELAXED);
 +    value.input_error = __atomic_load_n(&wireguardif_rx_counters[WG_RX_INPUT_ERROR], __ATOMIC_RELAXED);
 +    value.tcp_synack = __atomic_load_n(&wireguardif_rx_counters[WG_RX_TCP_SYNACK], __ATOMIC_RELAXED);
++    value.owner_dispatch_drop = __atomic_load_n(&wireguardif_rx_counters[WG_RX_OWNER_DISPATCH_DROP], __ATOMIC_RELAXED);
++    value.owner_processed = __atomic_load_n(&wireguardif_rx_counters[WG_RX_OWNER_PROCESSED], __ATOMIC_RELAXED);
++    value.transport_rx = __atomic_load_n(&wireguardif_rx_counters[WG_RX_TRANSPORT_RX], __ATOMIC_RELAXED);
++    value.invalid_packet = __atomic_load_n(&wireguardif_rx_counters[WG_RX_INVALID_PACKET], __ATOMIC_RELAXED);
++    value.empty_keepalive = __atomic_load_n(&wireguardif_rx_counters[WG_RX_EMPTY_KEEPALIVE], __ATOMIC_RELAXED);
 +    return value;
 +}
 +
@@ -139,7 +144,7 @@ index 6627fd0..077577e 100644
  
  #include <string.h>
  #include <stdlib.h>
-@@ -68,7 +93,21 @@ static void wireguardif_tmr(void *arg);
+@@ -68,7 +98,21 @@
  // Flag to disable internal UDP socket binding (for magicsock mode)
  static bool g_disable_socket_bind = false;
  
@@ -161,7 +166,7 @@ index 6627fd0..077577e 100644
  	g_disable_socket_bind = true;
  }
  
-@@ -327,7 +366,19 @@ static err_t wireguardif_output_to_peer(struct netif *netif, struct pbuf *q, con
+@@ -327,7 +371,19 @@
  
  // This is used as the output function for the Wireguard netif
  // The ipaddr here is the one inside the VPN which we use to lookup the correct peer/endpoint
@@ -181,7 +186,7 @@ index 6627fd0..077577e 100644
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
  	// Send to peer that matches dest IP
  	// Convert ip4_addr_t to ip_addr_t for lookup
-@@ -461,6 +512,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
+@@ -461,6 +517,7 @@
  				// Decrypt the packet
  				memset(pbuf->payload, 0, pbuf->tot_len);
  				bool decrypt_ok = wireguard_decrypt_packet(pbuf->payload, src, src_len, nonce, keypair);
@@ -189,7 +194,7 @@ index 6627fd0..077577e 100644
  				WG_DEBUG("[WG_DECRYPT] result=%d, src_len=%u, nonce=%llu\n",
  				       decrypt_ok, (unsigned)src_len, (unsigned long long)nonce);
  				if (decrypt_ok) {
-@@ -539,18 +591,28 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
+@@ -539,21 +596,32 @@
  								if (dest_ok) {
  									// Send packet to be processed by LWIP
  									WG_DEBUG("[WG_RX_IP] Passing %u bytes to IP layer\n", (unsigned)pbuf->tot_len);
@@ -221,7 +226,11 @@ index 6627fd0..077577e 100644
  							// This is a duplicate packet / replayed / too far out of order
  						}
  					} else {
-@@ -561,6 +623,8 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
++						wireguardif_rx_count(WG_RX_EMPTY_KEEPALIVE);
+ 						// This was a keep-alive packet
+ 					}
+ 				}
+@@ -561,6 +629,8 @@
  				if (pbuf) {
  					pbuf_free(pbuf);
  				}
@@ -230,7 +239,7 @@ index 6627fd0..077577e 100644
  			}
  
  
-@@ -568,10 +632,12 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
+@@ -568,10 +638,12 @@
  			//After Reject-After-Messages transport data messages or after the current secure session is Reject- After-Time seconds old,
  			// whichever comes first, WireGuard will refuse to send or receive any more transport data messages using the current secure session,
  			// until a new secure session is created through the 1-RTT handshake
@@ -243,7 +252,7 @@ index 6627fd0..077577e 100644
  		// Could not locate valid keypair for remote index
  	}
  }
-@@ -739,7 +805,20 @@ static bool wireguardif_check_response_message(struct wireguard_device *device,
+@@ -739,9 +811,25 @@
  }
  
  
@@ -257,14 +266,19 @@ index 6627fd0..077577e 100644
 +    if (!wireguardif_owner_current()) {
 +        wireguardif_network_rx_owner_ctx c = { .arg = arg, .pcb = pcb, .p = p, .addr = addr, .port = port };
 +        err_t dispatch = wireguardif_owner_call(wireguardif_network_rx_owner_cb, &c);
++        if (dispatch != ERR_OK) wireguardif_rx_count(WG_RX_OWNER_DISPATCH_DROP);
 +        if (dispatch != ERR_OK) pbuf_free(p); /* RX consumes p on every path. */
 +        return;
 +    }
 +
  	LWIP_ASSERT("wireguardif_network_rx: invalid arg", arg != NULL);
  	LWIP_ASSERT("wireguardif_network_rx: invalid pbuf", p != NULL);
++    // Count only the owner parse invocation, never the dispatch wrapper.
++    wireguardif_rx_count(WG_RX_OWNER_PROCESSED);
  	// We have received a packet from the base_netif to our UDP port - process this as a possible Wireguard packet
-@@ -755,8 +834,8 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
+ 	struct wireguard_device *device = (struct wireguard_device *)arg;
+ 	struct wireguard_peer *peer;
+@@ -755,8 +843,8 @@
  
  	uint8_t type = wireguard_get_message_type(data, len);
  
@@ -275,7 +289,7 @@ index 6627fd0..077577e 100644
  		type,
  		type == 1 ? "INIT" : type == 2 ? "RESP" : type == 3 ? "COOKIE" : type == 4 ? "DATA" : "?",
  		(unsigned)len,
-@@ -821,7 +900,10 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
+@@ -821,7 +909,10 @@
  				if (peer) {
  					printf("[WG_RX] Peer found for handshake, processing response\n");
  					// Process the handshake response
@@ -287,7 +301,14 @@ index 6627fd0..077577e 100644
  				} else {
  					printf("[WG_RX] ERROR: No peer found for receiver_idx=%lu\n", (unsigned long)msg_response->receiver);
  				}
-@@ -849,6 +931,8 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
+@@ -844,20 +935,28 @@
+ 			break;
+ 
+ 		case MESSAGE_TRANSPORT_DATA:
++            // get_message_type already checked reserved bytes and minimum header+tag length.
++            wireguardif_rx_count(WG_RX_TRANSPORT_RX);
+ 			msg_data = (struct message_transport_data *)data;
+ 			peer = peer_lookup_by_receiver(device, msg_data->receiver);
  			if (peer) {
  				// header is 16 bytes long so take that off the length
  				wireguardif_process_data_message(device, peer, msg_data, len - 16, addr, port);
@@ -296,7 +317,8 @@ index 6627fd0..077577e 100644
  			}
  			break;
  
-@@ -856,8 +940,11 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
+ 		default:
++            wireguardif_rx_count(WG_RX_INVALID_PACKET);
  			// Unknown or bad packet header
  			break;
  	}
@@ -310,7 +332,7 @@ index 6627fd0..077577e 100644
  }
  
  static err_t wireguard_start_handshake(struct netif *netif, struct wireguard_peer *peer) {
-@@ -910,7 +997,19 @@ static err_t wireguardif_lookup_peer(struct netif *netif, u8_t peer_index, struc
+@@ -910,7 +1009,19 @@
  	return result;
  }
  
@@ -330,7 +352,7 @@ index 6627fd0..077577e 100644
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -932,7 +1031,19 @@ err_t wireguardif_connect(struct netif *netif, u8_t peer_index) {
+@@ -932,7 +1043,19 @@
  	return result;
  }
  
@@ -350,7 +372,7 @@ index 6627fd0..077577e 100644
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -947,7 +1058,19 @@ err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index) {
+@@ -947,7 +1070,19 @@
  	return result;
  }
  
@@ -370,7 +392,7 @@ index 6627fd0..077577e 100644
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -966,7 +1089,19 @@ err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *cu
+@@ -966,7 +1101,19 @@
  	return result;
  }
  
@@ -390,7 +412,7 @@ index 6627fd0..077577e 100644
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -977,7 +1112,20 @@ err_t wireguardif_remove_peer(struct netif *netif, u8_t peer_index) {
+@@ -977,7 +1124,20 @@
  	return result;
  }
  
@@ -411,7 +433,7 @@ index 6627fd0..077577e 100644
  	if (!netif || !netif->state) {
  		return;
  	}
-@@ -988,7 +1136,19 @@ void wireguardif_shutdown(struct netif *netif) {
+@@ -988,7 +1148,19 @@
  	sys_untimeout(wireguardif_tmr, device);
  }
  
@@ -431,7 +453,7 @@ index 6627fd0..077577e 100644
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -1000,7 +1160,19 @@ err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip
+@@ -1000,7 +1172,19 @@
  }
  
  
@@ -451,7 +473,7 @@ index 6627fd0..077577e 100644
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	LWIP_ASSERT("p != NULL", (p != NULL));
-@@ -1159,7 +1331,20 @@ static void wireguardif_tmr(void *arg) {
+@@ -1159,7 +1343,20 @@
  	}
  }
  
@@ -472,7 +494,7 @@ index 6627fd0..077577e 100644
  	if (!netif || !netif->state) {
  		return;
  	}
-@@ -1209,7 +1394,19 @@ void wireguardif_periodic(struct netif *netif) {
+@@ -1209,7 +1406,19 @@
  	}
  }
  
@@ -492,7 +514,7 @@ index 6627fd0..077577e 100644
  	err_t result;
  	struct wireguardif_init_data *init_data;
  	struct wireguard_device *device;
-@@ -1355,7 +1552,20 @@ void wireguardif_peer_init(struct wireguardif_peer *peer) {
+@@ -1355,7 +1564,20 @@
  	peer->preshared_key = NULL;
  }
  
@@ -513,7 +535,7 @@ index 6627fd0..077577e 100644
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1365,7 +1575,20 @@ void wireguardif_set_derp_output(struct netif *netif, wireguard_derp_output_fn f
+@@ -1365,7 +1587,20 @@
  	}
  }
  
@@ -534,7 +556,7 @@ index 6627fd0..077577e 100644
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1376,7 +1599,20 @@ void wireguardif_set_udp_output(struct netif *netif, wireguard_udp_output_fn fn,
+@@ -1376,7 +1611,20 @@
  	}
  }
  
@@ -555,7 +577,7 @@ index 6627fd0..077577e 100644
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1386,7 +1622,19 @@ void wireguardif_force_derp_output(struct netif *netif, bool force) {
+@@ -1386,7 +1634,19 @@
  	}
  }
  
@@ -575,7 +597,7 @@ index 6627fd0..077577e 100644
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -1408,8 +1656,21 @@ err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index) {
+@@ -1408,8 +1668,21 @@
  	return result;
  }
  
@@ -650,10 +672,10 @@ index 0000000..3ec90d5
 +#endif
 diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif_rx_stats.h b/components/microlink/components/wireguard_lwip/src/wireguardif_rx_stats.h
 new file mode 100644
-index 0000000..8c37db3
+index 0000000..a045933
 --- /dev/null
 +++ b/components/microlink/components/wireguard_lwip/src/wireguardif_rx_stats.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,79 @@
 +/* Boot-cumulative numeric-only observations. No reset or packet retention.
 + * Relaxed 32-bit atomics: snapshot fields are independent, not transactional;
 + * increments wrap modulo 2^32. No locks, timers, or network operations. */
@@ -681,6 +703,11 @@ index 0000000..8c37db3
 +    uint32_t input_ok;
 +    uint32_t input_error;
 +    uint32_t tcp_synack;
++    uint32_t owner_dispatch_drop;
++    uint32_t owner_processed;
++    uint32_t transport_rx;
++    uint32_t invalid_packet;
++    uint32_t empty_keepalive;
 +} wireguardif_rx_stats_t;
 +enum {
 +    WG_RX_DERP_FRAME,
@@ -699,6 +726,11 @@ index 0000000..8c37db3
 +    WG_RX_INPUT_OK,
 +    WG_RX_INPUT_ERROR,
 +    WG_RX_TCP_SYNACK,
++    WG_RX_OWNER_DISPATCH_DROP,
++    WG_RX_OWNER_PROCESSED,
++    WG_RX_TRANSPORT_RX,
++    WG_RX_INVALID_PACKET,
++    WG_RX_EMPTY_KEEPALIVE,
 +    WG_RX_COUNT
 +};
 +extern uint32_t wireguardif_rx_counters[WG_RX_COUNT];

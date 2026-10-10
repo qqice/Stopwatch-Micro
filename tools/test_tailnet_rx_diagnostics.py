@@ -17,19 +17,50 @@ class RxDiagnosticsTests(unittest.TestCase):
         self.assertIn('__ATOMIC_RELAXED', H)
         self.assertIn('__atomic_fetch_add', H)
         self.assertNotRegex(H, r'ESP_LOG|vTaskDelay|malloc|memcpy')
-        self.assertEqual(len(FIELDS), 16)
+        self.assertEqual(len(FIELDS), 21)
         # Queue, timeout, input ownership, and encryption policy are untouched.
         self.assertIn('xQueueSend(target, &pkt, 0)', sources)
         self.assertIn('if (device->netif->input && device->netif->input(pbuf, device->netif) == ERR_OK)', C)
         for gate in ['if (decrypt_ok)', 'if (wireguard_check_replay(keypair, nonce))', 'if (header_len <= pbuf->tot_len)']:
             self.assertLess(C.index(gate), C.index('wireguardif_rx_count(WG_RX_INNER_OK)'))
 
+    def test_owner_format_transport_and_keepalive_boundaries(self):
+        owner = C.split('void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {',1)[1].split('static err_t wireguard_start_handshake',1)[0]
+        wrapper = owner.split('LWIP_ASSERT',1)[0]
+        self.assertIn('if (dispatch != ERR_OK) wireguardif_rx_count(WG_RX_OWNER_DISPATCH_DROP);', wrapper)
+        self.assertIn('if (dispatch != ERR_OK) pbuf_free(p)', wrapper)
+        self.assertNotIn('WG_RX_OWNER_PROCESSED', wrapper)
+        self.assertLess(owner.index('return;'), owner.index('wireguardif_rx_count(WG_RX_OWNER_PROCESSED)'))
+        self.assertEqual(owner.count('WG_RX_OWNER_PROCESSED'),1)
+        self.assertLess(owner.index('WG_RX_OWNER_PROCESSED'),owner.index('wireguard_get_message_type(data, len)'))
+        transport = owner.split('case MESSAGE_TRANSPORT_DATA:',1)[1].split('break;',1)[0]
+        self.assertLess(transport.index('WG_RX_TRANSPORT_RX'),transport.index('peer_lookup_by_receiver'))
+        self.assertEqual(owner.count('WG_RX_TRANSPORT_RX'),1)
+        default = owner.split('default:',1)[1].split('break;',1)[0]
+        self.assertIn('WG_RX_INVALID_PACKET',default)
+        classifier = (W/'wireguard.c').read_text(encoding='utf8').split('uint8_t wireguard_get_message_type(',1)[1].split('struct wireguard_peer *wireguard_process_initiation_message',1)[0]
+        for gate in ('if (len >= 4)', 'data[1] == 0', 'data[2] == 0', 'data[3] == 0',
+                     'len >= sizeof(struct message_transport_data) + WIREGUARD_AUTHTAG_LEN'):
+            self.assertIn(gate,classifier)
+        keepalive = C.split('// This is a duplicate packet / replayed / too far out of order',1)[1].split('if (pbuf)',1)[0]
+        self.assertIn('} else {\n\t\t\t\t\t\twireguardif_rx_count(WG_RX_EMPTY_KEEPALIVE)',keepalive)
+        self.assertEqual(C.count('wireguardif_rx_count(WG_RX_EMPTY_KEEPALIVE)'),1)
+        self.assertLess(C.index('if (decrypt_ok)'),C.index('wireguardif_rx_count(WG_RX_EMPTY_KEEPALIVE)'))
+        # Minimal owner-dispatch accounting trace: wrapper never parses; callback does once.
+        for already_owner, dispatch_ok in ((True,True),(False,True),(False,False)):
+            counts = dict(owner_dispatch_drop=0,owner_processed=0)
+            if already_owner or dispatch_ok: counts['owner_processed'] += 1
+            else: counts['owner_dispatch_drop'] += 1
+            self.assertEqual(sum(counts.values()),1)
+            self.assertEqual(counts['owner_processed'],int(already_owner or dispatch_ok))
+
     def test_serial_numeric_max_length_and_read_only_getter(self):
         serial = (R/'main/debug/serial_debug.cpp').read_text(encoding='utf8')
         fmt = re.search(r'debugPrintf\("(DBG TAIL_RX .*?)",', serial)[1]
         self.assertNotIn('%s', fmt)
         maximum = fmt.replace('%lu', '4294967295').replace(r'\r\n', '\r\n')
-        self.assertLess(len(maximum), 512)
+        self.assertLess(len(maximum), 896)
+        self.assertLess(len(maximum), 1536)
         getter = (R/'main/host/tailscale_transport.cpp').read_text(encoding='utf8').split('TailnetQuota::rxDiagnostics() const',1)[1].split('}',1)[0]
         self.assertEqual(getter.strip(), '{\n    return wireguardif_rx_stats();')
 

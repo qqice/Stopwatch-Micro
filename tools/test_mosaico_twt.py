@@ -305,7 +305,10 @@ constexpr bool gates() {
   if(mode==Mode::On && (o.setups!=1||o._twt.state.stage!=Stage::Negotiating||o._twt.state.setupDeadlineUs!=60000000))return false;
   if(mode==Mode::Baseline && (o.setups||o._twt.state.stage!=Stage::Baseline))return false;
   o.now++;o.dispatch();if(o.psCalls!=1||o.setups!=(mode==Mode::On?1:0))return false;
-  o.tail.online=false;o.dispatch();if(o._twt.live()||o._twt.state.stop!=Stop::Lost)return false;
+  o.tail.online=false;o.dispatch();
+  if(!o._twt.live() || o._twt.state.losses || o._twt.state.controlReady)return false;
+  o.tail.online=true;o.dispatch();
+  if(!o._twt.live() || o._twt.state.losses || !o._twt.state.controlReady || o.psCalls!=1 || o.setups!=(mode==Mode::On?1:0))return false;
   Owner starting;starting._connected=true;starting._twt.start(mode,0);starting.runBootstrap();
   if(starting.tail.starts!=1||starting.http||starting._twt.state.stage!=Stage::Armed)return false;
   starting.tail.online=true;starting.runBootstrap();
@@ -336,6 +339,45 @@ constexpr bool gates() {
  return true;
 }
 static_assert(gates(), "production dispatch block requires DHCP and configured tailnet for both arms");
+constexpr bool ongoingReadiness() {
+ for (Mode mode : {Mode::On,Mode::Baseline}) {
+  Owner o;o._connected=o.tail.online=true;o._twt.start(mode,0);o.dispatch();
+  if(mode==Mode::On)o._twt.state.stage=Stage::Active;
+  const auto stage=o._twt.state.stage;
+  const auto expiry=o._twt.state.expiryUs;
+  o.tail.online=false;o.dispatch();
+  if(!o._twt.live() || o._twt.state.stage!=stage || o._twt.state.losses ||
+     o._twt.state.controlReady || o._twt.state.expiryUs!=expiry)return false;
+  // Execute actual owner bootstrap/dispatch gate: no readiness means no HTTP.
+  o.runBootstrap(false);
+  if(o.http || !o._twt.live() || o._twt.state.losses || o.waits!=1)return false;
+  o.tail.online=true;o.runBootstrap();
+  if(o.http!=1 || !o._twt.live() || !o._twt.state.controlReady || o._twt.state.losses)return false;
+  for(bool associationLoss : {false,true}) {
+   Owner lost;lost._connected=lost.tail.online=true;lost._twt.start(mode,0);lost.dispatch();
+   if(mode==Mode::On)lost._twt.state.stage=Stage::Active;
+   if(associationLoss)lost.associated=false;else lost._connected=false;
+   lost.dispatch();
+   if(lost._twt.live() || lost._twt.state.losses!=1 || lost._twt.state.stop!=Stop::Lost)return false;
+  }
+  for(int action=0;action<4;++action) {
+   Owner ended;ended._connected=ended.tail.online=true;ended._twt.start(mode,0);ended.dispatch();
+   if(mode==Mode::On)ended._twt.state.stage=Stage::Active;
+   ended.tail.online=false;
+   if(action==0)ended._twt.check(ended._twt.state.expiryUs,false,true);
+   else if(action==1)ended.processRequest(0);
+   else if(action==2)ended._twt.check(1,false,false);
+   else ended._twt.check(1,true,true);
+   ended.dispatch();
+   if(ended._twt.live() || ended._twt.state.losses)return false;
+   const auto expected=action==0?Stop::Expired:action==1?Stop::Explicit:action==2?Stop::Awake:Stop::Ota;
+   if(ended._twt.state.stop!=expected)return false;
+  }
+ }
+ return true;
+}
+static_assert(ongoingReadiness(), "production owner keeps linked trial through control readiness loss but gates HTTP");
+
 ''')
 
     def test_announced_command_and_status_wire_budget(self):
@@ -350,6 +392,7 @@ static_assert(gates(), "production dispatch block requires DHCP and configured t
         # Snapshot enums and Result fields are uint8_t, id is uint16_t.
         bounded = {name:3 for name in ('mode', 'profile', 'stage', 'stop', 'reason', 'flow', 'last_failure', 'cleanup_stage')}
         bounded['id'] = 5
+        bounded['control_ready'] = 1 # Bool rendered as unsigned 0/1.
         longest = re.sub(r'(\w+)=%(llu|lld|lu|hhu|hu|u|d)',
                          lambda m: m.group(1)+'='+'9'*bounded.get(m.group(1), widths[m.group(2)]), fmt)
         details_size = int(re.search(r'char details\[(\d+)\]', command).group(1))
@@ -519,6 +562,12 @@ static_assert(identityTransitions(), "actual owner identity changes never mix ev
         self.assertGreaterEqual(service.count('reconcileTwtCycleIdentity();'), 2)
         self.assertLess(service.index('_twt.check('), service.index('_twt.accept('))
         self.assertIn('e.setup.id == _twt.state.id', service)
+        self.assertIn('const bool linkReady = associated && _connected;', service)
+        self.assertIn('const bool controlReady = !GetTailnetQuota().enabled() || GetTailnetQuota().ready();', service)
+        self.assertIn('if (!linkReady && _twt.state.stage != Stage::Armed)', service)
+        self.assertIn('linkReady && controlReady && locked && _twt.state.stage == Stage::Armed', service)
+        self.assertIn('_twt.state.controlReady = controlReady;', service)
+        self.assertIn('control_ready=%u', command)
         self.assertIn('phy != WIFI_PHY_MODE_HE20', service)
         self.assertIn('esp_wifi_get_ps', service)
         self.assertNotIn('esp_wifi_set_protocol', source)

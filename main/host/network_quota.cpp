@@ -634,11 +634,13 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
         wifi_ap_record_t ap{};
         const bool associated = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
         _twt.state.associated = associated;
-        const bool bootstrapReady = associated && _connected &&
-            (!GetTailnetQuota().enabled() || GetTailnetQuota().ready());
-        if (!bootstrapReady && _twt.state.stage != Stage::Armed) {
+        const bool linkReady = associated && _connected;
+        const bool controlReady = !GetTailnetQuota().enabled() || GetTailnetQuota().ready();
+        _twt.state.controlReady = controlReady;
+        // Control readiness gates bootstrap/HTTP, not ongoing Wi-Fi association.
+        if (!linkReady && _twt.state.stage != Stage::Armed) {
             ++_twt.state.losses; cancelTwtTrial(Stop::Lost);
-        } else if (bootstrapReady && locked && _twt.state.stage == Stage::Armed) {
+        } else if (linkReady && controlReady && locked && _twt.state.stage == Stage::Armed) {
             wifi_phy_mode_t phy{};
             _twt.state.apAx = ap.phy_11ax;
             const esp_err_t phyError = esp_wifi_sta_get_negotiated_phymode(&phy);
