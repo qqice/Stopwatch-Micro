@@ -19,13 +19,18 @@ ctrl_rx_idle ctrl_rx_partial_timeout ctrl_rx_eof ctrl_rx_invalid ctrl_rx_auth_fa
 METADATA = '''derp_tx_last_stage derp_tx_last_ret derp_tx_last_ms
 ctrl_reconnect_ms ctrl_last_reason ctrl_last_ret ctrl_last_ms'''.split()
 
+SOCKET_COUNTERS = [role+'_sock_rx_'+field for role in ('derp','ctrl')
+                   for field in ('calls','positive_count','bytes','timeout','eof','reset','fatal_other')]
+SOCKET_METADATA = [role+'_sock_rx_'+field for role in ('derp','ctrl')
+                   for field in ('last_ret','last_ms')]
+
 class RxDiagnosticsTests(unittest.TestCase):
     def test_all_boundary_counters_and_independent_snapshot(self):
         coord = (B/'src/ml_coord.c').read_text(encoding='utf8')
         sources = C + (B/'src/ml_derp.c').read_text(encoding='utf8') + (B/'src/ml_wg_mgr.c').read_text(encoding='utf8') + coord
         self.assertEqual(FIELDS[:25], RX_FIELDS)
-        self.assertEqual(set(FIELDS), set(RX_FIELDS + DIAG_COUNTERS + METADATA))
-        self.assertEqual(len(FIELDS), 50)
+        self.assertEqual(set(FIELDS), set(RX_FIELDS + DIAG_COUNTERS + METADATA + SOCKET_COUNTERS + SOCKET_METADATA))
+        self.assertEqual(len(FIELDS), 68)
         for field in RX_FIELDS + DIAG_COUNTERS:
             symbol = 'WG_RX_' + field.upper()
             if field in ('ctrl_noise_fail', 'ctrl_h2_ping_fail', 'ctrl_map_poll_fail', 'ctrl_watchdog'):
@@ -37,6 +42,8 @@ class RxDiagnosticsTests(unittest.TestCase):
             symbol = 'WG_RX_' + field.upper()
             self.assertIn('wireguardif_rx_store('+symbol+',', sources)
             self.assertNotIn('wireguardif_rx_count('+symbol+')', sources)
+        for field in SOCKET_COUNTERS + SOCKET_METADATA:
+            self.assertIn('WG_RX_'+field.upper(), H)
         for field in FIELDS:
             self.assertIn('value.'+field+' = __atomic_load_n(&wireguardif_rx_counters[WG_RX_'+field.upper()+'], __ATOMIC_RELAXED);', C)
         self.assertIn('wireguardif_rx_count(counter);', coord)

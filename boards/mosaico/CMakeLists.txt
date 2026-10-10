@@ -13,6 +13,11 @@ set(EXTRA_COMPONENT_DIRS
  "${STOPWATCH_ROOT}/components/microlink-source/components/microlink/components/wireguard_lwip")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 if(NOT DEFINED PROJECT_VER)
-    set(PROJECT_VER "0.13.36-mosaico-ota")
+    set(PROJECT_VER "0.13.37-mosaico-ota")
 endif()
 project(Stopwatch-Mosaico)
+
+# Project-local observer preserves ESP-IDF default hooks and pbuf ownership.
+idf_component_get_property(mosaico_lwip lwip COMPONENT_LIB)
+target_include_directories(${mosaico_lwip} PRIVATE "${STOPWATCH_ROOT}/main/debug")
+target_compile_definitions(${mosaico_lwip} PRIVATE ESP_IDF_LWIP_HOOK_FILENAME="mosaico_rx_hook.h")

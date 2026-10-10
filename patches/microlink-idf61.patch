@@ -105,7 +105,7 @@ index a11aefd..30704e9 100644
 diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/components/microlink/components/wireguard_lwip/src/wireguardif.c
 --- a/components/microlink/components/wireguard_lwip/src/wireguardif.c
 +++ b/components/microlink/components/wireguard_lwip/src/wireguardif.c
-@@ -30,7 +30,66 @@
+@@ -30,7 +30,84 @@
   * Author: Daniel Hope <daniel.hope@smartalock.com>
   */
  
@@ -163,6 +163,24 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
 +    value.ctrl_rx_invalid = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_RX_INVALID], __ATOMIC_RELAXED);
 +    value.ctrl_rx_auth_fail = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_RX_AUTH_FAIL], __ATOMIC_RELAXED);
 +    value.ctrl_upgrade_fragmented = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_UPGRADE_FRAGMENTED], __ATOMIC_RELAXED);
++    value.derp_sock_rx_calls = __atomic_load_n(&wireguardif_rx_counters[WG_RX_DERP_SOCK_RX_CALLS], __ATOMIC_RELAXED);
++    value.derp_sock_rx_positive_count = __atomic_load_n(&wireguardif_rx_counters[WG_RX_DERP_SOCK_RX_POSITIVE_COUNT], __ATOMIC_RELAXED);
++    value.derp_sock_rx_bytes = __atomic_load_n(&wireguardif_rx_counters[WG_RX_DERP_SOCK_RX_BYTES], __ATOMIC_RELAXED);
++    value.derp_sock_rx_timeout = __atomic_load_n(&wireguardif_rx_counters[WG_RX_DERP_SOCK_RX_TIMEOUT], __ATOMIC_RELAXED);
++    value.derp_sock_rx_eof = __atomic_load_n(&wireguardif_rx_counters[WG_RX_DERP_SOCK_RX_EOF], __ATOMIC_RELAXED);
++    value.derp_sock_rx_reset = __atomic_load_n(&wireguardif_rx_counters[WG_RX_DERP_SOCK_RX_RESET], __ATOMIC_RELAXED);
++    value.derp_sock_rx_fatal_other = __atomic_load_n(&wireguardif_rx_counters[WG_RX_DERP_SOCK_RX_FATAL_OTHER], __ATOMIC_RELAXED);
++    value.derp_sock_rx_last_ret = __atomic_load_n(&wireguardif_rx_counters[WG_RX_DERP_SOCK_RX_LAST_RET], __ATOMIC_RELAXED);
++    value.derp_sock_rx_last_ms = __atomic_load_n(&wireguardif_rx_counters[WG_RX_DERP_SOCK_RX_LAST_MS], __ATOMIC_RELAXED);
++    value.ctrl_sock_rx_calls = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_SOCK_RX_CALLS], __ATOMIC_RELAXED);
++    value.ctrl_sock_rx_positive_count = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_SOCK_RX_POSITIVE_COUNT], __ATOMIC_RELAXED);
++    value.ctrl_sock_rx_bytes = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_SOCK_RX_BYTES], __ATOMIC_RELAXED);
++    value.ctrl_sock_rx_timeout = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_SOCK_RX_TIMEOUT], __ATOMIC_RELAXED);
++    value.ctrl_sock_rx_eof = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_SOCK_RX_EOF], __ATOMIC_RELAXED);
++    value.ctrl_sock_rx_reset = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_SOCK_RX_RESET], __ATOMIC_RELAXED);
++    value.ctrl_sock_rx_fatal_other = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_SOCK_RX_FATAL_OTHER], __ATOMIC_RELAXED);
++    value.ctrl_sock_rx_last_ret = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_SOCK_RX_LAST_RET], __ATOMIC_RELAXED);
++    value.ctrl_sock_rx_last_ms = __atomic_load_n(&wireguardif_rx_counters[WG_RX_CTRL_SOCK_RX_LAST_MS], __ATOMIC_RELAXED);
 +    return value;
 +}
 +
@@ -172,7 +190,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  
  #include <string.h>
  #include <stdlib.h>
-@@ -68,7 +127,21 @@
+@@ -68,7 +145,21 @@
  // Flag to disable internal UDP socket binding (for magicsock mode)
  static bool g_disable_socket_bind = false;
  
@@ -194,7 +212,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	g_disable_socket_bind = true;
  }
  
-@@ -327,7 +400,19 @@
+@@ -327,7 +418,19 @@
  
  // This is used as the output function for the Wireguard netif
  // The ipaddr here is the one inside the VPN which we use to lookup the correct peer/endpoint
@@ -214,7 +232,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
  	// Send to peer that matches dest IP
  	// Convert ip4_addr_t to ip_addr_t for lookup
-@@ -461,6 +546,7 @@
+@@ -461,6 +564,7 @@
  				// Decrypt the packet
  				memset(pbuf->payload, 0, pbuf->tot_len);
  				bool decrypt_ok = wireguard_decrypt_packet(pbuf->payload, src, src_len, nonce, keypair);
@@ -222,7 +240,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  				WG_DEBUG("[WG_DECRYPT] result=%d, src_len=%u, nonce=%llu\n",
  				       decrypt_ok, (unsigned)src_len, (unsigned long long)nonce);
  				if (decrypt_ok) {
-@@ -539,21 +625,32 @@
+@@ -539,21 +643,32 @@
  								if (dest_ok) {
  									// Send packet to be processed by LWIP
  									WG_DEBUG("[WG_RX_IP] Passing %u bytes to IP layer\n", (unsigned)pbuf->tot_len);
@@ -258,7 +276,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  						// This was a keep-alive packet
  					}
  				}
-@@ -561,6 +658,8 @@
+@@ -561,6 +676,8 @@
  				if (pbuf) {
  					pbuf_free(pbuf);
  				}
@@ -267,7 +285,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  			}
  
  
-@@ -568,10 +667,12 @@
+@@ -568,10 +685,12 @@
  			//After Reject-After-Messages transport data messages or after the current secure session is Reject- After-Time seconds old,
  			// whichever comes first, WireGuard will refuse to send or receive any more transport data messages using the current secure session,
  			// until a new secure session is created through the 1-RTT handshake
@@ -280,7 +298,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  		// Could not locate valid keypair for remote index
  	}
  }
-@@ -739,9 +840,25 @@
+@@ -739,9 +858,25 @@
  }
  
  
@@ -306,7 +324,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	// We have received a packet from the base_netif to our UDP port - process this as a possible Wireguard packet
  	struct wireguard_device *device = (struct wireguard_device *)arg;
  	struct wireguard_peer *peer;
-@@ -755,8 +872,8 @@
+@@ -755,8 +890,8 @@
  
  	uint8_t type = wireguard_get_message_type(data, len);
  
@@ -317,7 +335,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  		type,
  		type == 1 ? "INIT" : type == 2 ? "RESP" : type == 3 ? "COOKIE" : type == 4 ? "DATA" : "?",
  		(unsigned)len,
-@@ -821,7 +938,10 @@
+@@ -821,7 +956,10 @@
  				if (peer) {
  					printf("[WG_RX] Peer found for handshake, processing response\n");
  					// Process the handshake response
@@ -329,7 +347,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  				} else {
  					printf("[WG_RX] ERROR: No peer found for receiver_idx=%lu\n", (unsigned long)msg_response->receiver);
  				}
-@@ -844,20 +964,28 @@
+@@ -844,20 +982,28 @@
  			break;
  
  		case MESSAGE_TRANSPORT_DATA:
@@ -360,7 +378,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  }
  
  static err_t wireguard_start_handshake(struct netif *netif, struct wireguard_peer *peer) {
-@@ -910,7 +1038,19 @@
+@@ -910,7 +1056,19 @@
  	return result;
  }
  
@@ -380,7 +398,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -932,7 +1072,19 @@
+@@ -932,7 +1090,19 @@
  	return result;
  }
  
@@ -400,7 +418,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -947,7 +1099,19 @@
+@@ -947,7 +1117,19 @@
  	return result;
  }
  
@@ -420,7 +438,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -966,7 +1130,19 @@
+@@ -966,7 +1148,19 @@
  	return result;
  }
  
@@ -440,7 +458,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -977,7 +1153,20 @@
+@@ -977,7 +1171,20 @@
  	return result;
  }
  
@@ -461,7 +479,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	if (!netif || !netif->state) {
  		return;
  	}
-@@ -988,7 +1177,19 @@
+@@ -988,7 +1195,19 @@
  	sys_untimeout(wireguardif_tmr, device);
  }
  
@@ -481,7 +499,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -1000,7 +1201,19 @@
+@@ -1000,7 +1219,19 @@
  }
  
  
@@ -501,7 +519,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	LWIP_ASSERT("p != NULL", (p != NULL));
-@@ -1159,7 +1372,20 @@
+@@ -1159,7 +1390,20 @@
  	}
  }
  
@@ -522,7 +540,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	if (!netif || !netif->state) {
  		return;
  	}
-@@ -1209,7 +1435,19 @@
+@@ -1209,7 +1453,19 @@
  	}
  }
  
@@ -542,7 +560,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	err_t result;
  	struct wireguardif_init_data *init_data;
  	struct wireguard_device *device;
-@@ -1355,7 +1593,20 @@
+@@ -1355,7 +1611,20 @@
  	peer->preshared_key = NULL;
  }
  
@@ -563,7 +581,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1365,7 +1616,20 @@
+@@ -1365,7 +1634,20 @@
  	}
  }
  
@@ -584,7 +602,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1376,7 +1640,20 @@
+@@ -1376,7 +1658,20 @@
  	}
  }
  
@@ -605,7 +623,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1386,7 +1663,19 @@
+@@ -1386,7 +1681,19 @@
  	}
  }
  
@@ -625,7 +643,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -1408,8 +1697,21 @@
+@@ -1408,8 +1715,21 @@
  	return result;
  }
  
@@ -700,10 +718,9 @@ index 0000000..3ec90d5
 +#endif
 diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif_rx_stats.h b/components/microlink/components/wireguard_lwip/src/wireguardif_rx_stats.h
 new file mode 100644
-index 0000000..965e206
 --- /dev/null
 +++ b/components/microlink/components/wireguard_lwip/src/wireguardif_rx_stats.h
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,215 @@
 +/* Boot-cumulative numeric-only observations. No reset or packet retention.
 + * Relaxed 32-bit atomics: snapshot fields are independent, not transactional;
 + * increments wrap modulo 2^32. No locks, timers, or network operations. */
@@ -711,6 +728,12 @@ index 0000000..965e206
 +#define WIREGUARDIF_RX_STATS_H
 +#include <stdint.h>
 +#include <stddef.h>
++#include <errno.h>
++#if defined(__GNUC__) || defined(__clang__)
++#define WG_RX_INLINE static inline __attribute__((unused))
++#else
++#define WG_RX_INLINE static inline
++#endif
 +#ifdef __cplusplus
 +extern "C" {
 +#endif
@@ -765,6 +788,24 @@ index 0000000..965e206
 +    uint32_t ctrl_rx_invalid;
 +    uint32_t ctrl_rx_auth_fail;
 +    uint32_t ctrl_upgrade_fragmented;
++    uint32_t derp_sock_rx_calls;
++    uint32_t derp_sock_rx_positive_count;
++    uint32_t derp_sock_rx_bytes;
++    uint32_t derp_sock_rx_timeout;
++    uint32_t derp_sock_rx_eof;
++    uint32_t derp_sock_rx_reset;
++    uint32_t derp_sock_rx_fatal_other;
++    uint32_t derp_sock_rx_last_ret;
++    uint32_t derp_sock_rx_last_ms;
++    uint32_t ctrl_sock_rx_calls;
++    uint32_t ctrl_sock_rx_positive_count;
++    uint32_t ctrl_sock_rx_bytes;
++    uint32_t ctrl_sock_rx_timeout;
++    uint32_t ctrl_sock_rx_eof;
++    uint32_t ctrl_sock_rx_reset;
++    uint32_t ctrl_sock_rx_fatal_other;
++    uint32_t ctrl_sock_rx_last_ret;
++    uint32_t ctrl_sock_rx_last_ms;
 +} wireguardif_rx_stats_t;
 +enum {
 +    WG_RX_DERP_FRAME,
@@ -817,10 +858,28 @@ index 0000000..965e206
 +    WG_RX_CTRL_RX_INVALID,
 +    WG_RX_CTRL_RX_AUTH_FAIL,
 +    WG_RX_CTRL_UPGRADE_FRAGMENTED,
++    WG_RX_DERP_SOCK_RX_CALLS,
++    WG_RX_DERP_SOCK_RX_POSITIVE_COUNT,
++    WG_RX_DERP_SOCK_RX_BYTES,
++    WG_RX_DERP_SOCK_RX_TIMEOUT,
++    WG_RX_DERP_SOCK_RX_EOF,
++    WG_RX_DERP_SOCK_RX_RESET,
++    WG_RX_DERP_SOCK_RX_FATAL_OTHER,
++    WG_RX_DERP_SOCK_RX_LAST_RET,
++    WG_RX_DERP_SOCK_RX_LAST_MS,
++    WG_RX_CTRL_SOCK_RX_CALLS,
++    WG_RX_CTRL_SOCK_RX_POSITIVE_COUNT,
++    WG_RX_CTRL_SOCK_RX_BYTES,
++    WG_RX_CTRL_SOCK_RX_TIMEOUT,
++    WG_RX_CTRL_SOCK_RX_EOF,
++    WG_RX_CTRL_SOCK_RX_RESET,
++    WG_RX_CTRL_SOCK_RX_FATAL_OTHER,
++    WG_RX_CTRL_SOCK_RX_LAST_RET,
++    WG_RX_CTRL_SOCK_RX_LAST_MS,
 +    WG_RX_COUNT
 +};
 +extern uint32_t wireguardif_rx_counters[WG_RX_COUNT];
-+static inline void wireguardif_rx_count(unsigned field) {
++WG_RX_INLINE void wireguardif_rx_count(unsigned field) {
 +    __atomic_fetch_add(&wireguardif_rx_counters[field], 1U, __ATOMIC_RELAXED);
 +}
 +/* Numeric only, independent relaxed observations; zero is not a health claim.
@@ -828,13 +887,40 @@ index 0000000..965e206
 +enum { WG_DERP_TX_NONE=0, WG_DERP_TX_HEADER=1, WG_DERP_TX_BODY=2, WG_DERP_TX_HTTP_UPGRADE=3 };
 +enum { WG_CTRL_NONE=0, WG_CTRL_NOISE_START=1, WG_CTRL_NOISE_FAIL=2,
 +       WG_CTRL_H2_PING_FAIL=3, WG_CTRL_MAP_POLL_FAIL=4, WG_CTRL_WATCHDOG=5, WG_CTRL_RECONNECT=6 };
-+static inline void wireguardif_rx_store(unsigned field, uint32_t value) {
++WG_RX_INLINE void wireguardif_rx_store(unsigned field, uint32_t value) {
 +    __atomic_store_n(&wireguardif_rx_counters[field], value, __ATOMIC_RELAXED);
++}
++/* External TCP receive boundary only: DERP TLS ciphertext / Ctrl raw Noise.
++ * Not decrypted WG/IP bytes. Default-on, no payload/address/socket retention.
++ * Each role has seven modulo counters and two independent metadata stores.
++ * Negative return values use uint32 two's-complement encoding. Classification
++ * consults saved_errno only when ret < 0 (successful reads may leave it stale).
++ * Caller restores saved_errno after time acquisition and this observer. */
++enum { WG_RX_SOCKET_DERP_TLS = 0, WG_RX_SOCKET_CTRL_RAW = 1 };
++WG_RX_INLINE void wireguardif_rx_socket_note(unsigned role, int ret,
++                                             int saved_errno, uint32_t ms) {
++    unsigned base = role == WG_RX_SOCKET_DERP_TLS ? WG_RX_DERP_SOCK_RX_CALLS :
++                                                  WG_RX_CTRL_SOCK_RX_CALLS;
++    wireguardif_rx_count(base);
++    if (ret > 0) {
++        wireguardif_rx_count(base + 1);
++        __atomic_fetch_add(&wireguardif_rx_counters[base + 2], (uint32_t)ret, __ATOMIC_RELAXED);
++    } else if (ret == 0) {
++        wireguardif_rx_count(base + 4);
++    } else if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK) {
++        wireguardif_rx_count(base + 3);
++    } else if (saved_errno == ECONNRESET || saved_errno == EPIPE) {
++        wireguardif_rx_count(base + 5);
++    } else {
++        wireguardif_rx_count(base + 6);
++    }
++    wireguardif_rx_store(base + 7, (uint32_t)ret);
++    wireguardif_rx_store(base + 8, ms);
 +}
 +wireguardif_rx_stats_t wireguardif_rx_stats(void);
 +/* IPv4 only (current quota transport), excludes fragments and truncated TCP.
 + * Read bytes only after authenticated/replay/allowed-source/length gates. */
-+static inline int wireguardif_rx_is_synack(const void *payload, size_t length) {
++WG_RX_INLINE int wireguardif_rx_is_synack(const void *payload, size_t length) {
 +    const uint8_t *ip = (const uint8_t *)payload;
 +    if (!ip || length < 20 || (ip[0] >> 4) != 4 || ip[9] != 6) return 0;
 +    size_t ihl = (ip[0] & 15U) * 4U;
@@ -845,6 +931,7 @@ index 0000000..965e206
 +    size_t thl = (tcp[12] >> 4) * 4U;
 +    return thl >= 20 && thl <= total - ihl && (tcp[13] & 0x12U) == 0x12U;
 +}
++#undef WG_RX_INLINE
 +#ifdef __cplusplus
 +}
 +#endif
@@ -1246,7 +1333,6 @@ index 237f039..fd5379a 100644
      /* Delete event group */
      if (ml->events) vEventGroupDelete(ml->events);
 diff --git a/components/microlink/src/ml_coord.c b/components/microlink/src/ml_coord.c
-index 8da8d4d..df7a350 100644
 --- a/components/microlink/src/ml_coord.c
 +++ b/components/microlink/src/ml_coord.c
 @@ -22,6 +22,7 @@
@@ -1270,7 +1356,7 @@ index 8da8d4d..df7a350 100644
  
  /* Effective control plane host: NVS override or compiled default */
  #define CTRL_HOST(ml) ((ml)->ctrl_host[0] ? (ml)->ctrl_host : ML_CTRL_HOST)
-@@ -103,20 +110,24 @@ static int coord_send(microlink_t *ml, const uint8_t *data, size_t len) {
+@@ -103,20 +110,27 @@
      return 0;
  }
  
@@ -1282,6 +1368,9 @@ index 8da8d4d..df7a350 100644
      int retries = 0;
      while (recvd < len) {
          int n = ml_recv(ml->coord_sock, buf + recvd, len - recvd, 0);
++        int saved_errno = errno;
++        wireguardif_rx_socket_note(WG_RX_SOCKET_CTRL_RAW, n, saved_errno, (uint32_t)ml_get_time_ms());
++        errno = saved_errno;
          if (n <= 0) {
 -            if (errno == EAGAIN || errno == EWOULDBLOCK) {
 +            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -1299,7 +1388,7 @@ index 8da8d4d..df7a350 100644
                      ESP_LOGE(TAG, "coord_recv partial timeout: %d/%d bytes",
                               (int)recvd, (int)len);
                      return -1;
-@@ -124,6 +135,7 @@ static int coord_recv(microlink_t *ml, uint8_t *buf, size_t len) {
+@@ -124,6 +138,7 @@
                  vTaskDelay(pdMS_TO_TICKS(10));
                  continue;
              }
@@ -1307,7 +1396,7 @@ index 8da8d4d..df7a350 100644
              ESP_LOGE(TAG, "coord_recv failed: %d (errno %d, recvd %d/%d)",
                       n, errno, (int)recvd, (int)len);
              return -1;
-@@ -168,17 +180,24 @@ static int noise_recv(microlink_t *ml, ml_noise_state_t *noise,
+@@ -168,17 +183,24 @@
                          uint8_t *plaintext, size_t max_len) {
      /* Read 3-byte frame header */
      uint8_t hdr[3];
@@ -1334,7 +1423,7 @@ index 8da8d4d..df7a350 100644
          ESP_LOGE(TAG, "Noise frame too large: %d > %d", (int)pt_len, (int)max_len);
          return -1;
      }
-@@ -186,15 +205,18 @@ static int noise_recv(microlink_t *ml, ml_noise_state_t *noise,
+@@ -186,15 +208,18 @@
      uint8_t *ciphertext = ml_psram_malloc(ct_len);
      if (!ciphertext) return -1;
  
@@ -1358,7 +1447,7 @@ index 8da8d4d..df7a350 100644
          ESP_LOGE(TAG, "noise_recv payload failed: ct_len=%d retries=%d errno=%d",
                   ct_len, payload_retries, errno);
          free(ciphertext);
-@@ -205,6 +227,7 @@ static int noise_recv(microlink_t *ml, ml_noise_state_t *noise,
+@@ -205,6 +230,7 @@
                            NULL, 0,
                            ciphertext, ct_len,
                            plaintext) != ESP_OK) {
@@ -1366,10 +1455,11 @@ index 8da8d4d..df7a350 100644
          ESP_LOGE(TAG, "Noise decrypt failed (nonce=%llu)", (unsigned long long)noise->rx_nonce);
          free(ciphertext);
          return -1;
-@@ -283,6 +306,46 @@ static int do_tcp_connect(microlink_t *ml) {
+@@ -282,6 +308,49 @@
+ /* Server proactive data (stored between handshake and H2 preface) */
  static uint8_t *s_server_extra_data = NULL;
  static int s_server_extra_data_len = 0;
- 
++
 +/* Collect only the bounded HTTP upgrade prefix, retaining any Noise tail.
 + * One overall 10s budget, not a new 10s timeout for each TCP fragment. */
 +static int coord_recv_upgrade(microlink_t *ml, uint8_t *resp, size_t capacity) {
@@ -1386,6 +1476,9 @@ index 8da8d4d..df7a350 100644
 +        ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 +        if (++reads == 2) wireguardif_rx_count(WG_RX_CTRL_UPGRADE_FRAGMENTED);
 +        int n = ml_recv(ml->coord_sock, resp + total, capacity - total - 1, 0);
++        int saved_errno = errno;
++        wireguardif_rx_socket_note(WG_RX_SOCKET_CTRL_RAW, n, saved_errno, (uint32_t)ml_get_time_ms());
++        errno = saved_errno;
 +        if (n <= 0) {
 +            if (n == 0) wireguardif_rx_count(WG_RX_CTRL_RX_EOF);
 +            break;
@@ -1409,11 +1502,10 @@ index 8da8d4d..df7a350 100644
 +    ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &normal_tv, sizeof(normal_tv));
 +    return result;
 +}
-+
+ 
  static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
      int64_t t_noise_start = esp_timer_get_time();
- 
-@@ -334,7 +397,7 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -334,7 +403,7 @@
      uint8_t *resp = ml_psram_malloc(2048);
      if (!resp) return -1;
  
@@ -1422,7 +1514,7 @@ index 8da8d4d..df7a350 100644
      if (total <= 0) {
          ESP_LOGE(TAG, "Handshake recv failed: %d (errno=%d)", total, errno);
          free(resp);
-@@ -344,12 +407,6 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -344,12 +413,6 @@
  
      ESP_LOGI(TAG, "HTTP response received: %d bytes", total);
  
@@ -1435,7 +1527,7 @@ index 8da8d4d..df7a350 100644
      ESP_LOGI(TAG, "HTTP 101 received, looking for Noise msg2...");
  
      /* Find end of HTTP headers */
-@@ -369,7 +426,8 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -369,7 +432,8 @@
      int body_buf_len = 0;
  
      if (body_len > 0) {
@@ -1445,7 +1537,17 @@ index 8da8d4d..df7a350 100644
          if (body_buf) {
              memcpy(body_buf, body_start, body_len);
              body_buf_len = body_len;
-@@ -671,8 +729,10 @@ static int do_h2_preface(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -469,6 +533,9 @@
+         extra_data = ml_psram_malloc(1024);
+         if (extra_data) {
+             int n = ml_recv(ml->coord_sock, extra_data, 1024, 0);
++            int saved_errno = errno;
++            wireguardif_rx_socket_note(WG_RX_SOCKET_CTRL_RAW, n, saved_errno, (uint32_t)ml_get_time_ms());
++            errno = saved_errno;
+             if (n > 0) {
+                 extra_len = n;
+                 ESP_LOGI(TAG, "Read %d bytes of proactive frames from socket", extra_len);
+@@ -671,8 +738,10 @@
      uint8_t recv_buf[4096];
      int recv_len = noise_recv(ml, noise, recv_buf, sizeof(recv_buf));
      if (recv_len < 0) {
@@ -1457,7 +1559,7 @@ index 8da8d4d..df7a350 100644
      } else {
          ESP_LOGI(TAG, "Server H2 response: %d bytes", recv_len);
      }
-@@ -723,7 +783,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -723,7 +792,7 @@
      {
          cJSON *netinfo = cJSON_CreateObject();
          if (netinfo) {
@@ -1466,7 +1568,7 @@ index 8da8d4d..df7a350 100644
              cJSON_AddItemToObject(hostinfo, "NetInfo", netinfo);
          }
      }
-@@ -811,13 +871,14 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -811,13 +880,14 @@
      bool got_register_end = false;
      for (int frame_count = 0; frame_count < 10 && !got_register_end; frame_count++) {
          uint8_t *frame_buf = ml_psram_malloc(4096);
@@ -1477,15 +1579,16 @@ index 8da8d4d..df7a350 100644
 -        if (frame_len <= 0) {
 -            free(frame_buf);
 -            break;
+-        }
 +        if (frame_len < 0) {
 +            free(frame_buf); free(h2_resp); free(resp_buf);
 +            return -1;
-         }
++        }
 +        if (frame_len == 0) { free(frame_buf); break; }
  
          ESP_LOGI(TAG, "RegisterResponse Noise frame %d: %d bytes", frame_count, frame_len);
  
-@@ -990,10 +1051,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -990,10 +1060,7 @@
          }
          cJSON *self_key = cJSON_GetObjectItem(node, "Key");
          if (self_key && self_key->valuestring) {
@@ -1497,10 +1600,11 @@ index 8da8d4d..df7a350 100644
          }
      }
  
-@@ -1009,6 +1067,25 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1008,6 +1075,25 @@
+ /* ============================================================================
   * State: FETCH_PEERS - Send MapRequest, parse MapResponse
   * ========================================================================== */
- 
++
 +/* Only map contents matter; repeated initial maps must not cause reconnect loops. */
 +static uint32_t derp_map_hash(cJSON *regions) {
 +    char *json = cJSON_PrintUnformatted(regions);
@@ -1519,25 +1623,24 @@ index 8da8d4d..df7a350 100644
 +    else ml->derp_home_region = value;
 +    if (ml->derp_map_lock) xSemaphoreGive(ml->derp_map_lock);
 +}
-+
+ 
  static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
      /* Try all field names used by Tailscale (copied from v1 lines 3176-3184):
-      *   "Peers"        - Full peer list (initial Stream=false response)
-@@ -1094,6 +1171,13 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
+@@ -1092,6 +1178,13 @@
+                     update->derp_region = (uint16_t)dr;
+                 }
              }
-         }
- 
++        }
++
 +        if (update->vpn_ip == ml->config.priority_peer_ip) {
 +            cJSON *id = cJSON_GetObjectItem(peer, "ID");
 +            if (cJSON_IsNumber(id)) ml->priority_peer_node_id = (uint64_t)id->valuedouble;
 +            memcpy(ml->priority_peer_key, update->public_key, 32);
 +            if (update->derp_region) set_derp_region(ml, true, update->derp_region);
-+        }
-+
+         }
+ 
          /* Endpoints */
-         cJSON *endpoints = cJSON_GetObjectItem(peer, "Endpoints");
-         if (endpoints) {
-@@ -1160,6 +1244,18 @@ check_removed:
+@@ -1160,6 +1253,18 @@
  
      /* Handle PeersChangedPatch — lightweight endpoint-only updates */
      cJSON *patches = cJSON_GetObjectItem(root, "PeersChangedPatch");
@@ -1556,17 +1659,17 @@ index 8da8d4d..df7a350 100644
      if (patches && cJSON_IsObject(patches)) {
          ESP_LOGI(TAG, "PeersChangedPatch: processing lightweight updates");
          cJSON *patch = patches->child;
-@@ -1189,6 +1285,9 @@ check_removed:
+@@ -1188,6 +1293,9 @@
+                             }
                          }
                      }
- 
++
 +                    if (update->derp_region && memcmp(update->public_key, ml->priority_peer_key, 32) == 0)
 +                        set_derp_region(ml, true, update->derp_region);
-+
+ 
                      /* Parse endpoints if present */
                      cJSON *endpoints = cJSON_GetObjectItem(patch, "Endpoints");
-                     if (endpoints) {
-@@ -1339,7 +1438,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1339,7 +1447,7 @@
       * to populate Node.HomeDERP for other peers. */
      cJSON *netinfo = cJSON_CreateObject();
      if (netinfo) {
@@ -1575,7 +1678,7 @@ index 8da8d4d..df7a350 100644
          if (ml->stun_nat_checked) {
              cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
          }
-@@ -1413,13 +1512,20 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1413,13 +1521,20 @@
      bool got_end_stream = false;
      for (int read_count = 0; read_count < 200; read_count++) {
          uint8_t *frame_buf = ml_psram_malloc(65536);
@@ -1590,17 +1693,18 @@ index 8da8d4d..df7a350 100644
 -        if (frame_len <= 0) {
 -            free(frame_buf);
 -            break;
+-        }
 +        if (frame_len < 0) {
 +            rcv_tv.tv_sec = 5;
 +            ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
 +            free(frame_buf); free(h2_recv); free(resp_buf);
 +            return -1;
-         }
++        }
 +        if (frame_len == 0) { free(frame_buf); break; }
  
          /* Append decrypted data to h2_recv */
          if (h2_total + frame_len < ML_H2_BUFFER_SIZE) {
-@@ -1579,11 +1685,21 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1579,10 +1694,20 @@
  
      if (!map_json) {
          const char *err = cJSON_GetErrorPtr();
@@ -1612,18 +1716,17 @@ index 8da8d4d..df7a350 100644
          free(resp_buf);
          return -1;
      }
- 
++
 +    ESP_LOGI("Quota-Map", "snapshot node=%d peers=%d derp=%d keepalive=%d h2_bytes=%u json_bytes=%u cap=%u",
 +             cJSON_IsObject(cJSON_GetObjectItem(map_json, "Node")),
 +             cJSON_GetArraySize(cJSON_GetObjectItem(map_json, "Peers")),
 +             cJSON_IsObject(cJSON_GetObjectItem(map_json, "DERPMap")),
 +             cJSON_IsTrue(cJSON_GetObjectItem(map_json, "KeepAlive")),
 +             (unsigned)h2_total, (unsigned)json_total, (unsigned)ML_JSON_BUFFER_SIZE);
-+
+ 
      /* Debug: log all top-level fields in MapResponse (from v1 lines 3053-3072) */
      {
-         ESP_LOGI(TAG, "MapResponse top-level fields:");
-@@ -1630,7 +1746,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1630,7 +1755,7 @@
               * then fall back to legacy DERP string (format: "127.3.3.40:REGION") */
              cJSON *home_derp = cJSON_GetObjectItem(node, "HomeDERP");
              if (home_derp && cJSON_IsNumber(home_derp) && home_derp->valueint > 0) {
@@ -1632,7 +1735,7 @@ index 8da8d4d..df7a350 100644
                  ESP_LOGI(TAG, "Home DERP region: %d (from server, HomeDERP)", ml->derp_home_region);
              } else {
                  cJSON *self_derp = cJSON_GetObjectItem(node, "DERP");
-@@ -1640,7 +1756,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1640,7 +1765,7 @@
                      if (colon) {
                          int region = atoi(colon + 1);
                          if (region > 0) {
@@ -1641,7 +1744,7 @@ index 8da8d4d..df7a350 100644
                              ESP_LOGI(TAG, "Home DERP region: %d (from server, legacy DERP)", region);
                          }
                      }
-@@ -1648,15 +1764,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1648,15 +1773,12 @@
              }
              /* Fallback: if server didn't assign a DERP region, use our configured default */
              if (ml->derp_home_region == 0) {
@@ -1659,7 +1762,7 @@ index 8da8d4d..df7a350 100644
              }
  
              /* Parse KeyExpiry (ISO 8601: "YYYY-MM-DDTHH:MM:SSZ") */
-@@ -1702,6 +1815,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1702,6 +1824,12 @@
      if (derp_map) {
          cJSON *regions = cJSON_GetObjectItem(derp_map, "Regions");
          if (regions) {
@@ -1672,20 +1775,20 @@ index 8da8d4d..df7a350 100644
              ml->derp_region_count = 0;
              cJSON *region_obj;
              cJSON_ArrayForEach(region_obj, regions) {
-@@ -1734,6 +1853,12 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1732,6 +1860,12 @@
+                         cJSON *hn = cJSON_GetObjectItem(node_obj, "HostName");
+                         if (hn && hn->valuestring) {
                              strncpy(n->hostname, hn->valuestring, sizeof(n->hostname) - 1);
-                         }
- 
++                        }
++
 +                        cJSON *cn = cJSON_GetObjectItem(node_obj, "CertName");
 +                        if (cJSON_IsString(cn)) {
 +                            if (strlen(cn->valuestring) >= sizeof(n->cert_name)) continue;
 +                            strcpy(n->cert_name, cn->valuestring);
-+                        }
-+
+                         }
+ 
                          cJSON *ip4 = cJSON_GetObjectItem(node_obj, "IPv4");
-                         if (ip4 && ip4->valuestring) {
-                             strncpy(n->ipv4, ip4->valuestring, sizeof(n->ipv4) - 1);
-@@ -1772,10 +1897,15 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1772,10 +1906,15 @@
  
                  ml->derp_region_count++;
              }
@@ -1701,7 +1804,7 @@ index 8da8d4d..df7a350 100644
      cJSON_Delete(map_json);
      free(resp_buf);
  
-@@ -1825,7 +1955,7 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1825,7 +1964,7 @@
       * to populate Node.HomeDERP for other peers. */
      cJSON *netinfo = cJSON_CreateObject();
      if (netinfo) {
@@ -1710,7 +1813,7 @@ index 8da8d4d..df7a350 100644
          if (ml->stun_nat_checked) {
              cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
          }
-@@ -1888,10 +2018,6 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1888,10 +2027,6 @@
   * Uses H2 stream 7. Response body is discarded (only HTTP status matters).
   * Returns 0 on success, -1 on send failure. */
  static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
@@ -1721,7 +1824,7 @@ index 8da8d4d..df7a350 100644
  
      cJSON *root = cJSON_CreateObject();
      if (!root) return -1;
-@@ -1926,7 +2052,7 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1926,7 +2061,7 @@
  
          cJSON *netinfo = cJSON_CreateObject();
          if (netinfo) {
@@ -1730,7 +1833,7 @@ index 8da8d4d..df7a350 100644
              if (ml->stun_nat_checked) {
                  cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
              }
-@@ -1978,6 +2104,7 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -1978,6 +2113,7 @@
      }
      free(h2_buf);
  
@@ -1738,7 +1841,7 @@ index 8da8d4d..df7a350 100644
      ESP_LOGI(TAG, "Endpoint update sent on H2 stream %lu", (unsigned long)sid);
      /* Response body is discarded — server may send empty response or
       * we'll consume it in the next poll_map_update() iteration.
-@@ -2000,16 +2127,11 @@ static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -2000,16 +2136,11 @@
      ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv));
  
      uint8_t *frame_buf = ml_psram_malloc(65536);
@@ -1757,7 +1860,7 @@ index 8da8d4d..df7a350 100644
      }
  
      /* Extract DATA frame payload from H2 frames, track flow control */
-@@ -2117,6 +2239,13 @@ static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
+@@ -2117,6 +2248,13 @@
              }
          }
  
@@ -1771,7 +1874,7 @@ index 8da8d4d..df7a350 100644
          /* Parse peer updates */
          parse_peers_from_map_response(ml, update_json);
          cJSON_Delete(update_json);
-@@ -2150,8 +2279,7 @@ void ml_coord_task(void *arg) {
+@@ -2150,8 +2288,7 @@
                               pdFALSE, pdFALSE, portMAX_DELAY);
          if (wb & ML_EVT_SHUTDOWN_REQUEST) {
              ESP_LOGI(TAG, "Shutdown requested before WiFi, exiting");
@@ -1781,7 +1884,7 @@ index 8da8d4d..df7a350 100644
          }
      }
  
-@@ -2166,6 +2294,7 @@ void ml_coord_task(void *arg) {
+@@ -2166,6 +2303,7 @@
                  }
                  break;
              case ML_CMD_DISCONNECT:
@@ -1789,7 +1892,7 @@ index 8da8d4d..df7a350 100644
                  if (ml->coord_sock >= 0) {
                      ml_close_sock(ml->coord_sock);
                      ml->coord_sock = -1;
-@@ -2174,6 +2303,7 @@ void ml_coord_task(void *arg) {
+@@ -2174,6 +2312,7 @@
                  ml->state = ML_STATE_IDLE;
                  break;
              case ML_CMD_FORCE_RECONNECT:
@@ -1797,7 +1900,7 @@ index 8da8d4d..df7a350 100644
                  state = COORD_RECONNECTING;
                  break;
              case ML_CMD_UPDATE_ENDPOINTS:
-@@ -2229,9 +2359,13 @@ void ml_coord_task(void *arg) {
+@@ -2229,9 +2368,13 @@
              state = COORD_NOISE_HANDSHAKE;
              break;
  
@@ -1813,7 +1916,7 @@ index 8da8d4d..df7a350 100644
                  ESP_LOGE(TAG, "Noise handshake failed");
                  ml_close_sock(ml->coord_sock);
                  ml->coord_sock = -1;
-@@ -2245,6 +2379,7 @@ void ml_coord_task(void *arg) {
+@@ -2245,6 +2388,7 @@
              state = COORD_H2_PREFACE;
              break;
  
@@ -1821,7 +1924,7 @@ index 8da8d4d..df7a350 100644
          case COORD_H2_PREFACE:
              if (do_h2_preface(ml, &noise) < 0) {
                  ESP_LOGE(TAG, "H2 preface failed");
-@@ -2269,6 +2404,7 @@ void ml_coord_task(void *arg) {
+@@ -2269,6 +2413,7 @@
              break;
  
          case COORD_FETCH_PEERS:
@@ -1829,7 +1932,7 @@ index 8da8d4d..df7a350 100644
              ESP_LOGI(TAG, "Fetching peers...");
              if (do_fetch_peers(ml, &noise) < 0) {
                  ESP_LOGW(TAG, "MapRequest failed, will retry");
-@@ -2294,11 +2430,9 @@ void ml_coord_task(void *arg) {
+@@ -2294,11 +2439,9 @@
                  ESP_LOGW(TAG, "Failed to start long-poll (non-fatal)");
              }
  
@@ -1844,7 +1947,7 @@ index 8da8d4d..df7a350 100644
  
              /* Send initial HTTP/2 PING immediately to keep connection active
               * before the periodic 5s timer kicks in (server has ~20s idle timeout) */
-@@ -2328,8 +2462,23 @@ void ml_coord_task(void *arg) {
+@@ -2328,8 +2471,23 @@
              {
                  uint64_t now = ml_get_time_ms();
  
@@ -1868,7 +1971,7 @@ index 8da8d4d..df7a350 100644
                      ESP_LOGW(TAG, "Control plane watchdog timeout");
                      state = COORD_RECONNECTING;
                      break;
-@@ -2524,7 +2673,8 @@ void ml_coord_task(void *arg) {
+@@ -2524,7 +2682,8 @@
                          last_h2_ping_ms = now;
                          last_activity_ms = now;
                      } else {
@@ -1878,7 +1981,7 @@ index 8da8d4d..df7a350 100644
                          state = COORD_RECONNECTING;
                          break;
                      }
-@@ -2535,6 +2685,7 @@ void ml_coord_task(void *arg) {
+@@ -2535,6 +2694,7 @@
                  if (poll_ret > 0) {
                      last_activity_ms = now;  /* Reset watchdog */
                  } else if (poll_ret < 0) {
@@ -1886,7 +1989,7 @@ index 8da8d4d..df7a350 100644
                      ESP_LOGW(TAG, "Long-poll connection lost");
                      state = COORD_RECONNECTING;
                      break;
-@@ -2545,6 +2696,10 @@ void ml_coord_task(void *arg) {
+@@ -2545,6 +2705,10 @@
              break;
  
          case COORD_RECONNECTING:
@@ -1897,7 +2000,7 @@ index 8da8d4d..df7a350 100644
              {
                  uint32_t backoff_ms = 1000 << (reconnect_attempts > 4 ? 4 : reconnect_attempts);
                  if (backoff_ms > ML_CTRL_BACKOFF_MAX_MS) backoff_ms = ML_CTRL_BACKOFF_MAX_MS;
-@@ -2581,6 +2736,8 @@ void ml_coord_task(void *arg) {
+@@ -2581,6 +2745,8 @@
          }
      }
  
@@ -1906,7 +2009,7 @@ index 8da8d4d..df7a350 100644
      /* Cleanup */
      if (ml->coord_sock >= 0) {
          ml_close_sock(ml->coord_sock);
-@@ -2588,6 +2745,33 @@ void ml_coord_task(void *arg) {
+@@ -2588,6 +2754,33 @@
      }
      memset(&noise, 0, sizeof(noise));
  
@@ -1961,7 +2064,17 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
  #include <errno.h>
  #include <fcntl.h>
  
-@@ -186,24 +189,50 @@
+@@ -65,6 +68,9 @@
+     ml_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+ 
+     int ret = (int)ml_read_sock(fd, buf, len);
++    int saved_errno = errno;
++    wireguardif_rx_socket_note(WG_RX_SOCKET_DERP_TLS, ret, saved_errno, (uint32_t)ml_get_time_ms());
++    errno = saved_errno;
+     if (ret < 0) {
+         if (errno == EAGAIN || errno == EWOULDBLOCK) {
+             return MBEDTLS_ERR_SSL_TIMEOUT;
+@@ -186,24 +192,50 @@
   * Returns bytes written on success, -1 on error.
   * No mutex needed — called only from the DERP I/O task.
   */
@@ -2015,7 +2128,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
              return -1;
          }
          written += ret;
-@@ -215,6 +244,9 @@
+@@ -215,6 +247,9 @@
  /* Write a complete DERP frame via TLS */
  static int derp_write_frame(microlink_t *ml, uint8_t type,
                               const uint8_t *payload, uint32_t len) {
@@ -2025,7 +2138,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
      /* 5-byte header: 1 type + 4 length (big-endian) */
      uint8_t header[5];
      header[0] = type;
-@@ -223,10 +255,10 @@
+@@ -223,10 +258,10 @@
      header[3] = (len >> 8) & 0xFF;
      header[4] = len & 0xFF;
  
@@ -2038,7 +2151,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
      }
      return 0;
  }
-@@ -287,9 +319,14 @@
+@@ -287,9 +322,14 @@
      };
      memcpy(pkt.src_pubkey, src_pubkey, 32);
  
@@ -2053,7 +2166,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
      }
  }
  
-@@ -316,7 +353,8 @@
+@@ -316,7 +356,8 @@
          /* Echo ping data back as PONG directly (single-threaded, safe to write) */
          if (payload && payload_len > 0) {
              ESP_LOGD(TAG, "DERP PING received, sending PONG");
@@ -2063,7 +2176,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
          }
          break;
  
-@@ -349,25 +387,44 @@
+@@ -349,25 +390,44 @@
  static int poll_derp_read(microlink_t *ml) {
      if (!ml->derp.connected || ml->derp.sockfd < 0) return -1;
  
@@ -2124,7 +2237,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
  
      uint8_t src_key[32] = {0};
      uint8_t *payload = NULL;
-@@ -389,10 +446,9 @@
+@@ -389,10 +449,9 @@
      if (!buf) return -1;
  
      size_t total_read = 0;
@@ -2137,7 +2250,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
              ESP_LOGW(TAG, "DERP payload timeout at %d/%lu bytes",
                       (int)total_read, (unsigned long)len);
              free(buf);
-@@ -405,12 +461,19 @@
+@@ -405,12 +464,19 @@
              continue;
          }
          if (n <= 0) {
@@ -2158,7 +2271,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
      }
  
      /* For RecvPacket (0x05): first 32 bytes are sender's public key */
-@@ -481,6 +544,51 @@
+@@ -481,6 +547,51 @@
   * Unified DERP I/O Task
   * ========================================================================== */
  
@@ -2210,7 +2323,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
  void ml_derp_tx_task(void *arg) {
      microlink_t *ml = (microlink_t *)arg;
      ESP_LOGI(TAG, "DERP I/O task started (Core %d)", xPortGetCoreID());
-@@ -492,6 +600,7 @@
+@@ -492,6 +603,7 @@
      uint64_t last_heartbeat_ms = 0;
      uint64_t connected_since_ms = 0;
      bool verbose_phase = false;  /* verbose logging for first 15s after connect */
@@ -2218,7 +2331,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
  
      while (!(xEventGroupGetBits(ml->events) & ML_EVT_SHUTDOWN_REQUEST)) {
          loop_count++;
-@@ -518,11 +627,31 @@
+@@ -518,11 +630,31 @@
              }
          }
  
@@ -2253,7 +2366,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
                  /* Retry up to 3 times with 2s backoff */
                  for (int attempt = 0; attempt < 3 && !ml->derp.connected; attempt++) {
                      if (attempt > 0) {
-@@ -531,6 +660,10 @@
+@@ -531,6 +663,10 @@
                      } else {
                          ESP_LOGI(TAG, "DERP connect requested, connecting from I/O task");
                      }
@@ -2264,7 +2377,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
                      if (ml_derp_connect(ml) == ESP_OK) {
                          connected_since_ms = ml_get_time_ms();
                          verbose_phase = true;
-@@ -538,27 +671,10 @@
+@@ -538,27 +674,10 @@
                      }
                      ESP_LOGW(TAG, "DERP connect attempt %d failed", attempt + 1);
                  }
@@ -2296,7 +2409,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
              }
          }
  
-@@ -568,6 +684,11 @@
+@@ -568,6 +687,11 @@
          }
  
          if (!ml->derp.connected) {
@@ -2308,7 +2421,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
              /* Not connected - just wait and check again */
              vTaskDelay(pdMS_TO_TICKS(100));
              continue;
-@@ -596,7 +717,7 @@
+@@ -596,7 +720,7 @@
                  }
                  if (ret < 0) {
                      ESP_LOGW(TAG, "DERP write failed");
@@ -2317,7 +2430,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
                      xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
                  } else {
                      frames_tx++;
-@@ -619,7 +740,7 @@
+@@ -619,7 +743,7 @@
                      break;  /* No more data / timeout */
                  } else {
                      ESP_LOGW(TAG, "DERP read error: %d", ret);
@@ -2326,7 +2439,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
                      xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
                      break;
                  }
-@@ -630,33 +751,75 @@
+@@ -630,33 +754,75 @@
          vTaskDelay(pdMS_TO_TICKS(1));
      }
  
@@ -2412,7 +2525,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
                          }
                          break;
                      }
-@@ -666,44 +829,75 @@
+@@ -666,44 +832,75 @@
          }
      }
  
@@ -2521,7 +2634,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
  
      int64_t t_derp_tcp = esp_timer_get_time();
      ESP_LOGI(TAG, "[TIMING] DERP TCP connect: %lld ms", (t_derp_tcp - t_derp_dns) / 1000);
-@@ -711,22 +905,28 @@
+@@ -711,22 +908,28 @@
      /* TLS setup */
      mbedtls_ssl_init(&ml->derp.ssl);
      mbedtls_ssl_config_init(&ml->derp.ssl_conf);
@@ -2564,7 +2677,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
      /* Store socket fd BEFORE setting bio.
       * Use custom BIO callbacks that route through ml_read_sock/ml_write_sock,
       * which transparently support both lwIP and AT socket backends.
-@@ -736,7 +936,6 @@
+@@ -736,7 +939,6 @@
                           ml_derp_bio_send, NULL, ml_derp_bio_recv_timeout);
  
      /* TLS handshake - socket has 10s SO_RCVTIMEO from connect phase. */
@@ -2572,7 +2685,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
      while ((ret = mbedtls_ssl_handshake(&ml->derp.ssl)) != 0) {
          if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
              continue;
-@@ -754,7 +953,7 @@
+@@ -754,7 +956,7 @@
      ESP_LOGI(TAG, "TLS connected to DERP");
  
      /* HTTP Upgrade: GET /derp with Upgrade: DERP header */
@@ -2581,7 +2694,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
      snprintf(upgrade_req, sizeof(upgrade_req),
               "GET /derp HTTP/1.1\r\n"
               "Host: %s\r\n"
-@@ -764,6 +963,10 @@
+@@ -764,6 +966,10 @@
               derp_host);
  
      ret = mbedtls_ssl_write(&ml->derp.ssl, (const uint8_t *)upgrade_req, strlen(upgrade_req));
@@ -2592,7 +2705,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
      if (ret < 0) {
          ESP_LOGE(TAG, "Failed to send HTTP upgrade");
          ml_close_sock(sock);
-@@ -955,11 +1158,7 @@
+@@ -955,11 +1161,7 @@
          memcpy(ci_payload + 32 + NACL_BOX_NONCEBYTES, ciphertext, ciphertext_len);
          free(ciphertext);
  
@@ -2605,7 +2718,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
  
          /* Send ClientInfo frame */
          if (derp_write_frame(ml, DERP_FRAME_CLIENT_INFO, ci_payload, ci_payload_len) < 0) {
-@@ -995,7 +1194,8 @@
+@@ -995,7 +1197,8 @@
      /* Send NotePreferred (type 0x07): this is our preferred DERP */
      {
          uint8_t preferred = 0x01;
@@ -2615,7 +2728,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
      }
  
      /* Switch socket to short timeout for data phase.
-@@ -1006,6 +1206,8 @@
+@@ -1006,6 +1209,8 @@
          mbedtls_ssl_conf_read_timeout(&ml->derp.ssl_conf, 200);
      }
  
@@ -2624,7 +2737,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
      ml->derp.connected = true;
      ml->derp.last_recv_ms = ml_get_time_ms();
      xEventGroupSetBits(ml->events, ML_EVT_DERP_CONNECTED);
-@@ -1022,18 +1224,22 @@
+@@ -1022,18 +1227,22 @@
  }
  
  void ml_derp_disconnect(microlink_t *ml) {
@@ -2651,7 +2764,7 @@ diff --git a/components/microlink/src/ml_derp.c b/components/microlink/src/ml_de
  
      /* Drain TX queue */
      ml_derp_tx_item_t item;
-@@ -1043,3 +1249,17 @@
+@@ -1043,3 +1252,17 @@
  
      ESP_LOGI(TAG, "DERP disconnected");
  }

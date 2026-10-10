@@ -1,3 +1,4 @@
+#include <debug/mosaico_rx_observer.h>
 #include "mosaico_ota.h"
 #include "mosaico_ota_power.h"
 #include "ota_public_key.h"
@@ -610,6 +611,8 @@ void processLocalRequests()
     const bool installWork=active.load() && imageReady.load() && !selected.load() &&
         (pendingStage==UiStage::ReadyInstall || pendingStage==UiStage::WaitingPower || pendingStage==UiStage::Installing);
     if(!rebootQueued.load() && !installQueued.load() && !installWork)return;
+    mosaico_rx_observer::request(false);
+    mosaico_rx_observer::service(false); // Same network owner; stop diagnostics before flash/reboot.
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return;
     if (rebootQueued.exchange(false) && selected.load()) { rebootWithFreshPower(); return; }
     if (installQueued.exchange(false)) {

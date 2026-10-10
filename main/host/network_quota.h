@@ -38,6 +38,7 @@ public:
     void setPowerProfile(uint8_t profile);
     void refreshWhileLocked();
 #ifdef MOSAICO_BOARD
+    bool requestRxObservation(bool on, uint32_t ttlSeconds = 1200);
     void wakeForFirmwareUpdate();
     void serviceStandbySleep(); // Existing main loop; preserves the current CPU/RF target.
 #if SOC_WIFI_HE_SUPPORT

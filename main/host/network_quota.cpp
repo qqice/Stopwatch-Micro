@@ -5,6 +5,7 @@
 #include "token_history.h"
 #ifdef MOSAICO_BOARD
 #include "quota_monitor.h"
+#include <debug/mosaico_rx_observer.h>
 #include "mosaico_quota_request_policy.h"
 #include "mosaico_display_settings.h"
 #include "mosaico_session_monitor.h"
@@ -123,6 +124,12 @@ void NetworkQuota::refreshWhileLocked()
 void NetworkQuota::wait(uint32_t milliseconds)
 {
 #ifdef MOSAICO_BOARD
+    const auto rxObserver = mosaico_rx_observer::snapshot();
+    if (rxObserver.active) {
+        const uint32_t nowMs = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        const int32_t remaining = static_cast<int32_t>(rxObserver.deadlineMs - nowMs);
+        milliseconds = std::min<uint32_t>(milliseconds, remaining > 0 ? std::min<uint32_t>(remaining, 1000) : 1U);
+    } else if (rxObserver.reporting || rxObserver.queued) milliseconds = std::min<uint32_t>(milliseconds, 1000U);
     MosaicoDisplay::Snapshot display;
     if (MosaicoDisplay::snapshot(display) && display.pending && milliseconds > 250) milliseconds = 250;
     WifiSettingsSnapshot wifi;
@@ -178,6 +185,14 @@ void NetworkQuota::applyCpuConfig(uint32_t mhz, bool lightSleep)
     if(result==ESP_OK)_cpu_target=mhz;
 }
 #ifdef MOSAICO_BOARD
+bool NetworkQuota::requestRxObservation(bool on, uint32_t ttlSeconds)
+{
+    if (on && MosaicoOta::busy()) return false;
+    if (!mosaico_rx_observer::request(on, ttlSeconds)) return false;
+    if (_task_handle) xTaskNotifyGive(_task_handle);
+    return true;
+}
+
 void NetworkQuota::serviceStandbySleep()
 {
     // Same PM serialization as the radio owner; never change its frequency,
@@ -1038,6 +1053,9 @@ void NetworkQuota::run()
 #endif
     while (true) {
 #ifdef MOSAICO_BOARD
+        if (MosaicoOta::busy())
+            mosaico_rx_observer::request(false);
+        mosaico_rx_observer::service(!MosaicoOta::busy());
         drainWifiScan();
 #if SOC_WIFI_HE_SUPPORT
         if(_wifi_scan_started && (_twt.live() || _twt_request.load()!=-1)) {
@@ -1278,6 +1296,8 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
         // Reuse an already-online quota window. Do not wake radios just for OTA.
         if (MosaicoOta::takeCheckRequest() || MosaicoOta::automaticCheckDue()) {
+            mosaico_rx_observer::request(false);
+            mosaico_rx_observer::service(false);
 #if SOC_WIFI_HE_SUPPORT
             cancelTwtTrial(MosaicoTwt::Stop::Ota);
             if (_twt.state.cleanupPending || _twt_cleanup_failed || !_wifi_running || !_connected) {
@@ -1292,6 +1312,8 @@ void NetworkQuota::run()
             MosaicoOta::finishCheck(downloaded);
         }
         if (MosaicoOta::takeRequest()) {
+            mosaico_rx_observer::request(false);
+            mosaico_rx_observer::service(false);
             updateFirmware();
 
             continue;

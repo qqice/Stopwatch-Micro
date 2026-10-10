@@ -6,6 +6,7 @@
 #include "serial_debug.h"
 #ifdef MOSAICO_BOARD
 #include <host/system_clock.h>
+#include "mosaico_rx_observer.h"
 #include <host/mosaico_display_settings.h>
 #include <host/standby_sleep.h>
 #include <host/touch_sleep.h>
@@ -792,6 +793,39 @@ void SerialDebug::handleLine(char* line)
             static_cast<unsigned long>(s.lockedWindowCount), static_cast<unsigned long>(windowMs));
         result("sessions", s.failed ? "FAIL" : "PASS", details); return;
     }
+    if (command && std::strcmp(command, "rx-observe") == 0) {
+        const char* action = ::strtok_r(nullptr, " \t", &save);
+        if (!action) action = "status";
+        if (!std::strcmp(action,"on") || !std::strcmp(action,"off")) {
+            const char* arg = ::strtok_r(nullptr," \t",&save);
+            char* end = nullptr;
+            unsigned long ttl = arg ? std::strtoul(arg,&end,10) : 1200;
+            const bool valid = !arg || (end != arg && !*end && ttl > 0 && ttl <= 1200);
+            const bool ok = valid && GetNetworkQuota().requestRxObservation(!std::strcmp(action,"on"), ttl);
+            result(command,ok ? "PASS" : "FAIL",ok ? "queued=1 ram_only=1" : "invalid_arguments");
+            return;
+        }
+        if (!std::strcmp(action,"drain")) {
+            mosaico_rx_observer::Record records[32];
+            const auto n = mosaico_rx_observer::drain(records,32);
+            for (size_t i=0;i<n;++i) {
+                const auto& r=records[i];
+                debugPrintf("DBG RX_PACKET ms=%lu src=%lu dst=%lu sport=%u dport=%u proto=%u len=%u data_len=%u seq=%lu ack=%lu flags=%u wg=%u receiver=%lu ip_csum=%u tcp_csum=%u tsf_ref=%llu tsf_ms=%lu\r\n",
+                    (unsigned long)r.millis,(unsigned long)r.src,(unsigned long)r.dst,r.srcPort,r.dstPort,r.protocol,r.ipLength,r.transportPayloadLength,
+                    (unsigned long)r.seq,(unsigned long)r.ack,r.tcpFlags,r.wgType,(unsigned long)r.receiverIndex,(unsigned)r.ipChecksum,(unsigned)r.tcpChecksum,
+                    (unsigned long long)r.tsf,(unsigned long)r.tsfMillis);
+            }
+            result(command,"PASS","drain_max=32 prevalidation=1 payload=0"); return;
+        }
+        if (std::strcmp(action,"status")) { result(command,"FAIL","expected=on_off_status_drain"); return; }
+        const auto r=mosaico_rx_observer::snapshot();
+        debugPrintf("DBG RX_OBSERVER active=%d queued=%d reporting=%d deadline_ms=%lu seen=%lu malformed=%lu fragments=%lu tcp=%lu udp=%lu other_udp=%lu wg=%lu,%lu,%lu,%lu ring_drop=%lu error=%ld\r\n",
+            r.active,r.queued,r.reporting,(unsigned long)r.deadlineMs,(unsigned long)r.seen,(unsigned long)r.malformed,(unsigned long)r.fragments,(unsigned long)r.tcp,(unsigned long)r.udp,(unsigned long)r.otherUdp,
+            (unsigned long)r.wireguard[0],(unsigned long)r.wireguard[1],(unsigned long)r.wireguard[2],(unsigned long)r.wireguard[3],(unsigned long)r.ringDrops,(long)r.lastError);
+        debugPrintf("DBG RX_TIMING rx_event_lower_bound=%lu tx_event_lower_bound=%lu event_ms=%lu wake=%lu suspend=%lu probe=%lu twt_event_ms=%lu tsf_ref=%llu tsf_ms=%lu wake_posting_unknown=1\r\n",
+            (unsigned long)r.rxEvents,(unsigned long)r.txEvents,(unsigned long)r.eventMillis,(unsigned long)r.wakeEvents,(unsigned long)r.suspendEvents,(unsigned long)r.probeEvents,(unsigned long)r.twtEventMillis,(unsigned long long)r.tsf,(unsigned long)r.tsfMillis);
+        result(command,"PASS","prevalidation=1 payload=0 ram_only=1"); return;
+    }
     if (command && std::strcmp(command, "clock") == 0) {
         const auto clock = MosaicoClock::snapshot();
         std::tm local{}; char wall[32] = "uncalibrated";
@@ -902,6 +936,11 @@ void SerialDebug::handleLine(char* line)
             static_cast<unsigned long>(rx.ctrl_rx_idle), static_cast<unsigned long>(rx.ctrl_rx_partial_timeout),
             static_cast<unsigned long>(rx.ctrl_rx_eof), static_cast<unsigned long>(rx.ctrl_rx_invalid),
             static_cast<unsigned long>(rx.ctrl_rx_auth_fail), static_cast<unsigned long>(rx.ctrl_upgrade_fragmented));
+        // Counter ABI legacy fatal_other is all other negative reads, including retryable EINTR.
+        debugPrintf("DBG OUTER_DERP_RX calls=%lu positive_count=%lu bytes=%lu timeout=%lu eof=%lu reset=%lu other_negative=%lu last_ret=%ld last_ms=%lu counters_include_intentional_stop=1 other_includes_eintr=1\r\n",
+            static_cast<unsigned long>(rx.derp_sock_rx_calls), static_cast<unsigned long>(rx.derp_sock_rx_positive_count), static_cast<unsigned long>(rx.derp_sock_rx_bytes), static_cast<unsigned long>(rx.derp_sock_rx_timeout), static_cast<unsigned long>(rx.derp_sock_rx_eof), static_cast<unsigned long>(rx.derp_sock_rx_reset), static_cast<unsigned long>(rx.derp_sock_rx_fatal_other), static_cast<long>(static_cast<int32_t>(rx.derp_sock_rx_last_ret)), static_cast<unsigned long>(rx.derp_sock_rx_last_ms));
+        debugPrintf("DBG OUTER_CTRL_RX calls=%lu positive_count=%lu bytes=%lu timeout=%lu eof=%lu reset=%lu other_negative=%lu last_ret=%ld last_ms=%lu counters_include_intentional_stop=1 other_includes_eintr=1\r\n",
+            static_cast<unsigned long>(rx.ctrl_sock_rx_calls), static_cast<unsigned long>(rx.ctrl_sock_rx_positive_count), static_cast<unsigned long>(rx.ctrl_sock_rx_bytes), static_cast<unsigned long>(rx.ctrl_sock_rx_timeout), static_cast<unsigned long>(rx.ctrl_sock_rx_eof), static_cast<unsigned long>(rx.ctrl_sock_rx_reset), static_cast<unsigned long>(rx.ctrl_sock_rx_fatal_other), static_cast<long>(static_cast<int32_t>(rx.ctrl_sock_rx_last_ret)), static_cast<unsigned long>(rx.ctrl_sock_rx_last_ms));
         for (unsigned path = 0; path < 4; ++path) {
             const auto d = GetTailnetQuota().fetchDiagnostics(static_cast<TailnetQuota::FetchPath>(path));
             debugPrintf("DBG TAIL_FETCH path=%u stage=%u http=%d received=%lu content_length=%lu elapsed_ms=%lu result=%u\r\n",

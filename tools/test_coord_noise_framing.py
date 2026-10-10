@@ -63,6 +63,7 @@ static int ml_recv(int fd, uint8_t *buf, size_t len, int flags) {
     if (n < 0) { errno = n == -1 ? EAGAIN : EIO; return -1; }
     assert((size_t)n <= len); if(n) { memcpy(buf, wire+cursor, n); cursor += n; } return n;
 }
+static uint64_t ml_get_time_ms(void) { return 0; }
 static void vTaskDelay(unsigned ms) { assert(ms == 10); ++delays; }
 static void *ml_psram_malloc(size_t n) { ++allocs; if (allocs == fail_alloc) return NULL; ++outstanding; return malloc(n); }
 static void shim_free(void *p) { if(p) { assert(outstanding); --outstanding; free(p); } }
