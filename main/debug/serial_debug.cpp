@@ -837,7 +837,7 @@ void SerialDebug::handleLine(char* line)
                       static_cast<unsigned long>(network.historyAccepted()),
                       static_cast<unsigned long>(network.historyFailures()));
         const auto rx = GetTailnetQuota().rxDiagnostics();
-        debugPrintf("DBG TAIL_RX derp_frame=%lu derp_enqueue=%lu derp_drop=%lu wg_dequeue=%lu wg_unavailable=%lu pbuf_fail=%lu receiver_index_miss=%lu key_reject=%lu inner_pbuf_fail=%lu decrypt_fail=%lu replay_drop=%lu inner_reject=%lu inner_ok=%lu input_ok=%lu input_error=%lu tcp_synack=%lu owner_dispatch_drop=%lu owner_processed=%lu transport_rx=%lu invalid_packet=%lu empty_keepalive=%lu\r\n",
+        debugPrintf("DBG TAIL_RX derp_frame=%lu derp_enqueue=%lu derp_drop=%lu wg_dequeue=%lu wg_unavailable=%lu pbuf_fail=%lu receiver_index_miss=%lu key_reject=%lu inner_pbuf_fail=%lu decrypt_fail=%lu replay_drop=%lu inner_reject=%lu inner_ok=%lu input_ok=%lu input_error=%lu tcp_synack=%lu owner_dispatch_drop=%lu owner_processed=%lu transport_rx=%lu invalid_packet=%lu empty_keepalive=%lu header_short_read=%lu header_resumed=%lu header_timeout=%lu derp_read_eof=%lu\r\n",
                     static_cast<unsigned long>(rx.derp_frame),
                     static_cast<unsigned long>(rx.derp_enqueue),
                     static_cast<unsigned long>(rx.derp_drop),
@@ -858,7 +858,11 @@ void SerialDebug::handleLine(char* line)
                     static_cast<unsigned long>(rx.owner_processed),
                     static_cast<unsigned long>(rx.transport_rx),
                     static_cast<unsigned long>(rx.invalid_packet),
-                    static_cast<unsigned long>(rx.empty_keepalive));
+                    static_cast<unsigned long>(rx.empty_keepalive),
+                    static_cast<unsigned long>(rx.header_short_read),
+                    static_cast<unsigned long>(rx.header_resumed),
+                    static_cast<unsigned long>(rx.header_timeout),
+                    static_cast<unsigned long>(rx.derp_read_eof));
         for (unsigned path = 0; path < 4; ++path) {
             const auto d = GetTailnetQuota().fetchDiagnostics(static_cast<TailnetQuota::FetchPath>(path));
             debugPrintf("DBG TAIL_FETCH path=%u stage=%u http=%d received=%lu content_length=%lu elapsed_ms=%lu result=%u\r\n",

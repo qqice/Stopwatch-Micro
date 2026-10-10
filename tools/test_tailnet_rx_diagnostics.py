@@ -17,7 +17,7 @@ class RxDiagnosticsTests(unittest.TestCase):
         self.assertIn('__ATOMIC_RELAXED', H)
         self.assertIn('__atomic_fetch_add', H)
         self.assertNotRegex(H, r'ESP_LOG|vTaskDelay|malloc|memcpy')
-        self.assertEqual(len(FIELDS), 21)
+        self.assertEqual(len(FIELDS), 25)
         # Queue, timeout, input ownership, and encryption policy are untouched.
         self.assertIn('xQueueSend(target, &pkt, 0)', sources)
         self.assertIn('if (device->netif->input && device->netif->input(pbuf, device->netif) == ERR_OK)', C)
@@ -59,7 +59,7 @@ class RxDiagnosticsTests(unittest.TestCase):
         fmt = re.search(r'debugPrintf\("(DBG TAIL_RX .*?)",', serial)[1]
         self.assertNotIn('%s', fmt)
         maximum = fmt.replace('%lu', '4294967295').replace(r'\r\n', '\r\n')
-        self.assertLess(len(maximum), 896)
+        self.assertLess(len(maximum), 1024)
         self.assertLess(len(maximum), 1536)
         getter = (R/'main/host/tailscale_transport.cpp').read_text(encoding='utf8').split('TailnetQuota::rxDiagnostics() const',1)[1].split('}',1)[0]
         self.assertEqual(getter.strip(), '{\n    return wireguardif_rx_stats();')
