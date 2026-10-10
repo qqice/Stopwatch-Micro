@@ -418,6 +418,7 @@ void NetworkQuota::recordTwtCycle(MosaicoTwt::CyclePhase phase, MosaicoTwt::Cycl
 {
     using namespace MosaicoTwt;
     if (phase == CyclePhase::Start) {
+        if (_twt.state.stage == Stage::Armed) return; // Bootstrap is not a measured refresh cycle.
         if (!_twt_observe.load() && !_twt.live()) return;
         _twt_cycle_open = true; ++_twt_cycle_seq;
         _twt_cycle_trial_id = _twt.live() ? _twt.state.id : 0;
@@ -619,6 +620,8 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
     const int request = _twt_request.exchange(-1);
     if (request >= 0) {
         cancelTwtTrial(Stop::Explicit);
+        _twt_bootstrap_id = 0;
+        _twt_bootstrap_attempted = _twt_bootstrap_ok = false;
         const auto mode = static_cast<Mode>(request & 3);
         const uint32_t leaseSeconds = request & 4 ? 1800 : 600;
         const auto profile = request & 8 ? Profile::AnnouncedTrigger : Profile::Default;
@@ -638,9 +641,11 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
         const bool controlReady = !GetTailnetQuota().enabled() || GetTailnetQuota().ready();
         _twt.state.controlReady = controlReady;
         // Control readiness gates bootstrap/HTTP, not ongoing Wi-Fi association.
-        if (!linkReady && _twt.state.stage != Stage::Armed) {
+        if (!linkReady && (_twt.state.stage != Stage::Armed ||
+                           (_twt_bootstrap_attempted && _twt_bootstrap_id == _twt.state.id))) {
             ++_twt.state.losses; cancelTwtTrial(Stop::Lost);
-        } else if (linkReady && controlReady && locked && _twt.state.stage == Stage::Armed) {
+        } else if (linkReady && controlReady && locked && _twt.state.stage == Stage::Armed &&
+                   _twt_bootstrap_ok && _twt_bootstrap_id == _twt.state.id) {
             wifi_phy_mode_t phy{};
             _twt.state.apAx = ap.phy_11ax;
             const esp_err_t phyError = esp_wifi_sta_get_negotiated_phymode(&phy);
@@ -684,6 +689,34 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
     }
     reconcileTwtCycleIdentity();
     publishTwt();
+}
+bool NetworkQuota::serviceTwtBootstrap()
+{
+    using namespace MosaicoTwt;
+    // Candidate causal fix: control-map readiness alone never proved the
+    // DERP/WireGuard HTTP data path. Both arms prime it before changing PS.
+    serviceTwtTrial(esp_timer_get_time(), idleLocked());
+    if (_twt.state.stage != Stage::Armed || _twt.state.cleanupPending || _twt_cleanup_failed ||
+        !_wifi_running || !_connected || !_twt.state.associated || !_twt.state.controlReady ||
+        !idleLocked() || twtOtaBlocked() || _twt_bootstrap_attempted) return false;
+    const uint16_t id = _twt.state.id;
+    _twt_bootstrap_id = id;
+    _twt_bootstrap_attempted = true; // Latch before HTTP; never retry this trial.
+    const bool ok = fetch(); // Quota only, existing timeout; no history/cycle counters.
+    ESP_LOGI("TwtBootstrap", "id=%u attempt=1 ok=%u", static_cast<unsigned>(id), static_cast<unsigned>(ok));
+    // Consume Off/new request/disconnect, and recheck OTA/unlock/deadlines before
+    // accepting success. This service cannot dispatch while bootstrap_ok=false.
+    serviceTwtTrial(esp_timer_get_time(), idleLocked());
+    if (_twt.state.id != id || _twt.state.stage != Stage::Armed ||
+        _twt_bootstrap_id != id || !_twt_bootstrap_attempted) return true;
+    if (!ok) cancelTwtTrial(Stop::Driver);
+    else if (!_wifi_running || !_connected || !_twt.state.associated || !_twt.state.controlReady)
+        cancelTwtTrial(Stop::Lost);
+    else {
+        _twt_bootstrap_ok = true;
+        serviceTwtTrial(esp_timer_get_time(), idleLocked()); // Fresh cancellation checks before PS/setup.
+    }
+    return true; // Return to the owner loop even on cancellation; no periodic/history fetch here.
 }
 #endif
 void NetworkQuota::setLowClockDiagnostic(bool enabled)
@@ -1085,7 +1118,8 @@ void NetworkQuota::run()
             // Hold association/tailnet, but never fetch outside the existing refresh window.
             // Armed may bootstrap via the normal owner path, bounded by 60s.
             const bool trialHold = _twt.live();
-            if (trialHold && _wifi_running && _twt.state.associated && _connected &&
+            if (trialHold && _twt.state.stage != MosaicoTwt::Stage::Armed &&
+                _wifi_running && _twt.state.associated && _connected &&
                 (!GetTailnetQuota().enabled() || GetTailnetQuota().ready())) {
                 setCpu(_power_profile == 2 ? 80 : CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
                 setPhase(2);
@@ -1263,6 +1297,10 @@ void NetworkQuota::run()
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
         // Dispatch only after normal bootstrap has completed, before HTTP.
         serviceTwtTrial(esp_timer_get_time(), idleLocked());
+        if (_twt.state.stage == MosaicoTwt::Stage::Armed) {
+            closeWindow(MosaicoTwt::CycleReason::Cancel); // No bootstrap HTTP in an energy window.
+            if (serviceTwtBootstrap()) continue;
+        }
         if (_twt.state.cleanupPending || _twt_cleanup_failed ||
             _twt.state.stage == MosaicoTwt::Stage::Armed || _twt.state.stage == MosaicoTwt::Stage::Negotiating) {
             wait(50); continue;

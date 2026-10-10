@@ -118,6 +118,9 @@ private:
 #if SOC_WIFI_HE_SUPPORT
     static void twtEvent(void* arg, const char* base, int32_t event, void* data);
     void serviceTwtTrial(int64_t now, bool locked);
+    bool serviceTwtBootstrap(); // Owner-only, one quota data request per trial.
+    uint16_t _twt_bootstrap_id = 0;
+    bool _twt_bootstrap_attempted = false, _twt_bootstrap_ok = false;
     void cancelTwtTrial(MosaicoTwt::Stop reason);
     void cleanupTwtTrial();
     void publishTwt();

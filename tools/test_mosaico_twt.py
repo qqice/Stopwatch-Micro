@@ -212,7 +212,9 @@ static_assert(deadlines(), "finite bootstrap then fixed dispatch deadline, manua
         bootstrap_run = '#if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT\n// Armed must allow DHCP/clock/tailnet bootstrap.' + source.split('// Armed must allow DHCP/clock/tailnet bootstrap.',1)[1].split('        // Reuse an already-online quota window.',1)[0]
         bootstrap_run = bootstrap_run.rsplit('#ifdef MOSAICO_BOARD',1)[0].replace('std::time(nullptr)', 'bootTime()')
         dispatch_run = source.split('        // Dispatch only after normal bootstrap has completed, before HTTP.',1)[1].split('        const int64_t twtFetchStart',1)[0]
+        helper = source.split('bool NetworkQuota::serviceTwtBootstrap()',1)[1].split('#endif\nvoid NetworkQuota::setLowClockDiagnostic',1)[0]
         self.compile_cpp(r'''
+#define ESP_LOGI(...)
 #define MOSAICO_BOARD 1
 #define SOC_WIFI_HE_SUPPORT 1
 #include "main/host/mosaico_twt_model.h"
@@ -225,7 +227,24 @@ struct wifi_itwt_setup_config_t { int setup_cmd=0,trigger=0,flow_type=0,flow_id=
 struct Tailnet { bool configured=true,online=false;int starts=0;constexpr bool enabled(){return configured;}constexpr bool ready(){return online;} constexpr void start(){++starts;} constexpr void rebind(){} };
 struct Owner {
  Model _twt; Tailnet tail; bool _twt_handler_ready=true;
- constexpr bool twtOtaBlocked(){return false;}
+ bool ota=false;
+ constexpr bool twtOtaBlocked(){return ota;}
+ uint16_t _twt_bootstrap_id=0;
+ bool _twt_bootstrap_attempted=false,_twt_bootstrap_ok=false;
+ int probes=0,probeAction=0;bool probeOk=true;
+ constexpr bool fetch(){
+  ++probes;
+  if(probeAction==1)pendingOff=true;
+  if(probeAction==2)lateUnlock=true;
+  if(probeAction==3)ota=true;
+  if(probeAction==4)now=_twt.state.bootstrapDeadlineUs;
+  if(probeAction==5)now=_twt.state.expiryUs;
+  if(probeAction==6)associated=false;
+  if(probeAction==7){_twt.start(Mode::On,now);_twt_bootstrap_attempted=_twt_bootstrap_ok=false;_twt_bootstrap_id=0;}
+  return probeOk;
+ }
+ constexpr bool serviceTwtBootstrap();
+ constexpr void closeWindow(CycleReason){}
  bool _wifi_running=true,_connected=false,associated=true,_twt_cleanup_failed=false;
  bool _twt_ps_saved=false,_twt_submitted=false,_twt_negotiation_pending=false,_twt_cleanup_barrier_needed=false;
  wifi_itwt_setup_config_t submitted{};
@@ -243,9 +262,9 @@ struct Owner {
  constexpr int64_t bootTime(){return 1800000000;}
  constexpr void sampleNetworkHeap(const char*,unsigned&){}
  constexpr void wait(int){++waits;}
- constexpr bool idleLocked(){return true;}
+ constexpr bool idleLocked(){return !lateUnlock;}
  constexpr void serviceTwtTrial(int64_t,bool locked){
-  _twt.check(now,false,locked && !lateUnlock);
+  _twt.check(now,ota,locked && !lateUnlock);
   if(pendingOff)_twt.start(Mode::Off,now);
   if(_twt.live())dispatch(locked && !lateUnlock);
  }
@@ -263,6 +282,7 @@ struct Owner {
   }
  }
 };
+constexpr bool Owner::serviceTwtBootstrap()''' + helper + r'''
 constexpr bool profiles() {
  if(encodeRequest(Mode::On,600)!=2 || encodeRequest(Mode::On,1800)!=6 ||
     encodeRequest(Mode::Baseline,600)!=1 || encodeRequest(Mode::Baseline,1800)!=5 ||
@@ -272,7 +292,7 @@ constexpr bool profiles() {
   Owner o;o._connected=o.tail.online=true;
   if(o._twt.state.profile!=Profile::Default)return false;
   o.processRequest(request);
-  o.dispatch();
+  o.serviceTwtBootstrap();
   if(o.setups!=1 || o.submitted.trigger!=1 || o.submitted.flow_type!=0 ||
      o.submitted.wake_invl_expn!=11 || o.submitted.wake_invl_mant!=512 ||
      o.submitted.min_wake_dura!=64 || o.submitted.wake_duration_unit!=0 ||
@@ -283,37 +303,65 @@ constexpr bool profiles() {
    else if(reason==Stop::Expired)o._twt.check(int64_t(lease)*1000000,false,true);
    else o.cancelTwtTrial(reason);
    if(o._twt.state.profile!=Profile::Default)return false;
-   o.processRequest(encodeRequest(Mode::On,lease));o.dispatch();
+   o.processRequest(encodeRequest(Mode::On,lease));o.serviceTwtBootstrap();
    if(o.submitted.trigger!=0 || o.submitted.flow_type!=1 || o._twt.state.profile!=Profile::Default)return false;
   }
-  o._twt.start(Mode::Baseline,0,lease);int setups=o.setups;o.dispatch();
+  o._twt.start(Mode::Baseline,0,lease);int setups=o.setups;o.serviceTwtBootstrap();
   if(o.setups!=setups || o._twt.state.profile!=Profile::Default)return false;
  }
  return true;
 }
+constexpr bool probeFaults() {
+ for(Mode mode : {Mode::On,Mode::Baseline}) {
+  Owner gate;gate._connected=gate.tail.online=true;gate.processRequest(encodeRequest(mode,600));
+  gate.dispatch(); // Even control+association true cannot change PS before real HTTP.
+  if(gate.psCalls||gate.setups||gate.probes)return false;
+  gate.serviceTwtBootstrap();
+  if(gate.probes!=1||gate.psCalls!=1||gate._twt.state.fetchAttempts||gate._twt.state.fetchOk)return false;
+  gate.serviceTwtBootstrap();if(gate.probes!=1)return false;
+  gate.processRequest(encodeRequest(mode,600));gate.dispatch();
+  if(gate.psCalls!=1)return false; // No success inherited by the next trial.
+  gate.serviceTwtBootstrap();if(gate.probes!=2||gate.psCalls!=2)return false;
+  for(int action=0;action<=7;++action) {
+   Owner o;o._connected=o.tail.online=true;o.processRequest(encodeRequest(mode,600));
+   auto id=o._twt.state.id;o.probeOk=action!=0;o.probeAction=action;
+   o.serviceTwtBootstrap();
+   if(o.probes!=1||o.psCalls||o.setups||o.http||o._twt.state.fetchOk||o._twt.state.fetchAttempts)return false;
+   if(action==7) {
+    if(o._twt.state.id==id||o._twt.state.stage!=Stage::Armed||o._twt_bootstrap_ok)return false;
+    o.probeAction=0;o.serviceTwtBootstrap();if(o.probes!=2||o.psCalls!=1)return false;
+   } else {
+    if(o._twt.live())return false;
+    o.serviceTwtBootstrap();if(o.probes!=1)return false;
+   }
+  }
+ }
+ return true;
+}
+static_assert(probeFaults(), "quota-only one-shot bootstrap, both arms, no late or cross-trial success");
 static_assert(profiles(), "production setup selects only temporary announced trigger profile and resets on termination");
 constexpr bool gates() {
  for(Mode mode : {Mode::Baseline,Mode::On}) {
-  Owner o;o._twt.start(mode,0);o.dispatch();
+  Owner o;o._twt.start(mode,0);o.serviceTwtBootstrap();
   if(o.setups||o.psCalls||o._twt.state.stage!=Stage::Armed)return false;
-  o._connected=true;o.dispatch(); // tailnet false still forbids PS/baseline/setup
+  o._connected=true;o.serviceTwtBootstrap(); // tailnet false still forbids PS/baseline/setup
   if(o.setups||o.psCalls||o._twt.state.stage!=Stage::Armed)return false;
-  o.tail.online=true;o.associated=false;o.dispatch();
+  o.tail.online=true;o.associated=false;o.serviceTwtBootstrap();
   if(o.setups||o.psCalls||o._twt.state.stage!=Stage::Armed)return false;
-  o.associated=true;o.now=50000000;o.dispatch();
+  o.associated=true;o.now=50000000;o.serviceTwtBootstrap();
   if(o.psCalls!=1||o._twt.state.bootstrapDeadlineUs)return false;
   if(mode==Mode::On && (o.setups!=1||o._twt.state.stage!=Stage::Negotiating||o._twt.state.setupDeadlineUs!=60000000))return false;
   if(mode==Mode::Baseline && (o.setups||o._twt.state.stage!=Stage::Baseline))return false;
-  o.now++;o.dispatch();if(o.psCalls!=1||o.setups!=(mode==Mode::On?1:0))return false;
-  o.tail.online=false;o.dispatch();
+  o.now++;o.serviceTwtBootstrap();if(o.psCalls!=1||o.setups!=(mode==Mode::On?1:0))return false;
+  o.tail.online=false;o.serviceTwtBootstrap();
   if(!o._twt.live() || o._twt.state.losses || o._twt.state.controlReady)return false;
-  o.tail.online=true;o.dispatch();
+  o.tail.online=true;o.serviceTwtBootstrap();
   if(!o._twt.live() || o._twt.state.losses || !o._twt.state.controlReady || o.psCalls!=1 || o.setups!=(mode==Mode::On?1:0))return false;
   Owner starting;starting._connected=true;starting._twt.start(mode,0);starting.runBootstrap();
   if(starting.tail.starts!=1||starting.http||starting._twt.state.stage!=Stage::Armed)return false;
   starting.tail.online=true;starting.runBootstrap();
   if(mode==Mode::On && (starting.http||starting._twt.state.stage!=Stage::Negotiating))return false;
-  if(mode==Mode::Baseline && starting.http!=1)return false;
+  if(mode==Mode::Baseline && starting.http!=0)return false;
   if(mode==Mode::On)starting._twt.state.stage=Stage::Active;
   starting.http=0;starting.runBootstrap(false);if(starting.http)return false;
   // Late service cancellation must return to owner idle/stop, even when
@@ -333,7 +381,7 @@ constexpr bool gates() {
   Owner expiredManual;expiredManual._connected=expiredManual.tail.online=true;expiredManual._twt.start(mode,0);
   expiredManual.now=600000000;expiredManual.pendingOff=true;expiredManual.runBootstrap(false);
   if(expiredManual.http||expiredManual._twt.state.stop!=Stop::Explicit)return false;
-  Owner lan;lan.tail.configured=false;lan._connected=true;lan._twt.start(mode,0);lan.dispatch();
+  Owner lan;lan.tail.configured=false;lan._connected=true;lan._twt.start(mode,0);lan.serviceTwtBootstrap();
   if(lan._twt.state.stage!=(mode==Mode::On?Stage::Negotiating:Stage::Baseline))return false;
  }
  return true;
@@ -341,11 +389,11 @@ constexpr bool gates() {
 static_assert(gates(), "production dispatch block requires DHCP and configured tailnet for both arms");
 constexpr bool ongoingReadiness() {
  for (Mode mode : {Mode::On,Mode::Baseline}) {
-  Owner o;o._connected=o.tail.online=true;o._twt.start(mode,0);o.dispatch();
+  Owner o;o._connected=o.tail.online=true;o._twt.start(mode,0);o.serviceTwtBootstrap();
   if(mode==Mode::On)o._twt.state.stage=Stage::Active;
   const auto stage=o._twt.state.stage;
   const auto expiry=o._twt.state.expiryUs;
-  o.tail.online=false;o.dispatch();
+  o.tail.online=false;o.serviceTwtBootstrap();
   if(!o._twt.live() || o._twt.state.stage!=stage || o._twt.state.losses ||
      o._twt.state.controlReady || o._twt.state.expiryUs!=expiry)return false;
   // Execute actual owner bootstrap/dispatch gate: no readiness means no HTTP.
@@ -354,21 +402,21 @@ constexpr bool ongoingReadiness() {
   o.tail.online=true;o.runBootstrap();
   if(o.http!=1 || !o._twt.live() || !o._twt.state.controlReady || o._twt.state.losses)return false;
   for(bool associationLoss : {false,true}) {
-   Owner lost;lost._connected=lost.tail.online=true;lost._twt.start(mode,0);lost.dispatch();
+   Owner lost;lost._connected=lost.tail.online=true;lost._twt.start(mode,0);lost.serviceTwtBootstrap();
    if(mode==Mode::On)lost._twt.state.stage=Stage::Active;
    if(associationLoss)lost.associated=false;else lost._connected=false;
-   lost.dispatch();
+   lost.serviceTwtBootstrap();
    if(lost._twt.live() || lost._twt.state.losses!=1 || lost._twt.state.stop!=Stop::Lost)return false;
   }
   for(int action=0;action<4;++action) {
-   Owner ended;ended._connected=ended.tail.online=true;ended._twt.start(mode,0);ended.dispatch();
+   Owner ended;ended._connected=ended.tail.online=true;ended._twt.start(mode,0);ended.serviceTwtBootstrap();
    if(mode==Mode::On)ended._twt.state.stage=Stage::Active;
    ended.tail.online=false;
    if(action==0)ended._twt.check(ended._twt.state.expiryUs,false,true);
    else if(action==1)ended.processRequest(0);
    else if(action==2)ended._twt.check(1,false,false);
    else ended._twt.check(1,true,true);
-   ended.dispatch();
+   ended.serviceTwtBootstrap();
    if(ended._twt.live() || ended._twt.state.losses)return false;
    const auto expected=action==0?Stop::Expired:action==1?Stop::Explicit:action==2?Stop::Awake:Stop::Ota;
    if(ended._twt.state.stop!=expected)return false;
@@ -412,6 +460,29 @@ static_assert(ongoingReadiness(), "production owner keeps linked trial through c
         self.assertIn('Stage::Armed', gate); self.assertIn('Stage::Negotiating', gate)
         self.assertIn('wait(50); continue;', gate)
         self.assertIn('if (locked && !updateWindow) continue;', gate)
+
+    def test_bootstrap_owner_scope_and_schedule(self):
+        source = (ROOT/'main/host/network_quota.cpp').read_text()
+        helper = source.split('bool NetworkQuota::serviceTwtBootstrap()',1)[1].split('#endif',1)[0]
+        self.assertEqual(helper.count('const bool ok = fetch();'), 1)
+        self.assertNotIn('fetchHistory(', helper)
+        self.assertNotIn('recordTwtCycle(', helper)
+        self.assertNotIn('fetchAttempts', helper)
+        self.assertNotIn('fetchOk', helper)
+        self.assertNotIn('esp_wifi_set_ps', helper)
+        self.assertNotIn('esp_wifi_sta_itwt_setup', helper)
+        self.assertGreaterEqual(helper.count('serviceTwtTrial('), 3)
+        self.assertLess(helper.index('_twt_bootstrap_attempted = true;'), helper.index('fetch();'))
+        self.assertLess(helper.index('fetch();'), helper.index('_twt.state.id != id'))
+        self.assertLess(helper.index('_twt.state.id != id'), helper.index('_twt_bootstrap_ok = true;'))
+        run = source.split('void NetworkQuota::run()',1)[1].split('bool NetworkQuota::requestJson',1)[0]
+        self.assertIn('trialHold && _twt.state.stage != MosaicoTwt::Stage::Armed', run)
+        armed = run.split('// Dispatch only after normal bootstrap has completed, before HTTP.',1)[1].split('if (_twt.state.cleanupPending',1)[0]
+        self.assertLess(armed.index('closeWindow('), armed.index('serviceTwtBootstrap()'))
+        self.assertIn('if (serviceTwtBootstrap()) continue;', armed)
+        self.assertNotIn('nextRefresh', armed)
+        self.assertNotIn('esp_wifi_stop', armed)
+        self.assertNotIn('esp_wifi_disconnect', armed)
 
     def test_long_lease_and_cycle_ring(self):
         self.compile_cpp(r'''
@@ -467,7 +538,10 @@ constexpr bool actualOwner() {
  o.recordTwtCycle(CyclePhase::End,CycleReason::Deadline);
  if(!o._twt_cycles.pop(c)||c.reason!=CycleReason::Deadline||o._twt_cycle_open)return false;
  o.recordTwtCycle(CyclePhase::Fetch);if(o._twt_cycles.pop(c))return false;
- o._twt.start(Mode::On,3,1800);o.recordTwtCycle(CyclePhase::Start);o._twt_cycles.pop(c);
+ o._twt.start(Mode::On,3,1800);o.recordTwtCycle(CyclePhase::Start);
+ if(o._twt_cycles.pop(c)||o._twt_cycle_open)return false; // Armed bootstrap is outside measurement.
+ o._twt.bootstrapReady(3);o._twt.state.stage=Stage::Active;
+ o.recordTwtCycle(CyclePhase::Start);o._twt_cycles.pop(c);
  if(c.trialId!=1||c.cycleSeq!=2)return false;
  o._twt.end(Stop::Expired);o.recordTwtCycle(CyclePhase::End,CycleReason::Cancel);
  if(!o._twt_cycles.pop(c)||c.trialId!=1||c.reason!=CycleReason::Cancel)return false;
@@ -481,6 +555,8 @@ constexpr bool identityTransitions() {
   o._twt.start(next,1,1800);o.reconcileTwtCycleIdentity();
   if(!o._twt_cycles.pop(c)||c.trialId!=1||c.reason!=CycleReason::Cancel||o._twt_cycle_open)return false;
   o.recordTwtCycle(CyclePhase::Fetch,CycleReason::None,15);if(o._twt_cycles.pop(c))return false;
+  o.recordTwtCycle(CyclePhase::Start);if(o._twt_cycles.pop(c))return false;
+  o._twt.bootstrapReady(1);
   o.recordTwtCycle(CyclePhase::Start);if(!o._twt_cycles.pop(c)||c.trialId!=2)return false;
  }
  Owner observe;Cycle c;observe._twt_observe.value=true;observe.recordTwtCycle(CyclePhase::Start);observe._twt_cycles.pop(c);
@@ -564,7 +640,9 @@ static_assert(identityTransitions(), "actual owner identity changes never mix ev
         self.assertIn('e.setup.id == _twt.state.id', service)
         self.assertIn('const bool linkReady = associated && _connected;', service)
         self.assertIn('const bool controlReady = !GetTailnetQuota().enabled() || GetTailnetQuota().ready();', service)
-        self.assertIn('if (!linkReady && _twt.state.stage != Stage::Armed)', service)
+        self.assertIn('if (!linkReady && (_twt.state.stage != Stage::Armed ||', service)
+        self.assertIn('_twt_bootstrap_attempted && _twt_bootstrap_id == _twt.state.id', service)
+        self.assertIn('_twt_bootstrap_ok && _twt_bootstrap_id == _twt.state.id', service)
         self.assertIn('linkReady && controlReady && locked && _twt.state.stage == Stage::Armed', service)
         self.assertIn('_twt.state.controlReady = controlReady;', service)
         self.assertIn('control_ready=%u', command)
