@@ -781,6 +781,32 @@ void SerialDebug::handleLine(char* line)
     }
 #ifdef MOSAICO_BOARD
 #if CONFIG_IDF_TARGET_ESP32S31
+    if (command && std::strcmp(command, "lan-tcp") == 0) {
+        const char* action = ::strtok_r(nullptr, " \t", &save);
+        const char* ip = ::strtok_r(nullptr, " \t", &save);
+        const char* port = ::strtok_r(nullptr, " \t", &save);
+        const char* seconds = ::strtok_r(nullptr, " \t", &save);
+        const char* extra = ::strtok_r(nullptr, " \t", &save);
+        MosaicoLanTcp::Request request;
+        const bool start = action && !std::strcmp(action,"start");
+        const bool status = action && !std::strcmp(action,"status");
+        const bool cancel = action && !std::strcmp(action,"cancel");
+        if (extra || (!start && !status && !cancel) ||
+            (start ? !MosaicoLanTcp::parse(ip,port,seconds,request) : ip != nullptr)) {
+            result(command,"FAIL","usage=lan-tcp_start_RFC1918_port1024..65535_seconds10..60|status|cancel no_changes=1"); return;
+        }
+        if (start) {
+            result(command,GetNetworkQuota().requestLanTcp(request)?"QUEUED":"FAIL","owner_wake=0 synthetic_only=1 quota_fallback=0"); return;
+        }
+        if (cancel) GetNetworkQuota().cancelLanTcp();
+        const auto r=GetNetworkQuota().lanTcpSnapshot();
+        char details[768];
+        std::snprintf(details,sizeof(details),
+            "request_id=%llu trial_id=%u stage=%u source=%lu destination=%lu source_port=%u destination_port=%u seconds=%lu netif_index=%d queued=%d active=%d fd_open=%d finished=%d cleanup_debt=%d close_result=%d close_error=%d binding_success=%d connected=%d recv_bytes=%llu read_calls=%llu mismatch_count=%llu first_mismatch_offset=%llu expected=%u got=%u error=%d start_us=%lld end_us=%lld last_progress_us=%lld synthetic_only=1 quota_fallback=0 owner_wake=0",
+            (unsigned long long)r.requestId,r.trialId,r.stage,(unsigned long)r.source,(unsigned long)r.destination,r.sourcePort,r.destinationPort,(unsigned long)r.seconds,r.netifIndex,
+            r.queued,r.active,r.fdOpen,r.finished,r.cleanupDebt,r.closeResult,r.closeError,r.bindingSuccess,r.connected,(unsigned long long)r.recvBytes,(unsigned long long)r.readCalls,(unsigned long long)r.mismatchCount,(unsigned long long)r.firstMismatchOffset,r.expected,r.got,r.error,(long long)r.startUs,(long long)r.endUs,(long long)r.lastProgressUs);
+        result(command,"PASS",details); return;
+    }
     if (command && std::strcmp(command, "tsf-probe") == 0) {
         const char* action = ::strtok_r(nullptr, " \t", &save);
         const char* timeout = ::strtok_r(nullptr, " \t", &save);

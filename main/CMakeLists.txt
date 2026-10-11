@@ -14,7 +14,7 @@ set(APP_SRCS
 if(MOSAICO_BOARD)
     list(REMOVE_ITEM APP_SRCS "apps/app_codex_micro/view/view.cpp")
     if(CONFIG_IDF_TARGET_ESP32S31 AND CONFIG_IDF_TARGET_ARCH_RISCV)
-        list(APPEND APP_SRCS "ota/panic_capture.cpp" "hal/mosaico/vfs_internal_ops.c")
+        list(APPEND APP_SRCS "host/mosaico_lan_tcp_probe.cpp" "ota/panic_capture.cpp" "hal/mosaico/vfs_internal_ops.c")
     endif()
     list(APPEND APP_SRCS "apps/app_codex_micro/view/view_mosaico.cpp"
         "apps/app_codex_micro/view/dot_widgets.cpp" "host/quota_monitor.cpp" "ota/mosaico_ota.cpp"

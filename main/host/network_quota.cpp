@@ -124,6 +124,35 @@ void NetworkQuota::refreshWhileLocked()
     if (_task_handle) xTaskNotifyGive(_task_handle);
 }
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+bool NetworkQuota::requestLanTcp(const MosaicoLanTcp::Request& request)
+{
+    if (!_hw_rx_owner_ready.load() || !idleLocked() || MosaicoOta::blocksTwt()) return false;
+    std::unique_lock<std::mutex> settingsGuard(_wifi_settings_mutex, std::try_to_lock);
+    if (!settingsGuard.owns_lock() || _wifi_settings.pending || _wifi_settings.restartPending) return false;
+    const auto t = twtSnapshot();
+    if (!t.id || t.cleanupPending || t.cleanupFailed || !t.associated ||
+        (t.stage != MosaicoTwt::Stage::Baseline && t.stage != MosaicoTwt::Stage::Active)) return false;
+    return _lan_tcp.request(request, t.id, static_cast<uint8_t>(t.stage)); // No notification.
+}
+void NetworkQuota::serviceLanTcp()
+{
+    if (!_lan_tcp.busy()) return;
+    bool settingsClear=false;
+    {
+        std::unique_lock<std::mutex> guard(_wifi_settings_mutex, std::try_to_lock);
+        settingsClear=guard.owns_lock() && !_wifi_settings.pending && !_wifi_settings.restartPending;
+    }
+    bool eventsClear;
+    portENTER_CRITICAL(&_twt_mux);
+    eventsClear = _twt_event_read == _twt_event_write && !_twt_event_overflow;
+    portEXIT_CRITICAL(&_twt_mux);
+    const bool allowed = settingsClear && eventsClear && idleLocked() && !MosaicoOta::blocksTwt() &&
+        _twt_request.load() == -1 && !_twt.state.cleanupPending && !_twt_cleanup_failed &&
+        !_twt.state.cleanupFailed && _twt.state.expiryUs > esp_timer_get_time() &&
+        (_twt.state.stage == MosaicoTwt::Stage::Baseline || _twt.state.stage == MosaicoTwt::Stage::Active) &&
+        _twt.state.associated && _wifi_running.load() && _connected.load();
+    _lan_tcp.service(allowed, _twt.state.id, static_cast<uint8_t>(_twt.state.stage));
+}
 bool NetworkQuota::requestTsfProbe(uint32_t timeoutMs, uint64_t& requestId)
 {
     requestId = 0;
@@ -408,6 +437,9 @@ void NetworkQuota::serviceHwRxSnapshot()
 
 void NetworkQuota::wait(uint32_t milliseconds)
 {
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    if (_lan_tcp.busy()) milliseconds = std::min<uint32_t>(milliseconds, 100);
+#endif
 #ifdef MOSAICO_BOARD
     const auto wifiRx = mosaico_wifi_rx_observer::snapshot();
     if (wifiRx.active) {
@@ -427,7 +459,7 @@ void NetworkQuota::wait(uint32_t milliseconds)
     if (wifiSettingsSnapshot(wifi) && (wifi.pending || wifi.restartPending) && milliseconds > 250) milliseconds=250;
 #endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
-    if (_twt.state.cleanupPending && _twt.state.cleanupStage == 6) {
+    if (_twt.state.cleanupPending && (_twt.state.cleanupStage == 6 || _twt.state.cleanupStage == 7)) {
         milliseconds = std::min<uint32_t>(milliseconds, 1000); // Probe hold has no cancellation deadline.
     } else if (_twt.live() || (_twt.state.cleanupPending && !_twt_cleanup_failed)) {
         const int64_t now = esp_timer_get_time();
@@ -625,6 +657,9 @@ bool NetworkQuota::requestWifiCredentials(const char* ssid, const char* password
     _pending_forget=false;
     std::strcpy(_pending_ssid,ssid); std::strcpy(_pending_password,password);
     _wifi_settings.pending=true; _wifi_settings.error=0;
+#if CONFIG_IDF_TARGET_ESP32S31
+    ++_wifi_settings_generation;
+#endif
     xTaskNotifyGive(_task_handle); return true;
 }
 bool NetworkQuota::requestWifiForget(const char* ssid)
@@ -638,6 +673,9 @@ bool NetworkQuota::requestWifiForget(const char* ssid)
     if(!exists || _wifi_settings.count<=1) { _wifi_settings.error=ESP_ERR_INVALID_ARG; return false; }
     std::strcpy(_pending_ssid,ssid); MosaicoWifi::scrub(_pending_password,sizeof(_pending_password));
     _pending_forget=true; _wifi_settings.pending=true; _wifi_settings.error=0;
+#if CONFIG_IDF_TARGET_ESP32S31
+    ++_wifi_settings_generation;
+#endif
     xTaskNotifyGive(_task_handle); return true;
 }
 void NetworkQuota::publishWifiProfiles()
@@ -656,6 +694,9 @@ bool NetworkQuota::requestWifiRestart()
     std::unique_lock<std::mutex> guard(_wifi_settings_mutex, std::try_to_lock);
     if (!guard.owns_lock()) return false;
     if (!_wifi_settings.available || _wifi_settings.pending || _wifi_settings.error || (!_wifi_settings.rebootRequired && !_wifi_settings.scanError)) return false;
+#if CONFIG_IDF_TARGET_ESP32S31
+    ++_wifi_settings_generation;
+#endif
     _wifi_settings.restartPending=true; _wifi_settings.restartError=0; xTaskNotifyGive(_task_handle); return true;
 }
 void NetworkQuota::serviceWifiSettings()
@@ -672,9 +713,25 @@ void NetworkQuota::serviceWifiSettings()
     if (!running || esp_ota_get_state_partition(running,&state)!=ESP_OK || state!=ESP_OTA_IMG_VALID) return;
     char ssid[33]{}, password[65]{};
     bool restart=false, forget=false;
+#if CONFIG_IDF_TARGET_ESP32S31
+    uint64_t generation=0;
+    {
+        std::unique_lock<std::mutex> guard(_wifi_settings_mutex,std::try_to_lock);
+        if (!guard.owns_lock()) return; // No snapshot-derived fail-open admission.
+        restart=_wifi_settings.restartPending && !_wifi_settings.pending && !_wifi_settings.error;
+        if (!restart && !_wifi_settings.pending) return;
+        generation=_wifi_settings_generation;
+    }
+    // SDK/socket operations never run under the settings mutex. A failed close
+    // retains debt; neither NVS nor restart may pass this gate.
+    if (!_lan_tcp.quiesce()) return;
+#endif
     {
         std::unique_lock<std::mutex> guard(_wifi_settings_mutex,std::try_to_lock);
         if (!guard.owns_lock()) return;
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (generation!=_wifi_settings_generation) return; // Queue changed while closing.
+#endif
         restart=_wifi_settings.restartPending && !_wifi_settings.pending && !_wifi_settings.error;
         if (!restart && !_wifi_settings.pending) return;
         if (!restart) { forget=_pending_forget; std::memcpy(ssid,_pending_ssid,sizeof(ssid)); std::memcpy(password,_pending_password,sizeof(password)); }
@@ -830,6 +887,17 @@ void NetworkQuota::cleanupTwtTrial()
     // it runs after that same PP-task TX callback returns. Require BOTH proofs.
     // Never disconnect/stop a STA with a pending setup/teardown callback.
 #if CONFIG_IDF_TARGET_ESP32S31
+    if (!_lan_tcp.quiesce()) {
+        _twt.state.cleanupPending = true;
+        _twt.state.cleanupStage = 7; // Socket worker owns close; no driver teardown before it returns.
+        _twt.state.cleanupDeadlineUs = 0;
+        return;
+    }
+    if (_twt.state.cleanupStage == 7) {
+        _twt.state.cleanupPending = false;
+        _twt.state.cleanupStage = 0;
+        _twt.state.cleanupDeadlineUs = 0;
+    }
     const auto probe = tsfProbeSnapshot();
     if (probe.apiCalled && probe.apiResult == ESP_OK && !probe.driverDrained) {
         _twt.state.cleanupPending = true;
@@ -1416,13 +1484,14 @@ void NetworkQuota::run()
         // Scan-fault paths can change identity without servicing the trial.
         reconcileTwtCycleIdentity();
 #if CONFIG_IDF_TARGET_ESP32S31
+        serviceLanTcp();
         serviceTsfProbe(); // Cancellation/events reconcile before probe, even during cleanup hold.
 #endif
         if (_twt.state.cleanupPending || _twt_cleanup_failed) {
             if (MosaicoOta::busy()) MosaicoOta::fail("twt_cleanup_not_ready");
             setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
             setPhase(4);
-            wait((_twt_cleanup_failed || _twt.state.cleanupStage == 6) ? 1000 : 50);
+            wait((_twt_cleanup_failed || (_twt.state.cleanupStage == 6 || _twt.state.cleanupStage == 7)) ? 1000 : 50);
             continue; // No OTA, radio stop, restart or new network request while TX is uncertain.
         }
 #endif
@@ -1519,6 +1588,9 @@ void NetworkQuota::run()
                 const auto wifiRxStop=mosaico_wifi_rx_observer::snapshot();
                 // Filter rollback can retry after stop; only an unverified radio disable holds normal idle.
                 if (!mosaico_wifi_rx_observer::detail::canStopRadio(wifiRxStop)) { wait(1000); continue; }
+#endif
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+                if (!_lan_tcp.quiesce()) { wait(100); continue; }
 #endif
                 esp_wifi_disconnect();
                 if (esp_wifi_stop() != ESP_OK) {

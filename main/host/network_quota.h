@@ -11,6 +11,7 @@
 #if CONFIG_IDF_TARGET_ESP32S31
 #include "mosaico_hw_rx_snapshot.h"
 #include "mosaico_tsf_probe.h"
+#include "mosaico_lan_tcp_probe.h"
 #include <esp_timer.h>
 #endif
 #include <ota/mosaico_ota.h>
@@ -44,6 +45,9 @@ public:
     void refreshWhileLocked();
 #ifdef MOSAICO_BOARD
 #if CONFIG_IDF_TARGET_ESP32S31
+    bool requestLanTcp(const MosaicoLanTcp::Request& request);
+    void cancelLanTcp() { _lan_tcp.cancel(); }
+    MosaicoLanTcp::Snapshot lanTcpSnapshot() const { return _lan_tcp.snapshot(); }
     bool requestTsfProbe(uint32_t timeoutMs, uint64_t& requestId);
     MosaicoTsfProbe::Snapshot tsfProbeSnapshot() const;
     bool requestHwRxSnapshot(uint64_t& requestId);
@@ -114,6 +118,8 @@ private:
     bool fetchHistory();
 #ifdef MOSAICO_BOARD
 #if CONFIG_IDF_TARGET_ESP32S31
+    void serviceLanTcp();
+    MosaicoLanTcp::Probe _lan_tcp;
     void serviceTsfProbe(); // Natural network loop only; never wake it for a probe.
     void captureTsfProbeEvent(int status, uint8_t reason, int64_t localUs);
     static void tsfProbeTimerSentinel(void* arg);
@@ -200,6 +206,9 @@ private:
     bool _cpu_light_sleep=false, _sleep_pm_fault=false;
     std::mutex _wifi_settings_mutex;
     WifiSettingsSnapshot _wifi_settings;
+#if CONFIG_IDF_TARGET_ESP32S31
+    uint64_t _wifi_settings_generation=0; // Settings mutex; identity for the LAN close gate.
+#endif
     std::atomic<uint32_t> _wifi_connect_attempts{0}, _wifi_budget_closures{0};
     char _pending_ssid[33]{}, _pending_password[65]{};
 #endif

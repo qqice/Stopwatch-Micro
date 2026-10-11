@@ -41,6 +41,7 @@ struct esp_timer_create_args_t {
 };
 struct NetworkQuota {
  Atomic<bool> _tsf_probe_pending{}, _hw_rx_owner_ready{true}, _wifi_running{true}, _connected{true};
+ struct LanProbe { bool closed=true; constexpr bool quiesce(){return closed;} } _lan_tcp;
  MosaicoTwt::Model _twt;
  MosaicoTwt::Snapshot _twt_cache;
  MosaicoTsfProbe::Snapshot _tsf_probe_cache;
@@ -241,6 +242,15 @@ constexpr bool timerProducerBarrier() {
  }
  return true;
 }
+constexpr bool socketCloseHold() {
+ NetworkQuota n; n._lan_tcp.closed=false;
+ n._twt.end(MosaicoTwt::Stop::Explicit); n.cleanupTwtTrial();
+ if (!n._twt.state.cleanupPending || n._twt.state.cleanupStage!=7 ||
+     n._twt.state.cleanupDeadlineUs || n.teardownCalls || n.psCalls || n.barrierCalls) return false;
+ n._lan_tcp.closed=true; n.cleanupTwtTrial();
+ return n._twt.state.cleanupStage!=7;
+}
+static_assert(socketCloseHold(), "socket close must precede driver teardown and PS restore");
 static_assert(timerProducerBarrier(), "timer producer sentinel ordering/resource/fault regression");
 static_assert(queuedCancellationGates(), "queued cancel/unlock/expiry/AP event gate regression");
 static_assert(cleanupHold(), "probe callback+PP barrier required before ANY cleanup");
@@ -269,9 +279,9 @@ static_assert(preCallRejections(), "pre-call gate rejection must not consume lat
         self.assertLess(run.index("serviceTwtTrial(esp_timer_get_time(), idleLocked())"),probe)
         self.assertLess(run.index("reconcileTwtCycleIdentity();"),probe)
         self.assertLess(probe,run.index("if (_twt.state.cleanupPending || _twt_cleanup_failed)"))
-        self.assertIn("wait((_twt_cleanup_failed || _twt.state.cleanupStage == 6) ? 1000 : 50)",run)
+        self.assertIn("wait((_twt_cleanup_failed || (_twt.state.cleanupStage == 6 || _twt.state.cleanupStage == 7)) ? 1000 : 50)",run)
         wait=CPP[CPP.index("void NetworkQuota::wait("):CPP.index("void NetworkQuota::setCpu(")]
-        self.assertIn("cleanupPending && _twt.state.cleanupStage == 6",wait)
+        self.assertIn("cleanupPending && (_twt.state.cleanupStage == 6 || _twt.state.cleanupStage == 7)",wait)
         self.assertIn("milliseconds = std::min<uint32_t>(milliseconds, 1000)",wait)
         cleanup=CPP[CPP.index("void NetworkQuota::cleanupTwtTrial()"):CPP.index("void NetworkQuota::serviceTwtTrial(")]
         self.assertLess(cleanup.index("!probe.driverDrained"),cleanup.index("esp_wifi_sta_itwt_teardown"))
@@ -288,7 +298,7 @@ static_assert(preCallRejections(), "pre-call gate rejection must not consume lat
             self.assertIn(token,block)
         self.assertIn('"tsf-probe"',(ROOT/"main/debug/serial_debug_transport.h").read_text())
         before=CPP[:CPP.index("bool NetworkQuota::requestTsfProbe(")]
-        self.assertTrue(before.rstrip().endswith("#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31"))
+        self.assertIn("#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31\nbool NetworkQuota::requestLanTcp(", before)
         self.assertNotIn("esp_wifi_he.h",(ROOT/"main/host/network_quota.h").read_text())
 
 if __name__ == "__main__": unittest.main()
