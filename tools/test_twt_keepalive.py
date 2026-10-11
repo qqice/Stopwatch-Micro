@@ -123,6 +123,15 @@ constexpr bool arguments(){
 static_assert(arguments(),"production parser strict args do not mutate settings");
 '''
         test_mosaico_twt.TwtTests().compile_cpp(code)
+    def test_uart_admission_production(self):
+        src=(ROOT/'main/debug/serial_debug_transport.h').read_text()
+        body=src[src.index('inline bool uartAllowed'):src.index('\n}',src.index('inline bool uartAllowed'))]
+        body=body.replace('inline bool','constexpr bool')+'\n}'
+        code=r'''namespace std { constexpr int strcmp(const char* a,const char* b){while(*a&&*a==*b){++a;++b;}return *a-*b;} }
+'''+body+r'''
+static_assert(serial_debug_transport_placeholder);'''
+        code=code.replace('static_assert(serial_debug_transport_placeholder);','static_assert(uartAllowed("twt-keepalive")); static_assert(!uartAllowed("arbitrary-unknown-command"));')
+        test_mosaico_twt.TwtTests().compile_cpp(code)
     def test_strict_parser_and_no_notification(self):
         serial=(ROOT/'main/debug/serial_debug.cpp').read_text().split('if (std::strcmp(command, "twt-keepalive") == 0)',1)[1].split('if (std::strcmp(command, "twt") == 0)',1)[0]
         self.assertIn(r'!option || ::strtok_r(nullptr, " \t", &save)',serial)
