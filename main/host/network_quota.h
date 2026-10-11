@@ -10,6 +10,8 @@
 #include <soc/soc_caps.h>
 #if CONFIG_IDF_TARGET_ESP32S31
 #include "mosaico_hw_rx_snapshot.h"
+#include "mosaico_tsf_probe.h"
+#include <esp_timer.h>
 #endif
 #include <ota/mosaico_ota.h>
 #endif
@@ -42,6 +44,8 @@ public:
     void refreshWhileLocked();
 #ifdef MOSAICO_BOARD
 #if CONFIG_IDF_TARGET_ESP32S31
+    bool requestTsfProbe(uint32_t timeoutMs, uint64_t& requestId);
+    MosaicoTsfProbe::Snapshot tsfProbeSnapshot() const;
     bool requestHwRxSnapshot(uint64_t& requestId);
     MosaicoHwRx::Snapshot hwRxSnapshot() const;
 #endif
@@ -110,6 +114,16 @@ private:
     bool fetchHistory();
 #ifdef MOSAICO_BOARD
 #if CONFIG_IDF_TARGET_ESP32S31
+    void serviceTsfProbe(); // Natural network loop only; never wake it for a probe.
+    void captureTsfProbeEvent(int status, uint8_t reason, int64_t localUs);
+    static void tsfProbeTimerSentinel(void* arg);
+    std::atomic<bool> _tsf_probe_timer_seen{false};
+    esp_timer_handle_t _tsf_probe_timer = nullptr;
+    std::atomic<bool> _tsf_probe_pending{false};
+    MosaicoTsfProbe::Snapshot _tsf_probe_cache;
+    struct TsfProbeEvent { bool seen = false; int status = 0; uint8_t reason = 0; int64_t localUs = 0; };
+    TsfProbeEvent _tsf_probe_event;
+    bool _tsf_probe_consumed = false, _tsf_probe_accept_event = false; // _twt_mux protected.
     void serviceHwRxSnapshot(); // Network owner only, explicit one-shot request.
     std::atomic<bool> _hw_rx_pending{false}, _hw_rx_owner_ready{false};
     mutable portMUX_TYPE _hw_rx_mux = portMUX_INITIALIZER_UNLOCKED;

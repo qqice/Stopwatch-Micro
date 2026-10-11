@@ -742,7 +742,7 @@ static_assert(identityTransitions(), "actual owner identity changes never mix ev
         self.assertGreaterEqual(len(gates), 2)
         for gate in gates:
             self.assertIn('continue;', gate.split('}', 1)[0])
-        self.assertIn('wait(_twt_cleanup_failed ? 1000 : 50)', cleanup_gate)
+        self.assertIn('wait((_twt_cleanup_failed || _twt.state.cleanupStage == 6) ? 1000 : 50)', cleanup_gate)
         self.assertIn('if (_twt.state.cleanupPending || _twt_cleanup_failed)', run)
         self.assertLess(run.index('wait(50); continue;'), run.index('GetTailnetQuota().start()'))
         transfers = run.split('const bool quotaOk = fetch();', 1)[1]

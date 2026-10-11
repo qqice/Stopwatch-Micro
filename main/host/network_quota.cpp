@@ -124,6 +124,207 @@ void NetworkQuota::refreshWhileLocked()
     if (_task_handle) xTaskNotifyGive(_task_handle);
 }
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+bool NetworkQuota::requestTsfProbe(uint32_t timeoutMs, uint64_t& requestId)
+{
+    requestId = 0;
+    if (timeoutMs < 250 || timeoutMs > 2000) return false;
+    bool expected = false;
+    if (!_tsf_probe_pending.compare_exchange_strong(expected, true)) return false;
+    const bool ready = _hw_rx_owner_ready.load() && !MosaicoOta::blocksTwt();
+    portENTER_CRITICAL(&_twt_mux);
+    // Once the API has actually been invoked, preserve its evidence forever.
+    if (_tsf_probe_consumed) {
+        _tsf_probe_pending.store(false);
+        portEXIT_CRITICAL(&_twt_mux);
+        return false;
+    }
+    const auto next = _tsf_probe_cache.requestId + 1;
+    const auto processed = _tsf_probe_cache.processedId;
+    const bool active = _twt_cache.requested == MosaicoTwt::Mode::On &&
+        _twt_cache.stage == MosaicoTwt::Stage::Active && _twt_cache.associated;
+    _tsf_probe_cache = {};
+    _tsf_probe_cache.requestId = next;
+    _tsf_probe_cache.processedId = ready && active ? processed : next;
+    _tsf_probe_cache.trialId = _twt_cache.id;
+    _tsf_probe_cache.timeoutMs = timeoutMs;
+    _tsf_probe_cache.sameTrial = active;
+    _tsf_probe_cache.queued = ready && active;
+    _tsf_probe_cache.apiResult = ESP_ERR_INVALID_STATE;
+    requestId = next;
+    const bool accepted = _tsf_probe_cache.queued;
+    if (!accepted) _tsf_probe_pending.store(false);
+    portEXIT_CRITICAL(&_twt_mux);
+    return accepted; // No notification: do not change quota/history cadence.
+}
+MosaicoTsfProbe::Snapshot NetworkQuota::tsfProbeSnapshot() const
+{
+    portENTER_CRITICAL(&_twt_mux);
+    const auto copy = _tsf_probe_cache;
+    portEXIT_CRITICAL(&_twt_mux);
+    return copy;
+}
+void NetworkQuota::captureTsfProbeEvent(int status, uint8_t reason, int64_t localUs)
+{
+    // Fixed first-event slot only: no Wi-Fi API, owner wake, allocation or output.
+    portENTER_CRITICAL(&_twt_mux);
+    if (_tsf_probe_accept_event && !_tsf_probe_event.seen)
+        _tsf_probe_event = {true, status, reason, localUs};
+    portEXIT_CRITICAL(&_twt_mux);
+}
+void NetworkQuota::tsfProbeTimerSentinel(void* arg)
+{
+    // NetworkQuota is the permanent global instance, never a request-local object.
+    // The ESP_TIMER_TASK callback only writes this atomic flag: no SDK calls.
+    static_cast<NetworkQuota*>(arg)->_tsf_probe_timer_seen.store(true);
+}
+void NetworkQuota::serviceTsfProbe()
+{
+    if (!_tsf_probe_pending.load()) return;
+    auto sample = tsfProbeSnapshot();
+    if (!sample.queued && !sample.inflight) return; // Admission not published yet.
+    auto sameActiveTrial = [&]() {
+        portENTER_CRITICAL(&_twt_mux);
+        const bool eventsClear = !_twt_event_overflow && _twt_event_read == _twt_event_write;
+        portEXIT_CRITICAL(&_twt_mux);
+        return eventsClear && idleLocked() && _twt.state.expiryUs > esp_timer_get_time() &&
+            _twt_request.load() == -1 && !_twt.state.cleanupPending && !_twt.state.cleanupFailed && !_twt_cleanup_failed &&
+            _twt.live() && _twt.state.requested == MosaicoTwt::Mode::On &&
+            _twt.state.stage == MosaicoTwt::Stage::Active && _twt.state.associated &&
+            _twt.state.id == sample.trialId;
+    };
+    if (sample.queued) {
+        sample.queued = false;
+        sample.processedId = sample.requestId;
+        sample.sameTrial = sameActiveTrial();
+        wifi_ap_record_t ap{};
+        const bool allowed = _hw_rx_owner_ready.load() && _wifi_running.load() && _connected.load() &&
+            sample.sameTrial && !MosaicoOta::blocksTwt() && esp_wifi_sta_get_ap_info(&ap) == ESP_OK &&
+            !MosaicoOta::blocksTwt() && _wifi_running.load() && _connected.load() && sameActiveTrial();
+        if (allowed) {
+            sample.beforeStartUs = esp_timer_get_time();
+            sample.tsfBefore = esp_wifi_get_tsf_time(WIFI_IF_STA);
+            sample.beforeEndUs = esp_timer_get_time();
+            sample.beforeValid = sample.tsfBefore > 0;
+        }
+        // Fresh OTA/link/trial gates directly before arming callback ownership.
+        if (!allowed || MosaicoOta::blocksTwt() || !_wifi_running.load() || !_connected.load() || !sameActiveTrial()) {
+            sample.sameTrial = sameActiveTrial();
+            portENTER_CRITICAL(&_twt_mux);
+            _tsf_probe_cache = sample;
+            _tsf_probe_pending.store(false);
+            portEXIT_CRITICAL(&_twt_mux);
+            return; // No actual invocation: a later valid admission can retry.
+        }
+        sample.apiCalled = true;
+        sample.consumed = true;
+        sample.inflight = true;
+        sample.deadlineUs = esp_timer_get_time() + (int64_t(sample.timeoutMs) + 2000) * 1000;
+        // Arm BEFORE the public API: its callback may arrive before it returns.
+        portENTER_CRITICAL(&_twt_mux);
+        // Final event-FIFO gate shares the callback lock with slot arming.
+        if (_twt_event_overflow || _twt_event_read != _twt_event_write) {
+            sample.apiCalled = sample.consumed = sample.inflight = false;
+            sample.sameTrial = false;
+            _tsf_probe_cache = sample;
+            _tsf_probe_pending.store(false);
+            portEXIT_CRITICAL(&_twt_mux);
+            return;
+        }
+        _tsf_probe_consumed = true;
+        _tsf_probe_event = {};
+        _tsf_probe_accept_event = true;
+        _tsf_probe_cache = sample;
+        portEXIT_CRITICAL(&_twt_mux);
+        sample.apiResult = esp_wifi_sta_itwt_send_probe_req(static_cast<int>(sample.timeoutMs));
+        if (sample.apiResult != ESP_OK) {
+            sample.inflight = false;
+            portENTER_CRITICAL(&_twt_mux);
+            _tsf_probe_accept_event = false;
+            _tsf_probe_event = {}; // API failure is not an observed completion.
+            _tsf_probe_cache = sample;
+            _tsf_probe_pending.store(false);
+            portEXIT_CRITICAL(&_twt_mux);
+            return;
+        }
+    }
+    TsfProbeEvent event;
+    portENTER_CRITICAL(&_twt_mux);
+    event = _tsf_probe_event;
+    portEXIT_CRITICAL(&_twt_mux);
+    sample.sameTrial = sameActiveTrial();
+    const auto now = esp_timer_get_time();
+    sample.deadlineExpired = sample.deadlineExpired ||
+        (event.seen ? event.localUs >= sample.deadlineUs : now >= sample.deadlineUs);
+    if (event.seen) {
+        sample.callbackSeen = true;
+        sample.probeStatus = event.status;
+        sample.reason = event.reason;
+        sample.callbackLocalUs = event.localUs;
+        // First PP barrier confirms SDK timer disarm/done; a timer-task sentinel
+        // then drains any already-running legacy timer producer. The second PP
+        // barrier consumes messages that producer may have posted after barrier 1.
+        if (!sample.drainAttempted) {
+            sample.drainAttempted = true;
+            sample.flowBitmap = -1;
+            sample.firstPpResult = esp_wifi_sta_itwt_get_flow_id_status(&sample.flowBitmap);
+            sample.drainResult = sample.firstPpResult;
+        }
+        if (sample.firstPpResult == ESP_OK && !sample.timerCreateAttempted) {
+            sample.timerCreateAttempted = true;
+            _tsf_probe_timer_seen.store(false);
+            esp_timer_create_args_t args{};
+            args.callback = &NetworkQuota::tsfProbeTimerSentinel;
+            args.arg = this; // Permanent owner lifetime, safe even on a retained fault.
+            args.dispatch_method = ESP_TIMER_TASK;
+            args.name = "tsf_probe_drain";
+            sample.timerError = esp_timer_create(&args, &_tsf_probe_timer);
+            sample.timerCreated = sample.timerError == ESP_OK;
+            if (sample.timerCreated) {
+                sample.timerError = esp_timer_start_once(_tsf_probe_timer, 1);
+                sample.timerStarted = sample.timerError == ESP_OK;
+            }
+        }
+        if (sample.timerStarted) sample.timerSeen = _tsf_probe_timer_seen.load();
+        if (sample.timerSeen && !sample.secondPpAttempted) {
+            sample.secondPpAttempted = true;
+            sample.secondPpResult = esp_wifi_sta_itwt_get_flow_id_status(&sample.flowBitmap);
+            sample.drainResult = sample.secondPpResult;
+        }
+        // Delete once after the sentinel ran, or immediately if its start failed.
+        // A failed delete is retained as a resource fault, never claimed reclaimed.
+        // ESP_OK queues asynchronous timer-task deletion; no claim of synchronous free.
+        if (sample.timerCreated && !sample.reclaimAttempted &&
+            (sample.timerSeen || (!sample.timerStarted && sample.timerError != ESP_OK))) {
+            sample.reclaimAttempted = true;
+            sample.deleteResult = esp_timer_delete(_tsf_probe_timer);
+            sample.resourceReclaimed = sample.deleteResult == ESP_OK;
+            if (sample.resourceReclaimed) _tsf_probe_timer = nullptr;
+        }
+        sample.driverDrained = sample.drainAttempted && sample.firstPpResult == ESP_OK &&
+            sample.timerStarted && sample.timerSeen && sample.secondPpAttempted &&
+            sample.secondPpResult == ESP_OK && sample.resourceReclaimed;
+        sample.inflight = !sample.driverDrained;
+        // A failed barrier is retained for manual investigation; never retry.
+        // The after-TSF read belongs to the owner, never the event callback.
+        wifi_ap_record_t ap{};
+        if (sample.driverDrained && !sample.afterStartUs && _wifi_running.load() && _connected.load() && sample.sameTrial &&
+            !MosaicoOta::blocksTwt() && esp_wifi_sta_get_ap_info(&ap) == ESP_OK && !MosaicoOta::blocksTwt()) {
+            sample.afterStartUs = esp_timer_get_time();
+            sample.tsfAfter = esp_wifi_get_tsf_time(WIFI_IF_STA);
+            sample.afterEndUs = esp_timer_get_time();
+            sample.afterValid = sample.tsfAfter > 0;
+        }
+    }
+    portENTER_CRITICAL(&_twt_mux);
+    _tsf_probe_cache = sample;
+    if (sample.driverDrained) {
+        _tsf_probe_accept_event = false;
+        _tsf_probe_pending.store(false);
+    }
+    portEXIT_CRITICAL(&_twt_mux);
+    // Deadline alone NEVER closes inflight: keep the one late callback observable.
+}
+
 bool NetworkQuota::requestHwRxSnapshot(uint64_t& requestId)
 {
     requestId = 0;
@@ -226,7 +427,9 @@ void NetworkQuota::wait(uint32_t milliseconds)
     if (wifiSettingsSnapshot(wifi) && (wifi.pending || wifi.restartPending) && milliseconds > 250) milliseconds=250;
 #endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
-    if (_twt.live() || (_twt.state.cleanupPending && !_twt_cleanup_failed)) {
+    if (_twt.state.cleanupPending && _twt.state.cleanupStage == 6) {
+        milliseconds = std::min<uint32_t>(milliseconds, 1000); // Probe hold has no cancellation deadline.
+    } else if (_twt.live() || (_twt.state.cleanupPending && !_twt_cleanup_failed)) {
         const int64_t now = esp_timer_get_time();
         const int64_t deadline = _twt.state.cleanupPending ? _twt.state.cleanupDeadlineUs :
             (_twt.state.setupDeadlineUs ? std::min(_twt.state.setupDeadlineUs, _twt.state.expiryUs) : _twt.state.expiryUs);
@@ -576,6 +779,15 @@ void NetworkQuota::publishTwt()
 void NetworkQuota::twtEvent(void* arg, const char*, int32_t event, void* data)
 {
     auto& owner = *static_cast<NetworkQuota*>(arg);
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (event == WIFI_EVENT_ITWT_PROBE) {
+        if (data) {
+            const auto& e = *static_cast<const wifi_event_sta_itwt_probe_t*>(data);
+            owner.captureTsfProbeEvent(static_cast<int>(e.status), e.reason, esp_timer_get_time());
+        }
+        return; // Do not wake the network loop or call any Wi-Fi API here.
+    }
+#endif
     TwtEvent copied{};
     if (event == WIFI_EVENT_ITWT_SETUP && data) {
         const auto& e = *static_cast<const wifi_event_sta_itwt_setup_t*>(data);
@@ -617,6 +829,20 @@ void NetworkQuota::cleanupTwtTrial()
     // installed SDK, post-ack get_flow_id_status is a synchronous PP-task ioctl;
     // it runs after that same PP-task TX callback returns. Require BOTH proofs.
     // Never disconnect/stop a STA with a pending setup/teardown callback.
+#if CONFIG_IDF_TARGET_ESP32S31
+    const auto probe = tsfProbeSnapshot();
+    if (probe.apiCalled && probe.apiResult == ESP_OK && !probe.driverDrained) {
+        _twt.state.cleanupPending = true;
+        _twt.state.cleanupStage = 6; // Explicit probe hold, not driver failure or cancellation.
+        _twt.state.cleanupDeadlineUs = 0; // Cleanup countdown starts only after PP drain.
+        return; // No teardown, PS restore, stop or speculative barrier before callback.
+    }
+    if (_twt.state.cleanupStage == 6) {
+        _twt.state.cleanupPending = false;
+        _twt.state.cleanupStage = 0;
+        _twt.state.cleanupDeadlineUs = 0;
+    }
+#endif
     if (_twt_cleanup_failed) return;
     if (!_twt_submitted && !_twt_ps_saved && !_twt_cleanup_barrier_needed) return;
     _twt.state.cleanupPending = true;
@@ -1189,11 +1415,14 @@ void NetworkQuota::run()
         if(!_wifi_scan_started && !_wifi_scan_fault) serviceTwtTrial(esp_timer_get_time(), idleLocked());
         // Scan-fault paths can change identity without servicing the trial.
         reconcileTwtCycleIdentity();
+#if CONFIG_IDF_TARGET_ESP32S31
+        serviceTsfProbe(); // Cancellation/events reconcile before probe, even during cleanup hold.
+#endif
         if (_twt.state.cleanupPending || _twt_cleanup_failed) {
             if (MosaicoOta::busy()) MosaicoOta::fail("twt_cleanup_not_ready");
             setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
             setPhase(4);
-            wait(_twt_cleanup_failed ? 1000 : 50);
+            wait((_twt_cleanup_failed || _twt.state.cleanupStage == 6) ? 1000 : 50);
             continue; // No OTA, radio stop, restart or new network request while TX is uncertain.
         }
 #endif

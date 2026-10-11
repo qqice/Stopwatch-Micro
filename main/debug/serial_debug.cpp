@@ -781,6 +781,34 @@ void SerialDebug::handleLine(char* line)
     }
 #ifdef MOSAICO_BOARD
 #if CONFIG_IDF_TARGET_ESP32S31
+    if (command && std::strcmp(command, "tsf-probe") == 0) {
+        const char* action = ::strtok_r(nullptr, " \t", &save);
+        const char* timeout = ::strtok_r(nullptr, " \t", &save);
+        const char* extra = ::strtok_r(nullptr, " \t", &save);
+        uint32_t timeoutMs = 0;
+        if (!action || extra || (std::strcmp(action, "request") && std::strcmp(action, "status")) ||
+            (!std::strcmp(action, "status") && timeout) ||
+            (!std::strcmp(action, "request") && (!serial_debug_transport::settingsInteger(timeout, 2000, timeoutMs) || timeoutMs < 250))) {
+            result(command, "FAIL", "usage=tsf-probe_request_250..2000|status no_changes=1"); return;
+        }
+        if (!std::strcmp(action, "request")) {
+            uint64_t id = 0;
+            const bool ok = GetNetworkQuota().requestTsfProbe(timeoutMs, id);
+            char details[192];
+            std::snprintf(details, sizeof(details), "request_id=%llu queued=%d one_per_boot=1 callback_request_id=0 owner_wake=0 naturally_scheduled=1", (unsigned long long)id, ok);
+            result(command, ok ? "QUEUED" : "FAIL", details); return;
+        }
+        const auto r = GetNetworkQuota().tsfProbeSnapshot();
+        char details[1400];
+        std::snprintf(details, sizeof(details),
+            "request_id=%llu processed_id=%llu trial_id=%u same_trial=%d timeout_ms=%lu queued=%d inflight=%d consumed=%d api_called=%d api_result=%d callback_seen=%d probe_status=%d reason=%u drain_attempted=%d drain_result=%d flow_bitmap=%d driver_drained=%d first_pp_result=%d second_pp_attempted=%d second_pp_result=%d timer_create_attempted=%d timer_created=%d timer_started=%d timer_seen=%d timer_error=%d reclaim_attempted=%d delete_result=%d resource_reclaimed=%d resource_reclaim_async=1 callback_local_us=%lld deadline_us=%lld deadline_expired=%d tsf_before=%lld before_start_us=%lld before_end_us=%lld before_valid=%d tsf_after=%lld after_start_us=%lld after_end_us=%lld after_valid=%d one_per_boot=1 callback_request_id=0 precise_rf_wake=0 owner_wake=0 probe_rf_perturbation=1 deadline_is_cancel=0",
+            (unsigned long long)r.requestId, (unsigned long long)r.processedId, r.trialId, r.sameTrial,
+            (unsigned long)r.timeoutMs, r.queued, r.inflight, r.consumed, r.apiCalled, r.apiResult,
+            r.callbackSeen, r.probeStatus, r.reason, r.drainAttempted, r.drainResult, r.flowBitmap, r.driverDrained, r.firstPpResult, r.secondPpAttempted, r.secondPpResult, r.timerCreateAttempted, r.timerCreated, r.timerStarted, r.timerSeen, r.timerError, r.reclaimAttempted, r.deleteResult, r.resourceReclaimed, (long long)r.callbackLocalUs, (long long)r.deadlineUs,
+            r.deadlineExpired, (long long)r.tsfBefore, (long long)r.beforeStartUs, (long long)r.beforeEndUs, r.beforeValid,
+            (long long)r.tsfAfter, (long long)r.afterStartUs, (long long)r.afterEndUs, r.afterValid);
+        result(command, "PASS", details); return;
+    }
     if (command && std::strcmp(command, "hw-rx") == 0) {
         const char* action = ::strtok_r(nullptr, " \t", &save);
         const char* extra = ::strtok_r(nullptr, " \t", &save);
