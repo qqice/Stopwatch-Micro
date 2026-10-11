@@ -1171,6 +1171,24 @@ void SerialDebug::handleLine(char* line)
         return;
     }
 #if SOC_WIFI_HE_SUPPORT
+    if (std::strcmp(command, "twt-keepalive") == 0) {
+        const char* option = ::strtok_r(nullptr, " \t", &save);
+        if (!option || ::strtok_r(nullptr, " \t", &save) ||
+            (std::strcmp(option, "on") && std::strcmp(option, "off") && std::strcmp(option, "status"))) {
+            result("twt-keepalive", "FAIL", "expected=on_off_status no_changes=1"); return;
+        }
+        if (std::strcmp(option, "status")) {
+            const bool accepted = GetNetworkQuota().requestTwtKeepalive(!std::strcmp(option, "on"));
+            result("twt-keepalive", accepted ? "PASS" : "FAIL", "ram_only=1 next_on_trial_only=1 no_notification=1"); return;
+        }
+        const auto k = GetNetworkQuota().twtKeepaliveSnapshot();
+        char details[512]{};
+        std::snprintf(details, sizeof(details),
+            "requested=%d trial_requested=%d applied=%d restore_owed=%d config_result=%d restore_result=%d config_known=%d actual_keepalive=%d prior_config_unknown=%d restored_known_baseline=%d needs_restart_to_restore_defaults=%d pending=%d post_wakeup_event=0 ram_only=1 no_power_claim=1",
+            k.requested, k.trialRequested, k.applied, k.restoreOwed, k.configResult, k.restoreResult, k.configKnown, k.actualKeepalive,
+            k.priorConfigUnknown, k.restoredKnownBaseline, k.needsRestartToRestoreDefaults, k.pending);
+        result("twt-keepalive", "PASS", details); return;
+    }
     if (std::strcmp(command, "twt") == 0) {
         const char* mode = ::strtok_r(nullptr, " \t", &save);
         const char* option = ::strtok_r(nullptr, " \t", &save);

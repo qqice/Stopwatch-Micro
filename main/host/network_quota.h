@@ -7,6 +7,7 @@
 #include "mosaico_wifi_settings_model.h"
 #include "mosaico_wifi_profiles_model.h"
 #include "mosaico_twt_model.h"
+#include "mosaico_twt_keepalive.h"
 #include <soc/soc_caps.h>
 #if CONFIG_IDF_TARGET_ESP32S31
 #include "mosaico_hw_rx_snapshot.h"
@@ -61,6 +62,8 @@ public:
     void serviceStandbySleep(); // Existing main loop; preserves the current CPU/RF target.
 #if SOC_WIFI_HE_SUPPORT
     bool requestTwtTrial(MosaicoTwt::Mode mode, uint32_t leaseSeconds = 600, MosaicoTwt::Profile profile = MosaicoTwt::Profile::Default);
+    bool requestTwtKeepalive(bool enabled); // RAM only; never notify or call Wi-Fi.
+    MosaicoTwtKeepalive::State twtKeepaliveSnapshot() const;
     void requestTwtObserve(bool enabled);
     bool popTwtCycle(MosaicoTwt::Cycle& cycle);
     MosaicoTwt::Snapshot twtSnapshot() const;
@@ -160,6 +163,7 @@ private:
     bool _twt_bootstrap_attempted = false, _twt_bootstrap_ok = false;
     void cancelTwtTrial(MosaicoTwt::Stop reason);
     void cleanupTwtTrial();
+    bool serviceTwtKeepaliveConfig(); // Owner only, public config before setup.
     void publishTwt();
     void reconcileTwtCycleIdentity();
     void recordTwtCycle(MosaicoTwt::CyclePhase phase, MosaicoTwt::CycleReason reason = MosaicoTwt::CycleReason::None, uint8_t flags = 0);
@@ -168,6 +172,9 @@ private:
     uint16_t _twt_cycle_trial_id = 0;
     bool _twt_cycle_open = false;
     std::atomic<bool> _twt_observe{false};
+    MosaicoTwtKeepalive::State _twt_keepalive, _twt_keepalive_cache;
+    bool _twt_keepalive_owner_processing = false; // _twt_mux; whole owner service, including cancel/publish.
+    bool _twt_keepalive_busy = false; // _twt_mux: queued/owner/live/cleanup exclusion.
     MosaicoTwt::Model _twt;
     MosaicoTwt::Snapshot _twt_cache;
     struct TwtEvent {

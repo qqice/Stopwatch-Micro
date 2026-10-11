@@ -774,14 +774,40 @@ void NetworkQuota::serviceWifiSettings()
     MosaicoWifi::scrub(&candidate,sizeof(candidate));
 }
 #if SOC_WIFI_HE_SUPPORT
+bool NetworkQuota::requestTwtKeepalive(bool enabled)
+{
+    if (!_task_handle || !idleLocked() || twtOtaBlocked()) return false;
+    std::unique_lock<std::mutex> settingsGuard(_wifi_settings_mutex, std::try_to_lock);
+    if (!settingsGuard.owns_lock() || _wifi_settings.pending || _wifi_settings.restartPending) return false;
+    portENTER_CRITICAL(&_twt_mux);
+    const bool allowed = !_twt_keepalive_busy && _twt_request.load() == -1 &&
+        idleLocked() && !twtOtaBlocked();
+    if (allowed) {
+        _twt_keepalive.requested = enabled ? 1 : 0;
+        _twt_keepalive_cache = _twt_keepalive;
+    }
+    portEXIT_CRITICAL(&_twt_mux);
+    return allowed;
+}
+MosaicoTwtKeepalive::State NetworkQuota::twtKeepaliveSnapshot() const
+{
+    portENTER_CRITICAL(&_twt_mux);
+    auto out = _twt_keepalive_cache;
+    out.pending = _twt_keepalive_busy || _twt_request.load() != -1;
+    portEXIT_CRITICAL(&_twt_mux);
+    return out;
+}
 bool NetworkQuota::requestTwtTrial(MosaicoTwt::Mode mode, uint32_t leaseSeconds, MosaicoTwt::Profile profile)
 {
     const int request = MosaicoTwt::encodeRequest(mode, leaseSeconds, profile);
     if (!_task_handle || !MosaicoTwt::validLease(leaseSeconds) || request < 0 ||
         (mode == MosaicoTwt::Mode::Off && profile != MosaicoTwt::Profile::Default)) return false;
+    portENTER_CRITICAL(&_twt_mux);
+    _twt_keepalive_busy = true;
     // Off always wins over a queued command; no Wi-Fi API on serial/GUI threads.
     if (mode == MosaicoTwt::Mode::Off) _twt_request.store(0);
-    else { int empty = -1; if (!_twt_request.compare_exchange_strong(empty, request)) return false; }
+    else { int empty = -1; if (!_twt_request.compare_exchange_strong(empty, request)) { portEXIT_CRITICAL(&_twt_mux); return false; } }
+    portEXIT_CRITICAL(&_twt_mux);
     xTaskNotifyGive(_task_handle);
     return true;
 }
@@ -831,6 +857,8 @@ void NetworkQuota::publishTwt()
 {
     portENTER_CRITICAL(&_twt_mux);
     _twt_cache = _twt.state;
+    _twt_keepalive_busy = _twt_keepalive_owner_processing || _twt.live() || _twt.state.cleanupPending || _twt_cleanup_failed || _twt_request.load() != -1;
+    _twt_keepalive_cache = _twt_keepalive;
     portEXIT_CRITICAL(&_twt_mux);
 }
 void NetworkQuota::twtEvent(void* arg, const char*, int32_t event, void* data)
@@ -912,7 +940,7 @@ void NetworkQuota::cleanupTwtTrial()
     }
 #endif
     if (_twt_cleanup_failed) return;
-    if (!_twt_submitted && !_twt_ps_saved && !_twt_cleanup_barrier_needed) return;
+    if (!_twt_submitted && !_twt_ps_saved && !_twt_cleanup_barrier_needed && !_twt_keepalive.restoreOwed) return;
     _twt.state.cleanupPending = true;
     const int64_t now = esp_timer_get_time();
     if (!_twt.state.cleanupDeadlineUs) _twt.state.cleanupDeadlineUs = now + 10LL * 1000000;
@@ -949,6 +977,18 @@ void NetworkQuota::cleanupTwtTrial()
         _twt_submitted = _twt_cleanup_barrier_needed = false;
         _twt_teardown_sent = _twt_teardown_ack = false;
     }
+    if (_twt_keepalive.restoreOwed) {
+        // A known public baseline, NOT a claim about the unknown SDK boot defaults.
+        wifi_twt_config_t baseline{};
+        baseline.post_wakeup_event = false;
+        baseline.twt_enable_keep_alive = false;
+        _twt_keepalive.restored(esp_wifi_sta_twt_config(&baseline));
+        if (_twt_keepalive.restoreResult != ESP_OK) {
+            _twt_cleanup_failed = _twt.state.cleanupFailed = true;
+            _twt.state.cleanupStage = 8; // Config restoration debt: no retries/radio teardown.
+            return;
+        }
+    }
     if (_twt_ps_saved) {
         _twt.state.cleanupStage = 4;
         ++_twt_cleanup_attempts;
@@ -960,16 +1000,55 @@ void NetworkQuota::cleanupTwtTrial()
             return;
         }
     }
-    _twt.state.cleanupPending = _twt_submitted || _twt_ps_saved || _twt_cleanup_barrier_needed;
+    _twt.state.cleanupPending = _twt_submitted || _twt_ps_saved || _twt_cleanup_barrier_needed || _twt_keepalive.restoreOwed;
     if (!_twt.state.cleanupPending) {
         _twt_cleanup_attempts = 0;
         _twt.state.cleanupDeadlineUs = 0;
         _twt.state.cleanupStage = 0;
     }
 }
+bool NetworkQuota::serviceTwtKeepaliveConfig()
+{
+    using namespace MosaicoTwt;
+    if (_twt_keepalive.shouldApply()) {
+        std::unique_lock<std::mutex> guard(_wifi_settings_mutex, std::try_to_lock);
+        const bool allowed = guard.owns_lock() && !_wifi_settings.pending && !_wifi_settings.restartPending &&
+            idleLocked() && !twtOtaBlocked() && _twt_request.load() == -1 &&
+            !_twt.state.cleanupPending && !_twt_cleanup_failed &&
+            _twt.state.stage == Stage::Armed && _twt.check(esp_timer_get_time(), twtOtaBlocked(), idleLocked());
+        if (!allowed) {
+            cancelTwtTrial(twtOtaBlocked() ? Stop::Ota : Stop::Explicit);
+            return false;
+        }
+        wifi_twt_config_t diagnostic{};
+        diagnostic.post_wakeup_event = false;
+        diagnostic.twt_enable_keep_alive = _twt_keepalive.trialRequested != 0;
+        _twt_keepalive.configured(esp_wifi_sta_twt_config(&diagnostic));
+        if (_twt_keepalive.configResult != ESP_OK || twtOtaBlocked() || !idleLocked() || _twt_request.load() != -1) {
+            _twt.state.error = _twt_keepalive.configResult;
+            cancelTwtTrial(twtOtaBlocked() ? Stop::Ota : Stop::Driver);
+            return false;
+        }
+    }
+    return true;
+}
 void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
 {
     using namespace MosaicoTwt;
+    struct KeepaliveOwnerGuard {
+        NetworkQuota& owner;
+        explicit KeepaliveOwnerGuard(NetworkQuota& value) : owner(value) {
+            portENTER_CRITICAL(&owner._twt_mux);
+            owner._twt_keepalive_owner_processing = owner._twt_keepalive_busy = true;
+            portEXIT_CRITICAL(&owner._twt_mux);
+        }
+        ~KeepaliveOwnerGuard() {
+            portENTER_CRITICAL(&owner._twt_mux);
+            owner._twt_keepalive_owner_processing = false;
+            portEXIT_CRITICAL(&owner._twt_mux);
+            owner.publishTwt(); // Release admission and publish final metadata on every return.
+        }
+    } keepaliveOwnerGuard(*this);
     reconcileTwtCycleIdentity();
     // Expiry/OTA/unlock wins over an already queued setup success.
     if (_twt.live() && !_twt.check(now, twtOtaBlocked(), locked))
@@ -1037,7 +1116,10 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
         }
     }
     if (_twt.state.cleanupPending) cleanupTwtTrial();
+    portENTER_CRITICAL(&_twt_mux);
     const int request = _twt_request.exchange(-1);
+    if (request >= 0) _twt_keepalive_busy = true;
+    portEXIT_CRITICAL(&_twt_mux);
     if (request >= 0) {
         cancelTwtTrial(Stop::Explicit);
         _twt_bootstrap_id = 0;
@@ -1050,6 +1132,7 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
             _twt.state.error = ESP_ERR_INVALID_STATE;
             _twt.end(Stop::Driver);
         } else if (encodeRequest(mode, leaseSeconds, profile) != request || !_twt.start(mode, now, leaseSeconds, profile)) { _twt.state.error = ESP_ERR_INVALID_STATE; _twt.end(Stop::Driver); }
+        if (_twt.live()) _twt_keepalive.beginTrial(mode == Mode::On);
         if (_twt.live() && !locked) cancelTwtTrial(Stop::Awake);
         if (mode != Mode::Off && (!_twt_handler_ready || twtOtaBlocked()))
             cancelTwtTrial(_twt_handler_ready ? Stop::Ota : Stop::Driver);
@@ -1093,8 +1176,14 @@ void NetworkQuota::serviceTwtTrial(int64_t now, bool locked)
                     config.min_wake_dura = _twt.state.profile == Profile::WideServiceWindow ? 255 : 64;
                     config.wake_duration_unit = 0;
                     config.twt_id = _twt.state.id; config.timeout_time_ms = 5000;
+                    if (!serviceTwtKeepaliveConfig()) { publishTwt(); return; }
                     if (!_twt.bootstrapReady(esp_timer_get_time())) {
                         cancelTwtTrial(_twt.state.stop);
+                        publishTwt(); return;
+                    }
+                    if (_twt_keepalive.trialRequested >= 0 &&
+                        (twtOtaBlocked() || !idleLocked() || _twt_request.load() != -1)) {
+                        cancelTwtTrial(twtOtaBlocked() ? Stop::Ota : Stop::Explicit);
                         publishTwt(); return;
                     }
                     _twt_submitted = true;

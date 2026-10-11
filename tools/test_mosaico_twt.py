@@ -10,13 +10,18 @@ COMPILER = Path('C:/Espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-
 class TwtTests(unittest.TestCase):
     def test_actual_cleanup_source_fault_traces(self):
         source = (ROOT/'main/host/network_quota.cpp').read_text()
-        body = 'void NetworkQuota::cancelTwtTrial' + source.split('void NetworkQuota::cancelTwtTrial', 1)[1].split('void NetworkQuota::serviceTwtTrial', 1)[0]
+        body = 'void NetworkQuota::cancelTwtTrial' + source.split('void NetworkQuota::cancelTwtTrial', 1)[1].split('bool NetworkQuota::serviceTwtKeepaliveConfig', 1)[0]
         body = body.replace('void NetworkQuota::', 'constexpr void Owner::')
         code = r'''
 #include "main/host/mosaico_twt_model.h"
+#include "main/host/mosaico_twt_keepalive.h"
 using esp_err_t=int; using wifi_ps_type_t=int;
 constexpr int ESP_OK=0,FLOW_ID_ALL=8,ESP_ERR_INVALID_STATE=-2;
+struct wifi_twt_config_t { bool post_wakeup_event=false,twt_enable_keep_alive=false; };
 struct Owner {
+ MosaicoTwtKeepalive::State _twt_keepalive;
+ int configCalls=0,configError=0;
+ constexpr int esp_wifi_sta_twt_config(wifi_twt_config_t*){++configCalls;return configError;}
  MosaicoTwt::Model _twt;
  bool _twt_submitted=false,_twt_ps_saved=false,_twt_negotiation_pending=false;
  bool _twt_cleanup_failed=false,_wifi_running=true,_connected=true;
@@ -88,6 +93,7 @@ static_assert(cleanupTraces(), "actual cleanup fault traces");
     def test_cpp_trial_fault_traces(self):
         code = r'''
 #include "main/host/mosaico_twt_model.h"
+#include "main/host/mosaico_twt_keepalive.h"
 #include <initializer_list>
 using namespace MosaicoTwt;
 constexpr Result good(uint16_t id) { Result r; r.id=id; r.flow=5; r.status=1; r.mantissa=512; r.exponent=11; r.duration=64; return r; }
@@ -175,6 +181,7 @@ static_assert(disconnectRetention(), "actual disconnect record/end/off/start ret
     def test_bootstrap_and_negotiation_deadlines(self):
         self.compile_cpp(r'''
 #include "main/host/mosaico_twt_model.h"
+#include "main/host/mosaico_twt_keepalive.h"
 #include <initializer_list>
 using namespace MosaicoTwt;
 constexpr bool deadlines() {
@@ -207,6 +214,7 @@ static_assert(deadlines(), "finite bootstrap then fixed dispatch deadline, manua
         body = source.split('bool NetworkQuota::requestTwtTrial(',1)[1].split('void NetworkQuota::requestTwtObserve',1)[0]
         self.compile_cpp(r'''
 #include "main/host/mosaico_twt_model.h"
+#include "main/host/mosaico_twt_keepalive.h"
 #include <initializer_list>
 using namespace MosaicoTwt;
 struct Slot {
@@ -216,6 +224,8 @@ struct Slot {
 };
 struct Owner {
  Slot _twt_request; bool _task_handle=true;int notifications=0;
+ bool _twt_keepalive_busy=false;int _twt_mux=0;
+ constexpr void portENTER_CRITICAL(int*){} constexpr void portEXIT_CRITICAL(int*){}
  constexpr void xTaskNotifyGive(bool){++notifications;}
  constexpr bool requestTwtTrial(Mode,uint32_t,Profile);
 };
@@ -264,6 +274,7 @@ static_assert(validation(), "production request validation and Off priority");
 #define MOSAICO_BOARD 1
 #define SOC_WIFI_HE_SUPPORT 1
 #include "main/host/mosaico_twt_model.h"
+#include "main/host/mosaico_twt_keepalive.h"
 #include <initializer_list>
 using namespace MosaicoTwt;
 using esp_err_t=int;using wifi_phy_mode_t=int;using wifi_ps_type_t=int;
@@ -273,6 +284,9 @@ struct wifi_itwt_setup_config_t { int setup_cmd=0,trigger=0,flow_type=0,flow_id=
 struct Tailnet { bool configured=true,online=false;int starts=0;constexpr bool enabled(){return configured;}constexpr bool ready(){return online;} constexpr void start(){++starts;} constexpr void rebind(){} };
 struct Owner {
  Model _twt; Tailnet tail; bool _twt_handler_ready=true;
+ MosaicoTwtKeepalive::State _twt_keepalive;
+ constexpr bool serviceTwtKeepaliveConfig(){return true;}
+ struct Slot {constexpr int load(){return -1;}} _twt_request;
  bool ota=false;
  constexpr bool twtOtaBlocked(){return ota;}
  uint16_t _twt_bootstrap_id=0;
@@ -548,6 +562,7 @@ static_assert(ongoingReadiness(), "production owner keeps linked trial through c
     def test_long_lease_and_cycle_ring(self):
         self.compile_cpp(r'''
 #include "main/host/mosaico_twt_model.h"
+#include "main/host/mosaico_twt_keepalive.h"
 #include <initializer_list>
 using namespace MosaicoTwt;
 constexpr bool longLease() {
@@ -572,6 +587,7 @@ static_assert(longLease(), "lease atomic encoding and bounded ring");
         body = body.replace('void NetworkQuota::', 'constexpr void Owner::')
         self.compile_cpp(r'''
 #include "main/host/mosaico_twt_model.h"
+#include "main/host/mosaico_twt_keepalive.h"
 #include <initializer_list>
 using namespace MosaicoTwt;
 constexpr int ESP_OK=0;
@@ -711,7 +727,7 @@ static_assert(identityTransitions(), "actual owner identity changes never mix ev
         self.assertIn('esp_wifi_get_ps', service)
         self.assertNotIn('esp_wifi_set_protocol', source)
         self.assertNotIn('esp_wifi_set_twt_config', source)
-        cancel = source.split('void NetworkQuota::cancelTwtTrial', 1)[1].split('void NetworkQuota::serviceTwtTrial', 1)[0]
+        cancel = source.split('void NetworkQuota::cancelTwtTrial', 1)[1].split('bool NetworkQuota::serviceTwtKeepaliveConfig', 1)[0]
         self.assertIn('esp_wifi_sta_itwt_teardown(FLOW_ID_ALL)', cancel)
         self.assertNotIn('esp_wifi_disconnect(', cancel)
         self.assertNotIn('esp_wifi_stop(', cancel)

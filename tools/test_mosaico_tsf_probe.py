@@ -12,7 +12,7 @@ class TsfProbeTests(unittest.TestCase):
         if not COMPILERS: self.skipTest("cross compiler unavailable")
         start=CPP.index("bool NetworkQuota::requestTsfProbe(")
         end=CPP.index("bool NetworkQuota::requestHwRxSnapshot(",start)
-        cleanup=CPP[CPP.index("void NetworkQuota::cleanupTwtTrial()"):CPP.index("void NetworkQuota::serviceTwtTrial(")]
+        cleanup=CPP[CPP.index("void NetworkQuota::cleanupTwtTrial()"):CPP.index("bool NetworkQuota::serviceTwtKeepaliveConfig(")]
         methods=CPP[start:end]+cleanup
         for kind in ("bool", "void", "MosaicoTsfProbe::Snapshot"):
             methods=methods.replace(kind+" NetworkQuota::", "constexpr "+kind+" NetworkQuota::")
@@ -20,6 +20,7 @@ class TsfProbeTests(unittest.TestCase):
         harness=r'''
 #include "mosaico_tsf_probe.h"
 #include "mosaico_twt_model.h"
+#include "mosaico_twt_keepalive.h"
 #define CONFIG_IDF_TARGET_ESP32S31 1
 #define portENTER_CRITICAL(x) ((void)0)
 #define portEXIT_CRITICAL(x) ((void)0)
@@ -39,7 +40,10 @@ constexpr int ESP_TIMER_TASK=0;
 struct esp_timer_create_args_t {
  void (*callback)(void*)=nullptr; void* arg=nullptr; int dispatch_method=0; const char* name=nullptr;
 };
+struct wifi_twt_config_t {bool post_wakeup_event=false,twt_enable_keep_alive=false;};
 struct NetworkQuota {
+ MosaicoTwtKeepalive::State _twt_keepalive;
+ constexpr int esp_wifi_sta_twt_config(wifi_twt_config_t*){return 0;}
  Atomic<bool> _tsf_probe_pending{}, _hw_rx_owner_ready{true}, _wifi_running{true}, _connected{true};
  struct LanProbe { bool closed=true; constexpr bool quiesce(){return closed;} } _lan_tcp;
  MosaicoTwt::Model _twt;
@@ -283,7 +287,7 @@ static_assert(preCallRejections(), "pre-call gate rejection must not consume lat
         wait=CPP[CPP.index("void NetworkQuota::wait("):CPP.index("void NetworkQuota::setCpu(")]
         self.assertIn("cleanupPending && (_twt.state.cleanupStage == 6 || _twt.state.cleanupStage == 7)",wait)
         self.assertIn("milliseconds = std::min<uint32_t>(milliseconds, 1000)",wait)
-        cleanup=CPP[CPP.index("void NetworkQuota::cleanupTwtTrial()"):CPP.index("void NetworkQuota::serviceTwtTrial(")]
+        cleanup=CPP[CPP.index("void NetworkQuota::cleanupTwtTrial()"):CPP.index("bool NetworkQuota::serviceTwtKeepaliveConfig(")]
         self.assertLess(cleanup.index("!probe.driverDrained"),cleanup.index("esp_wifi_sta_itwt_teardown"))
         self.assertLess(cleanup.index("!probe.driverDrained"),cleanup.index("esp_wifi_set_ps"))
         self.assertEqual(region.count("esp_wifi_sta_itwt_send_probe_req("),1)
