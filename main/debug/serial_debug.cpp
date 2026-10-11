@@ -780,6 +780,35 @@ void SerialDebug::handleLine(char* line)
         return;
     }
 #ifdef MOSAICO_BOARD
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (command && std::strcmp(command, "hw-rx") == 0) {
+        const char* action = ::strtok_r(nullptr, " \t", &save);
+        const char* extra = ::strtok_r(nullptr, " \t", &save);
+        if (!action || extra || (std::strcmp(action, "snapshot") && std::strcmp(action, "status"))) {
+            result(command, "FAIL", "usage=hw-rx_snapshot|status no_changes=1"); return;
+        }
+        if (!std::strcmp(action, "snapshot")) {
+            uint64_t id = 0;
+            const bool ok = GetNetworkQuota().requestHwRxSnapshot(id);
+            char details[160];
+            std::snprintf(details, sizeof(details), "request_id=%llu queued=%d readonly=1 owner_only=1 owner_wake=0 naturally_scheduled=1", (unsigned long long)id, ok);
+            result(command, ok ? "QUEUED" : "FAIL", details); return;
+        }
+        const auto r = GetNetworkQuota().hwRxSnapshot();
+        char details[448];
+        std::snprintf(details, sizeof(details),
+            "request_id=%llu processed_id=%llu sample_seq=%llu pending=%d valid=%d getter_called=%d error=%d before_us=%lld after_us=%lld readonly=1 raw_counts=1 hw_atomic=0 powerdrop_bits=10 fcs_bits=16 container_bits=16 rxtxhung_bits=32 rxtxpanic_bits=32",
+            (unsigned long long)r.requestId, (unsigned long long)r.processedId, (unsigned long long)r.sampleSequence,
+            r.pending, r.valid, r.getterCalled, r.error, (long long)r.beforeUs, (long long)r.afterUs);
+        result(command, "PASS", details);
+        if (r.valid) {
+            debugPrintf("DBG HW_RX request_id=%llu sample_seq=%llu rx_fcs_err=%lu rx_abort=%lu rx_abort_fcs_pass=%lu nrx_err_pwrdrop=%lu rx_mpdu=%lu rx_end_cnt=%lu rx_datasuc=%lu rx_buf_fullcnt=%lu rx_fifo_ovfcnt=%lu rx_tkip_errcnt=%lu rx_lastunmatch_err=%lu nrx_err_bboff=%lu nrx_err_agcexit=%lu rxhung_statis=%lu txhung_statis=%lu rxtxhung=%lu rxtxpanic=%lu\r\n",
+                (unsigned long long)r.requestId, (unsigned long long)r.sampleSequence,
+                (unsigned long)r.rx_fcs_err, (unsigned long)r.rx_abort, (unsigned long)r.rx_abort_fcs_pass, (unsigned long)r.nrx_err_pwrdrop, (unsigned long)r.rx_mpdu, (unsigned long)r.rx_end_cnt, (unsigned long)r.rx_datasuc, (unsigned long)r.rx_buf_fullcnt, (unsigned long)r.rx_fifo_ovfcnt, (unsigned long)r.rx_tkip_errcnt, (unsigned long)r.rx_lastunmatch_err, (unsigned long)r.nrx_err_bboff, (unsigned long)r.nrx_err_agcexit, (unsigned long)r.rxhung_statis, (unsigned long)r.txhung_statis, (unsigned long)r.rxtxhung, (unsigned long)r.rxtxpanic);
+        }
+        return;
+    }
+#endif
     if (command && std::strcmp(command, "sessions") == 0) {
         const auto s = MosaicoSessions::snapshot();
         char details[512];

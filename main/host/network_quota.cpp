@@ -42,6 +42,10 @@
 #include <esp_log.h>
 #include <hal/ble/codex_micro_ble.h>
 #include <esp_wifi.h>
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+#include <esp_private/esp_wifi_he_private.h>
+static_assert(sizeof(esp_test_hw_rx_statistics_t) >= 86, "S31 getter writes through byte 85");
+#endif
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
 #include <esp_wifi_he.h>
 #endif
@@ -119,6 +123,88 @@ void NetworkQuota::refreshWhileLocked()
     _force_refresh = true;
     if (_task_handle) xTaskNotifyGive(_task_handle);
 }
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+bool NetworkQuota::requestHwRxSnapshot(uint64_t& requestId)
+{
+    requestId = 0;
+    // A single outstanding request, including owner execution. Never overwrite it.
+    bool expected = false;
+    if (!_hw_rx_pending.compare_exchange_strong(expected, true)) return false;
+    const bool accepted = _hw_rx_owner_ready.load() && !MosaicoOta::blocksTwt();
+    portENTER_CRITICAL(&_hw_rx_mux);
+    const auto next = _hw_rx_cache.requestId + 1;
+    const auto samples = _hw_rx_cache.sampleSequence;
+    const auto processed = _hw_rx_cache.processedId;
+    _hw_rx_cache = {};
+    _hw_rx_cache.requestId = next;
+    _hw_rx_cache.processedId = accepted ? processed : next;
+    _hw_rx_cache.sampleSequence = samples;
+    _hw_rx_cache.pending = accepted;
+    _hw_rx_cache.error = ESP_ERR_INVALID_STATE;
+    requestId = next;
+    if (!accepted) _hw_rx_pending.store(false);
+    portEXIT_CRITICAL(&_hw_rx_mux);
+    // No owner wake: execute at the next naturally scheduled network loop.
+    return accepted;
+}
+MosaicoHwRx::Snapshot NetworkQuota::hwRxSnapshot() const
+{
+    portENTER_CRITICAL(&_hw_rx_mux);
+    const auto copy = _hw_rx_cache;
+    portEXIT_CRITICAL(&_hw_rx_mux);
+    return copy;
+}
+void NetworkQuota::serviceHwRxSnapshot()
+{
+    if (!_hw_rx_pending.load()) return;
+    auto sample = hwRxSnapshot();
+    // Admission CAS can become visible before cache initialization. Wait for
+    // published pending state; a later naturally scheduled loop observes it.
+    if (!sample.pending) return;
+    sample.pending = false;
+    sample.processedId = sample.requestId;
+    sample.valid = false;
+    sample.error = ESP_ERR_INVALID_STATE;
+    wifi_ap_record_t ap{};
+    if (_wifi_running.load() && _connected.load() && !MosaicoOta::blocksTwt() &&
+        esp_wifi_sta_get_ap_info(&ap) == ESP_OK && !MosaicoOta::blocksTwt()) {
+        // Exact installed private type; getter receives the whole SDK structure,
+        // but only named numeric whitelist fields escape to the public cache.
+        esp_test_hw_rx_statistics_t raw{};
+        sample.beforeUs = esp_timer_get_time();
+        sample.getterCalled = true;
+        sample.error = esp_test_get_hw_rx_statistics(&raw);
+        sample.afterUs = esp_timer_get_time();
+        if (sample.error == ESP_OK) {
+            sample.valid = true;
+            ++sample.sampleSequence;
+            sample.rx_fcs_err = raw.rx_fcs_err;
+            sample.rx_abort = raw.rx_abort;
+            sample.rx_abort_fcs_pass = raw.rx_abort_fcs_pass;
+            sample.nrx_err_pwrdrop = raw.nrx_err_pwrdrop;
+            sample.rx_mpdu = raw.rx_mpdu;
+            sample.rx_end_cnt = raw.rx_end_cnt;
+            sample.rx_datasuc = raw.rx_datasuc;
+            sample.rx_buf_fullcnt = raw.rx_buf_fullcnt;
+            sample.rx_fifo_ovfcnt = raw.rx_fifo_ovfcnt;
+            sample.rx_tkip_errcnt = raw.rx_tkip_errcnt;
+            sample.rx_lastunmatch_err = raw.rx_lastunmatch_err;
+            sample.nrx_err_bboff = raw.nrx_err_bboff;
+            sample.nrx_err_agcexit = raw.nrx_err_agcexit;
+            sample.rxhung_statis = raw.rxhung_statis;
+            sample.txhung_statis = raw.txhung_statis;
+            sample.rxtxhung = raw.rxtxhung;
+            sample.rxtxpanic = raw.rxtxpanic;
+        }
+    }
+    // No SDK API is called while holding this cache lock.
+    portENTER_CRITICAL(&_hw_rx_mux);
+    _hw_rx_cache = sample;
+    _hw_rx_pending.store(false);
+    portEXIT_CRITICAL(&_hw_rx_mux);
+}
+#endif
+
 void NetworkQuota::wait(uint32_t milliseconds)
 {
 #ifdef MOSAICO_BOARD
@@ -980,6 +1066,9 @@ void NetworkQuota::begin()
 void NetworkQuota::task(void* arg)
 {
     static_cast<NetworkQuota*>(arg)->run();
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    static_cast<NetworkQuota*>(arg)->_hw_rx_owner_ready.store(false);
+#endif
     vTaskDelete(nullptr);
 }
 void NetworkQuota::run()
@@ -1076,7 +1165,13 @@ void NetworkQuota::run()
     unsigned scanHeapBefore = 0, scanHeapAfter = 0, tailnetHeapBefore = 0, tailnetHeapAfter = 0;
 
 #endif
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    _hw_rx_owner_ready.store(true); // All startup gates have completed.
+#endif
     while (true) {
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+        serviceHwRxSnapshot();
+#endif
 #ifdef MOSAICO_BOARD
         if (MosaicoOta::busy())
             mosaico_rx_observer::request(false);

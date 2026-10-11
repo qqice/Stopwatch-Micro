@@ -8,6 +8,9 @@
 #include "mosaico_wifi_profiles_model.h"
 #include "mosaico_twt_model.h"
 #include <soc/soc_caps.h>
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "mosaico_hw_rx_snapshot.h"
+#endif
 #include <ota/mosaico_ota.h>
 #endif
 #include <freertos/FreeRTOS.h>
@@ -38,6 +41,10 @@ public:
     void setPowerProfile(uint8_t profile);
     void refreshWhileLocked();
 #ifdef MOSAICO_BOARD
+#if CONFIG_IDF_TARGET_ESP32S31
+    bool requestHwRxSnapshot(uint64_t& requestId);
+    MosaicoHwRx::Snapshot hwRxSnapshot() const;
+#endif
     bool requestRxIngress(bool on, uint32_t src=0, uint16_t port=0, uint32_t ttlSeconds=0);
     bool requestWifiRxObservation(bool on, uint32_t ttlSeconds = 120);
     bool requestRxObservation(bool on, uint32_t ttlSeconds = 1200, bool controlOnly = false,
@@ -102,6 +109,12 @@ private:
     bool requestJson(const char* path, char* body, size_t capacity, int& used);
     bool fetchHistory();
 #ifdef MOSAICO_BOARD
+#if CONFIG_IDF_TARGET_ESP32S31
+    void serviceHwRxSnapshot(); // Network owner only, explicit one-shot request.
+    std::atomic<bool> _hw_rx_pending{false}, _hw_rx_owner_ready{false};
+    mutable portMUX_TYPE _hw_rx_mux = portMUX_INITIALIZER_UNLOCKED;
+    MosaicoHwRx::Snapshot _hw_rx_cache;
+#endif
     void updateFirmware();
     void serviceWifiSettings();
     void publishWifiProfiles();

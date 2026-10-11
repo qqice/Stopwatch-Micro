@@ -732,7 +732,7 @@ static_assert(identityTransitions(), "actual owner identity changes never mix ev
         overflow = service.split('if (overflow)', 1)[1].split('while (true)', 1)[0]
         self.assertNotIn('esp_wifi_', overflow)
         self.assertIn('_twt_cleanup_failed', overflow)
-        run = source.split('while (true) {\n#ifdef MOSAICO_BOARD', 1)[1]
+        run = source.split('void NetworkQuota::run()', 1)[1].split('while (true) {', 1)[1]
         self.assertLess(run.index('serviceTwtTrial('), run.index('MosaicoOta::processLocalRequests()'))
         cleanup_gate = run.split('if (_twt.state.cleanupPending || _twt_cleanup_failed)', 1)[1].split('if (ownsDisplaySettings)', 1)[0]
         self.assertIn('continue;', cleanup_gate)
