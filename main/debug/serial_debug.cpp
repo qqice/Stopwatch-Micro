@@ -7,6 +7,7 @@
 #ifdef MOSAICO_BOARD
 #include <host/system_clock.h>
 #include "mosaico_rx_observer.h"
+#include "mosaico_wifi_rx_observer.h"
 #include <host/mosaico_display_settings.h>
 #include <host/standby_sleep.h>
 #include <host/touch_sleep.h>
@@ -792,6 +793,30 @@ void SerialDebug::handleLine(char* line)
             s.freshnessKnownMask, s.lockedRefreshTimedOut, static_cast<long>(s.lockedRefreshError),
             static_cast<unsigned long>(s.lockedWindowCount), static_cast<unsigned long>(windowMs));
         result("sessions", s.failed ? "FAIL" : "PASS", details); return;
+    }
+    if (command && std::strcmp(command, "wifi-rx") == 0) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        const char* arg=::strtok_r(nullptr," \t",&save);
+        const char* extra=::strtok_r(nullptr," \t",&save);
+        uint32_t ttl=0;
+        using namespace mosaico_wifi_rx_observer;
+        const auto cmd=detail::arguments(action,arg,extra,ttl);
+        if(cmd==detail::Command::Invalid){result(command,"FAIL","usage=wifi-rx_on_1..120|off|status|drain");return;}
+        if(cmd==detail::Command::On || cmd==detail::Command::Off) {
+            const bool ok=GetNetworkQuota().requestWifiRxObservation(cmd==detail::Command::On,ttl);
+            result(command,ok?"PASS":"FAIL",ok?"queued=1 ram_only=1":"invalid_or_ota_busy");return;
+        }
+        if(cmd==detail::Command::Drain) {
+            Record rows[16];const auto n=drain(rows,16);
+            for(size_t i=0;i<n;++i){const auto& r=rows[i];
+                debugPrintf("DBG WIFI_RX local_us=%llu native_rx_us=%lu len=%u fc=%04x type=%u subtype=%u retry=%d protected=%d seq=%u frag=%u tid=%u rssi=%d rx_state=%u\r\n",
+                    (unsigned long long)r.localUs,(unsigned long)r.timestampUs,r.length,r.fc,r.type,r.subtype,r.retry,r.protectedFrame,r.sequence,r.fragment,r.tid,r.rssi,r.rxState);
+            }
+        }
+        const auto s=snapshot();char details[512];
+        std::snprintf(details,sizeof(details),"active=%d queued=%d actual_known=%d promisc=%d cleanup_pending=%d deadline_ms=%lu seen=%lu filtered=%lu invalid=%lu target=%lu drops=%lu ps_known=%d original_ps=%ld current_ps=%ld error=%ld native_timestamp_sleep_imprecise=1 observational_perturbation_possible=1",
+            s.active,s.queued,s.actualKnown,s.actualPromisc,s.cleanupPending,(unsigned long)s.deadlineMs,(unsigned long)s.seen,(unsigned long)s.filtered,(unsigned long)s.invalid,(unsigned long)s.target,(unsigned long)s.drops,s.psKnown,(long)s.originalPs,(long)s.currentPs,(long)s.lastError);
+        result(command,"PASS",details);return;
     }
     if (command && std::strcmp(command, "rx-observe") == 0) {
         const char* action = ::strtok_r(nullptr, " \t", &save);

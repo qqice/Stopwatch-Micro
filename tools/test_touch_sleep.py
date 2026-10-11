@@ -127,6 +127,11 @@ static_assert(cases(),"touch-first and OTA-first fence, nested guards, HTTP inte
 #define CONFIG_IDF_TARGET_ESP32S31 1
 // RX observer is a separate owner concern; preserve actual touch-admission prefix.
 namespace mosaico_rx_observer { constexpr bool request(bool){return true;} constexpr void service(bool){} }
+namespace mosaico_wifi_rx_observer {
+ struct Snapshot { bool cleanupPending; };
+ constexpr bool request(bool){return true;} constexpr void service(bool){}
+ constexpr Snapshot snapshot(){return {false};}
+}
 enum class UiStage{Idle,Checking,Failed,ReadyInstall,WaitingPower,Installing};
 template<class T>struct Value{T value;constexpr T load()const{return value;}constexpr void store(T x){value=x;}constexpr T exchange(T x){T old=value;value=x;return old;}constexpr operator T()const{return value;}};
 struct Actor {

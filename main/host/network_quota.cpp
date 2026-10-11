@@ -6,6 +6,7 @@
 #ifdef MOSAICO_BOARD
 #include "quota_monitor.h"
 #include <debug/mosaico_rx_observer.h>
+#include <debug/mosaico_wifi_rx_observer.h>
 #include "mosaico_quota_request_policy.h"
 #include "mosaico_display_settings.h"
 #include "mosaico_session_monitor.h"
@@ -120,6 +121,12 @@ void NetworkQuota::refreshWhileLocked()
 void NetworkQuota::wait(uint32_t milliseconds)
 {
 #ifdef MOSAICO_BOARD
+    const auto wifiRx = mosaico_wifi_rx_observer::snapshot();
+    if (wifiRx.active) {
+        const uint32_t now = uint32_t(esp_timer_get_time()/1000);
+        const int32_t remaining = int32_t(wifiRx.deadlineMs-now);
+        milliseconds=std::min<uint32_t>(milliseconds, remaining>0 ? std::min<uint32_t>(remaining,1000) : 1U);
+    } else if (wifiRx.cleanupPending || wifiRx.queued) milliseconds=std::min<uint32_t>(milliseconds,1000U);
     const auto rxObserver = mosaico_rx_observer::snapshot();
     if (rxObserver.active) {
         const uint32_t nowMs = static_cast<uint32_t>(esp_timer_get_time() / 1000);
@@ -181,6 +188,13 @@ void NetworkQuota::applyCpuConfig(uint32_t mhz, bool lightSleep)
     if(result==ESP_OK)_cpu_target=mhz;
 }
 #ifdef MOSAICO_BOARD
+bool NetworkQuota::requestWifiRxObservation(bool on, uint32_t ttlSeconds)
+{
+    if (on && MosaicoOta::blocksTwt()) return false;
+    if (!mosaico_wifi_rx_observer::request(on, ttlSeconds)) return false;
+    if (_task_handle) xTaskNotifyGive(_task_handle);
+    return true;
+}
 bool NetworkQuota::requestRxObservation(bool on, uint32_t ttlSeconds, bool controlOnly,
                                         uint32_t filterSrcIp, uint16_t filterSrcPort)
 {
@@ -1053,6 +1067,7 @@ void NetworkQuota::run()
         if (MosaicoOta::busy())
             mosaico_rx_observer::request(false);
         mosaico_rx_observer::service(!MosaicoOta::busy());
+        mosaico_wifi_rx_observer::service(!MosaicoOta::blocksTwt());
         drainWifiScan();
 #if SOC_WIFI_HE_SUPPORT
         if(_wifi_scan_started && (_twt.live() || _twt_request.load()!=-1)) {
@@ -1156,6 +1171,13 @@ void NetworkQuota::run()
                 if (!idleLocked()) continue;
 #ifdef MOSAICO_BOARD
                 cancelWifiScan(); drainWifiScan();
+#endif
+#ifdef MOSAICO_BOARD
+                mosaico_wifi_rx_observer::request(false);
+                mosaico_wifi_rx_observer::service(false);
+                const auto wifiRxStop=mosaico_wifi_rx_observer::snapshot();
+                // Filter rollback can retry after stop; only an unverified radio disable holds normal idle.
+                if (!mosaico_wifi_rx_observer::detail::canStopRadio(wifiRxStop)) { wait(1000); continue; }
 #endif
                 esp_wifi_disconnect();
                 if (esp_wifi_stop() != ESP_OK) {
@@ -1295,6 +1317,8 @@ void NetworkQuota::run()
         if (MosaicoOta::takeCheckRequest() || MosaicoOta::automaticCheckDue()) {
             mosaico_rx_observer::request(false);
             mosaico_rx_observer::service(false);
+            mosaico_wifi_rx_observer::request(false);
+            mosaico_wifi_rx_observer::service(false);
 #if SOC_WIFI_HE_SUPPORT
             cancelTwtTrial(MosaicoTwt::Stop::Ota);
             if (_twt.state.cleanupPending || _twt_cleanup_failed || !_wifi_running || !_connected) {
@@ -1311,6 +1335,8 @@ void NetworkQuota::run()
         if (MosaicoOta::takeRequest()) {
             mosaico_rx_observer::request(false);
             mosaico_rx_observer::service(false);
+            mosaico_wifi_rx_observer::request(false);
+            mosaico_wifi_rx_observer::service(false);
             updateFirmware();
 
             continue;
@@ -1513,6 +1539,11 @@ bool NetworkQuota::fetch()
 #ifdef MOSAICO_BOARD
 void NetworkQuota::updateFirmware()
 {
+    mosaico_wifi_rx_observer::request(false);
+    mosaico_wifi_rx_observer::service(false);
+    if (mosaico_wifi_rx_observer::snapshot().cleanupPending) {
+        MosaicoOta::fail("wifi_rx_cleanup_not_ready"); return;
+    }
 #if SOC_WIFI_HE_SUPPORT
     cancelTwtTrial(MosaicoTwt::Stop::Ota); // Before any manifest/chunk transfer.
     if (_twt.state.cleanupPending || _twt_cleanup_failed || !_wifi_running || !_connected) {
