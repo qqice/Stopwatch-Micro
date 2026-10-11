@@ -24,7 +24,8 @@ STATE = STATE.split(' * DERP Connection State', 1)[1].split('typedef struct {', 
 CONSTANTS = dict(MBEDTLS_ERR_SSL_WANT_READ=-1, MBEDTLS_ERR_SSL_WANT_WRITE=-2,
                  MBEDTLS_ERR_SSL_TIMEOUT=-3, DERP_FRAME_RECV_PACKET=5,
                  WG_RX_HEADER_SHORT_READ=0, WG_RX_HEADER_RESUMED=1,
-                 WG_RX_HEADER_TIMEOUT=2, WG_RX_DERP_READ_EOF=3, NULL=0)
+                 WG_RX_HEADER_TIMEOUT=2, WG_RX_DERP_READ_EOF=3, NULL=0,
+                 ESP_ERR_INVALID_STATE=-20, ESP_ERR_INVALID_SIZE=-21, ESP_ERR_NO_MEM=-22)
 PREAMBLE = '''typedef unsigned char uint8_t; typedef unsigned short uint16_t;
 typedef unsigned int uint32_t; typedef unsigned long long uint64_t;
 typedef long long int64_t; typedef unsigned int size_t; typedef int bool;
@@ -36,6 +37,8 @@ DEFINES = '\n'.join('#define %s %s' % item for item in CONSTANTS.items())
 PROTOTYPES = '''
 long long esp_timer_get_time(void); uint64_t ml_get_time_ms(void);
 int mbedtls_ssl_read(int *, uint8_t *, size_t);
+static unsigned derp_trace_stage; static int derp_trace_fd;
+void derp_trace_failure(microlink_t *, int);
 void wireguardif_rx_count(unsigned); void vTaskDelay(unsigned);
 void *ml_psram_malloc(size_t); void *malloc(size_t); void free(void *);
 void *memcpy(void *, const void *, size_t);
@@ -88,6 +91,7 @@ static long long now_us;
 static microlink_t client;
 long long esp_timer_get_time(void) { return now_us; }
 uint64_t ml_get_time_ms(void) { return (uint64_t)(now_us / 1000); }
+void derp_trace_failure(microlink_t *ml, int ret) { (void)ml; (void)ret; }
 void wireguardif_rx_count(unsigned field) { assert(field < 4); ++counts[field]; }
 void vTaskDelay(unsigned ms) { now_us += (long long)ms * 1000; }
 void *ml_psram_malloc(size_t length) { return tracked_malloc(length); }
@@ -264,7 +268,7 @@ class Replay:
                         ml_psram_malloc=self.allocate, malloc=self.allocate, free=self.release,
                         memcpy=self.copy, dispatch_derp_frame=self.dispatch,
                         vTaskDelay=self.delay, pdMS_TO_TICKS=lambda n:n, ESP_LOGW=lambda *a:None,
-                        TAG=0)
+                        derp_trace_failure=lambda *a:None, TAG=0)
         try: self.run(self.ast)
         except Returned as e: return e.args[0]
         raise AssertionError('production function fell through')

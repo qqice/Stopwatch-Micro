@@ -28,7 +28,7 @@ def native_harness():
     src = (BASE / 'src/ml_derp.c').read_text(encoding='utf8')
     stats = (BASE / 'components/wireguard_lwip/src/wireguardif_rx_stats.h').read_text(encoding='utf8')
     snapshot = function((BASE / 'components/wireguard_lwip/src/wireguardif.c').read_text(encoding='utf8'), 'wireguardif_rx_stats')
-    functions = ''.join(function(src, name) for name in (
+    functions = 'static void derp_trace_failure(microlink_t *ml, int ret) { (void)ml; (void)ret; }\n' + ''.join(function(src, name) for name in (
         'ml_derp_bio_send', 'microlink_set_derp_tx_retry_budget_ms',
         'microlink_get_derp_tx_retry_budget_ms', 'derp_tx_observe',
         'derp_tls_write_all', 'derp_write_frame'))
