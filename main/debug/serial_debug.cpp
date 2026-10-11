@@ -796,6 +796,17 @@ void SerialDebug::handleLine(char* line)
     if (command && std::strcmp(command, "rx-observe") == 0) {
         const char* action = ::strtok_r(nullptr, " \t", &save);
         if (!action) action = "status";
+        if (!std::strcmp(action,"target")) {
+            const char* ipText = ::strtok_r(nullptr," \t",&save);
+            const char* portText = ::strtok_r(nullptr," \t",&save);
+            const char* ttlText = ::strtok_r(nullptr," \t",&save);
+            const char* extra = ::strtok_r(nullptr," \t",&save);
+            uint32_t ip = 0, ttl = 0; uint16_t port = 0;
+            const bool valid = !extra && mosaico_rx_observer::detail::targetArguments(ipText,portText,ttlText,ip,port,ttl);
+            const bool ok = valid && GetNetworkQuota().requestRxObservation(true,ttl,false,ip,port);
+            result(command,ok ? "PASS" : "FAIL",ok ? "queued=1 ram_only=1" : "invalid_arguments_or_ota_busy");
+            return;
+        }
         if (!std::strcmp(action,"on") || !std::strcmp(action,"derp") || !std::strcmp(action,"off")) {
             const char* arg = ::strtok_r(nullptr," \t",&save);
             char* end = nullptr;
@@ -832,11 +843,13 @@ void SerialDebug::handleLine(char* line)
             }
             result(command,"PASS","drain_max=16 prevalidation=1 payload=0"); return;
         }
-        if (std::strcmp(action,"status")) { result(command,"FAIL","expected=on_derp_off_status_drain"); return; }
+        if (std::strcmp(action,"status")) { result(command,"FAIL","expected=on_derp_target_off_status_drain"); return; }
         const auto r=mosaico_rx_observer::snapshot();
         debugPrintf("DBG RX_OBSERVER active=%d queued=%d reporting=%d control_only=%d deadline_ms=%lu seen=%lu malformed=%lu fragments=%lu tcp=%lu udp=%lu other_udp=%lu wg=%lu,%lu,%lu,%lu ring_drop=%lu error=%ld\r\n",
             r.active,r.queued,r.reporting,r.controlOnly,(unsigned long)r.deadlineMs,(unsigned long)r.seen,(unsigned long)r.malformed,(unsigned long)r.fragments,(unsigned long)r.tcp,(unsigned long)r.udp,(unsigned long)r.otherUdp,
             (unsigned long)r.wireguard[0],(unsigned long)r.wireguard[1],(unsigned long)r.wireguard[2],(unsigned long)r.wireguard[3],(unsigned long)r.ringDrops,(long)r.lastError);
+        debugPrintf("DBG RX_TARGET src=%lu sport=%u target_match=%lu filtered=%lu ram_only=1\r\n",
+            (unsigned long)r.filterSrcIp,r.filterSrcPort,(unsigned long)r.targetMatch,(unsigned long)r.filtered);
         debugPrintf("DBG DERP_TRACE events=%lu ring_drop=%lu session_discarded=%lu metadata_only=1 errno_hint_not_authoritative=1\r\n",
             (unsigned long)r.derpEvents,(unsigned long)r.derpRingDrops,(unsigned long)r.discardedRecords);
         debugPrintf("DBG TX_TRACE syn=%lu encrypted_syn=%lu dispatch=%lu enqueue=%lu dequeue=%lu frame_done=%lu gate=%lu bind=%lu ring_drop=%lu public_header_only=1\r\n",
