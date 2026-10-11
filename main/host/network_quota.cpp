@@ -7,6 +7,7 @@
 #include "quota_monitor.h"
 #include <debug/mosaico_rx_observer.h>
 #include <debug/mosaico_wifi_rx_observer.h>
+#include <debug/mosaico_rx_ingress.h>
 #include "mosaico_quota_request_policy.h"
 #include "mosaico_display_settings.h"
 #include "mosaico_session_monitor.h"
@@ -188,6 +189,19 @@ void NetworkQuota::applyCpuConfig(uint32_t mhz, bool lightSleep)
     if(result==ESP_OK)_cpu_target=mhz;
 }
 #ifdef MOSAICO_BOARD
+bool NetworkQuota::requestRxIngress(bool on,uint32_t src,uint16_t port,uint32_t ttlSeconds)
+{
+    if (on && MosaicoOta::blocksTwt()) return false;
+    if (!mosaico_rx_ingress::request(on,src,port,ttlSeconds)) return false;
+    // Close the admission race with an OTA request on another task. OTA also
+    // invalidates any earlier ingress generation at its successful admission.
+    if (on && MosaicoOta::blocksTwt()) {
+        mosaico_rx_ingress::request(false);
+        return false;
+    }
+    if (_task_handle) xTaskNotifyGive(_task_handle);
+    return true;
+}
 bool NetworkQuota::requestWifiRxObservation(bool on, uint32_t ttlSeconds)
 {
     if (on && MosaicoOta::blocksTwt()) return false;
@@ -1068,6 +1082,7 @@ void NetworkQuota::run()
             mosaico_rx_observer::request(false);
         mosaico_rx_observer::service(!MosaicoOta::busy());
         mosaico_wifi_rx_observer::service(!MosaicoOta::blocksTwt());
+        mosaico_rx_ingress::service(!MosaicoOta::blocksTwt());
         drainWifiScan();
 #if SOC_WIFI_HE_SUPPORT
         if(_wifi_scan_started && (_twt.live() || _twt_request.load()!=-1)) {
@@ -1173,6 +1188,8 @@ void NetworkQuota::run()
                 cancelWifiScan(); drainWifiScan();
 #endif
 #ifdef MOSAICO_BOARD
+                mosaico_rx_ingress::request(false);
+                mosaico_rx_ingress::service(false);
                 mosaico_wifi_rx_observer::request(false);
                 mosaico_wifi_rx_observer::service(false);
                 const auto wifiRxStop=mosaico_wifi_rx_observer::snapshot();
@@ -1317,6 +1334,8 @@ void NetworkQuota::run()
         if (MosaicoOta::takeCheckRequest() || MosaicoOta::automaticCheckDue()) {
             mosaico_rx_observer::request(false);
             mosaico_rx_observer::service(false);
+            mosaico_rx_ingress::request(false);
+            mosaico_rx_ingress::service(false);
             mosaico_wifi_rx_observer::request(false);
             mosaico_wifi_rx_observer::service(false);
 #if SOC_WIFI_HE_SUPPORT
@@ -1335,6 +1354,8 @@ void NetworkQuota::run()
         if (MosaicoOta::takeRequest()) {
             mosaico_rx_observer::request(false);
             mosaico_rx_observer::service(false);
+            mosaico_rx_ingress::request(false);
+            mosaico_rx_ingress::service(false);
             mosaico_wifi_rx_observer::request(false);
             mosaico_wifi_rx_observer::service(false);
             updateFirmware();
@@ -1539,6 +1560,8 @@ bool NetworkQuota::fetch()
 #ifdef MOSAICO_BOARD
 void NetworkQuota::updateFirmware()
 {
+    mosaico_rx_ingress::request(false);
+    mosaico_rx_ingress::service(false);
     mosaico_wifi_rx_observer::request(false);
     mosaico_wifi_rx_observer::service(false);
     if (mosaico_wifi_rx_observer::snapshot().cleanupPending) {

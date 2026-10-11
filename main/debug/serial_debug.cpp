@@ -8,6 +8,7 @@
 #include <host/system_clock.h>
 #include "mosaico_rx_observer.h"
 #include "mosaico_wifi_rx_observer.h"
+#include <debug/mosaico_rx_ingress.h>
 #include <host/mosaico_display_settings.h>
 #include <host/standby_sleep.h>
 #include <host/touch_sleep.h>
@@ -793,6 +794,39 @@ void SerialDebug::handleLine(char* line)
             s.freshnessKnownMask, s.lockedRefreshTimedOut, static_cast<long>(s.lockedRefreshError),
             static_cast<unsigned long>(s.lockedWindowCount), static_cast<unsigned long>(windowMs));
         result("sessions", s.failed ? "FAIL" : "PASS", details); return;
+    }
+    if (command && std::strcmp(command, "rx-ingress") == 0) {
+        using namespace mosaico_rx_ingress;
+        const char* action=::strtok_r(nullptr," \t",&save);
+        if(action && !std::strcmp(action,"target")) {
+            const char* ipText=::strtok_r(nullptr," \t",&save);
+            const char* portText=::strtok_r(nullptr," \t",&save);
+            const char* ttlText=::strtok_r(nullptr," \t",&save);
+            const char* extra=::strtok_r(nullptr," \t",&save);
+            uint32_t ip=0,ttl=0;uint16_t port=0;
+            const bool valid=!extra && detail::targetArguments(ipText,portText,ttlText,ip,port,ttl);
+            const bool ok=valid && GetNetworkQuota().requestRxIngress(true,ip,port,ttl);
+            result(command,ok?"PASS":"FAIL",ok?"queued=1 app_only=1":"invalid_or_ota_busy");return;
+        }
+        if(!action || ::strtok_r(nullptr," \t",&save) ||
+           (std::strcmp(action,"off") && std::strcmp(action,"status") && std::strcmp(action,"drain"))) {
+            result(command,"FAIL","usage=rx-ingress_target_ip_port_1..120|off|status|drain");return;
+        }
+        if(!std::strcmp(action,"off")) {
+            const bool ok=GetNetworkQuota().requestRxIngress(false);
+            result(command,ok?"PASS":"FAIL","queued=1 stopped_immediately=1");return;
+        }
+        if(!std::strcmp(action,"drain")) {
+            Record rows[16];const auto n=drain(rows,16);
+            for(size_t i=0;i<n;++i){const auto& r=rows[i];
+                debugPrintf("DBG RX_INGRESS local_us=%llu ingress_id=%lu src=%08lx dst=%08lx src_port=%u dst_port=%u frame_len=%u ip_len=%u ip_hlen=%u tcp_hlen=%u tcp_len=%u seq=%lu ack=%lu flags=%02x vlan=%u class=%u netif_result=%ld\r\n",
+                    (unsigned long long)r.localUs,(unsigned long)r.ingressId,(unsigned long)r.src,(unsigned long)r.dst,r.srcPort,r.dstPort,r.frameLength,r.ipLength,r.ipHeaderLength,r.tcpHeaderLength,r.tcpPayloadLength,(unsigned long)r.seq,(unsigned long)r.ack,r.tcpFlags,r.vlanTags,unsigned(r.classification),(long)r.netifResult);
+            }
+        }
+        const auto s=snapshot();char details[512];
+        std::snprintf(details,sizeof(details),"active=%d queued=%d deadline_ms=%lu src=%08lx src_port=%u seen=%lu sta=%lu invalid=%lu filtered=%lu target=%lu ring_drops=%lu buffered=%u ok=%lu no_mem=%lu fail=%lu other=%lu error=%ld queue_admission_only=1 body=0 app_only=1",
+            s.active,s.queued,(unsigned long)s.deadlineMs,(unsigned long)s.src,s.srcPort,(unsigned long)s.seen,(unsigned long)s.sta,(unsigned long)s.invalid,(unsigned long)s.filtered,(unsigned long)s.target,(unsigned long)s.ringDrops,s.buffered,(unsigned long)s.ok,(unsigned long)s.noMem,(unsigned long)s.fail,(unsigned long)s.other,(long)s.lastError);
+        result(command,"PASS",details);return;
     }
     if (command && std::strcmp(command, "wifi-rx") == 0) {
         const char* action=::strtok_r(nullptr," \t",&save);

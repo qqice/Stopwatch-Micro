@@ -153,7 +153,13 @@ static_assert(cases(),"same-frequency LS enable/disable is not hidden by cached 
         self.assertIn('model.pause()',cancel);self.assertNotIn('model.off()',cancel)
         ota=(R/'main/ota/mosaico_ota.cpp').read_text()
         for flag in ('active','approvedRequest','checkQueued','checking','installQueued','rebootQueued','bootPending'):
-            self.assertIn(flag+'.store(true); StandbySleep::otaActivity();',ota)
+            self.assertRegex(ota, flag + r'\.store\(true\);\s*'
+                r'(?:mosaico_rx_ingress::request\(false\);\s*(?://[^\n]*\n\s*)?)?'
+                r'StandbySleep::otaActivity\(\);')
+        for admission in ('bool requestLocked(', 'bool approveUpdate(', 'bool requestCheck(',
+                          'bool approveInstall(', 'bool requestReboot('):
+            body=function(ota,admission)
+            self.assertIn('mosaico_rx_ingress::request(false)',body)
         action=function(source,'void otaActivity()')
         self.assertIn('model.otaBlocked=true',action);self.assertIn('refreshRecovery(',action)
         serial=(R/'main/debug/serial_debug.cpp').read_text()

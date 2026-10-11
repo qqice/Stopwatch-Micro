@@ -1,5 +1,6 @@
 #include <debug/mosaico_rx_observer.h>
 #include <debug/mosaico_wifi_rx_observer.h>
+#include <debug/mosaico_rx_ingress.h>
 #include "mosaico_ota.h"
 #include "mosaico_ota_power.h"
 #include "ota_public_key.h"
@@ -252,7 +253,9 @@ bool requestLocked(bool automatic, bool preserveAge = false)
     std::snprintf(reason, sizeof(reason), "requested");
     cachedRunning.store(esp_ota_get_running_partition());
     if (!preserveAge) requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    active.store(true); StandbySleep::otaActivity();
+    active.store(true);
+    mosaico_rx_ingress::request(false); // Admission invalidates pending RX generations.
+    StandbySleep::otaActivity();
     return true;
 }
 bool validateDescriptor(const char* json, Descriptor& out, const char*& error)
@@ -419,7 +422,8 @@ bool approveUpdate(const char* expectedSha)
     // Only a short in-memory copy and atomic queue; network owner performs all work.
     std::memcpy(approvedHash, ui.sha256, 65);
     requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    approvedRequest.store(true); StandbySleep::otaActivity(); return true;
+    approvedRequest.store(true); mosaico_rx_ingress::request(false);
+    StandbySleep::otaActivity(); return true;
 }
 void deferUpdate()
 {
@@ -568,7 +572,8 @@ bool requestCheck()
         ui.stage == UiStage::ReadyInstall || ui.stage == UiStage::ReadyReboot ||
         (ui.stage == UiStage::WaitingPower && imageReady.load())) return false;
     requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    checkQueued.store(true); StandbySleep::otaActivity(); return true;
+    checkQueued.store(true); mosaico_rx_ingress::request(false);
+    StandbySleep::otaActivity(); return true;
 }
 bool takeCheckRequest()
 {
@@ -591,14 +596,16 @@ bool approveInstall(const char* expectedSha)
         !ui.signatureVerified || !ui.imageVerified || !imageReady.load() || selected.load() ||
         (ui.stage != UiStage::ReadyInstall && ui.stage != UiStage::WaitingPower)) return false;
     requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    installQueued.store(true); StandbySleep::otaActivity(); return true;
+    installQueued.store(true); mosaico_rx_ingress::request(false);
+    StandbySleep::otaActivity(); return true;
 }
 bool requestReboot()
 {
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || ui.stage != UiStage::ReadyReboot || !selected.load()) return false;
-    rebootQueued.store(true); StandbySleep::otaActivity(); return true;
+    rebootQueued.store(true); mosaico_rx_ingress::request(false);
+    StandbySleep::otaActivity(); return true;
 }
 bool rebootWithFreshPower()
 {
@@ -620,6 +627,8 @@ void processLocalRequests()
     if(!rebootQueued.load() && !installQueued.load() && !installWork)return;
     mosaico_rx_observer::request(false);
     mosaico_rx_observer::service(false); // Same network owner; stop diagnostics before flash/reboot.
+    mosaico_rx_ingress::request(false);
+    mosaico_rx_ingress::service(false);
     mosaico_wifi_rx_observer::request(false);
     mosaico_wifi_rx_observer::service(false);
     if (mosaico_wifi_rx_observer::snapshot().cleanupPending) return;

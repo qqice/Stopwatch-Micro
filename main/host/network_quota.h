@@ -38,6 +38,7 @@ public:
     void setPowerProfile(uint8_t profile);
     void refreshWhileLocked();
 #ifdef MOSAICO_BOARD
+    bool requestRxIngress(bool on, uint32_t src=0, uint16_t port=0, uint32_t ttlSeconds=0);
     bool requestWifiRxObservation(bool on, uint32_t ttlSeconds = 120);
     bool requestRxObservation(bool on, uint32_t ttlSeconds = 1200, bool controlOnly = false,
                               uint32_t filterSrcIp = 0, uint16_t filterSrcPort = 0);
