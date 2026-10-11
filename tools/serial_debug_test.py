@@ -21,6 +21,70 @@ except ImportError as exc:  # pragma: no cover - depends on the ESP-IDF environm
 RESULT_RE = re.compile(r"DBG RESULT command=([^ ]+) status=([^ ]+)(?: (.*))?")
 
 
+class SerialLineReader:
+    """Keep timeout-split UART/USB lines intact; never return a partial line.
+
+    Oversize lines are discarded through LF, never parsed from their tail.
+    Bounded raw reads and a bounded accumulator prevent untrusted line growth.
+    """
+    def __init__(self, source, limit=8192):
+        if not 1 <= limit <= 65536:
+            raise ValueError("invalid serial line limit")
+        self.source = source
+        self.limit = limit
+        self.buffer = bytearray()
+        self.discarding = False
+        self.partial_reads = 0
+        self.dropped_lines = 0
+
+    # Preserve pyserial control writes (notably CDC's 1200-baud ROM request).
+    SERIAL_PROPERTIES = frozenset(("baudrate", "port", "timeout", "write_timeout",
+        "inter_byte_timeout", "bytesize", "parity", "stopbits", "xonxoff",
+        "rtscts", "dsrdtr", "rts", "dtr"))
+
+    def __getattr__(self, key):
+        return getattr(self.source, key)
+
+    def __setattr__(self, key, value):
+        if key in self.SERIAL_PROPERTIES:
+            setattr(self.source, key, value)
+        else:
+            object.__setattr__(self, key, value)
+
+    def reset_input_buffer(self):
+        self.buffer.clear()
+        self.discarding = False
+        self.source.reset_input_buffer()
+
+    def readline(self, *args):
+        # pyserial read_until preserves its existing timeout. Test/legacy readers
+        # without that API are supported; production reads are size-bounded.
+        read_until = getattr(self.source, "read_until", None)
+        chunk = read_until(b"\n", self.limit + 1) if read_until else self.source.readline()
+        if not chunk:
+            return b""
+        if self.discarding:
+            end = chunk.find(b"\n")
+            if end < 0:
+                return b""
+            self.discarding = False
+            chunk = chunk[end + 1:]
+        # read_until returns at most one LF-terminated line; accumulator contains
+        # only a prefix from prior timeouts, never a second completed line.
+        if len(self.buffer) + len(chunk) > self.limit:
+            self.buffer.clear()
+            self.dropped_lines += 1
+            self.discarding = not chunk.endswith(b"\n")
+            return b""
+        self.buffer.extend(chunk)
+        if not self.buffer.endswith(b"\n"):
+            self.partial_reads += 1
+            return b""
+        line = bytes(self.buffer)
+        self.buffer.clear()
+        return line
+
+
 @dataclass
 class Result:
     command: str
@@ -88,6 +152,7 @@ class DebugClient:
         self.serial.rts = False
         self.serial.port = port
         self.serial.open()
+        self.serial = SerialLineReader(self.serial)
 
     def handshake(self, timeout: float = 12.0) -> None:
         if self.wake_preamble:
