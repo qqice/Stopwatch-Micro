@@ -796,12 +796,12 @@ void SerialDebug::handleLine(char* line)
     if (command && std::strcmp(command, "rx-observe") == 0) {
         const char* action = ::strtok_r(nullptr, " \t", &save);
         if (!action) action = "status";
-        if (!std::strcmp(action,"on") || !std::strcmp(action,"off")) {
+        if (!std::strcmp(action,"on") || !std::strcmp(action,"derp") || !std::strcmp(action,"off")) {
             const char* arg = ::strtok_r(nullptr," \t",&save);
             char* end = nullptr;
             unsigned long ttl = arg ? std::strtoul(arg,&end,10) : 1200;
             const bool valid = !arg || (end != arg && !*end && ttl > 0 && ttl <= 1200);
-            const bool ok = valid && GetNetworkQuota().requestRxObservation(!std::strcmp(action,"on"), ttl);
+            const bool ok = valid && GetNetworkQuota().requestRxObservation(std::strcmp(action,"off") != 0, ttl, !std::strcmp(action,"derp"));
             result(command,ok ? "PASS" : "FAIL",ok ? "queued=1 ram_only=1" : "invalid_arguments");
             return;
         }
@@ -810,6 +810,11 @@ void SerialDebug::handleLine(char* line)
             const auto n = mosaico_rx_observer::drain(records,16);
             for (size_t i=0;i<n;++i) {
                 const auto& r=records[i];
+                if (r.tracePhase == 9) {
+                    debugPrintf("DBG DERP_EVENT ms=%lu kind=%u stage=%u ret=%ld errno_hint=%ld region=%lu fd=%ld tsf_ref=%llu tsf_ms=%lu\r\n",
+                        (unsigned long)r.millis,r.protocol,r.tcpFlags,(long)r.traceResult,(long)int32_t(r.ack),(unsigned long)r.receiverIndex,(long)int32_t(r.seq),(unsigned long long)r.tsf,(unsigned long)r.tsfMillis);
+                    continue;
+                }
                 if (r.tracePhase == 8) {
                     debugPrintf("DBG TX_BIND ms=%lu if_index=%lu flags=%lu dest=%lu port=%u result=%ld\r\n",
                         (unsigned long)r.millis,(unsigned long)uint32_t(r.counter),(unsigned long)(r.counter >> 32),(unsigned long)r.seq,r.dstPort,(long)r.traceResult);
@@ -827,11 +832,13 @@ void SerialDebug::handleLine(char* line)
             }
             result(command,"PASS","drain_max=16 prevalidation=1 payload=0"); return;
         }
-        if (std::strcmp(action,"status")) { result(command,"FAIL","expected=on_off_status_drain"); return; }
+        if (std::strcmp(action,"status")) { result(command,"FAIL","expected=on_derp_off_status_drain"); return; }
         const auto r=mosaico_rx_observer::snapshot();
-        debugPrintf("DBG RX_OBSERVER active=%d queued=%d reporting=%d deadline_ms=%lu seen=%lu malformed=%lu fragments=%lu tcp=%lu udp=%lu other_udp=%lu wg=%lu,%lu,%lu,%lu ring_drop=%lu error=%ld\r\n",
-            r.active,r.queued,r.reporting,(unsigned long)r.deadlineMs,(unsigned long)r.seen,(unsigned long)r.malformed,(unsigned long)r.fragments,(unsigned long)r.tcp,(unsigned long)r.udp,(unsigned long)r.otherUdp,
+        debugPrintf("DBG RX_OBSERVER active=%d queued=%d reporting=%d control_only=%d deadline_ms=%lu seen=%lu malformed=%lu fragments=%lu tcp=%lu udp=%lu other_udp=%lu wg=%lu,%lu,%lu,%lu ring_drop=%lu error=%ld\r\n",
+            r.active,r.queued,r.reporting,r.controlOnly,(unsigned long)r.deadlineMs,(unsigned long)r.seen,(unsigned long)r.malformed,(unsigned long)r.fragments,(unsigned long)r.tcp,(unsigned long)r.udp,(unsigned long)r.otherUdp,
             (unsigned long)r.wireguard[0],(unsigned long)r.wireguard[1],(unsigned long)r.wireguard[2],(unsigned long)r.wireguard[3],(unsigned long)r.ringDrops,(long)r.lastError);
+        debugPrintf("DBG DERP_TRACE events=%lu ring_drop=%lu session_discarded=%lu metadata_only=1 errno_hint_not_authoritative=1\r\n",
+            (unsigned long)r.derpEvents,(unsigned long)r.derpRingDrops,(unsigned long)r.discardedRecords);
         debugPrintf("DBG TX_TRACE syn=%lu encrypted_syn=%lu dispatch=%lu enqueue=%lu dequeue=%lu frame_done=%lu gate=%lu bind=%lu ring_drop=%lu public_header_only=1\r\n",
             (unsigned long)r.txTrace[1],(unsigned long)r.txTrace[2],(unsigned long)r.txTrace[3],(unsigned long)r.txTrace[4],(unsigned long)r.txTrace[5],(unsigned long)r.txTrace[6],(unsigned long)r.txTrace[7],(unsigned long)r.txTrace[8],(unsigned long)r.txRingDrops);
         debugPrintf("DBG RX_TIMING rx_event_lower_bound=%lu tx_event_lower_bound=%lu event_ms=%lu wake=%lu suspend=%lu probe=%lu twt_event_ms=%lu tsf_ref=%llu tsf_ms=%lu wake_posting_unknown=1\r\n",

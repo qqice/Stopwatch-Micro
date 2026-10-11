@@ -19,7 +19,7 @@ portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 DRAM_ATTR detail::MetadataRing ring;
 Snapshot state;
 netif* sta = nullptr;
-bool pending = false, requested = false, handlers = false;
+bool pending = false, requested = false, handlers = false, requestedControlOnly = false;
 uint32_t requestedTtl = 0, nextTsf = 0;
 esp_netif_t* ownerNetif = nullptr;
 esp_event_handler_instance_t ipHandler = nullptr, wifiHandler = nullptr;
@@ -49,10 +49,10 @@ bool readPbuf(void* ctx, uint16_t offset, uint8_t* out, uint16_t length) {
 }
 void error(esp_err_t e) { portENTER_CRITICAL(&mux); state.lastError = e; portEXIT_CRITICAL(&mux); }
 }
-bool request(bool on, uint32_t ttlSeconds) {
+bool request(bool on, uint32_t ttlSeconds, bool controlOnly) {
     if (on && (!ttlSeconds || ttlSeconds > 1200)) return false;
     portENTER_CRITICAL(&mux);
-    requested = on; requestedTtl = ttlSeconds; pending = true; state.queued = true;
+    requested = on; requestedTtl = ttlSeconds; requestedControlOnly = controlOnly; pending = true; state.queued = true;
     portEXIT_CRITICAL(&mux);
     return true;
 }
@@ -65,9 +65,9 @@ std::size_t drain(Record* out, std::size_t capacity) {
 }
 void service(bool allowEnable) {
     const uint32_t now = nowMs();
-    bool command, on; uint32_t ttl;
+    bool command, on, controlOnly; uint32_t ttl;
     portENTER_CRITICAL(&mux);
-    command = pending || !allowEnable; on = requested && allowEnable; ttl = requestedTtl;
+    command = pending || !allowEnable; on = requested && allowEnable; ttl = requestedTtl; controlOnly = requestedControlOnly;
     pending = false; state.queued = false;
     bool expired = state.active && !detail::alive(now, state.deadlineMs);
     if ((command && !on) || expired) { state.active = false; sta = nullptr; }
@@ -97,7 +97,9 @@ void service(bool allowEnable) {
         if (e != ESP_OK) { error(e); return; }
         portENTER_CRITICAL(&mux);
         ownerNetif = candidate; sta = impl;
-        state.active = true; state.reporting = true; state.deadlineMs = now + ttl * 1000;
+        if (!state.active || state.controlOnly != controlOnly)
+            state.discardedRecords += ring.discardQueued();
+        state.active = true; state.reporting = true; state.controlOnly = controlOnly; state.deadlineMs = now + ttl * 1000;
         state.lastError = ESP_OK;
         portEXIT_CRITICAL(&mux);
         nextTsf = now;
@@ -132,7 +134,7 @@ extern "C" int mosaico_rx_ip4_input(pbuf* p, netif* inp) {
             if (result == detail::Parsed::Tcp) ++state.tcp;
             else { ++state.udp; ++state.wireguard[r.wgType - 1]; }
             r.tsf = state.tsf; r.tsfMillis = state.tsfMillis;
-            if (!ring.push(r)) ++state.ringDrops;
+            if (!state.controlOnly && !ring.push(r)) ++state.ringDrops;
         }
     }
     portEXIT_CRITICAL(&mux);
@@ -152,7 +154,23 @@ extern "C" void mosaico_wg_tx_trace(uint32_t phase, uint32_t receiver, uint32_t 
         r.counter = (uint64_t(counterHi) << 32) | counterLo;
         r.srcPort = uint16_t(srcPort); r.dstPort = uint16_t(dstPort); r.seq = seq; r.traceResult = result;
         r.tsf = state.tsf; r.tsfMillis = state.tsfMillis;
-        if (!ring.push(r)) ++state.txRingDrops;
+        if (!state.controlOnly && !ring.push(r)) ++state.txRingDrops;
+    }
+    portEXIT_CRITICAL(&mux);
+}
+// Connection control metadata only; errno is a hint except direct BIO/socket failures.
+extern "C" void mosaico_derp_trace(uint32_t kind, uint32_t stage, int32_t ret,
+                                   int32_t errnoHint, uint32_t region, int32_t fd) {
+    using namespace mosaico_rx_observer;
+    if (!kind || kind > 6 || stage > 19) return;
+    const uint32_t now = nowMs();
+    portENTER_CRITICAL(&mux);
+    if (state.active && detail::alive(now, state.deadlineMs)) {
+        ++state.derpEvents;
+        Record r; r.millis = now; r.tracePhase = 9; r.protocol = uint8_t(kind); r.tcpFlags = uint8_t(stage);
+        r.receiverIndex = region; r.seq = uint32_t(fd); r.ack = uint32_t(errnoHint); r.traceResult = ret;
+        r.tsf = state.tsf; r.tsfMillis = state.tsfMillis;
+        if (!ring.push(r)) ++state.derpRingDrops;
     }
     portEXIT_CRITICAL(&mux);
 }

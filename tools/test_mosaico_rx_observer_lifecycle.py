@@ -7,6 +7,10 @@ class Lifecycle(unittest.TestCase):
         allowed=s.split('const char* allowed[] = {',1)[1].split('};',1)[0]
         self.assertIn('"rx-observe"',allowed)
         self.assertIn('"derp-tx-budget"',allowed)
+    def test_new_mode_discards_previous_session_metadata(self):
+        s=(ROOT/'main/debug/mosaico_rx_observer.cpp').read_text()
+        self.assertIn('if (!state.active || state.controlOnly != controlOnly)',s)
+        self.assertIn('state.discardedRecords += ring.discardQueued();',s)
     def test_owner_wait_is_ttl_bounded(self):
         s=(ROOT/'main/host/network_quota.cpp').read_text()
         wait=s.split('void NetworkQuota::wait(uint32_t milliseconds)',1)[1].split('void NetworkQuota::setCpu',1)[0]

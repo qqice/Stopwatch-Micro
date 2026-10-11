@@ -181,10 +181,10 @@ void NetworkQuota::applyCpuConfig(uint32_t mhz, bool lightSleep)
     if(result==ESP_OK)_cpu_target=mhz;
 }
 #ifdef MOSAICO_BOARD
-bool NetworkQuota::requestRxObservation(bool on, uint32_t ttlSeconds)
+bool NetworkQuota::requestRxObservation(bool on, uint32_t ttlSeconds, bool controlOnly)
 {
     if (on && MosaicoOta::busy()) return false;
-    if (!mosaico_rx_observer::request(on, ttlSeconds)) return false;
+    if (!mosaico_rx_observer::request(on, ttlSeconds, controlOnly)) return false;
     if (_task_handle) xTaskNotifyGive(_task_handle);
     return true;
 }

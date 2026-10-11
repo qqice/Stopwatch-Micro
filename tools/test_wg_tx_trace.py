@@ -45,6 +45,7 @@ static unsigned pbuf_copy_partial(const struct pbuf *p,void *dst,unsigned n,unsi
 typedef int esp_err_t;
 typedef struct { uint8_t *data;size_t len;unsigned frame_type;uint8_t dest_pubkey[32]; } ml_derp_tx_item_t;
 typedef struct { void *derp_tx_queue; } microlink_t;
+static void derp_trace_failure(microlink_t *ml,int ret) { (void)ml;(void)ret; }
 static int alloc_fail,send_result=1,send_calls,recv_result,frame_result,frame_calls;
 static ml_derp_tx_item_t queued;
 static void *test_malloc(size_t n){return alloc_fail?NULL:malloc(n);}

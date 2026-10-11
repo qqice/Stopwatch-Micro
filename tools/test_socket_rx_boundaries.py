@@ -51,6 +51,9 @@ static int ml_recv(int fd,uint8_t *buf,size_t len,int flags) {
 static int ml_read_sock(int fd,uint8_t *buf,size_t len) { return ml_recv(fd,buf,len,0); }
 '''
     suffix=r'''
+void mosaico_derp_trace(uint32_t kind,uint32_t stage,int32_t ret,int32_t hint,uint32_t region,int32_t fd) {
+ (void)kind;(void)stage;(void)ret;(void)hint;(void)region;(void)fd;errno=EINVAL;
+}
 static void setup(int ret,int err) { next_ret=ret;next_errno=err;wire_input=NULL;io_calls=0;opt_calls=0;clock_ms=UINT64_C(0x100000029);memset(wireguardif_rx_counters,0,sizeof(wireguardif_rx_counters)); }
 static void check(unsigned base,int ret,int err) {
  assert(wireguardif_rx_counters[base]==1);

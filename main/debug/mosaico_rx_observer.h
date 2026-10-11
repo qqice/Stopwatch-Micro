@@ -16,10 +16,11 @@ struct Record {
     Checksum ipChecksum = Checksum::Unknown, tcpChecksum = Checksum::Unknown;
 };
 struct Snapshot {
-    bool active = false, queued = false, reporting = false;
+    bool active = false, queued = false, reporting = false, controlOnly = false;
     uint32_t deadlineMs = 0, seen = 0, malformed = 0, fragments = 0, tcp = 0;
     uint32_t udp = 0, otherUdp = 0, wireguard[4] = {}, ringDrops = 0;
     uint32_t txTrace[9] = {}, txRingDrops = 0;
+    uint32_t derpEvents = 0, derpRingDrops = 0, discardedRecords = 0;
     uint32_t rxEvents = 0, txEvents = 0, eventMillis = 0;
     uint32_t wakeEvents = 0, suspendEvents = 0, probeEvents = 0, twtEventMillis = 0;
     int32_t lastError = 0;
@@ -28,7 +29,7 @@ struct Snapshot {
 };
 // Counts are hook observations, not stack acceptance; 32-bit counters may wrap.
 // Traffic events are best effort (SDK posting timeout is zero).
-bool request(bool on, uint32_t ttlSeconds = 1200);
+bool request(bool on, uint32_t ttlSeconds = 1200, bool controlOnly = false);
 void service(bool allowEnable = true); // Network owner only; false atomically rejects queued enable.
 Snapshot snapshot();
 std::size_t drain(Record* out, std::size_t capacity); // At most 32 records.
@@ -37,6 +38,7 @@ namespace detail {
 struct MetadataRing {
     Record records[128]{};
     uint16_t head = 0, count = 0;
+    uint16_t discardQueued() { const uint16_t n=count; head=0; count=0; return n; }
     bool push(const Record& r) {
         if (count == 128) return false;
         records[(head + count) % 128] = r; ++count; return true;
