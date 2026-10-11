@@ -170,9 +170,9 @@ static_assert(partialAndBoundedTx());
     def test_sensitive_policy(self):
         # Evaluate actual allowlist, not a mirrored policy.
         text=HEADER.read_text(); allowed=set(re.findall(r'"([a-z0-9-]+)"',text.split('allowed[] =',1)[1]))
-        for command in ('ota-check','ota-download','ota-install','ota-reboot','ota-update','ota-rollback-test','runtime-restart','gauge-access','gauge-reconcile','gauge-nominal','network-config','tailscale-config','pairing-reset','host-usage'):
+        for command in ('ota-check','ota-download','ota-install','ota-reboot','ota-update','ota-rollback-test','gauge-access','gauge-reconcile','gauge-nominal','network-config','tailscale-config','pairing-reset','host-usage'):
             self.assertNotIn(command,allowed)
-        for command in ('status','network','power','gauge','display-lock','display-wake','display-test-frequency','display-idle-frequency','boot','mic','inputs','cancel'):
+        for command in ('status','network','power','gauge','display-lock','display-wake','display-test-frequency','display-idle-frequency','boot','mic','inputs','cancel','runtime-restart'):
             self.assertIn(command,allowed)
         self.assertIn('ota-bypass',allowed)
         bypass=SOURCE.split('if (command && (!std::strcmp(command, "ota-update")',1)[1].split('if (command && std::strcmp(command, "ota-rollback-test")',1)[0]
@@ -184,6 +184,23 @@ static_assert(partialAndBoundedTx());
         self.assertIn('uartAllowed(command)',gate)
         self.assertIn('std::strcmp(value, "160") && std::strcmp(value, "320")',gate)
         self.assertIn('cancel_first=1',gate)
+
+    def test_runtime_restart_uart_keeps_safety_guards(self):
+        restart=SOURCE.split('if (std::strcmp(command, "runtime-restart") == 0) {',1)[1].split('if (std::strcmp(command, "gauge-selftest") == 0)',1)[0]
+        for guard in (r'!confirm || std::strcmp(confirm, "CONFIRM") || ::strtok_r(nullptr, " \t", &save)',
+                      'MosaicoOta::blocksTwt()',
+                      'power.locked || power.phase != 0',
+                      'info.status == Hal::GaugeBootReloadStatus::Critical'):
+            self.assertIn(guard,restart)
+        for reason in ('requires_CONFIRM no_changes=1', 'requires_idle_ota_state no_changes=1',
+                       'requires_awake_radio_phase no_changes=1',
+                       'critical_gauge_requires_inspection no_changes=1'):
+            branch=restart.split(reason,1)[1].split('}',1)[0]
+            self.assertIn('return;',branch)
+            self.assertLess(restart.index(reason),restart.index('GetHAL().reboot()'))
+        self.assertIn('action=normal_application_restart',restart)
+        self.assertLess(restart.index('requires_CONFIRM'),restart.index('MosaicoOta::blocksTwt()'))
+        self.assertLess(restart.index('MosaicoOta::blocksTwt()'),restart.index('GetNetworkQuota().powerStats()'))
 
     def test_network_uart_diagnostics_are_readonly(self):
         # Exact allowlist matching must not grant the adjacent config command.

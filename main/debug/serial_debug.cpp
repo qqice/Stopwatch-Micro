@@ -1150,6 +1150,10 @@ void SerialDebug::handleLine(char* line)
             result("runtime-restart", "SKIP", "requires_CONFIRM no_changes=1");
             return;
         }
+        if (MosaicoOta::blocksTwt()) {
+            result("runtime-restart", "SKIP", "requires_idle_ota_state no_changes=1");
+            return;
+        }
         const auto power = GetNetworkQuota().powerStats();
         if (power.locked || power.phase != 0) {
             result("runtime-restart", "SKIP", "requires_awake_radio_phase no_changes=1");
