@@ -1855,12 +1855,7 @@ void SerialDebug::runSelfTest()
 #else
     check("hal.audio", hal.audio);
 #endif
-#ifdef MOSAICO_BOARD
-    ++skipped;
-    result("hal.vibrator", "SKIP", "unsupported_board_peripheral");
-#else
     check("hal.vibrator", hal.vibrator);
-#endif
     check("hal.buttons", hal.buttons);
 
     const bool heap_ok              = heap_caps_check_integrity_all(false);

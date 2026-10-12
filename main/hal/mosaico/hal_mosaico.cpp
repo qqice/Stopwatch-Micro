@@ -31,8 +31,10 @@
 #include "mosaico_touch_power_model.h"
 #include "mosaico_lvgl_tick_model.h"
 #include "mosaico_orientation_model.h"
+#include "mosaico_haptic_model.h"
 #include "bmi270.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "soc/io_mux_reg.h"
 #include "soc/gpio_sig_map.h"
 #include "driver/i2c_master.h"
@@ -124,6 +126,105 @@ void refresh_sleep_io_locked() {
     sleep_io_ready.store(sleep_io_model.state.ready,std::memory_order_release);
 }
 std::atomic<bool> unused_gates_off{false};
+// Core V1.0 and V1.2.1 schematics both map MOTOR to GPIO8 (p2/p3).
+// This does not broaden the existing V1.0 sleep-IO assumptions or authorize
+// codec, PA, rail or gauge writes; motor polarity follows the factory driver.
+std::mutex haptic_mutex;
+mosaico_haptic::Model haptic_model;
+esp_timer_handle_t haptic_timer = nullptr;
+bool haptic_initialized = false, haptic_channel_attached = false, haptic_blocked = false;
+mosaico_haptic::TimerState haptic_pwm; // haptic_mutex owned; failures remain unknown.
+std::atomic<bool> haptic_ready{false}, haptic_active{false};
+
+esp_err_t haptic_pause_locked() {
+    if (!haptic_pwm.needsPause()) return ESP_OK;
+    const esp_err_t result = ledc_timer_pause(LEDC_LOW_SPEED_MODE, LEDC_TIMER_1);
+    haptic_pwm.paused(result == ESP_OK);
+    // SDK ledc.c: pause fails only without the driver context (or bad args).
+    // Public deconfigure also requires that same context AND an already paused
+    // timer; it cannot rescue a pause failure. Never guess private power APIs.
+    return result;
+}
+
+bool haptic_off_locked() {
+    haptic_model.stop();
+    if (haptic_timer) esp_timer_stop(haptic_timer); // Inactive / dispatched is benign.
+    esp_err_t stopped = ESP_OK;
+    if (haptic_channel_attached) stopped = ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+    // GPIO output latch is LOW before detaching the peripheral. Restore the
+    // original GPIO mapping so existing sleep-IO baselines/masks remain valid.
+    const esp_err_t latch = gpio_set_level(GPIO_NUM_8, 0);
+    gpio_config_t motor{};
+    motor.pin_bit_mask = 1ULL << 8;
+    motor.mode = GPIO_MODE_OUTPUT;
+    const esp_err_t detached = gpio_config(&motor);
+    haptic_channel_attached = false;
+    const bool off = latch == ESP_OK && detached == ESP_OK;
+    // Stop output/detach GPIO LOW FIRST: pausing a nonzero PWM alone could
+    // freeze it high. ledc_stop stops the channel, not the 4 kHz timer counter.
+    const esp_err_t paused = haptic_pause_locked();
+    haptic_active.store(!off || paused != ESP_OK, std::memory_order_release); // Unknown is not sleep-safe.
+    if (!off || stopped != ESP_OK || paused != ESP_OK) {
+        haptic_ready.store(false, std::memory_order_release);
+        ESP_LOGW(Tag, "Motor OFF stop=%ld latch=%ld gpio=%ld pause=%ld", long(stopped), long(latch), long(detached), long(paused));
+    }
+    return off && stopped == ESP_OK && paused == ESP_OK;
+}
+
+void haptic_timeout(void*) {
+    std::lock_guard<std::mutex> guard(haptic_mutex);
+    if (!haptic_model.active) return;
+    const int64_t remaining = haptic_model.remaining(esp_timer_get_time());
+    if (remaining == 0) { haptic_off_locked(); return; }
+    // A callback already queued before stop/restart can run against a new
+    // deadline. Keep the new timer if armed; otherwise restore the one-shot.
+    // Never repeatedly extend the deadline; a rearm failure forces LOW.
+    if (!esp_timer_is_active(haptic_timer) && esp_timer_start_once(haptic_timer, remaining) != ESP_OK) {
+        haptic_ready.store(false, std::memory_order_release);
+        haptic_off_locked();
+    }
+}
+
+esp_err_t haptic_attach_locked() {
+    ledc_channel_config_t channel{};
+    channel.gpio_num = GPIO_NUM_8;
+    channel.speed_mode = LEDC_LOW_SPEED_MODE;
+    channel.channel = LEDC_CHANNEL_1;
+    channel.timer_sel = LEDC_TIMER_1;
+    channel.duty = 0;
+    channel.sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD; // Never keep motor alive in sleep.
+    haptic_channel_attached = true; // Even a partially failed config needs OFF cleanup.
+    return ledc_channel_config(&channel);
+}
+
+void haptic_init_locked() {
+    if (haptic_initialized) return; // Nonfatal failure stays disabled; no retry loop.
+    haptic_initialized = true;
+    ledc_timer_config_t timer{};
+    timer.speed_mode = LEDC_LOW_SPEED_MODE;
+    timer.duty_resolution = LEDC_TIMER_10_BIT;
+    timer.timer_num = LEDC_TIMER_1;
+    // Factory YAML omits frequency. esp-board-manager's published periph_ledc
+    // schema defaults to 4 kHz; factory's exact resolved manager is not locked
+    // in the reference snapshot. Physical drive acceptance remains required.
+    timer.freq_hz = 4000;
+    timer.clk_cfg = LEDC_AUTO_CLK;
+    haptic_pwm.configuring(); // config automatically resumes; failure may be partial.
+    esp_err_t result = ledc_timer_config(&timer);
+    // No channel is attached yet, so GPIO8 remains LOW even if pause fails.
+    const esp_err_t paused = haptic_pause_locked();
+    if (result == ESP_OK) result = paused;
+    if (result == ESP_OK) result = haptic_attach_locked();
+    if (result == ESP_OK) {
+        esp_timer_create_args_t args{};
+        args.callback = haptic_timeout;
+        args.name = "motor-off";
+        result = esp_timer_create(&args, &haptic_timer);
+    }
+    const bool off = haptic_off_locked();
+    haptic_ready.store(result == ESP_OK && off, std::memory_order_release);
+    if (result != ESP_OK) ESP_LOGW(Tag, "Motor unavailable error=%ld", long(result));
+}
 // Serialized by the LVGL port mutex once it exists. Keep physical brightness
 // separate from the requested setting while a wake redraw is pending.
 int panel_brightness = -1;
@@ -1486,7 +1587,11 @@ bool Hal::displayRamProbe(uint32_t& errors)
 }
 
 bool Hal::pmic_get_pwr_btn_state() { return false; }
-void Hal::ioe_init() { ESP_LOGI(Tag, "No M5 IO expander; audio/vibration unsupported"); }
+void Hal::ioe_init() {
+    std::lock_guard<std::mutex> guard(haptic_mutex);
+    haptic_init_locked();
+    ESP_LOGI(Tag, "No M5 IO expander; GPIO8 motor ready=%d (Core V1.0/V1.2.1 mapping)", haptic_ready.load());
+}
 bool Hal::ioe_ready() const { return false; }
 void Hal::ioe_tp_reset() {} // Board driver has no controllable touch reset GPIO.
 void Hal::ioe_speaker_enable(bool) {} // No unverified amplifier GPIO writes.
@@ -1738,7 +1843,9 @@ void Hal::lvgl_init()
     }
     ESP_LOGI(Tag, "CO5300/CST9217 480x480; geometry requires physical acceptance");
 #if CONFIG_MOSAICO_SLEEP_IO_RETENTION && CONFIG_IDF_TARGET_ESP32S31
-    { std::lock_guard<std::mutex> guard(sleep_io_mutex);refresh_sleep_io_locked(); }
+    { std::lock_guard<std::mutex> motorGuard(haptic_mutex);
+      std::lock_guard<std::mutex> guard(sleep_io_mutex);
+      if (!haptic_active.load(std::memory_order_acquire)) refresh_sleep_io_locked(); }
 #endif
 }
 
@@ -1748,6 +1855,11 @@ void Hal::lvglUnlock() { if (port_ready) lvgl_port_unlock(); }
 void Hal::setTouchIdlePolling(bool idle)
 {
     if(!idle && TouchSleep::blocksTouch()) {TouchSleep::wakeRequested();return;}
+    {
+        std::lock_guard<std::mutex> guard(haptic_mutex);
+        haptic_blocked = idle;
+        if (idle) haptic_off_locked(); // Also covers pre-port and repeated idle requests.
+    }
     if (!port_ready) {
         // Preserve a startup request; lvgl_init applies it to the new timer.
         touch_idle_polling.store(idle, std::memory_order_relaxed);
@@ -1791,13 +1903,22 @@ void Hal::setTouchIdlePolling(bool idle)
 
 Hal::SleepIoInfo Hal::sleepIoRetentionInfo() const {
     SleepIoInfo info;
-    { std::lock_guard<std::mutex> guard(sleep_io_mutex);refresh_sleep_io_locked();info=sleep_io_model.state; }
+    bool motorBusy=false;
+    { std::lock_guard<std::mutex> motorGuard(haptic_mutex);
+      std::lock_guard<std::mutex> guard(sleep_io_mutex);
+      // GPIO8 intentionally routes PWM during a pulse. Do not poison the
+      // GPIO-only baseline with a transient observation; LS is blocked below.
+      motorBusy=haptic_active.load(std::memory_order_acquire);
+      if (!motorBusy) refresh_sleep_io_locked();
+      info=sleep_io_model.state; }
+    if (motorBusy) info.ready=false;
     // No GPIO mutation in this report. A detected inconsistency does immediately
     // block LS through the existing recovery lock AFTER releasing our mutex.
     if(info.enabled && !info.ready)StandbySleep::cancelForActivity();
     return info;
 }
 bool Hal::sleepIoRetentionReady() const {
+    if (haptic_active.load(std::memory_order_acquire)) return false;
 #if CONFIG_MOSAICO_SLEEP_IO_RETENTION
     return sleep_io_ready.load(std::memory_order_acquire);
 #elif CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND || CONFIG_PM_SLP_DISABLE_GPIO
@@ -1809,7 +1930,8 @@ bool Hal::sleepIoRetentionReady() const {
 Hal::TouchPollingInfo Hal::touchPollingInfo() const
 {
     const bool idle = touch_idle_polling.load(std::memory_order_relaxed);
-    TouchPollingInfo info{idle, mosaico_touch_power::pollingPeriodMs(idle), unused_gates_off.load(std::memory_order_relaxed)};
+    TouchPollingInfo info{idle, mosaico_touch_power::pollingPeriodMs(idle),
+        unused_gates_off.load(std::memory_order_relaxed) && !haptic_active.load(std::memory_order_acquire)};
     if(port_ready.load(std::memory_order_acquire)) {
         info.lvglTimerPeriodMs=lvgl_timer_period_ms;
 #if CONFIG_MOSAICO_LVGL_MONOTONIC_TICK
@@ -1946,9 +2068,9 @@ const Hal::ButtonConfig& Hal::getButtonConfig(bool loadFromSettings)
     return _btn_config;
 }
 
-void Hal::audio_init() { ESP_LOGW(Tag, "Codec/microphone/vibration unvalidated and disabled"); }
+void Hal::audio_init() { ESP_LOGW(Tag, "Codec/microphone unvalidated and disabled"); }
 bool Hal::audio_ready() const { return false; }
-bool Hal::vibrator_ready() const { return false; }
+bool Hal::vibrator_ready() const { return haptic_ready.load(std::memory_order_acquire); }
 bool Hal::audioSuspended() const { return true; }
 // Software tone-generator format only; this does not claim a working codec.
 int Hal::getAudioSampleRate() { return 44100; }
@@ -1956,8 +2078,39 @@ void Hal::audioPlay(std::vector<int16_t>&, bool) {}
 void Hal::setMicrophoneMeterEnabled(bool) {}
 bool Hal::isMicrophoneMeterEnabled() { return false; }
 float Hal::getMicrophoneLevel() { return 0.0f; }
-void Hal::vibrate(uint16_t, uint8_t) {}
-void Hal::stopVibrate() {}
+void Hal::vibrate(uint16_t durationMs, uint8_t strength) {
+    // Recovery lock before haptic mutex: standby can query atomic readiness
+    // without taking our mutex. No periodic task, I2C or codec activity.
+    if (durationMs && strength) StandbySleep::cancelForActivity();
+    std::lock_guard<std::mutex> guard(haptic_mutex);
+    if (!durationMs || !strength) { haptic_off_locked(); return; }
+    if (haptic_blocked || TouchSleep::blocksTouch()) { haptic_off_locked(); return; }
+    if (!haptic_initialized) haptic_init_locked();
+    if (!haptic_ready.load(std::memory_order_acquire)) { haptic_off_locked(); return; }
+    const int64_t now = esp_timer_get_time();
+    if (!haptic_model.begin(now, durationMs, strength)) return; // <=1 pulse / 60ms.
+    haptic_active.store(true, std::memory_order_release); // Block sleep BEFORE attaching PWM.
+    if (haptic_timer) esp_timer_stop(haptic_timer);
+    esp_err_t result = haptic_attach_locked(); // Always attach with duty 0.
+    // Arm OFF before enabling duty; queued callbacks serialize on this mutex.
+    const int64_t remaining = haptic_model.remaining(esp_timer_get_time());
+    if (result == ESP_OK) result = remaining > 0 ? esp_timer_start_once(haptic_timer, remaining) : ESP_ERR_TIMEOUT;
+    if (result == ESP_OK) {
+        haptic_pwm.resuming(); // A partial/failed resume still needs OFF/pause.
+        result = ledc_timer_resume(LEDC_LOW_SPEED_MODE, LEDC_TIMER_1);
+    }
+    if (result == ESP_OK) result = ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, mosaico_haptic::Model::duty(strength));
+    if (result == ESP_OK) result = ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
+    if (result != ESP_OK) {
+        haptic_ready.store(false, std::memory_order_release);
+        haptic_off_locked();
+        ESP_LOGW(Tag, "Motor pulse rejected error=%ld", long(result));
+    }
+}
+void Hal::stopVibrate() {
+    std::lock_guard<std::mutex> guard(haptic_mutex);
+    haptic_off_locked();
+}
 
 void Hal::setSpeakerVolume(int volume, bool saveToSettings)
 {

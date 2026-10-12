@@ -12,6 +12,7 @@
 #include <host/mosaico_session_monitor.h>
 #include "charge_supply_state.h"
 #include "quota_display_cache.h"
+#include "keyboard_style_model.h"
 
 namespace view {
 class CodexMicroView {
@@ -65,6 +66,7 @@ private:
     static void settingsSheetCompleted(lv_anim_t* anim);
     static void settingsTileEvent(lv_event_t* event);
     static void wifiFieldEvent(lv_event_t* event);
+    static void wifiKeyboardEvent(lv_event_t* event);
     static void wifiSelectionEvent(lv_event_t* event);
     static void wifiActionEvent(lv_event_t* event);
     uint32_t wifiEditorGuards() const;
@@ -144,6 +146,7 @@ private:
     lv_obj_t* _wifiSsid = nullptr;
     lv_obj_t* _wifiPassword = nullptr;
     lv_obj_t* _wifiKeyboard = nullptr;
+    mosaico_keyboard::PointerHaptic _wifiKeyboardHaptic{};
     lv_obj_t* _wifiOpenButton = nullptr;
     lv_obj_t* _wifiSaveButton = nullptr;
     lv_obj_t* _wifiRestartButton = nullptr;
