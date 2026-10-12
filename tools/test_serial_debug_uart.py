@@ -26,6 +26,21 @@ def method(name):
     return 'constexpr ' + SOURCE[start:end]
 
 class UartTests(unittest.TestCase):
+    def test_mosaico_bounded_bank_command_permission(self):
+        if not COMPILERS: self.skipTest('cross compiler unavailable')
+        header = HEADER.read_text().replace('inline bool uartAllowed', 'constexpr bool uartAllowed')
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'permission.cpp'
+            for enabled in (False,True):
+                prefix='#define MOSAICO_BOARD 1\n' if enabled else ''
+                expected='true' if enabled else 'false'
+                p.write_text(prefix+header+'\nstatic_assert(serial_debug_transport::uartAllowed("bankpulse")=='+expected+');\n'
+                    'static_assert(!serial_debug_transport::uartAllowed("bankpulse-extra"));\n'
+                    'static_assert(!serial_debug_transport::uartAllowed("vibrate"));\n'
+                    'static_assert(serial_debug_transport::uartAllowed("status"));\n')
+                result=subprocess.run([str(COMPILERS[-1]),'-std=c++20','-fsyntax-only',str(p)],capture_output=True,text=True)
+                self.assertEqual(result.returncode,0,result.stderr)
+
     def test_source_line_routing_and_ring(self):
         if not COMPILERS: self.skipTest('cross compiler unavailable')
         harness = r"""

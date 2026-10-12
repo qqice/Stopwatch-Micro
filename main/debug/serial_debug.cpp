@@ -1780,6 +1780,7 @@ void SerialDebug::handleLine(char* line)
 void SerialDebug::printHelp()
 {
 #ifdef MOSAICO_BOARD
+    debugPrintf("DBG HELP bankpulse status | off | on <lease_s180-1800> <period_s5-20> <duration_ms100-1000> ram_only=1 max_work_duty_pct=5 default_off=1\r\n");
     debugPrintf("DBG HELP sleep-io report_only=1 registered_outputs_only=1\r\n");
     debugPrintf("DBG HELP touch-sleep 120 | off | status single_use_ram_lease=1 unverified_candidate=1 sleep_verified=0\r\n");
     debugPrintf("DBG HELP idle-wait on | off | status ram_only=1 locked_event_wait_ms=500 safe_gates_required=1\r\n");
