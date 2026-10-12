@@ -165,8 +165,8 @@ private:
     bool _settingsOpen = false, _settingsClosing = false, _settingsAnimating = false;
     bool _wifiOpenNetwork = false, _touchOnEditor = false;
     unsigned _settingsDetail = 0;
-    std::array<lv_obj_t*, 8> _settingsRows{}, _settingsValues{};
-    std::array<Hit, 16> _settingsHits{};
+    std::array<lv_obj_t*, 9> _settingsRows{}, _settingsValues{};
+    std::array<Hit, 18> _settingsHits{};
     MosaicoDisplay::Snapshot _displaySettings{};
     bool _settingsRequestFailed = false;
     bool _chargeProfile = false, _profileSeen = false;

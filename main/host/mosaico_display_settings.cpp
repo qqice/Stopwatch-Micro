@@ -36,7 +36,12 @@ void init() {
     esp_err_t error = nvs_open("mosaico_disp", NVS_READONLY, &h);
     if (error == ESP_OK) {
         Blob blob{}; size_t size = blob.size();
-        error = nvs_get_blob(h, "config", blob.data(), &size);
+        // Separate schema key preserves the previous firmware's config on rollback.
+        error = nvs_get_blob(h, "config3", blob.data(), &size);
+        if (error == ESP_ERR_NVS_NOT_FOUND) {
+            size = blob.size();
+            error = nvs_get_blob(h, "config", blob.data(), &size);
+        }
         nvs_close(h);
         Config config;
         if (error == ESP_OK && (size != blob.size() || !decode(blob, config))) error = ESP_ERR_INVALID_ARG;
@@ -126,7 +131,7 @@ void service() {
     nvs_handle_t h;
     esp_err_t error = nvs_open("mosaico_disp", NVS_READWRITE, &h);
     if (error == ESP_OK) {
-        error = nvs_set_blob(h, "config", blob.data(), blob.size());
+        error = nvs_set_blob(h, "config3", blob.data(), blob.size());
         if (error == ESP_OK) error = nvs_commit(h);
         nvs_close(h);
     }

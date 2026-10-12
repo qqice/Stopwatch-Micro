@@ -15,6 +15,7 @@ class ChargeSupplyUiTests(unittest.TestCase):
         self.assertEqual(battery.count('batteryTelemetry(false)'),1)
         self.assertNotIn('isBatteryCharging()',battery)
         self.assertIn('_chargeSupply.update(telemetry.valid, telemetry.currentMa, telemetry.reportedSoc)',battery)
+        self.assertIn('PowerbankKeepalive::observeSupply(telemetry.valid, _chargeSupply.external)',battery)
         self.assertIn('_batteryCharging = telemetry.valid && telemetry.currentMa > 3;',battery)
         self.assertIn('if (_chargeSupply.external) lv_obj_remove_flag(_boltIcon',battery)
         # Deliberately unchanged: the inference does not widen OTA safety.
@@ -58,6 +59,9 @@ struct Telemetry { bool valid=true;int currentMa=0;uint8_t reportedSoc=99; };
 struct Hal { Telemetry sample;int reads=0;bool forced=false;
  constexpr Telemetry batteryTelemetry(bool refresh){++reads;forced=refresh;return sample;}
 };
+namespace PowerbankKeepalive {
+ constexpr void observeSupply(bool valid,bool external) { (void)valid;(void)external; }
+}
 struct CodexMicroView {
  Hal _hal;ChargeSupplyState _chargeSupply;
  unsigned _batteryReadTick=0;bool _batterySeen=false,_batteryValid=false,_batteryCharging=false;

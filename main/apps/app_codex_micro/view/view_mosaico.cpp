@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "view_mosaico.h"
+#include <host/powerbank_keepalive.h>
 #include "dot_widgets.h"
 #include "reset_countdown.h"
 #include "credit_format.h"
@@ -290,10 +291,10 @@ void CodexMicroView::initSettings() {
         _settingsDetails[i] = lv_obj_create(_settingsPage); panel(_settingsDetails[i], 0, 56, 440, 346, 0x080B10);
         lv_obj_add_flag(_settingsDetails[i], static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
     }
-    const char* names[] = {"CHG SEC", "BAT SEC", "CHG %", "BAT %", "LOCK %", "SHIFT", "WIFI MIN", "BT MIN"};
-    for (size_t row = 0; row < 8; ++row) {
-        const size_t group = row < 2 ? 0 : row < 5 ? 1 : row == 5 ? 2 : 3;
-        const size_t slot = row < 2 ? row : row < 5 ? row - 2 : row == 5 ? 0 : row - 6;
+    const char* names[] = {"CHG SEC", "BAT SEC", "CHG %", "BAT %", "LOCK %", "SHIFT", "WIFI MIN", "BT MIN", "SMART BANK"};
+    for (size_t row = 0; row < 9; ++row) {
+        const size_t group = row == 8 ? 0 : row < 2 ? 0 : row < 5 ? 1 : row == 5 ? 2 : 3;
+        const size_t slot = row == 8 ? 2 : row < 2 ? row : row < 5 ? row - 2 : row == 5 ? 0 : row - 6;
         const int y = 0;
         _settingsRows[row] = lv_obj_create(_settingsDetails[group]);
         panel(_settingsRows[row], 0, 8 + static_cast<int>(slot) * 62, 440, 54, 0x080B10);
@@ -303,7 +304,7 @@ void CodexMicroView::initSettings() {
         lv_obj_set_height(_settingsValues[row], 28); lv_obj_set_style_text_align(_settingsValues[row], LV_TEXT_ALIGN_CENTER, 0);
         for (size_t side = 0; side < 2; ++side) {
             auto* button = lv_button_create(parent); panel(button, 292 + static_cast<int>(side) * 72, y, 64, 54);
-            auto* text = label(button, 2, 11, 60, row == 5 ? (side ? "ON" : "OFF") : (side ? "+" : "-"), &lv_font_montserrat_20);
+            auto* text = label(button, 2, 11, 60, (row == 5 || row == 8) ? (side ? "ON" : "OFF") : (side ? "+" : "-"), &lv_font_montserrat_20);
             lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0); lv_obj_set_style_text_color(text, lv_color_hex(Cyan), 0);
             lv_obj_remove_flag(text, LV_OBJ_FLAG_CLICKABLE);
             auto& hit = _settingsHits[row * 2 + side]; hit = {this, row * 2 + side};
@@ -763,6 +764,7 @@ void CodexMicroView::renderSettings() {
         lv_label_set_text(_settingsValues[row], text);
     }
     lv_label_set_text(_settingsValues[5], c.burnIn ? "ON" : "OFF");
+    lv_label_set_text(_settingsValues[8], c.smartKeepalive ? "ON" : "OFF");
     for (size_t row = 6; row < 8; ++row) {
         char text[8]; std::snprintf(text, sizeof(text), "%u", row == 6 ? c.lockWifiMinutes : c.lockBleMinutes);
         lv_label_set_text(_settingsValues[row], text);
@@ -781,6 +783,7 @@ void CodexMicroView::settingsEvent(lv_event_t* event) {
     auto config = self->_displaySettings.effectiveConfig;
     const size_t row = hit->index / 2;
     const bool up = hit->index % 2;
+    if (row >= 9) return;
     if (row < 2) {
         static constexpr uint32_t charge[] = {15, 30, 60, 120, 300, 600, 0};
         static constexpr uint32_t battery[] = {15, 30, 45, 60};
@@ -795,6 +798,7 @@ void CodexMicroView::settingsEvent(lv_event_t* event) {
         const int next = up ? (value / 5 + 1) * 5 : value ? ((value - 1) / 5) * 5 : 0;
         value = static_cast<uint8_t>(std::clamp(next, low, 100));
     } else if (row == 5) config.burnIn = up;
+    else if (row == 8) config.smartKeepalive = up;
     else {
         static constexpr uint8_t minutes[] = {1, 2, 5, 10, 15, 30, 60};
         auto& value = row == 6 ? config.lockWifiMinutes : config.lockBleMinutes;
@@ -802,9 +806,9 @@ void CodexMicroView::settingsEvent(lv_event_t* event) {
         value = minutes[(index + (up ? 1 : 6)) % 7];
     }
     static constexpr const char* fields[] = {"charge_timeout", "battery_timeout", "charge_brightness", "battery_brightness",
-        "lock_brightness", "burn_in", "lock_wifi_minutes", "lock_ble_minutes"};
+        "lock_brightness", "burn_in", "lock_wifi_minutes", "lock_ble_minutes", "smart_keepalive"};
     const uint32_t values[] = {config.chargeTimeoutSeconds, config.batteryTimeoutSeconds, config.chargeBrightness,
-        config.batteryBrightness, config.lockBrightness, config.burnIn, config.lockWifiMinutes, config.lockBleMinutes};
+        config.batteryBrightness, config.lockBrightness, config.burnIn, config.lockWifiMinutes, config.lockBleMinutes, config.smartKeepalive};
     // Persist the selected visible field only; unrelated lease fields stay RAM-only.
     self->_settingsRequestFailed = !MosaicoDisplay::requestPersistentField(fields[row], values[row]);
     self->_activity = lv_tick_get();
@@ -1331,6 +1335,7 @@ void CodexMicroView::refreshBattery(uint32_t now) {
     const auto telemetry = GetHAL().batteryTelemetry(false);
     _batteryReadTick = now; _batterySeen = true; _batteryValid = telemetry.valid;
     _chargeSupply.update(telemetry.valid, telemetry.currentMa, telemetry.reportedSoc);
+    PowerbankKeepalive::observeSupply(telemetry.valid, _chargeSupply.external);
     _batteryCharging = telemetry.valid && telemetry.currentMa > 3;
     const bool critical = GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical;
     _externalPowerReady = MosaicoOta::manualInstallPowerSafe(telemetry, tud_mounted(), critical);

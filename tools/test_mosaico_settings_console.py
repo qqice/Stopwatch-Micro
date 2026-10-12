@@ -90,6 +90,10 @@ class SettingsConsoleTests(unittest.TestCase):
         self.assertIn('settingsScrubJson(root)',source)
         self.assertIn('MosaicoWifi::scrub(password,sizeof(password))',source)
         self.assertIn('ble_name_mutable=0',branch)
+        self.assertIn('smart_keepalive=%d',branch)
+        self.assertIn('c.smartKeepalive',branch)
+        self.assertIn('smart_keepalive:0,1',source)
+        self.assertIn('automatic=%u configured=%u supply_external=%u inhibited=%u',source)
         self.assertIn('cJSON_GetArraySize(root)==2',source)
 
 if __name__=='__main__': unittest.main()

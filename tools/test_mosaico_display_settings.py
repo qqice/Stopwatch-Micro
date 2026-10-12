@@ -21,7 +21,7 @@ using namespace MosaicoDisplay;
 constexpr bool test() {
  Config defaults;
  if(defaults.chargeTimeoutSeconds!=60 || defaults.batteryTimeoutSeconds!=60 ||
-    defaults.chargeBrightness!=80 || defaults.batteryBrightness!=80 || defaults.lockBrightness!=8 || !defaults.burnIn) return false;
+    defaults.chargeBrightness!=80 || defaults.batteryBrightness!=80 || defaults.lockBrightness!=8 || !defaults.burnIn || !defaults.smartKeepalive) return false;
  for(uint32_t charge : {0U,15U,30U,60U,120U,300U,600U}) {
   for(uint32_t battery : {15U,30U,45U,60U}) {
    Config c{charge,battery,10,100,0,false}; Config out;
@@ -31,11 +31,22 @@ constexpr bool test() {
  Config c{601,0,0,255,255,true}; c=sanitize(c);
  if(c.chargeTimeoutSeconds!=60 || c.batteryTimeoutSeconds!=60 || c.chargeBrightness!=10 || c.batteryBrightness!=100 || c.lockBrightness!=100) return false;
  for(uint32_t battery : {61U,120U,600U,0xffffffffU}) { c.batteryTimeoutSeconds=battery; if(sanitize(c).batteryTimeoutSeconds!=60) return false; }
+ // Both booleans roundtrip; legacy aggregate callers retain the new default.
+ Config disabled=defaults; disabled.smartKeepalive=false; Config migrated;
+ if(!decode(encode(disabled),migrated)||migrated.smartKeepalive||migrated==defaults)return false;
+ for(unsigned version : {1U,2U}) {
+  Blob legacy=encode(disabled); legacy[4]=version; legacy[11]=0;
+  if(version==1)legacy[9]=legacy[10]=0;
+  put32(legacy,20,crc(legacy));
+  if(!decode(legacy,migrated)||!migrated.smartKeepalive)return false;
+ }
+ Blob invalidBool=encode(defaults); invalidBool[11]=2; put32(invalidBool,20,crc(invalidBool));
+ const Config before=migrated;if(decode(invalidBool,migrated)||!(migrated==before))return false;
  const Blob valid=encode(defaults);
  for(unsigned i=0;i<valid.size();++i) { Blob corrupt=valid; corrupt[i]^=1; Config out{15,15,20,20,3,false}; const Config before=out;
   if(decode(corrupt,out)||!(out==before)) return false;
  }
- Blob bad=valid; bad[4]=3; put32(bad,20,crc(bad)); Config out;
+ Blob bad=valid; bad[4]=4; put32(bad,20,crc(bad)); Config out;
  if(decode(bad,out)) return false;
  bad=valid; bad[5]=2; put32(bad,20,crc(bad)); if(decode(bad,out)) return false;
  bad=valid; put32(bad,16,120); put32(bad,20,crc(bad)); if(decode(bad,out)) return false;
@@ -78,6 +89,11 @@ static_assert(test());
     def test_load_never_writes_or_erases(self):
         init=BACKEND.split('void init()',1)[1].split('bool snapshot(',1)[0]
         self.assertIn('NVS_READONLY',init)
+        self.assertIn('nvs_get_blob(h, "config3", blob.data(), &size)',init)
+        self.assertIn('if (error == ESP_ERR_NVS_NOT_FOUND) {',init)
+        self.assertIn('nvs_get_blob(h, "config", blob.data(), &size)',init)
+        self.assertIn('nvs_set_blob(h, "config3",',BACKEND)
+        self.assertNotIn('nvs_set_blob(h, "config",',BACKEND)
         self.assertIn('ESP_ERR_NVS_NOT_FOUND ? ESP_OK',init)
         self.assertIn('size != blob.size() || !decode(blob, config)',init)
         for forbidden in ('nvs_set_', 'nvs_commit', 'nvs_erase'):

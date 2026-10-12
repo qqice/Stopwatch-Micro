@@ -8,12 +8,13 @@ struct Config {
     uint8_t chargeBrightness = 80, batteryBrightness = 80, lockBrightness = 8;
     bool burnIn = true;
     uint8_t lockWifiMinutes = 5, lockBleMinutes = 1;
+    bool smartKeepalive = true;
 };
 constexpr bool operator==(const Config& a, const Config& b) {
     return a.chargeTimeoutSeconds == b.chargeTimeoutSeconds && a.batteryTimeoutSeconds == b.batteryTimeoutSeconds &&
         a.chargeBrightness == b.chargeBrightness && a.batteryBrightness == b.batteryBrightness &&
         a.lockBrightness == b.lockBrightness && a.burnIn == b.burnIn &&
-        a.lockWifiMinutes == b.lockWifiMinutes && a.lockBleMinutes == b.lockBleMinutes;
+        a.lockWifiMinutes == b.lockWifiMinutes && a.lockBleMinutes == b.lockBleMinutes && a.smartKeepalive == b.smartKeepalive;
 }
 constexpr bool validLockMinutes(uint32_t m) { return m==1 || m==2 || m==5 || m==10 || m==15 || m==30 || m==60; }
 constexpr uint32_t lockIntervalMs(uint32_t m, uint8_t fallback) { return (validLockMinutes(m) ? m : fallback) * 60000U; }
@@ -43,6 +44,7 @@ constexpr bool patch(Config& c, const char* field, int64_t value) {
     else if (fieldEquals(field,"charge_brightness")) { if(value>100) return false; next.chargeBrightness=static_cast<uint8_t>(value); }
     else if (fieldEquals(field,"battery_brightness")) { if(value>100) return false; next.batteryBrightness=static_cast<uint8_t>(value); }
     else if (fieldEquals(field,"lock_brightness")) { if(value>100) return false; next.lockBrightness=static_cast<uint8_t>(value); }
+    else if (fieldEquals(field,"smart_keepalive")) { if(value>1) return false; next.smartKeepalive=value!=0; }
     else if (fieldEquals(field,"burn_in")) { if(value>1) return false; next.burnIn=value!=0; }
     else if (fieldEquals(field,"lock_wifi_minutes")) { if(value>60) return false; next.lockWifiMinutes=static_cast<uint8_t>(value); }
     else if (fieldEquals(field,"lock_ble_minutes")) { if(value>60) return false; next.lockBleMinutes=static_cast<uint8_t>(value); }
@@ -75,14 +77,15 @@ constexpr uint32_t crc(const Blob& b) {
     return ~v;
 }
 constexpr Blob encode(Config c) {
-    Blob b{}; put32(b,0,0x4453504dU); b[4]=2; b[5]=c.burnIn; b[6]=c.chargeBrightness;
-    b[7]=c.batteryBrightness; b[8]=c.lockBrightness; b[9]=c.lockWifiMinutes; b[10]=c.lockBleMinutes; put32(b,12,c.chargeTimeoutSeconds);
+    Blob b{}; put32(b,0,0x4453504dU); b[4]=3; b[5]=c.burnIn; b[6]=c.chargeBrightness;
+    b[7]=c.batteryBrightness; b[8]=c.lockBrightness; b[9]=c.lockWifiMinutes; b[10]=c.lockBleMinutes; b[11]=c.smartKeepalive; put32(b,12,c.chargeTimeoutSeconds);
     put32(b,16,c.batteryTimeoutSeconds); put32(b,20,crc(b)); return b;
 }
 constexpr bool decode(const Blob& b, Config& out) {
-    if (get32(b,0)!=0x4453504dU || (b[4]!=1 && b[4]!=2) || b[5]>1 || (b[4]==1 && (b[9] || b[10])) || b[11] || get32(b,20)!=crc(b)) return false;
+    if (get32(b,0)!=0x4453504dU || (b[4]!=1 && b[4]!=2 && b[4]!=3) || b[5]>1 || (b[4]==1 && (b[9] || b[10])) || (b[4]<3 ? b[11]!=0 : b[11]>1) || get32(b,20)!=crc(b)) return false;
     Config c{get32(b,12),get32(b,16),b[6],b[7],b[8],bool(b[5])};
-    if (b[4]==2) { c.lockWifiMinutes=b[9]; c.lockBleMinutes=b[10]; }
+    if (b[4]>=2) { c.lockWifiMinutes=b[9]; c.lockBleMinutes=b[10]; }
+    if (b[4]==3) c.smartKeepalive=bool(b[11]);
     if (!(sanitize(c)==c)) return false;
     out=c; return true;
 }

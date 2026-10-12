@@ -23,7 +23,7 @@ class SettingsUiTests(unittest.TestCase):
         for i in range(4):
             x,y,w,h=12+(i%2)*218,64+56+8+(i//2)*166,206,154
             self.assertLessEqual(x+w,440);self.assertLessEqual(y+h+2,480)
-        for rows in (2,3,1,2):
+        for rows in (3,3,1,2):
             for i in range(rows):
                 boxes=[(12,8+i*62+16,150,24),(168,8+i*62+14,112,28),
                        (292,8+i*62,64,54),(364,8+i*62,64,54)]
@@ -44,6 +44,9 @@ class SettingsUiTests(unittest.TestCase):
                       'requestWifiCredentials(ssid, self->_wifiOpenNetwork ? "" : password)',
                       'lv_textarea_set_text(_wifiPassword, "")', 'SAVE ERROR'):
             self.assertIn(token,CPP)
+        self.assertIn('"SMART BANK"',CPP)
+        self.assertIn('lv_label_set_text(_settingsValues[8], c.smartKeepalive ? "ON" : "OFF")',CPP)
+        self.assertIn('else if (row == 8) config.smartKeepalive = up;',CPP)
         callback=CPP.split('void CodexMicroView::settingsEvent(',1)[1].split('\n}',1)[0]
         for forbidden in ('nvs_', 'setBackLightBrightness', 'service()', 'batteryTelemetry', 'lv_timer_create'):
             self.assertNotIn(forbidden,callback)
@@ -117,7 +120,7 @@ constexpr CodexMicroView::Hit* lv_event_get_user_data(CodexMicroView::Hit* e) { 
 '''+ '\n'.join(methods)+r'''
 constexpr bool controls() {
  CodexMicroView v;v.refreshDisplaySettings();
- for(int row=0;row<8;++row) {
+ for(int row=0;row<9;++row) {
   CodexMicroView::Hit h{&v,size_t(row*2+1)};
   for(int repeat=0;repeat<25;++repeat) {
    v.settingsEvent(&h);
@@ -127,7 +130,7 @@ constexpr bool controls() {
   }
   h.index=row*2;for(int repeat=0;repeat<25;++repeat)v.settingsEvent(&h);
  }
- if(v._displaySettings.effectiveConfig.burnIn || v._displaySettings.effectiveConfig.lockBrightness!=0)return false;
+ if(v._displaySettings.effectiveConfig.smartKeepalive || v._displaySettings.effectiveConfig.burnIn || v._displaySettings.effectiveConfig.lockBrightness!=0)return false;
  CodexMicroView::Hit h{&v,5};
  for(int guard=0;guard<7;++guard) {
   v._locked=guard==0;v._suppressed=guard==1;v._swipeConsumed=guard==2;
@@ -175,7 +178,7 @@ constexpr bool shift() {
  v._displaySettings.effectiveConfig.burnIn=false;v.applyBurnInShift(false);
  return !v.root.x && !v.root.y && !v._shiftPending;
 }
-static_assert(controls(),"eight controls stay bounded and reject suppressed input");
+static_assert(controls(),"nine controls stay bounded and reject suppressed input");
 static_assert(profiles(),"profile changes reset activity once, live brightness and contention are safe");
 static_assert(shift(),"bounded scan defers unsafe movement and disabled shift returns to origin");
 '''

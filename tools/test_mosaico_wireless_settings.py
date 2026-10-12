@@ -23,7 +23,7 @@ constexpr bool test() {
  if(rebootSaveReady(display.state)) return false;
  display.completed(display.state.revision,0);
  if(!rebootSaveReady(display.state)) return false;
- Blob old=encode(c); old[4]=1; old[9]=old[10]=0; put32(old,20,crc(old));
+ Blob old=encode(c); old[4]=1; old[9]=old[10]=old[11]=0; put32(old,20,crc(old));
  if(!decode(old,out) || !(out==c)) return false;
  c.lockWifiMinutes=60; c.lockBleMinutes=30;
  if(!decode(encode(c),out) || !(out==c)) return false;

@@ -680,9 +680,9 @@ void SerialDebug::handleLine(char* line)
             const auto s=MosaicoDisplay::snapshot(); const auto& c=s.effectiveConfig;
             char details[512]{};
             std::snprintf(details,sizeof(details),
-                "charge_timeout=%lu battery_timeout=%lu charge_brightness=%u battery_brightness=%u lock_brightness=%u burn_in=%d lock_wifi_minutes=%u lock_ble_minutes=%u temporary=%d lease_remaining_s=%lu runtime_revision=%lu revision=%lu saved_revision=%lu pending=%d error=%ld",
+                "charge_timeout=%lu battery_timeout=%lu charge_brightness=%u battery_brightness=%u lock_brightness=%u burn_in=%d lock_wifi_minutes=%u lock_ble_minutes=%u smart_keepalive=%d temporary=%d lease_remaining_s=%lu runtime_revision=%lu revision=%lu saved_revision=%lu pending=%d error=%ld",
                 static_cast<unsigned long>(c.chargeTimeoutSeconds),static_cast<unsigned long>(c.batteryTimeoutSeconds),
-                c.chargeBrightness,c.batteryBrightness,c.lockBrightness,c.burnIn,c.lockWifiMinutes,c.lockBleMinutes,s.temporary,
+                c.chargeBrightness,c.batteryBrightness,c.lockBrightness,c.burnIn,c.lockWifiMinutes,c.lockBleMinutes,c.smartKeepalive,s.temporary,
                 static_cast<unsigned long>(s.remainingLeaseSeconds),static_cast<unsigned long>(s.runtimeRevision),
                 static_cast<unsigned long>(s.revision),static_cast<unsigned long>(s.savedRevision),s.pending,static_cast<long>(s.error));
             WifiSettingsSnapshot w{};
@@ -713,9 +713,9 @@ void SerialDebug::handleLine(char* line)
         const auto s = MosaicoDisplay::snapshot();
         char details[256];
         std::snprintf(details, sizeof(details),
-            "charge_timeout=%lu battery_timeout=%lu charge_brightness=%u battery_brightness=%u lock_brightness=%u burn_in=%d revision=%lu saved_revision=%lu pending=%d error=%ld",
+            "charge_timeout=%lu battery_timeout=%lu charge_brightness=%u battery_brightness=%u lock_brightness=%u burn_in=%d smart_keepalive=%d revision=%lu saved_revision=%lu pending=%d error=%ld",
             static_cast<unsigned long>(s.config.chargeTimeoutSeconds), static_cast<unsigned long>(s.config.batteryTimeoutSeconds),
-            s.config.chargeBrightness, s.config.batteryBrightness, s.config.lockBrightness, s.config.burnIn,
+            s.config.chargeBrightness, s.config.batteryBrightness, s.config.lockBrightness, s.config.burnIn, s.config.smartKeepalive,
             static_cast<unsigned long>(s.revision), static_cast<unsigned long>(s.savedRevision), s.pending, static_cast<long>(s.error));
         result("display-settings", s.error ? "FAIL" : "PASS", details); return;
     }
@@ -740,8 +740,8 @@ void SerialDebug::handleLine(char* line)
         const auto p = PowerbankKeepalive::boundedSnapshot();
         char details[384]{};
         std::snprintf(details,sizeof(details),
-            "supported=%u enabled=%u pulsing=%u state=%u remaining_s=%lu period_s=%lu duration_ms=%lu pulses=%lu aborted=%lu blocked=%lu pm_errors=%lu error=%ld ram_only=1 no_current_measurement=1",
-            p.supported,p.enabled,p.pulsing,static_cast<unsigned>(p.state),
+            "supported=%u enabled=%u pulsing=%u automatic=%u configured=%u supply_external=%u inhibited=%u state=%u remaining_s=%lu period_s=%lu duration_ms=%lu pulses=%lu aborted=%lu blocked=%lu pm_errors=%lu error=%ld ram_only=1 no_current_measurement=1",
+            p.supported,p.enabled,p.pulsing,p.automatic,p.configured,p.supplyExternal,p.inhibited,static_cast<unsigned>(p.state),
             static_cast<unsigned long>(p.remainingSeconds),static_cast<unsigned long>(p.config.periodSeconds),
             static_cast<unsigned long>(p.config.durationMs),static_cast<unsigned long>(p.pulses),
             static_cast<unsigned long>(p.aborted),static_cast<unsigned long>(p.blocked),
@@ -1780,14 +1780,14 @@ void SerialDebug::handleLine(char* line)
 void SerialDebug::printHelp()
 {
 #ifdef MOSAICO_BOARD
-    debugPrintf("DBG HELP bankpulse status | off | on <lease_s180-1800> <period_s5-20> <duration_ms100-1000> ram_only=1 max_work_duty_pct=5 default_off=1\r\n");
+    debugPrintf("DBG HELP bankpulse status | off | on <lease_s180-1800> <period_s5-20> <duration_ms100-1000> ram_only=1 max_work_duty_pct=5 smart_keepalive_default=1 automatic_requires_supply=1 off_inhibits_until_supply_or_setting_change_or_reboot=1\r\n");
     debugPrintf("DBG HELP sleep-io report_only=1 registered_outputs_only=1\r\n");
     debugPrintf("DBG HELP touch-sleep 120 | off | status single_use_ram_lease=1 unverified_candidate=1 sleep_verified=0\r\n");
     debugPrintf("DBG HELP idle-wait on | off | status ram_only=1 locked_event_wait_ms=500 safe_gates_required=1\r\n");
     debugPrintf("DBG HELP standby-sleep on [lease_s=180,30..300] | standby-sleep off | standby-sleep auto CONFIRM | standby-sleep status automatic_default=profile UART_wake_preamble_required=1\r\n");
     debugPrintf("DBG HELP settings get | settings set <field> <int> [lease_s=180,30..600] | settings restore | settings save CONFIRM\r\n");
     debugPrintf("DBG HELP settings ui numeric_editor_diagnostic=1 no_input_text=1\r\n");
-    debugPrintf("DBG HELP settings fields=charge_timeout:0,15,30,60,120,300,600 battery_timeout:15,30,45,60 charge_brightness:10..100 battery_brightness:10..100 lock_brightness:0..100 burn_in:0,1 lock_wifi_minutes:1,2,5,10,15,30,60 lock_ble_minutes:1,2,5,10,15,30,60\r\n");
+    debugPrintf("DBG HELP settings fields=charge_timeout:0,15,30,60,120,300,600 battery_timeout:15,30,45,60 charge_brightness:10..100 battery_brightness:10..100 lock_brightness:0..100 burn_in:0,1 smart_keepalive:0,1 lock_wifi_minutes:1,2,5,10,15,30,60 lock_ble_minutes:1,2,5,10,15,30,60\r\n");
     debugPrintf("DBG HELP settings wifi list | save <base64JSON_ssid_password_only> | forget <base64SSID> | restart CONFIRM physical_local_console_trust=1 base64_crc_not_security=1 save_async=1 restart_requires_saved=1\r\n");
 #endif
 

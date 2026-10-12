@@ -35,6 +35,20 @@ class KeepaliveTests(unittest.TestCase):
 #include "main/host/powerbank_keepalive_model.h"
 using namespace PowerbankKeepalive;
 constexpr bool cases() {
+ AutoPolicy a;
+ if(a.desired(0))return false;
+ a.configure(true);a.observe(true,true,1);
+ if(!a.desired(1)||!a.desired(90000001)||a.desired(90000002))return false;
+ a.inhibited=true;a.observe(true,true,2);if(a.desired(2))return false;
+ a.configure(false);a.configure(true);if(!a.desired(2))return false;
+ a.observe(true,false,3);if(a.desired(3))return false;
+ a.observe(true,true,4);if(!a.desired(4))return false;
+ a.observe(false,true,5);if(a.desired(5))return false;
+ Model automatic;automatic.startAutomatic(100);
+ if(!automatic.automatic||!automatic.enabled(3600000000LL)||automatic.leaseUntil)return false;
+ automatic.expire(3600000000LL);if(!automatic.enabled(3600000000LL))return false;
+ const auto av=automatic.generation;automatic.off();
+ if(automatic.enabled(3600000001LL)||automatic.pulseAllowed(3600000001LL,av,true))return false;
  Model m; Request r;
  if(m.enabled(0)||m.take(100000000,true)||m.pulseAllowed(0,0,true))return false;
  for(auto invalid : {Request{179,15,500},Request{1801,15,500},Request{180,4,500},

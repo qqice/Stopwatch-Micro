@@ -12,7 +12,14 @@ class GenericSettingsTests(unittest.TestCase):
 using namespace MosaicoDisplay;
 constexpr bool test() {
  Config c; const Config base=c;
- for (const char* field : {"charge_timeout","battery_timeout","charge_brightness","battery_brightness","lock_brightness","burn_in","lock_wifi_minutes","lock_ble_minutes"}) {
+ if(patch(c,"smart_keepalive",2)||patch(c,"smart_keepalive",256)||!(c==base))return false;
+ if(!patch(c,"smart_keepalive",0)||c.smartKeepalive||!patch(c,"smart_keepalive",1)||!(c==base))return false;
+ Model smart;
+ if(!smart.setTemporary("smart_keepalive",0,30,0)||smart.effective().smartKeepalive||!smart.state.config.smartKeepalive)return false;
+ const auto smartRevision=smart.runtimeRevision;const auto smartLease=smart.leaseUntil;
+ if(smart.setTemporary("smart_keepalive",2,30,1)||smart.runtimeRevision!=smartRevision||smart.leaseUntil!=smartLease)return false;
+ if(!smart.expire(2,true)||!smart.effective().smartKeepalive)return false;
+ for (const char* field : {"charge_timeout","battery_timeout","charge_brightness","battery_brightness","lock_brightness","burn_in","lock_wifi_minutes","lock_ble_minutes","smart_keepalive"}) {
   for (int64_t bad : {-1LL,601LL,4294967296LL,9223372036854775807LL}) {
    if(patch(c,field,bad) || !(c==base)) return false;
   }
@@ -80,7 +87,9 @@ static_assert(test(),"strict patches, monotonic leases, explicit save and base p
         self.assertIn(r'!::strtok_r(nullptr, " \t", &save)',serial)
     def test_configured_s31_s3_syntax(self):
         logs=[]
-        for db in (ROOT/'.artifacts/mosaico/ota-staged-heapdiag-build/compile_commands.json',ROOT/'build/compile_commands.json'):
+        s31=ROOT/'.artifacts/mosaico/auto-ls-probe-build/compile_commands.json'
+        if not s31.exists():s31=ROOT/'.artifacts/mosaico/ota-staged-heapdiag-build/compile_commands.json'
+        for db in (s31,ROOT/'build/compile_commands.json'):
             if not db.exists():self.skipTest('configured sources unavailable')
             entries=json.loads(db.read_text())
             for name in ('serial_debug.cpp','view_mosaico.cpp','mosaico_display_settings.cpp'):

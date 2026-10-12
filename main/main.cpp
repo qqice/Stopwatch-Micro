@@ -25,6 +25,7 @@ using namespace smooth_ui_toolkit;
 #include <host/mosaico_display_settings.h>
 #include <host/mosaico_session_monitor.h>
 #include <host/standby_sleep.h>
+#include <host/powerbank_keepalive.h>
 #include <host/touch_sleep.h>
 #include "main_idle_wait.h"
 #include <hal/mosaico/usb_console.h>
@@ -114,6 +115,7 @@ extern "C" void app_main(void)
         const auto sleepBle=GetCodexMicroBle().diagnostics();
         StandbySleep::service(MosaicoOta::busy() || MosaicoOta::healthPending(), sleepBle.advertising || sleepBle.connected);
         GetNetworkQuota().serviceStandbySleep();
+        PowerbankKeepalive::serviceAutomatic();
         // The monitor has no low-latency remote-control path. Keep its 10Hz
         // motion/100Hz touch responsive without a 1kHz application update loop.
         // Function remains the sole physical wake input. The event candidate

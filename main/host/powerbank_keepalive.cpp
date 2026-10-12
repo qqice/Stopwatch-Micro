@@ -11,6 +11,7 @@
 #include <esp_pm.h>
 #include "network_quota.h"
 #include "standby_sleep.h"
+#include "mosaico_display_settings.h"
 #include <ota/mosaico_ota.h>
 #else
 #define POWERBANK_PULSE_SUPPORTED 0
@@ -20,6 +21,7 @@ namespace PowerbankKeepalive {
 namespace {
 portMUX_TYPE mux=portMUX_INITIALIZER_UNLOCKED;
 Model model;
+AutoPolicy autoPolicy;
 Snapshot stats;
 TaskHandle_t task=nullptr;
 bool fatal=false;
@@ -28,7 +30,10 @@ std::mutex admission;
 esp_pm_lock_handle_t pmLock=nullptr; // Lazy, task-owned; never acquired by UART/ISR.
 volatile uint32_t workSink=0;
 bool safe() {
-    if(MosaicoOta::busy() || MosaicoOta::healthPending())return false;
+    portENTER_CRITICAL(&mux);
+    const bool supplyAllowed=!model.automatic || autoPolicy.desired(esp_timer_get_time());
+    portEXIT_CRITICAL(&mux);
+    if(!supplyAllowed || MosaicoOta::busy() || MosaicoOta::healthPending())return false;
     auto& quota=GetNetworkQuota();
     if(!quota.displayLocked())return false;
     const auto p=quota.powerStats();
@@ -121,7 +126,7 @@ void worker(void*) {
             if(!gate) {++stats.blocked;stats.state=State::Blocked;}
         }
         if(model.enabled(now)) {
-            const auto deadline=model.nextDue<model.leaseUntil ? model.nextDue : model.leaseUntil;
+            const auto deadline=model.automatic || model.nextDue<model.leaseUntil ? model.nextDue : model.leaseUntil;
             waitUs=deadline-now;
         }
         portEXIT_CRITICAL(&mux);
@@ -176,14 +181,59 @@ bool request(const Request& config) {
 #endif
 }
 void off() {
-    portENTER_CRITICAL(&mux);model.off();stats.state=State::Off;const auto handle=task;portEXIT_CRITICAL(&mux);
+    portENTER_CRITICAL(&mux);model.off();autoPolicy.inhibited=true;stats.state=State::Off;const auto handle=task;portEXIT_CRITICAL(&mux);
     if(handle)xTaskNotify(handle,1,eSetBits);
+}
+void observeSupply(bool valid, bool external) {
+    portENTER_CRITICAL(&mux);
+    autoPolicy.observe(valid,external,esp_timer_get_time());
+    const bool stopped=model.automatic && !autoPolicy.desired(esp_timer_get_time());
+    if(stopped) {model.off();stats.state=State::Off;}
+    const auto handle=task;
+    portEXIT_CRITICAL(&mux);
+    if(stopped && handle)xTaskNotify(handle,1,eSetBits);
+}
+void serviceAutomatic() {
+#if POWERBANK_PULSE_SUPPORTED
+    // No gauge polling or NVS writes: reuse the GUI classification and settings.
+    static int64_t nextCheck=0;
+    const auto now=esp_timer_get_time();
+    if(now<nextCheck)return;
+    nextCheck=now+250000;
+    MosaicoDisplay::Snapshot display;
+    if(!MosaicoDisplay::snapshot(display))return;
+    std::unique_lock<std::mutex> guard(admission,std::try_to_lock);
+    if(!guard.owns_lock())return;
+    portENTER_CRITICAL(&mux);
+    autoPolicy.configure(display.effectiveConfig.smartKeepalive);
+    const bool wanted=autoPolicy.desired(now) && !fatal;
+    if(!wanted && model.automatic) {model.off();stats.state=State::Off;}
+    const bool start=wanted && !model.enabled(now);
+    const auto reservation=model.generation;
+    portEXIT_CRITICAL(&mux);
+    if(start && !task) {
+        TaskHandle_t created=nullptr;
+        if(xTaskCreate(worker,"bank_pulse",3072,nullptr,1,&created)!=pdPASS) {
+            portENTER_CRITICAL(&mux);fatal=true;stats.state=State::TaskError;stats.error=-1;portEXIT_CRITICAL(&mux);return;
+        }
+        portENTER_CRITICAL(&mux);task=created;portEXIT_CRITICAL(&mux);
+    }
+    portENTER_CRITICAL(&mux);
+    if(start && !fatal && model.generation==reservation && autoPolicy.desired(esp_timer_get_time())) {
+        model.startAutomatic(esp_timer_get_time());stats.config=model.config;stats.state=State::Waiting;stats.error=0;
+    }
+    const auto handle=task;
+    portEXIT_CRITICAL(&mux);
+    // Only transitions notify; no 250ms wakeup of the pulse task in steady state.
+    if(start && handle)xTaskNotify(handle,1,eSetBits);
+#endif
 }
 Snapshot boundedSnapshot() {
     const auto now=esp_timer_get_time();
     portENTER_CRITICAL(&mux);
     Snapshot out=stats;out.supported=POWERBANK_PULSE_SUPPORTED;out.enabled=model.enabled(now);
-    out.remainingSeconds=out.enabled ? uint32_t((model.leaseUntil-now+999999)/1000000) : 0;
+    out.automatic=model.automatic;out.configured=autoPolicy.configured;out.supplyExternal=autoPolicy.external;out.inhibited=autoPolicy.inhibited;
+    out.remainingSeconds=out.enabled && !model.automatic ? uint32_t((model.leaseUntil-now+999999)/1000000) : 0;
     portEXIT_CRITICAL(&mux);return out;
 }
 }
