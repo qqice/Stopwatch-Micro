@@ -365,17 +365,39 @@ void CodexMicroView::initSettings() {
     }
     _wifiSaveState = label(wireless, 12, 328, 416, "", &lv_font_montserrat_14);
     lv_obj_set_height(_wifiSaveState, 18); lv_label_set_long_mode(_wifiSaveState, LV_LABEL_LONG_MODE_DOTS);
-    _wifiKeyboard = lv_keyboard_create(_settingsPage);
-    // LVGL creates keyboards BOTTOM_MID aligned; set_pos only changes offsets.
-    // The sheet uses absolute top-left geometry, not a 204px bottom offset.
+    _wifiEditorOverlay = lv_obj_create(_root); panel(_wifiEditorOverlay, 0, 0, 480, 480);
+    lv_obj_add_flag(_wifiEditorOverlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(_wifiEditorOverlay, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_remove_flag(_wifiEditorOverlay, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    label(_wifiEditorOverlay, 24, 32, 280, "WIRELESS INPUT", &lv_font_montserrat_24);
+    _wifiEditorCancel = lv_button_create(_wifiEditorOverlay); panel(_wifiEditorCancel, 328, 24, 128, 48);
+    _wifiEditorClear = lv_button_create(_wifiEditorOverlay); panel(_wifiEditorClear, 24, 100, 128, 48);
+    _wifiSymbolPage = lv_button_create(_wifiEditorOverlay); panel(_wifiSymbolPage, 328, 100, 128, 48);
+    _wifiSymbolPageLabel = label(_wifiSymbolPage, 0, 12, 128, "SYMBOL 1/2", &lv_font_montserrat_18);
+    auto* cancelLabel = label(_wifiEditorCancel, 0, 12, 128, "CANCEL", &lv_font_montserrat_18);
+    auto* clearLabel = label(_wifiEditorClear, 0, 12, 128, "CLEAR", &lv_font_montserrat_18);
+    for (auto* text : {cancelLabel, clearLabel, _wifiSymbolPageLabel}) {
+        lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_remove_flag(text, LV_OBJ_FLAG_CLICKABLE);
+    }
+    for (auto* button : {_wifiEditorCancel, _wifiEditorClear, _wifiSymbolPage}) {
+        lv_obj_remove_flag(button, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_remove_flag(button, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        lv_obj_add_event_cb(button, wifiEditorControlEvent, LV_EVENT_CLICKED, this);
+    }
+    _wifiKeyboard = lv_keyboard_create(_wifiEditorOverlay);
     lv_obj_set_align(_wifiKeyboard, LV_ALIGN_TOP_LEFT);
-    static_assert(mosaico_keyboard::X == 0 && mosaico_keyboard::Y == 204 &&
-                  mosaico_keyboard::Width == 440 && mosaico_keyboard::Height == 198);
-    panel(_wifiKeyboard, 0, 204, 440, 198);
     using namespace mosaico_keyboard;
-    // Keep LVGL maps/controls and editing callbacks intact; only style the items.
-    lv_obj_set_style_text_font(_wifiKeyboard, &lv_font_montserrat_20, LV_PART_ITEMS);
-    lv_obj_set_style_pad_all(_wifiKeyboard, Padding, LV_PART_MAIN);
+    panel(_wifiKeyboard, X, Y, Width, Height);
+    lv_keyboard_set_map(_wifiKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER, Map_lc, Ctrl_lc);
+    lv_keyboard_set_map(_wifiKeyboard, LV_KEYBOARD_MODE_TEXT_UPPER, Map_uc, Ctrl_uc);
+    lv_keyboard_set_map(_wifiKeyboard, LV_KEYBOARD_MODE_SPECIAL, Map_spec, Ctrl_spec);
+    lv_keyboard_set_map(_wifiKeyboard, LV_KEYBOARD_MODE_USER_1, Map_extra, Ctrl_extra);
+    lv_obj_set_style_text_font(_wifiKeyboard, &lv_font_montserrat_24, LV_PART_ITEMS);
+    lv_obj_set_style_pad_left(_wifiKeyboard, Padding, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(_wifiKeyboard, Padding, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(_wifiKeyboard, PaddingY, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(_wifiKeyboard, PaddingY, LV_PART_MAIN);
     lv_obj_set_style_pad_row(_wifiKeyboard, Gap, LV_PART_MAIN);
     lv_obj_set_style_pad_column(_wifiKeyboard, Gap, LV_PART_MAIN);
     for (auto state : {LV_STATE_DEFAULT, LV_STATE_CHECKED, LV_STATE_PRESSED,
@@ -428,6 +450,7 @@ void CodexMicroView::openSettings() {
 void CodexMicroView::closeSettings(bool animate) {
     cancelWifiEditorPending();
     if (!_settingsPage || (!_settingsOpen && !_settingsAnimating)) return;
+    restoreWifiEditor();
     lv_anim_delete(this, settingsDetailExec);
     lv_anim_delete(this, settingsSheetExec); _settingsOpen = false; _settingsAnimating = animate; _settingsClosing = animate;
     _touchTracking = false; _swipeConsumed = true; _activity = lv_tick_get();
@@ -448,6 +471,7 @@ void CodexMicroView::closeSettings(bool animate) {
 }
 void CodexMicroView::showSettingsDetail(unsigned detail) {
     cancelWifiEditorPending();
+    restoreWifiEditor();
     for (auto* panel : _settingsDetails) lv_obj_set_y(panel, 56);
     _settingsDetail = detail;
     if (!detail) lv_obj_remove_flag(_settingsTiles, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_settingsTiles, LV_OBJ_FLAG_HIDDEN);
@@ -511,9 +535,49 @@ void CodexMicroView::serviceWifiEditorPending(bool touching) {
     for (auto* obj : {_wifiProfiles, _wifiNewButton, _wifiForgetButton, _wifiOpenButton, _wifiSaveButton, _wifiRestartButton, _wifiSaveState})
         lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
     auto* other = field == _wifiSsid ? _wifiPassword : _wifiSsid;
-    lv_obj_add_flag(other, LV_OBJ_FLAG_HIDDEN); place(field, 12, 70);
+    lv_obj_add_flag(other, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_parent(field, _wifiEditorOverlay);
+    lv_obj_set_pos(field, mosaico_keyboard::EditorX, mosaico_keyboard::EditorY);
+    lv_obj_set_size(field, mosaico_keyboard::EditorWidth, mosaico_keyboard::EditorHeight);
+    lv_obj_remove_flag(field, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_remove_flag(field, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_remove_flag(_wifiEditorOverlay, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_wifiEditorOverlay);
+    lv_keyboard_set_mode(_wifiKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_label_set_text(_wifiSymbolPageLabel, "SYMBOL 1/2");
     lv_keyboard_set_textarea(_wifiKeyboard, field); lv_obj_remove_flag(_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_wifiKeyboard);
+}
+void CodexMicroView::restoreWifiEditor() {
+    if (!_wifiEditorOverlay || lv_obj_has_flag(_wifiEditorOverlay, LV_OBJ_FLAG_HIDDEN)) return;
+    lv_keyboard_set_textarea(_wifiKeyboard, nullptr); lv_obj_add_flag(_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(_wifiEditorOverlay, LV_OBJ_FLAG_HIDDEN);
+    _wifiKeyboardHaptic.end();
+    for (auto* field : {_wifiSsid, _wifiPassword}) {
+        lv_obj_set_parent(field, _settingsDetails[3]); lv_obj_set_size(field, 416, 48);
+        lv_obj_add_flag(field, LV_OBJ_FLAG_EVENT_BUBBLE); lv_obj_add_flag(field, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        lv_obj_remove_flag(field, LV_OBJ_FLAG_HIDDEN);
+    }
+    place(_wifiSsid, 12, 178); place(_wifiPassword, 12, 232);
+    for (size_t row = 6; row < 8; ++row) lv_obj_remove_flag(_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
+    for (auto* obj : {_wifiProfiles, _wifiNewButton, _wifiForgetButton, _wifiOpenButton, _wifiSaveButton, _wifiRestartButton, _wifiSaveState})
+        lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+void CodexMicroView::wifiEditorControlEvent(lv_event_t* event) {
+    auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
+    if ((self->wifiEditorGuards() & ~512U) || lv_obj_has_flag(self->_wifiEditorOverlay, LV_OBJ_FLAG_HIDDEN)) return;
+    auto* target = static_cast<lv_obj_t*>(lv_event_get_current_target(event));
+    self->_activity = lv_tick_get();
+    if (target == self->_wifiEditorCancel) {
+        self->cancelWifiEditorPending(); self->restoreWifiEditor();
+        lv_textarea_set_text(self->_wifiPassword, "");
+    } else if (target == self->_wifiEditorClear) {
+        if (auto* field = lv_keyboard_get_textarea(self->_wifiKeyboard)) lv_textarea_set_text(field, "");
+    } else if (target == self->_wifiSymbolPage) {
+        const bool extra = lv_keyboard_get_mode(self->_wifiKeyboard) != LV_KEYBOARD_MODE_USER_1;
+        lv_keyboard_set_mode(self->_wifiKeyboard, extra ? LV_KEYBOARD_MODE_USER_1 : LV_KEYBOARD_MODE_SPECIAL);
+        lv_label_set_text(self->_wifiSymbolPageLabel, extra ? "SYMBOL 2/2" : "SYMBOL 1/2");
+    }
+    self->publishWifiEditorDebug();
 }
 void CodexMicroView::wifiKeyboardEvent(lv_event_t* event) {
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
@@ -536,14 +600,27 @@ void CodexMicroView::wifiKeyboardEvent(lv_event_t* event) {
         if (auto* fill = lv_draw_task_get_fill_dsc(task)) fill->color = lv_color_hex(keyColor(kind, pressed));
         if (auto* label = lv_draw_task_get_label_dsc(task)) {
             label->color = lv_color_hex(kind == KeyKind::Go ? GoText : Text);
-            if (kind == KeyKind::Go && label->text_local) {
-                // LVGL copied the three-byte UTF-8 OK symbol into an owned buffer.
-                // GO fits that buffer. Keep ownership so LVGL frees it normally.
+            const char* display = nullptr;
+            const auto mode = lv_keyboard_get_mode(self->_wifiKeyboard);
+            if (kind == KeyKind::Go) display = "GO";
+            else if (!std::strcmp(text, "1#")) display = "ABC";
+            else if (!std::strcmp(text, "ABC") || !std::strcmp(text, "abc"))
+                display = (mode == LV_KEYBOARD_MODE_TEXT_LOWER || mode == LV_KEYBOARD_MODE_TEXT_UPPER) ? LV_SYMBOL_UP : "ABC";
+            if (kind != KeyKind::Normal) {
                 lv_point_t oldSize{}, newSize{};
                 lv_text_get_size(&oldSize, label->text, label->font, label->letter_space, label->line_space, LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
-                std::strcpy(const_cast<char*>(label->text), "GO");
-                lv_text_get_size(&newSize, "GO", label->font, label->letter_space, label->line_space, LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+                // Draw tasks own text_local buffers (lv_draw_label duplicates, lv_draw frees).
+                // Never write a longer replacement into the original allocation.
+                if (display && label->text_local) {
+                    if (char* replacement = lv_strdup(display)) {
+                        lv_free(const_cast<char*>(label->text)); label->text = replacement;
+                        label->text_length = std::strlen(display);
+                    }
+                }
+                label->font = &lv_font_montserrat_18;
+                lv_text_get_size(&newSize, label->text, label->font, label->letter_space, label->line_space, LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
                 label->ofs_x += (oldSize.x - newSize.x) / 2;
+                label->ofs_y += (oldSize.y - newSize.y) / 2;
                 label->flag = static_cast<lv_text_flag_t>(label->flag | LV_TEXT_FLAG_EXPAND);
                 label->text_size = {};
             }
@@ -589,11 +666,12 @@ void CodexMicroView::wifiFieldEvent(lv_event_t* event) {
     } else if (isField && code == LV_EVENT_PRESSED) {
         self->cancelWifiEditorPending();
         // PRESSED precedes the bubbled sheet callback that resets swipeConsumed.
-        if (!(self->wifiEditorGuards() & ~512U) && input && lv_indev_get_type(input) == LV_INDEV_TYPE_POINTER) {
+        if (!(self->wifiEditorGuards() & ~512U) && lv_obj_has_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN) && input && lv_indev_get_type(input) == LV_INDEV_TYPE_POINTER) {
             self->_wifiEditorPending = field; self->_wifiEditorInput = input;
             lv_indev_get_point(input, &self->_wifiEditorStart);
         }
-    } else if (self->wifiEditorGuards()) {
+    } else if (mosaico_keyboard::fieldEventGuards(self->wifiEditorGuards(),
+                   code == LV_EVENT_READY || code == LV_EVENT_CANCEL)) {
         self->cancelWifiEditorPending();
     } else if (isField && (code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED)) {
         if (input && lv_indev_get_type(input) == LV_INDEV_TYPE_POINTER) {
@@ -603,19 +681,14 @@ void CodexMicroView::wifiFieldEvent(lv_event_t* event) {
                     lv_indev_get_scroll_obj(input)) {
                     self->_swipeConsumed = true; self->cancelWifiEditorPending();
                 } else self->_wifiEditorReleased = true;
-            } else if (code == LV_EVENT_CLICKED && !lv_indev_get_scroll_obj(input)) {
+            } else if (code == LV_EVENT_CLICKED && lv_obj_has_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN) && !lv_indev_get_scroll_obj(input)) {
                 // Pointer CLICKED fallback only; programmatic focus is not activation.
                 self->_wifiEditorPending = field; self->_wifiEditorInput = input; self->_wifiEditorReleased = true;
             }
         }
     } else if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
         self->cancelWifiEditorPending();
-        lv_keyboard_set_textarea(self->_wifiKeyboard, nullptr); lv_obj_add_flag(self->_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
-        place(self->_wifiSsid, 12, 178); place(self->_wifiPassword, 12, 232);
-        lv_obj_remove_flag(self->_wifiSsid, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(self->_wifiPassword, LV_OBJ_FLAG_HIDDEN);
-        for (size_t row = 6; row < 8; ++row) lv_obj_remove_flag(self->_settingsRows[row], LV_OBJ_FLAG_HIDDEN);
-        for (auto* obj : {self->_wifiProfiles, self->_wifiNewButton, self->_wifiForgetButton, self->_wifiOpenButton, self->_wifiSaveButton, self->_wifiRestartButton, self->_wifiSaveState})
-            lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+        self->restoreWifiEditor();
         if (code == LV_EVENT_CANCEL) lv_textarea_set_text(self->_wifiPassword, "");
     }
     if (code == LV_EVENT_PRESSED || code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED ||

@@ -67,6 +67,8 @@ private:
     static void settingsTileEvent(lv_event_t* event);
     static void wifiFieldEvent(lv_event_t* event);
     static void wifiKeyboardEvent(lv_event_t* event);
+    static void wifiEditorControlEvent(lv_event_t* event);
+    void restoreWifiEditor();
     static void wifiSelectionEvent(lv_event_t* event);
     static void wifiActionEvent(lv_event_t* event);
     uint32_t wifiEditorGuards() const;
@@ -146,6 +148,11 @@ private:
     lv_obj_t* _wifiSsid = nullptr;
     lv_obj_t* _wifiPassword = nullptr;
     lv_obj_t* _wifiKeyboard = nullptr;
+    lv_obj_t* _wifiEditorOverlay = nullptr;
+    lv_obj_t* _wifiEditorCancel = nullptr;
+    lv_obj_t* _wifiEditorClear = nullptr;
+    lv_obj_t* _wifiSymbolPage = nullptr;
+    lv_obj_t* _wifiSymbolPageLabel = nullptr;
     mosaico_keyboard::PointerHaptic _wifiKeyboardHaptic{};
     lv_obj_t* _wifiOpenButton = nullptr;
     lv_obj_t* _wifiSaveButton = nullptr;

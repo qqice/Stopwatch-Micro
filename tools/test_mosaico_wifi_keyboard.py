@@ -17,10 +17,11 @@ class WifiKeyboardTests(unittest.TestCase):
         self.assertLess(fields.index('lv_textarea_set_one_line'), fields.index('lv_obj_set_height(field, 48)'))
         self.assertIn('lv_obj_remove_flag(field, LV_OBJ_FLAG_SCROLL_ON_FOCUS)', fields)
         self.assertIn('wifiFieldEvent, LV_EVENT_ALL', fields)
-        self.assertIn('_wifiKeyboard = lv_keyboard_create(_settingsPage)', init)
-        self.assertIn('panel(_wifiKeyboard, 0, 204, 440, 198)', init)
+        self.assertIn('_wifiKeyboard = lv_keyboard_create(_wifiEditorOverlay)', init)
+        self.assertIn('panel(_wifiKeyboard, X, Y, Width, Height)', init)
         self.assertLessEqual(64 + 402 + 2, 480)
-        self.assertLessEqual(56 + 70 + 48, 204)
+        self.assertIn('panel(_wifiEditorOverlay, 0, 0, 480, 480)', init)
+        self.assertLessEqual(164 + 50, 231)
         self.assertIn('lv_textarea_set_password_show_time(_wifiPassword, 0)', init)
         close = CPP.split('void CodexMicroView::closeSettings(', 1)[1].split('void CodexMicroView::showSettingsDetail', 1)[0]
         self.assertIn('lv_keyboard_set_textarea(_wifiKeyboard, nullptr)', close)
@@ -36,7 +37,7 @@ class WifiKeyboardTests(unittest.TestCase):
     def test_actual_wireless_layout_and_draft_refresh(self):
         init = CPP.split('void CodexMicroView::initSettings()', 1)[1].split('void CodexMicroView::settingsDetailExec', 1)[0]
         rects = {}
-        for name in ('Profiles', 'NewButton', 'ForgetButton', 'Ssid', 'Password', 'OpenButton', 'SaveButton', 'RestartButton', 'Keyboard'):
+        for name in ('Profiles', 'NewButton', 'ForgetButton', 'Ssid', 'Password', 'OpenButton', 'SaveButton', 'RestartButton'):
             match = re.search(r'panel\(_wifi' + name + r', (\d+), (\d+), (\d+), (\d+)\)', init)
             self.assertIsNotNone(match, name)
             rects[name] = tuple(map(int, match.groups()))
@@ -50,9 +51,11 @@ class WifiKeyboardTests(unittest.TestCase):
                 for a, b, c, d in rectangles[i+1:]:
                     self.assertTrue(x+w <= a or a+c <= x or y+h <= b or b+d <= y)
         hidden = [(20+x, 120+y, w, h) for name, (x,y,w,h) in rects.items() if name != 'Keyboard']
-        keyboard = rects['Keyboard']
-        active = re.search(r'place\(field, (\d+), (\d+)\)', CPP)
-        shown = [(20+int(active[1]), 120+int(active[2]), 416, 48), (20+keyboard[0], 64+keyboard[1], keyboard[2], keyboard[3])]
+        from preview_mosaico_keyboard import export
+        meta,_ = export()
+        shown = [tuple(meta[7:]),tuple(meta[2:6])]
+        self.assertIn('lv_obj_set_parent(field, _wifiEditorOverlay)', CPP)
+        self.assertIn('lv_obj_set_size(field, mosaico_keyboard::EditorWidth, mosaico_keyboard::EditorHeight)', CPP)
         for layout in (hidden, shown):
             for rotation in range(4):
                 check(layout)
@@ -88,13 +91,14 @@ class WifiKeyboardTests(unittest.TestCase):
         if not compilers:
             self.skipTest('embedded compiler unavailable')
         methods = []
-        for name in ('wifiEditorGuards', 'cancelWifiEditorPending', 'serviceWifiEditorPending', 'wifiFieldEvent', 'touchEvent', 'wifiSelectionEvent', 'wifiActionEvent'):
+        for name in ('wifiEditorGuards', 'cancelWifiEditorPending', 'serviceWifiEditorPending', 'restoreWifiEditor', 'wifiEditorControlEvent', 'wifiFieldEvent', 'touchEvent', 'wifiSelectionEvent', 'wifiActionEvent'):
             start = CPP.index(('uint32_t' if name == 'wifiEditorGuards' else 'void') + ' CodexMicroView::' + name + '(')
             body = CPP[start:CPP.index('\n}', start) + 2]
             body = body.replace('std::strlen', 'textLength').replace('std::strcmp', 'textCompare')
             body = body.replace('GetNetworkQuota()', 'self->network')
             methods.append('constexpr ' + body)
-        harness = r'''
+        model=(ROOT/'main/apps/app_codex_micro/view/keyboard_style_model.h').as_posix()
+        harness = '#include "'+model+'"\n'+r'''
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -102,12 +106,13 @@ class WifiKeyboardTests(unittest.TestCase):
 using std::size_t;
 enum { LV_EVENT_PRESSED, LV_EVENT_PRESSING, LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST,
        LV_EVENT_CLICKED, LV_EVENT_VALUE_CHANGED, LV_EVENT_READY, LV_EVENT_CANCEL };
-enum lv_obj_flag_t { LV_OBJ_FLAG_HIDDEN=1 };
+enum lv_obj_flag_t { LV_OBJ_FLAG_HIDDEN=1, LV_OBJ_FLAG_EVENT_BUBBLE=2, LV_OBJ_FLAG_GESTURE_BUBBLE=4 };
+enum { LV_KEYBOARD_MODE_TEXT_LOWER,LV_KEYBOARD_MODE_USER_1,LV_KEYBOARD_MODE_SPECIAL };
 enum { LV_STATE_DISABLED=1 };
-enum { LV_INDEV_TYPE_POINTER, LV_INDEV_STATE_RELEASED, LV_INDEV_STATE_PRESSED };
+enum { LV_INDEV_TYPE_POINTER, LV_INDEV_TYPE_KEYPAD=9, LV_INDEV_STATE_RELEASED=0, LV_INDEV_STATE_PRESSED=1 };
 struct lv_point_t { int x=0,y=0; };
-struct lv_indev_t { lv_point_t point; int state=LV_INDEV_STATE_RELEASED; bool scrolling=false; };
-struct lv_obj_t { lv_obj_t* parent=nullptr; int flags=0,x=0,y=0; bool empty=false; lv_obj_t* editor=nullptr; char text[65]{}; unsigned selected=0; int states=0; const char* dropdownText=nullptr; };
+struct lv_indev_t { lv_point_t point; int state=LV_INDEV_STATE_RELEASED; bool scrolling=false; int type=LV_INDEV_TYPE_POINTER; };
+struct lv_obj_t { lv_obj_t* parent=nullptr; int flags=0,x=0,y=0; bool empty=false; lv_obj_t* editor=nullptr; char text[65]{}; unsigned selected=0; int states=0; const char* dropdownText=nullptr; int w=416,h=48,mode=LV_KEYBOARD_MODE_TEXT_LOWER; };
 struct CodexMicroView;
 struct lv_event_t { CodexMicroView* owner; int code; lv_obj_t* target; lv_obj_t* current; lv_indev_t* input; };
 constexpr auto lv_event_get_user_data(lv_event_t* e) { return e->owner; }
@@ -115,7 +120,7 @@ constexpr auto lv_event_get_code(lv_event_t* e) { return e->code; }
 constexpr auto lv_event_get_target(lv_event_t* e) { return e->target; }
 constexpr auto lv_event_get_current_target(lv_event_t* e) { return e->current; }
 constexpr auto lv_event_get_indev(lv_event_t* e) { return e->input; }
-constexpr int lv_indev_get_type(lv_indev_t*) { return LV_INDEV_TYPE_POINTER; }
+constexpr int lv_indev_get_type(lv_indev_t* i) { return i->type; }
 constexpr int lv_indev_get_state(lv_indev_t* i) { return i->state; }
 lv_obj_t scrollMock{};
 constexpr lv_obj_t* lv_indev_get_scroll_obj(lv_indev_t* i) { return i->scrolling ? &scrollMock : nullptr; }
@@ -124,6 +129,12 @@ constexpr bool lv_obj_has_state(lv_obj_t* o,int state) { return o->states&state;
 constexpr void lv_obj_add_state(lv_obj_t* o,int state) { o->states|=state; }
 constexpr void lv_obj_remove_state(lv_obj_t* o,int state) { o->states&=~state; }
 constexpr void lv_dropdown_set_text(lv_obj_t* o,const char* text) { o->dropdownText=text; }
+constexpr void lv_obj_set_parent(lv_obj_t* o,lv_obj_t* p) {o->parent=p;}
+constexpr void lv_obj_set_pos(lv_obj_t* o,int x,int y) {o->x=x;o->y=y;}
+constexpr void lv_obj_set_size(lv_obj_t* o,int w,int h) {o->w=w;o->h=h;}
+constexpr void lv_keyboard_set_mode(lv_obj_t* o,int m) {o->mode=m;}
+constexpr int lv_keyboard_get_mode(lv_obj_t* o) {return o->mode;}
+constexpr auto lv_keyboard_get_textarea(lv_obj_t* o) {return o->editor;}
 constexpr auto lv_obj_get_parent(lv_obj_t* o) { return o->parent; }
 constexpr bool lv_obj_has_flag(lv_obj_t* o,lv_obj_flag_t f) { return o->flags&f; }
 constexpr void lv_obj_add_flag(lv_obj_t* o,lv_obj_flag_t f) { o->flags|=f; }
@@ -159,7 +170,12 @@ struct CodexMicroView {
  bool _touchTracking=false,_swipeConsumed=true,_touchOnEditor=false,_wifiOpenNetwork=false,_wifiNewProfile=false;
  unsigned _settingsDetail=4,_activity=0;
  lv_point_t _touchStart;
- lv_obj_t page{},ssid{&page},password{&page},keyboard{&page,1},child{&ssid},rows[8]{};
+ lv_obj_t page{},wireless{&page},overlay{nullptr,1},ssid{&wireless},password{&wireless},keyboard{&overlay,1},child{&ssid},rows[8]{};
+ lv_obj_t cancel{},clear{},symbolPage{},symbolLabel{};
+ lv_obj_t* _wifiEditorOverlay=&overlay;lv_obj_t* _wifiEditorCancel=&cancel;lv_obj_t* _wifiEditorClear=&clear;
+ lv_obj_t* _wifiSymbolPage=&symbolPage;lv_obj_t* _wifiSymbolPageLabel=&symbolLabel;
+ lv_obj_t* _settingsDetails[4]={nullptr,nullptr,nullptr,&wireless};
+ mosaico_keyboard::PointerHaptic _wifiKeyboardHaptic{};
  lv_obj_t* _wifiSsid=&ssid; lv_obj_t* _wifiPassword=&password; lv_obj_t* _wifiKeyboard=&keyboard;
  lv_obj_t* _settingsPage=&page; lv_obj_t* _slideTo=nullptr;
  lv_obj_t profiles{&page},newButton{},forget{},open{},save{},restart{},state{};
@@ -179,6 +195,8 @@ struct CodexMicroView {
  constexpr uint32_t wifiEditorGuards() const;
  constexpr void cancelWifiEditorPending();
  constexpr void serviceWifiEditorPending(bool);
+ constexpr void restoreWifiEditor();
+ static constexpr void wifiEditorControlEvent(lv_event_t*);
  constexpr void publishWifiEditorDebug() {}
  static constexpr void wifiFieldEvent(lv_event_t*);
  static constexpr void touchEvent(lv_event_t*);
@@ -197,11 +215,11 @@ constexpr bool exercise() {
  e.code=LV_EVENT_CLICKED;e.current=&v.ssid;v.wifiFieldEvent(&e);
  if(v.keyboard.editor || !v._wifiEditorPending)return false;
  v.serviceWifiEditorPending(false);
- if(v.keyboard.editor!=&v.ssid || v.keyboard.flags || v.ssid.y!=70 || !(v.password.flags&1))return false;
+ if(v.keyboard.editor!=&v.ssid || v.keyboard.flags || v.ssid.y!=mosaico_keyboard::EditorY || v.ssid.x!=mosaico_keyboard::EditorX || v.ssid.w!=mosaico_keyboard::EditorWidth || v.ssid.h!=mosaico_keyboard::EditorHeight || v.ssid.parent!=&v.overlay || (v.overlay.flags&1) || !(v.password.flags&1))return false;
  for(auto* o:{v._wifiProfiles,v._wifiNewButton,v._wifiForgetButton,v._wifiOpenButton,v._wifiSaveButton,v._wifiRestartButton,v._wifiSaveState})
   if(!(o->flags&1))return false;
  e.code=LV_EVENT_READY;e.current=&v.keyboard;v.wifiFieldEvent(&e);
- if(v.keyboard.editor || !(v.keyboard.flags&1) || v.ssid.y!=178 || v.password.y!=232 || v.password.flags)return false;
+ if(v.keyboard.editor || !(v.keyboard.flags&1) || v.ssid.y!=178 || v.password.y!=232 || (v.password.flags&1) || v.ssid.parent!=&v.wireless || v.password.parent!=&v.wireless || v.ssid.w!=416 || v.ssid.h!=48 || v.password.w!=416 || v.password.h!=48 || !(v.overlay.flags&1))return false;
  for(auto* o:{v._wifiProfiles,v._wifiNewButton,v._wifiForgetButton,v._wifiOpenButton,v._wifiSaveButton,v._wifiRestartButton,v._wifiSaveState})
   if(o->flags&1)return false;
  // First-contact drags on either textarea must not navigate or close settings.
@@ -269,9 +287,47 @@ constexpr bool releaseOnly() {
   v._locked=v._suppressed=v.busy=v._settingsAnimating=v._rotationFault=false;
   v._rotationPhase=CodexMicroView::RotationPhase::Idle;v._settingsOpen=true;v._settingsDetail=4;
  }
+ // A non-pointer input is not an accepted opening contact.
+ input.type=LV_INDEV_TYPE_KEYPAD;e.code=LV_EVENT_PRESSED;v.wifiFieldEvent(&e);
+ e.code=LV_EVENT_RELEASED;v.wifiFieldEvent(&e);
+ e.code=LV_EVENT_CLICKED;v.wifiFieldEvent(&e);v.serviceWifiEditorPending(false);
+ if(v.keyboard.editor || v._wifiEditorPending)return false;
  // Synthetic click without pointer cannot queue opening.
  e.input=nullptr;e.code=LV_EVENT_CLICKED;v.wifiFieldEvent(&e);return !v._wifiEditorPending;
 }
+constexpr bool rotatedCompletionAndControls() {
+ // Run the actual extracted field callback, including direct textarea and keyboard READY/CANCEL.
+ for(bool cancel : {false,true}) for(bool fromField : {false,true}) {
+  CodexMicroView v;v._swipeConsumed=false;lv_textarea_set_text(&v.password,"secret");
+  lv_indev_t input{{200,280}};
+  lv_event_t e{&v,LV_EVENT_CLICKED,&v.ssid,&v.ssid,&input};
+  v.wifiFieldEvent(&e);v.serviceWifiEditorPending(false);
+  if(v.ssid.parent!=&v.overlay || !v.keyboard.editor)return false;
+  v._rotationPhase=CodexMicroView::RotationPhase::FadeOut;
+  e.code=cancel?LV_EVENT_CANCEL:LV_EVENT_READY;e.current=fromField?&v.ssid:&v.keyboard;
+  v.wifiFieldEvent(&e);if(!v.keyboard.editor || v.password.empty)return false;
+  v._rotationPhase=CodexMicroView::RotationPhase::Idle;v._swipeConsumed=true;
+  v.wifiFieldEvent(&e);
+  if(v.keyboard.editor || !(v.overlay.flags&1) || v.ssid.parent!=&v.wireless ||
+     v.ssid.w!=416 || v.ssid.h!=48 || v.password.empty!=cancel)return false;
+  // Completion must not clear the root latch or weaken new opening guards.
+  e.code=LV_EVENT_CLICKED;e.current=&v.password;v.wifiFieldEvent(&e);v.serviceWifiEditorPending(false);
+  if(v.keyboard.editor || v._wifiEditorPending || !v._swipeConsumed)return false;
+ }
+ // Header controls retain the same isolated-overlay lifecycle and active field identity.
+ CodexMicroView v;v._swipeConsumed=false;lv_textarea_set_text(&v.password,"secret");lv_textarea_set_text(&v.ssid,"draft");
+ lv_indev_t input{{200,280}};lv_event_t e{&v,LV_EVENT_CLICKED,&v.ssid,&v.ssid,&input};
+ v.wifiFieldEvent(&e);v.serviceWifiEditorPending(false);v._swipeConsumed=true;
+ e.current=&v.clear;v.wifiEditorControlEvent(&e);
+ if(!v.ssid.empty || v.password.empty || v.keyboard.editor!=&v.ssid)return false;
+ e.current=&v.symbolPage;v.wifiEditorControlEvent(&e);
+ if(v.keyboard.mode!=LV_KEYBOARD_MODE_USER_1)return false;
+ v.wifiEditorControlEvent(&e);if(v.keyboard.mode!=LV_KEYBOARD_MODE_SPECIAL)return false;
+ e.current=&v.cancel;v.wifiEditorControlEvent(&e);
+ return v.password.empty && !v.keyboard.editor && (v.overlay.flags&1) &&
+        v.ssid.parent==&v.wireless && v.password.parent==&v.wireless && v.ssid.w==416 && v.ssid.h==48;
+}
+static_assert(rotatedCompletionAndControls(),"actual rotated READY/CANCEL and header controls restore parent/size and wipe only on cancel");
 static_assert(releaseOnly(),"release-only arming defers layout, cancels loss, drag, scrolling and all lifecycle guards");
 static_assert(exercise(),"actual editor callbacks preserve contact boundaries and keyboard lifecycle");
 constexpr bool profiles() {

@@ -1,4 +1,4 @@
-"""Real LVGL default/alignment arithmetic regression; no device simulation claim."""
+"""Real LVGL factory-overlay/alignment arithmetic regression; no device simulation claim."""
 from pathlib import Path
 import re,subprocess,tempfile,unittest
 R=Path(__file__).resolve().parents[1]
@@ -6,7 +6,7 @@ class KeyboardAlignmentTests(unittest.TestCase):
  def test_explicit_alignment_precedes_offsets(self):
   s=(R/'main/apps/app_codex_micro/view/view_mosaico.cpp').read_text(encoding='utf8')
   block=s[s.index('_wifiKeyboard = lv_keyboard_create'):s.index('renderSettings();',s.index('_wifiKeyboard = lv_keyboard_create'))]
-  self.assertLess(block.index('lv_obj_set_align(_wifiKeyboard, LV_ALIGN_TOP_LEFT)'),block.index('panel(_wifiKeyboard, 0, 204, 440, 198)'))
+  self.assertLess(block.index('lv_obj_set_align(_wifiKeyboard, LV_ALIGN_TOP_LEFT)'),block.index('panel(_wifiKeyboard, X, Y, Width, Height)'))
  def test_actual_lvgl_constructor_and_position_arithmetic(self):
   base=R/'components/lvgl/src'
   if not base.exists():self.skipTest('configured LVGL source unavailable')
@@ -22,12 +22,13 @@ class KeyboardAlignmentTests(unittest.TestCase):
   for name in ('TOP_LEFT','BOTTOM_MID'):
    m=re.search(r'case LV_ALIGN_'+name+r':(.*?)break;',body,re.S)
    self.assertIsNotNone(m,name);cases.append('case '+name+':'+m[1]+'break;')
-  code='''enum Align {TOP_LEFT,BOTTOM_MID};
-constexpr int y_at(Align a) {int x=0,y=204,pw=440,ph=402,w=440,h=198;bool rtl=false;
- switch(a) { CASES } return 64+y;}
-static_assert(y_at(BOTTOM_MID)==472 && y_at(BOTTOM_MID)+198>480,"old keyboard clipped below display");
-static_assert(y_at(TOP_LEFT)==268 && y_at(TOP_LEFT)+198+2<=480,"keyboard fits including burn-in margin");
-static_assert(64+56+70+48<y_at(TOP_LEFT),"editor and keyboard do not overlap");
+  model=(R/'main/apps/app_codex_micro/view/keyboard_style_model.h').as_posix()
+  code='#include "'+model+'"\n'+'''enum Align {TOP_LEFT,BOTTOM_MID};
+constexpr int y_at(Align a) {int x=0,y=mosaico_keyboard::Y,pw=480,ph=480,w=mosaico_keyboard::Width,h=mosaico_keyboard::Height;bool rtl=false;
+ switch(a) { CASES } return y;}
+static_assert(y_at(BOTTOM_MID)==478 && y_at(BOTTOM_MID)+mosaico_keyboard::Height>480,"old keyboard clipped below display");
+static_assert(y_at(TOP_LEFT)==231 && y_at(TOP_LEFT)+mosaico_keyboard::Height==464,"keyboard fits including burn-in margin");
+static_assert(mosaico_keyboard::EditorY+mosaico_keyboard::EditorHeight<y_at(TOP_LEFT),"editor and keyboard do not overlap");
 '''.replace('CASES','\n'.join(cases))
   compilers=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
   if not compilers:self.skipTest('cross compiler unavailable')
