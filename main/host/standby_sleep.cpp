@@ -124,6 +124,15 @@ void captureCounts() {
 #endif
 }
 }
+bool pulseEligible() {
+    std::unique_lock<std::mutex> guard(mutex, std::try_to_lock);
+    if (!guard.owns_lock()) return false;
+    const int64_t now = esp_timer_get_time();
+    return applied && wanted && ready && model.viewLocked && model.displaySafe &&
+           !model.fault && !model.otaBlocked && !bleActive && model.requested(now) &&
+           !model.uartBlocked(now) && mosaico_console_usb_snapshot().sleep_safe &&
+           !MosaicoOta::busy() && !MosaicoOta::healthPending();
+}
 bool monitoring() { std::lock_guard<std::mutex> guard(mutex);return model.automaticPolicy || model.leaseUntil || applied; }
 void uartReady(bool value) {
     std::lock_guard<std::mutex> guard(mutex);ready=value;

@@ -11,6 +11,7 @@
 #include <debug/mosaico_rx_ingress.h>
 #include <host/mosaico_display_settings.h>
 #include <host/standby_sleep.h>
+#include <host/powerbank_keepalive.h>
 #include <host/touch_sleep.h>
 #include <hal/mosaico/usb_console.h>
 #include <main_idle_wait.h>
@@ -717,6 +718,35 @@ void SerialDebug::handleLine(char* line)
             s.config.chargeBrightness, s.config.batteryBrightness, s.config.lockBrightness, s.config.burnIn,
             static_cast<unsigned long>(s.revision), static_cast<unsigned long>(s.savedRevision), s.pending, static_cast<long>(s.error));
         result("display-settings", s.error ? "FAIL" : "PASS", details); return;
+    }
+    if (command && !std::strcmp(command, "bankpulse")) {
+        const char* action = ::strtok_r(nullptr, " \t", &save);
+        bool ok = false;
+        if (action && !std::strcmp(action, "status") && !::strtok_r(nullptr, " \t", &save)) ok = true;
+        else if (action && !std::strcmp(action, "off") && !::strtok_r(nullptr, " \t", &save)) {
+            PowerbankKeepalive::off(); ok = true;
+        } else if (action && !std::strcmp(action, "on")) {
+            PowerbankKeepalive::Request request{};
+            const char* lease = ::strtok_r(nullptr, " \t", &save);
+            const char* period = ::strtok_r(nullptr, " \t", &save);
+            const char* duration = ::strtok_r(nullptr, " \t", &save);
+            if (parseUnsignedStrict(lease,180,1800,request.leaseSeconds) &&
+                parseUnsignedStrict(period,5,20,request.periodSeconds) &&
+                parseUnsignedStrict(duration,100,1000,request.durationMs) &&
+                !::strtok_r(nullptr, " \t", &save) && PowerbankKeepalive::valid(request) &&
+                _async_test == AsyncTest::None && !MosaicoOta::busy() && !MosaicoOta::healthPending())
+                ok = PowerbankKeepalive::request(request);
+        }
+        const auto p = PowerbankKeepalive::boundedSnapshot();
+        char details[384]{};
+        std::snprintf(details,sizeof(details),
+            "supported=%u enabled=%u pulsing=%u state=%u remaining_s=%lu period_s=%lu duration_ms=%lu pulses=%lu aborted=%lu blocked=%lu pm_errors=%lu error=%ld ram_only=1 no_current_measurement=1",
+            p.supported,p.enabled,p.pulsing,static_cast<unsigned>(p.state),
+            static_cast<unsigned long>(p.remainingSeconds),static_cast<unsigned long>(p.config.periodSeconds),
+            static_cast<unsigned long>(p.config.durationMs),static_cast<unsigned long>(p.pulses),
+            static_cast<unsigned long>(p.aborted),static_cast<unsigned long>(p.blocked),
+            static_cast<unsigned long>(p.pmErrors),static_cast<long>(p.error));
+        result("bankpulse", ok ? "PASS" : "FAIL", details); return;
     }
     if (command && std::strcmp(command, "ota-status") == 0) {
         char details[384]{};

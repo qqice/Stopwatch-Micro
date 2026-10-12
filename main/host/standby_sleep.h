@@ -13,6 +13,9 @@ struct Snapshot {
     int32_t error=0;
 };
 bool monitoring();
+// Bounded try-lock, memory-only gate for an explicitly leased CPU-load experiment.
+// No profiling, allocation, configuration, or recovery-lock side effects.
+bool pulseEligible();
 void uartReady(bool ready);
 void usbActivity(); // TinyUSB task callbacks only, never ISR; immediate existing recovery lock.
 void uartWake(); // Existing UART event consumer, never ISR/callback.
