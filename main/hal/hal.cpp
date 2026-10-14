@@ -40,21 +40,33 @@ void Hal::init()
     }
     ESP_ERROR_CHECK(ret);
 
+    BootTimingMark(BootTiming::Nvs);
     BootTraceStage(2);
     i2c_init();
+    BootTimingMark(BootTiming::I2c);
     pmic_init();
+    BootTimingMark(BootTiming::Pmic);
 #ifdef MOSAICO_BOARD
-    // NVS and the gauge are ready, but display/radios have not started. Restore
+    delay(50); // Retain the original board settling interval before panel reset.
+    display_init();
+    BootTimingMark(BootTiming::Display);
+    display_boot_splash();
+    // No LVGL, touch, motion or radios yet. Restore
     // only this unit's authenticated RAM profile under the HAL safety policy.
     char gaugeReason[128]{};
+    BootTimingMark(BootTiming::GaugeStart);
     const auto gaugeReload = gaugeBootReload(gaugeReason, sizeof(gaugeReason));
+    BootTimingMark(BootTiming::GaugeEnd);
     ESP_LOGI("GaugeBoot", "startup status=%u reason=%s", static_cast<unsigned>(gaugeReload), gaugeReason);
 #endif
     BootTraceStage(3);
     ioe_init();
     BootTraceStage(4);
+#ifndef MOSAICO_BOARD
     delay(50);
     display_init();
+    BootTimingMark(BootTiming::Display);
+#endif
     BootTraceStage(5);
     touchpad_init();
     lvgl_init();

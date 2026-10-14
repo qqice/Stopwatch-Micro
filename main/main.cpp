@@ -94,6 +94,7 @@ extern "C" void app_main(void)
         return;
     }
 
+    BootTimingMark(BootTiming::UiReady);
     BootTraceStage(7);
     // Main loop
     while (true) {

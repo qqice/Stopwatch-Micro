@@ -4,12 +4,16 @@
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <cstdio>
+#include <array>
+#include <atomic>
 
 namespace {
 struct Entry { uint32_t boot, reset, stage, elapsedMs; };
 struct Trace { uint32_t version, count; Entry entries[4]; } trace{};
 esp_err_t error = ESP_OK;
 bool ready = false;
+std::array<std::atomic<uint32_t>, static_cast<unsigned>(BootTiming::Count)> timing{};
+constexpr const char* timingNames[]={"nvs","i2c","pmic","display","first_frame","gauge_start","gauge_end","ui_ready"};
 void save() {
     nvs_handle_t h;
     error = nvs_open("boot_trace", NVS_READWRITE, &h);
@@ -19,7 +23,12 @@ void save() {
     nvs_close(h);
 }
 }
+void BootTimingMark(BootTiming point) {
+    const auto index=static_cast<unsigned>(point);
+    if(index<timing.size())timing[index].store(static_cast<uint32_t>(esp_timer_get_time()/1000)+1,std::memory_order_release);
+}
 void BootTraceBegin() {
+    for(auto& value:timing)value.store(0,std::memory_order_relaxed);
     error = nvs_flash_init();
     if (error != ESP_OK) return; // Never erase user settings for diagnostics.
     nvs_handle_t h;
@@ -44,6 +53,10 @@ void BootTraceStage(uint32_t stage) {
 }
 void BootTracePrint(BootTraceWriter writer) {
     if (!writer) writer = std::printf;
+    for(unsigned i=0;i<timing.size();++i) {
+        const auto ms=timing[i].load(std::memory_order_acquire);
+        if(ms)writer("DBG BOOT_TIMING point=%s elapsed_ms=%lu current_boot_ram_only=1\r\n",timingNames[i],static_cast<unsigned long>(ms-1));
+    }
     for (const auto& e : trace.entries)
         if (e.boot) writer("DBG BOOT boot=%lu reset=%lu stage=%lu elapsed_ms=%lu\r\n",
             static_cast<unsigned long>(e.boot), static_cast<unsigned long>(e.reset),

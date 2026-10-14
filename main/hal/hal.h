@@ -322,6 +322,9 @@ private:
     void ioe_tp_reset();
     void ioe_speaker_enable(bool enable);
     void display_init();
+#ifdef MOSAICO_BOARD
+    void display_boot_splash();
+#endif
     void touchpad_init();
     void lvgl_init();
     void audio_init();

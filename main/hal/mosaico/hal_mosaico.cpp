@@ -28,6 +28,8 @@
 #include "../hal.h"
 #include "../utils/settings/settings.h"
 #include "mosaico_gauge_model.h"
+#include "mosaico_boot_splash_model.h"
+#include <debug/boot_trace.h>
 #include "mosaico_touch_power_model.h"
 #include "mosaico_lvgl_tick_model.h"
 #include "mosaico_orientation_model.h"
@@ -441,13 +443,16 @@ void gauge_feed()
 
 void gauge_delay_ms(uint32_t ms)
 {
-    // CFG transitions need >=2 s. Split waits to service the watchdog and idle
-    // task instead of one long sleep, with strictly bounded total waits.
-    while (ms) {
-        const uint32_t chunk = std::min<uint32_t>(ms, 100);
+    // Preserve the full requested minimum in monotonic time. Per-chunk +1
+    // ticks accumulated padding; tick phase can also make a delay shorter.
+    // The deadline handles both without reducing any CFG/security wait.
+    const int64_t until = esp_timer_get_time() + int64_t(ms) * 1000;
+    for (;;) {
+        const int64_t remaining = until - esp_timer_get_time();
+        if (remaining <= 0) break;
         gauge_feed();
-        vTaskDelay(pdMS_TO_TICKS(chunk) + 1);
-        ms -= chunk;
+        const uint32_t chunk = static_cast<uint32_t>(std::min<int64_t>(100, (remaining + 999) / 1000));
+        vTaskDelay(std::max<TickType_t>(1, pdMS_TO_TICKS(chunk)));
     }
     gauge_feed();
 }
@@ -1627,7 +1632,7 @@ void Hal::display_init()
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(static_cast<esp_lcd_spi_bus_handle_t>(SPI2_HOST), &io, &panel_io));
     // Driver 2.1.0 default sequence, except zero brightness and no DISPON.
     // Its default enables a fully bright panel before any pixel RAM is drawn.
-    // Keep the panel off until the first LVGL frame drains through tx_param.
+    // Keep the panel off until the complete native splash drains through tx_param.
     static const uint8_t zero[] = {0x00}, mode[] = {0x80}, control[] = {0x20}, full[] = {0xFF};
     static const uint8_t columns[] = {0x00, 0x06, 0x01, 0xDD}, rows[] = {0x00, 0x00, 0x01, 0xD1};
     static const co5300_lcd_init_cmd_t darkInit[] = {
@@ -1664,6 +1669,50 @@ void Hal::display_init()
 }
 
 bool Hal::display_ready() const { return panel && display; }
+
+void Hal::display_boot_splash()
+{
+    struct SplashTransfer {
+        uint16_t* strip = nullptr;
+        bool allocate() {
+            strip = static_cast<uint16_t*>(heap_caps_malloc(
+                mosaico_boot_splash::Width * mosaico_boot_splash::StripRows * sizeof(uint16_t),
+                MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+            return strip != nullptr;
+        }
+        void render(int y) {
+            for (int dy = 0; dy < mosaico_boot_splash::StripRows; ++dy)
+                for (int x = 0; x < mosaico_boot_splash::Width; ++x)
+                    strip[dy * mosaico_boot_splash::Width + x] = mosaico_boot_splash::pixel(x, y + dy);
+            // Only black/white RGB565 pixels; byte swapping is immaterial.
+        }
+        void draw(int y) {
+            ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, 0, y, mosaico_boot_splash::Width,
+                y + mosaico_boot_splash::StripRows, strip));
+        }
+        void drainDark() {
+            // Pinned CO5300 brightness -> SPI tx_param -> get_trans_result for
+            // every in-flight color transaction. No callback takeover/private API.
+            // Fail-stop on errors: never free/reuse a possibly in-flight strip.
+            ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, 0));
+        }
+        void release() { heap_caps_free(strip); strip = nullptr; }
+        void enable() {
+            ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
+            ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, mosaico_boot_splash::Brightness));
+            panel_brightness = mosaico_boot_splash::Brightness;
+            BootTimingMark(BootTiming::FirstFrame); // Commands completed, not optical proof.
+        }
+    } transfer;
+    if (!mosaico_boot_splash::show(transfer)) {
+        ESP_LOGW(Tag, "Boot splash allocation unavailable; panel remains dark");
+        return;
+    }
+    ESP_LOGI(Tag, "Boot splash transfer complete; native 480x480 brightness=%d; gauge work next",
+             mosaico_boot_splash::Brightness);
+}
+
+
 
 void Hal::touchpad_init()
 {
@@ -1752,6 +1801,13 @@ int32_t Hal::touchSleepReleaseProof(bool& released) {
 
 void Hal::lvgl_init()
 {
+    // Hide the raw splash before any LVGL task/rotation/partial refresh exists.
+    // First FULL redraw must drain before observe_refresh restores saved light.
+    ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, 0));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, false));
+    panel_brightness = 0;
+    pending_boot_display = true;
+    pending_wake_brightness = getBackLightBrightness(true);
     lvgl_port_cfg_t config{};
     config.task_priority = 3;
     config.task_stack = 7168;
@@ -1837,6 +1893,7 @@ void Hal::lvgl_init()
     }
     lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), LV_PART_MAIN);
     bootLogo = std::make_unique<BootLogo>();
+    lv_obj_invalidate(lv_screen_active()); // Full first LVGL redraw, including edges.
     lvglUnlock();
     if (xTaskCreate(motion_task, "motion-cache", 4096, _i2c_bus, 2, &motion_task_handle) != pdPASS) {
         portENTER_CRITICAL(&motion_mux); motion_snapshot.error = ESP_ERR_NO_MEM; portEXIT_CRITICAL(&motion_mux);

@@ -197,11 +197,13 @@ static_assert(faults(), "actual boot coordinator fault injection");
   abort=access.split('const auto abort =',1)[1].split('if (prior == 3)',1)[0]
   self.assertLess(abort.index('gauge_access_cleanup_attempted = true'),abort.index('gauge_return_access(journal)'))
   self.assertIn('gauge_access_cleanup_succeeded = restored',abort)
- def test_startup_before_display_and_network(self):
+ def test_startup_splash_before_protected_reload_and_network(self):
   source=(ROOT/'main/hal/hal.cpp').read_text(encoding='utf8')
   init=source.split('void Hal::init()',1)[1].split('Hal::Diagnostics',1)[0]
   self.assertLess(init.index('pmic_init();'),init.index('gaugeBootReload('))
-  self.assertLess(init.index('gaugeBootReload('),init.index('display_init();'))
+  self.assertLess(init.index('display_init();'),init.index('display_boot_splash();'))
+  self.assertLess(init.index('display_boot_splash();'),init.index('gaugeBootReload('))
+  self.assertLess(init.index('gaugeBootReload('),init.index('lvgl_init();'))
   self.assertIn('#ifdef MOSAICO_BOARD',init.split('gaugeBootReload(',1)[0])
  def test_idle_deferred_only_and_rate_limited(self):
   source=(ROOT/'main/host/network_quota.cpp').read_text(encoding='utf8')
