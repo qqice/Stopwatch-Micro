@@ -12,6 +12,7 @@
 #include "mosaico_display_settings.h"
 #include "mosaico_session_monitor.h"
 #include "wifi_retry_model.h"
+#include "first_quota_refresh_policy.h"
 #include "system_clock.h"
 #include <ota/panic_capture.h>
 #include <hal/hal.h>
@@ -1545,6 +1546,7 @@ void NetworkQuota::run()
     int64_t refreshBaseUs=0;
     int64_t nextGaugeCheckUs = 0;
     MosaicoWifiRetry::Policy wifiRetry;
+    MosaicoFirstQuotaRefresh::Policy firstQuotaRefresh;
     unsigned scanHeapBefore = 0, scanHeapAfter = 0, tailnetHeapBefore = 0, tailnetHeapAfter = 0;
 
 #endif
@@ -1617,8 +1619,20 @@ void NetworkQuota::run()
 #else
         GetCodexMicroBle().requestRadioIdle(locked);
 #endif
+#ifdef MOSAICO_BOARD
+        bool firstQuotaBootstrap = false;
+#endif
         if (locked && !wasLocked) {
+#ifdef MOSAICO_BOARD
+            // Consume once per owner boot, including already accepted or live-TWT cases.
+            firstQuotaBootstrap = firstQuotaRefresh.takeOnLock(_accepted != 0);
+#if SOC_WIFI_HE_SUPPORT
+            firstQuotaBootstrap = firstQuotaBootstrap && !_twt.live();
+#endif
+            nextRefresh = firstQuotaBootstrap ? now : now + refreshIntervalUs;
+#else
             nextRefresh  = now + refreshIntervalUs;
+#endif
 #ifdef MOSAICO_BOARD
             refreshBaseUs=now;
 #endif
@@ -1637,6 +1651,11 @@ void NetworkQuota::run()
             wifiRetry.reset(); _wifi_scan_complete=false; // New configured refresh window, not a task notification.
 #endif
             windowDeadline = now + updateWindowUs;
+#ifdef MOSAICO_BOARD
+            if (firstQuotaBootstrap)
+                ESP_LOGI("QuotaStartup", "reason=first_quota_pending budget_ms=%u",
+                    static_cast<unsigned>(updateWindowUs / 1000));
+#endif
             nextRefresh    = now + refreshIntervalUs;
 #ifdef MOSAICO_BOARD
             refreshBaseUs=now;
@@ -1873,9 +1892,14 @@ void NetworkQuota::run()
         const MosaicoQuota::RequestPolicy requestPolicy{displayLocked()};
 #endif
         const bool quotaOk = fetch();
-        if (quotaOk)
+        if (quotaOk) {
+#ifdef MOSAICO_BOARD
+            if (_accepted == 0)
+                ESP_LOGI("QuotaStartup", "reason=first_quota_accepted boot_elapsed_ms=%llu",
+                    static_cast<unsigned long long>(esp_timer_get_time() / 1000));
+#endif
             ++_accepted;
-        else
+        } else
             ++_failures;
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
         // Process queued off/unlock/OTA/expiry between bounded requests, not

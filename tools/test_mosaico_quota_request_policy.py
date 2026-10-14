@@ -17,6 +17,7 @@ class QuotaRequestPolicyTests(unittest.TestCase):
         code = r'''
 #include "main/host/mosaico_quota_request_policy.h"
 #include "main/host/mosaico_twt_model.h"
+#define ESP_LOGI(...) ((void)0) // Production logging has no request-policy side effects.
 struct Tailnet { constexpr bool enabled() const { return false; } constexpr bool ready() const { return true; } };
 constexpr Tailnet GetTailnetQuota() { return {}; }
 constexpr int64_t esp_timer_get_time() { return 100; }
