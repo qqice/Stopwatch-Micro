@@ -28,6 +28,8 @@ typedef struct { void (*callback_rx)(int,cdcacm_event_t*); void (*callback_line_
 #define ESP_ERR_NOT_SUPPORTED 0x106
 #define ESP_OK 0
 typedef int esp_err_t;
+typedef int esp_reset_reason_t;
+enum {ESP_RST_POWERON=1, ESP_RST_SW=3};
 int esp_sleep_enable_usb_wakeup(void);
 #define TINYUSB_CDC_ACM_0 0
 #define REG_SET_BIT(a,b) (void)0

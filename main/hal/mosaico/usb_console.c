@@ -103,6 +103,12 @@ static void recovery_watch(void *arg)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
 }
+// Keep host enumeration time in a fault-reset loop so 1200-baud recovery
+// remains usable even if the next HAL operation immediately panics again.
+static bool boot_recovery_grace_required(esp_reset_reason_t reason)
+{
+    return reason != ESP_RST_POWERON && reason != ESP_RST_SW;
+}
 void mosaico_console_init(void)
 {
     if (xTaskCreate(recovery_watch, "usb_recovery", 3072, NULL, 4, &recovery_task) != pdPASS)
@@ -120,7 +126,10 @@ void mosaico_console_init(void)
 #endif
     atomic_store(&wakeup_error, wake_err);
     atomic_store(&wakeup_ready, wake_err == ESP_OK);
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    printf("DBG BOOT board=esp-mosaico console=tinyusb-cdc reset_reason=%d\n", esp_reset_reason());
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    if (boot_recovery_grace_required(reset_reason))
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    printf("DBG BOOT board=esp-mosaico console=tinyusb-cdc reset_reason=%d recovery_grace_ms=%u\n",
+           reset_reason, boot_recovery_grace_required(reset_reason) ? 3000U : 0U);
     fflush(stdout);
 }
