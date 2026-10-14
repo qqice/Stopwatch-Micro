@@ -4,7 +4,7 @@
 
 // No LVGL, heap, tasks or board APIs: shared by the panel and PNG preview.
 namespace mosaico_boot_splash {
-constexpr int Width = 480, Height = 480, StripRows = 8, Brightness = 5;
+constexpr int Width = 480, Height = 480, StripRows = 8, Brightness = 30;
 constexpr int Pitch = 4, Diameter = 2, LogoWidth = 114, LogoHeight = 26;
 constexpr int Left = (Width - LogoWidth) / 2, Top = (Height - LogoHeight) / 2;
 constexpr uint8_t row(int letter, int y) {
@@ -37,6 +37,6 @@ template<class Backend> constexpr bool show(Backend& io) {
     return true;
 }
 static_assert(Width == 480 && Height == 480 && Height % StripRows == 0);
-static_assert(Brightness <= 5 && Left > 0 && Top > 0);
+static_assert(Brightness <= 30 && Left > 0 && Top > 0);
 }
 

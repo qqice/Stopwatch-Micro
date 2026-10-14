@@ -50,6 +50,6 @@ __attribute__((used,section(".preview"))) constexpr auto preview=bake();
     image=Image.new('L',(480,480),0);image.paste(Image.frombytes('L',(114,26),data),(183,227))
     image.convert('RGB').save(OUT/'boot-splash-native.png')
     image.crop((167,211,313,269)).resize((876,348),Image.Resampling.NEAREST).convert('RGB').save(OUT/'boot-splash-detail.png')
-    (OUT/'manifest.json').write_text(json.dumps({'model_sha256':hashlib.sha256(header.read_bytes()).hexdigest(),'command':command,'geometry':[480,480],'logo_box':[183,227,114,26],'panel_brightness':5,'preview_note':'Exact RGB565 white/black pixels; image does not simulate panel luminance or optical acceptance.'},indent=2))
+    (OUT/'manifest.json').write_text(json.dumps({'model_sha256':hashlib.sha256(header.read_bytes()).hexdigest(),'command':command,'geometry':[480,480],'logo_box':[183,227,114,26],'panel_brightness':30,'preview_note':'Exact RGB565 white/black pixels; image does not simulate panel luminance or optical acceptance.'},indent=2))
     return OUT/'boot-splash-native.png'
 if __name__=='__main__':print(export())
