@@ -108,7 +108,7 @@ static_assert(roundtrip(),"ring crc power loss canonical schema recovery");
 
     def test_commit_readback_and_export_ownership(self):
         save=BACKEND.split('bool save(',1)[1].split('Sample convert(',1)[0]
-        self.assertIn('Blob verifyBlob;',BACKEND)
+        self.assertIn('Blob ioBlob{}, verifyBlob{};',BACKEND)
         self.assertNotIn('Blob verifyBlob;',save)
         # Readback is reached only after a successful commit ACK; an ACK-lost error
         # returns storageError and leaves the pending request/dirty evidence intact.
@@ -121,30 +121,51 @@ static_assert(roundtrip(),"ring crc power loss canonical schema recovery");
         self.assertIn('if(save(next)){model=next;model.dirty=false;pending=Command::None;',BACKEND)
         self.assertIn('if(save(model))model.dirty=false;',BACKEND)
         export=BACKEND.split('void exportRows(',1)[1]
-        self.assertIn('Model exportSnapshot;',BACKEND)
+        self.assertIn('Model model, staging, exportSnapshot;',BACKEND)
         self.assertNotIn('Model copy;',export)
         self.assertIn('exportLock(exportMutex,std::try_to_lock)',export)
         self.assertIn('if(!exportLock)',export)
-        self.assertIn('auto& copy=exportSnapshot;',export)
+        self.assertIn('auto& copy=storage->exportSnapshot;',export)
         # The model lock scope closes before the first snapshot emission. The
         # independent export lock stays alive through every bounded row callback.
-        copy_scope=export.split('copy=model;',1)[1].split('emitStatus(',1)[0]
+        copy_scope=export.split('storage->exportSnapshot=storage->model;',1)[1].split('emitStatus(',1)[0]
         self.assertIn('}',copy_scope)
         self.assertNotIn('exportLock.unlock',export)
-        self.assertIn('char traceLine[640];',BACKEND)
+        self.assertIn('char traceLine[640]{};',BACKEND)
         status=extract_function('void status(')
         emit_status=extract_function('void emitStatus(')
         self.assertIn('exportLock(exportMutex,std::try_to_lock)',status)
         self.assertIn('if(!exportLock)',status)
-        self.assertIn('exportSnapshot=model;',status)
-        status_copy_scope=status.split('exportSnapshot=model;',1)[1].split('emitStatus(',1)[0]
+        self.assertIn('storage->exportSnapshot=storage->model;',status)
+        status_copy_scope=status.split('storage->exportSnapshot=storage->model;',1)[1].split('emitStatus(',1)[0]
         self.assertIn('}',status_copy_scope)
-        self.assertIn('emitStatus(emit,ctx,exportSnapshot,',status)
+        self.assertIn('emitStatus(emit,ctx,storage->exportSnapshot,',status)
         for function in (status,export,emit_status):
             self.assertNotIn('char line[',function)
             self.assertNotIn('Model copy;',function)
         self.assertIn('std::snprintf(traceLine,sizeof(traceLine)',emit_status)
         self.assertIn('std::snprintf(traceLine,sizeof(traceLine)',export)
+
+    def test_storage_is_explicit_external_and_lazy(self):
+        storage=BACKEND.split('struct Storage {',1)[1].split('\n};',1)[0]
+        self.assertIn('Model model, staging, exportSnapshot;',storage)
+        self.assertIn('Blob ioBlob{}, verifyBlob{};',storage)
+        self.assertIn('char traceLine[640]{};',storage)
+        allocation=extract_function('bool ensureStorage(')
+        self.assertIn('heap_caps_calloc(1,sizeof(Storage),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)',allocation)
+        self.assertIn('storage=new(memory) Storage;',allocation)
+        self.assertIn('now-lastAllocationAttempt<60000',allocation)
+        self.assertIn('if(storage)return true;',allocation)
+        self.assertNotIn('nvs_',allocation)
+        for signature in ('void status(', 'void exportRows('):
+            readonly=extract_function(signature)
+            self.assertNotIn('ensureStorage(',readonly)
+            self.assertIn('if(!allocated){emitUnavailable(',readonly)
+        unavailable=extract_function('void emitUnavailable(')
+        self.assertIn('char line[288];',unavailable)
+        for key in ('storage_external','storage_bytes','allocation_error','internal_free','internal_largest'):
+            self.assertIn(key,unavailable)
+            self.assertIn(key,extract_function('void emitStatus('))
 
     def test_actual_service_and_nvs_faults(self):
         with tempfile.TemporaryDirectory() as td:
@@ -188,14 +209,16 @@ def extract_function(signature):
 
 def actual_service_fixture():
     functions='\n'.join(extract_function(s) for s in (
-        'void load()', 'bool save(', 'Sample convert(', 'bool request(', 'void service()'))
+        'bool ensureStorage(', 'void load()', 'bool save(', 'Sample convert(', 'bool request(', 'void service()'))
     # Only external boundary adapters and constexpr-local definite initialization
     # differ. All production conditionals, calls, assignments, and order remain.
     functions=functions.replace('std::unique_lock<std::mutex>','MockLock')
     functions=functions.replace('std::try_to_lock','0')
     functions=functions.replace('MosaicoClock::snapshot()','clockSnapshot()')
     functions=functions.replace('nvs_handle_t h;','nvs_handle_t h=0;')
-    for signature in ('void load()', 'bool save(', 'Sample convert(', 'bool request(', 'void service()'):
+    functions=functions.replace('void* memory=heap_caps_calloc(1,sizeof(Storage),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);','Fixture* memory=allocateStorage();')
+    functions=functions.replace('storage=new(memory) Storage;','storage=memory;')
+    for signature in ('bool ensureStorage(', 'void load()', 'bool save(', 'Sample convert(', 'bool request(', 'void service()'):
         functions=functions.replace(signature,'constexpr '+signature,1)
     return r'''
 #include "main/host/gauge_discharge_trace_model.h"
@@ -215,6 +238,10 @@ struct Fixture {
  enum class Command {None,Arm,Stop,Clear};
  MockMutex mutex;
  Model model,staging;
+ Fixture* storage=nullptr;
+ bool allocationError=false,allocationAttempted=false,allocationFail=false;
+ uint64_t lastAllocationAttempt=0;unsigned allocationCalls=0;
+ constexpr Fixture* allocateStorage(){++allocationCalls;return allocationFail?nullptr:this;}
  Blob ioBlob{},verifyBlob{},disk{},candidate{};
  bool ready=false,corrupt=false,storageError=false,writeAttempted=false;
  uint64_t lastWriteAttempt=0,nowMs=0;
@@ -249,6 +276,18 @@ struct Fixture {
  }
 ''' + functions + r'''
 };
+constexpr bool allocationFailureRecovery(){
+ Fixture f;Model persisted;persisted.armed=true;Sample row;row.flags=Valid;row.soc=40;row.voltageMv=3800;persisted.append(row);
+ f.disk=encode(persisted);f.exists=true;f.good();f.allocationFail=true;f.service();
+ if(f.storage||f.ready||!f.storageError||!f.allocationError||f.corrupt||f.reads||f.writes||f.allocationCalls!=1)return false;
+ if(f.request(Fixture::Command::Clear)||f.request(Fixture::Command::Arm))return false;
+ f.nowMs=59999;f.service();if(f.allocationCalls!=1||f.reads||f.writes)return false;
+ f.allocationFail=false;f.nowMs=60000;f.service();
+ if(!f.storage||!f.ready||f.storageError||f.allocationError||f.corrupt||f.allocationCalls!=2||!f.model.armed||f.model.count!=2||f.writes)return false;
+ const Blob safe=f.disk;f.nowMs=60001;f.service();
+ return f.allocationCalls==2&&verifiedReadback(safe,f.disk,BlobSize)&&f.model.at(0).soc==40;
+}
+static_assert(allocationFailureRecovery(),"PSRAM allocation failure no IO bounded retry recovers prior evidence once");
 constexpr bool pendingAndFailures(){
  Fixture f;f.good();f.service();if(!f.ready||f.model.armed||f.exists)return false;
  if(!f.request(Fixture::Command::Arm)||f.pending!=Fixture::Command::Arm||f.model.armed)return false;

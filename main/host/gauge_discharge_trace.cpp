@@ -6,19 +6,23 @@
 #include <ota/mosaico_ota.h>
 #include <esp_timer.h>
 #include <nvs.h>
+#include <esp_heap_caps.h>
+#include <new>
 #include <cstdio>
 #include <mutex>
 
 namespace GaugeDischargeTrace {
 namespace {
 std::mutex mutex;
-Model staging;
-Blob ioBlob;
-Blob verifyBlob;
 std::mutex exportMutex;
-Model exportSnapshot;
-char traceLine[640]; // Protected by exportMutex through the synchronous emit callback.
-Model model;
+struct Storage {
+    Model model, staging, exportSnapshot;
+    Blob ioBlob{}, verifyBlob{};
+    char traceLine[640]{}; // Protected by exportMutex through emit callbacks.
+};
+Storage* storage=nullptr;
+bool allocationError=false, allocationAttempted=false;
+uint64_t lastAllocationAttempt=0;
 bool ready=false, corrupt=false, storageError=false;
 enum class Command { None, Arm, Stop, Clear };
 Command pending=Command::None;
@@ -28,7 +32,17 @@ bool writeAttempted=false;
 constexpr const char* Namespace="gauge_trace";
 constexpr const char* Key="trace1";
 bool otaBlocked(){return MosaicoOta::busy() || MosaicoOta::healthPending();}
+bool ensureStorage(uint64_t now) {
+    if(storage)return true;
+    if(allocationAttempted && now-lastAllocationAttempt<60000)return false;
+    allocationAttempted=true;lastAllocationAttempt=now;
+    void* memory=heap_caps_calloc(1,sizeof(Storage),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    if(!memory){allocationError=true;storageError=true;return false;}
+    storage=new(memory) Storage;
+    allocationError=false;storageError=false;return true;
+}
 void load() {
+    auto& model=storage->model;auto& ioBlob=storage->ioBlob;
     nvs_handle_t h;ioBlob={};size_t size=ioBlob.size();
     esp_err_t err=nvs_open(Namespace,NVS_READONLY,&h);
     if(err==ESP_OK){err=nvs_get_blob(h,Key,ioBlob.data(),&size);nvs_close(h);}
@@ -40,6 +54,7 @@ void load() {
     ready=true;
 }
 bool save(const Model& value) {
+    auto& ioBlob=storage->ioBlob;auto& verifyBlob=storage->verifyBlob;
     if(otaBlocked())return false;
     nvs_handle_t h;
     esp_err_t err=nvs_open(Namespace,NVS_READWRITE,&h);
@@ -76,21 +91,32 @@ Sample convert(const Hal::BatteryTelemetry& t,uint64_t now) {
 bool request(Command c){
     std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
     if(!lock || !ready || pending!=Command::None)return false;
+    auto& model=storage->model;
     if(c==Command::Arm && (corrupt || model.count || model.armed))return false;
     if(c==Command::Stop && !model.armed)return false;
     pending=c;return true;
 }
 void emitStatus(EmitLine emit,void* ctx,const Model& m,bool isReady,bool bad,bool err,Command cmd,uint64_t writeMs){
-    std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_status\",\"schema\":1,\"ready\":%u,\"armed\":%u,\"pending\":%u,\"corrupt\":%u,\"storage_error\":%u,\"count\":%u,\"capacity\":64,\"boot\":%lu,\"dirty\":%u,\"last_write_attempt_ms\":%llu,\"low_seen\":%u,\"finalized_charge_after_low\":%u}",unsigned(isReady),unsigned(m.armed),unsigned(cmd),unsigned(bad),unsigned(err),unsigned(m.count),static_cast<unsigned long>(m.boot),unsigned(m.dirty),static_cast<unsigned long long>(writeMs),unsigned(m.lowSeen),unsigned(m.finalizedChargeAfterLow));emit(traceLine,ctx);
+    auto& traceLine=storage->traceLine;
+    std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_status\",\"schema\":1,\"ready\":%u,\"armed\":%u,\"pending\":%u,\"corrupt\":%u,\"storage_error\":%u,\"count\":%u,\"capacity\":64,\"boot\":%lu,\"dirty\":%u,\"last_write_attempt_ms\":%llu,\"low_seen\":%u,\"finalized_charge_after_low\":%u,\"storage_external\":1,\"storage_bytes\":%u,\"allocation_error\":%u,\"internal_free\":%u,\"internal_largest\":%u}",unsigned(isReady),unsigned(m.armed),unsigned(cmd),unsigned(bad),unsigned(err),unsigned(m.count),static_cast<unsigned long>(m.boot),unsigned(m.dirty),static_cast<unsigned long long>(writeMs),unsigned(m.lowSeen),unsigned(m.finalizedChargeAfterLow),unsigned(sizeof(Storage)),unsigned(allocationError),unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)));emit(traceLine,ctx);
 }
+void emitUnavailable(EmitLine emit,void* ctx,bool error,bool allocationFailed){
+    // Allocation-failure-only small stack fallback; normal lines live in PSRAM.
+    char line[288];
+    std::snprintf(line,sizeof(line),"{\"type\":\"gauge_trace_status\",\"schema\":1,\"ready\":0,\"armed\":0,\"pending\":0,\"storage_error\":%u,\"storage_external\":0,\"storage_bytes\":%u,\"allocation_error\":%u,\"internal_free\":%u,\"internal_largest\":%u}",unsigned(error),unsigned(sizeof(Storage)),unsigned(allocationFailed),unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)));
+    emit(line,ctx);
+}
+
 }
 bool armConfirm(){return request(Command::Arm);}
 bool stop(){return request(Command::Stop);}
 bool clearConfirm(){return request(Command::Clear);}
 void service(){
     std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);if(!lock || otaBlocked())return;
-    if(!ready)load();
     const uint64_t now=uint64_t(esp_timer_get_time()/1000);
+    if(!ensureStorage(now))return;
+    auto& model=storage->model;auto& staging=storage->staging;
+    if(!ready)load();
     const bool command=pending!=Command::None;
     if(corrupt && !command)return;
     const bool canAttempt=!writeAttempted || now-lastWriteAttempt>=60000;
@@ -119,25 +145,31 @@ void status(EmitLine emit,void* ctx){
     if(!emit)return;
     std::unique_lock<std::mutex> exportLock(exportMutex,std::try_to_lock);
     if(!exportLock){emit("{\"type\":\"gauge_trace_status\",\"busy\":1}",ctx);return;}
-    bool r,b,e;Command cmd;uint64_t writeMs;
+    bool r,b,e,allocated,allocationFailed;Command cmd;uint64_t writeMs;
     {
         std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
         if(!lock){emit("{\"type\":\"gauge_trace_status\",\"busy\":1}",ctx);return;}
-        exportSnapshot=model;r=ready;b=corrupt;e=storageError;cmd=pending;writeMs=lastWriteAttempt;
+        allocated=storage!=nullptr;allocationFailed=allocationError;
+        if(allocated)storage->exportSnapshot=storage->model;
+        r=ready;b=corrupt;e=storageError;cmd=pending;writeMs=lastWriteAttempt;
     }
-    emitStatus(emit,ctx,exportSnapshot,r,b,e,cmd,writeMs);
+    if(!allocated){emitUnavailable(emit,ctx,e,allocationFailed);return;}
+    emitStatus(emit,ctx,storage->exportSnapshot,r,b,e,cmd,writeMs);
 }
 void exportRows(EmitLine emit,void* ctx){
     if(!emit)return;
     std::unique_lock<std::mutex> exportLock(exportMutex,std::try_to_lock);
     if(!exportLock){emit("{\"type\":\"gauge_trace_export\",\"busy\":1}",ctx);return;}
-    auto& copy=exportSnapshot;
-    bool r,b,e;Command cmd;uint64_t writeMs;
+    bool r,b,e,allocated,allocationFailed;Command cmd;uint64_t writeMs;
     {
         std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
         if(!lock){emit("{\"type\":\"gauge_trace_export\",\"busy\":1}",ctx);return;}
-        copy=model;r=ready;b=corrupt;e=storageError;cmd=pending;writeMs=lastWriteAttempt;
+        allocated=storage!=nullptr;allocationFailed=allocationError;
+        if(allocated)storage->exportSnapshot=storage->model;
+        r=ready;b=corrupt;e=storageError;cmd=pending;writeMs=lastWriteAttempt;
     }
+    if(!allocated){emitUnavailable(emit,ctx,e,allocationFailed);return;}
+    auto& copy=storage->exportSnapshot;auto& traceLine=storage->traceLine;
     emitStatus(emit,ctx,copy,r,b,e,cmd,writeMs);
     emit("{\"type\":\"gauge_trace_schema\",\"schema\":1,\"flags\":\"1=valid,2=capacityValid,4=temperatureValid,8=epochValid,16=nominalConfigured\",\"current_sign\":\"positive=charging\",\"temperature_unit\":\"0.1K\",\"order\":\"oldest_first\"}",ctx);
     for(size_t i=0;i<copy.count;++i){
