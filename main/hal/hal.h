@@ -155,6 +155,10 @@ public:
                                  char* reason, size_t reasonSize);
     // Closed, read-only standard + authenticated DM profile evidence; no cache updates.
     bool gaugeProfileAudit(char* details, size_t detailsSize);
+    // Closed standard charge-register diagnostic only, without cache updates.
+    bool gaugeChargeAudit(char* details, size_t detailsSize);
+    // Explicit CDC-only manual OCV diagnostic, one RAM-latched attempt per boot.
+    bool gaugeOcvMeasure(char* details, size_t detailsSize);
     // Explicit confirmed runtime action only; no boot/replay caller.
     bool gaugeFccLimitRepair(char* details, size_t detailsSize);
     // NVS read-only, with explicit absent/present/invalid record distinction.
@@ -193,6 +197,16 @@ public:
     bool gaugeFccLimitRepair(char* details, size_t detailsSize)
     {
         if (details && detailsSize) std::snprintf(details, detailsSize, "reason=unsupported_not_mosaico");
+        return false;
+    }
+    bool gaugeOcvMeasure(char* details, size_t detailsSize)
+    {
+        if (details && detailsSize) std::snprintf(details, detailsSize, "result=REJECTED_UNSUPPORTED attempted=0 sent=0");
+        return false;
+    }
+    bool gaugeChargeAudit(char* details, size_t detailsSize)
+    {
+        if (details && detailsSize) std::snprintf(details, detailsSize, "valid=0 readonly=1 reason=unsupported_not_mosaico");
         return false;
     }
     bool gaugeProfileAudit(char* details, size_t detailsSize)

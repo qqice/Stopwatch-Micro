@@ -1357,6 +1357,29 @@ void SerialDebug::handleLine(char* line)
         result("gauge-fcc-limit",ok?"PASS":"FAIL",details);
         return;
     }
+    if (std::strcmp(command, "gauge-ocv") == 0) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        const char* confirm=::strtok_r(nullptr," \t",&save);
+        if ((_writer&&_writer->_reply_uart)||!action||std::strcmp(action,"measure")||
+            !confirm||std::strcmp(confirm,"CONFIRM")||::strtok_r(nullptr," \t",&save)) {
+            result("gauge-ocv","FAIL","expected=measure_CONFIRM cdc_only=1 manual_one_attempt=1");
+            return;
+        }
+        char details[720]{};
+        const bool ok=GetHAL().gaugeOcvMeasure(details,sizeof(details));
+        result("gauge-ocv",ok?"PASS":"FAIL",details);
+        return;
+    }
+    if (std::strcmp(command, "gauge-charge") == 0) {
+        if (::strtok_r(nullptr, " \t", &save)) {
+            result("gauge-charge", "FAIL", "expected=no_arguments readonly=1");
+            return;
+        }
+        char details[480]{};
+        const bool ok=GetHAL().gaugeChargeAudit(details,sizeof(details));
+        result("gauge-charge",ok?"PASS":"FAIL",details);
+        return;
+    }
     if (std::strcmp(command, "gauge-profile") == 0) {
         if (::strtok_r(nullptr, " \t", &save)) {
             result("gauge-profile", "FAIL", "expected=no_arguments readonly=1");
@@ -1828,6 +1851,8 @@ void SerialDebug::printHelp()
 #ifdef MOSAICO_BOARD
     debugPrintf("DBG HELP gauge-fcc-status no_arguments=1 readonly=1 journal_existence_explicit=1\r\n");
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
+    debugPrintf("DBG HELP gauge-ocv measure CONFIRM cdc_only=1 quiet120s_post5s=1 ram_one_attempt=1 sent_is_wire_attempt=1 no_calibration_claim=1\r\n");
+    debugPrintf("DBG HELP gauge-charge no_arguments=1 readonly=1 standard_registers_only=1\r\n");
     debugPrintf("DBG HELP gauge-profile no_arguments=1 readonly=1 closed_dm_selectors=1 no_unseal=1\r\n");
     debugPrintf("DBG HELP ota=ota-status,ota-update_CONFIRM_EXTERNAL_POWER,ota-rollback-test_CONFIRM\r\n");
 #endif

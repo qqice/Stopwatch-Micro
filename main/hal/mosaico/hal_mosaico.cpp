@@ -29,6 +29,7 @@
 #include "../utils/settings/settings.h"
 #include "mosaico_gauge_model.h"
 #include "mosaico_fcc_limit_journal_codec.h"
+#include "mosaico_ocv_diagnostic_model.h"
 #include <host/network_quota.h>
 #include <hal/ble/codex_micro_ble.h>
 #include <ota/mosaico_ota.h>
@@ -249,6 +250,8 @@ bool boot_factory_reload_scope = false;
 bool gauge_access_cleanup_attempted = false;
 bool gauge_access_cleanup_succeeded = false;
 Hal::GaugeBootReloadInfo gauge_boot_info;
+// Volatile per-boot diagnostic latch; only the transaction owner may change it.
+bool gauge_ocv_attempted=false;
 bool battery_valid = false;
 uint8_t battery_soc = 0;
 uint16_t battery_mv = 0;
@@ -1608,6 +1611,121 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
 }
 
 bool Hal::gaugeSafetySelfTest() const { return mosaico_gauge::selftest(); }
+
+// Closed standard-command snapshot. No MAC/control/security path is used.
+template <typename Reader>
+constexpr bool gauge_charge_read(Reader read,uint16_t (&values)[13])
+{
+    constexpr uint8_t registers[]={0x06,0x08,0x0A,0x0C,0x10,0x12,0x14,0x18,0x2C,0x30,0x32,0x3A,0x3C};
+    uint16_t fresh[13]{};
+    bool complete=true;
+    for(unsigned i=0;i<13;++i)complete&=read(registers[i],fresh[i]);
+    if(!complete)return false;
+    for(unsigned i=0;i<13;++i)values[i]=fresh[i];
+    return true;
+}
+
+// Independent OCV diagnostic backend. No FCC repair policy/journal is used.
+struct GaugeOcvBackend {
+    bool fullReadSeen=false;
+    int64_t lastFullReadUs=0;
+    bool wasAttempted() const {return gauge_ocv_attempted;}
+    bool runtimeGate() const {
+        const auto p=GetNetworkQuota().powerStats();
+        const auto b=GetCodexMicroBle().diagnostics();
+        return p.locked&&p.phase==2&&!p.wifiRunning&&!b.advertising&&!b.connected&&
+            !MosaicoOta::busy()&&!MosaicoOta::healthPending();
+    }
+    bool identity() {
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        return gauge&&runtimeGate()&&gauge_identity()&&runtimeGate();
+    }
+    bool waitFullSnapshotSlot() {
+        if(!fullReadSeen)return true;
+        const int64_t now=esp_timer_get_time();
+        if(now<lastFullReadUs)return false;
+        const int64_t left=1000000-(now-lastFullReadUs);
+        // All rate waiting occurs BEFORE battery_mutex, including wire-fresh
+        // and the first post-command sample. Never burst full register batches.
+        if(left>0)gauge_delay_ms(static_cast<uint32_t>((left+999)/1000));
+        return esp_timer_get_time()>=lastFullReadUs+1000000;
+    }
+    bool readFullLocked(mosaico_ocv::Sample& s) {
+        const int64_t started=esp_timer_get_time();
+        if((fullReadSeen&&started<lastFullReadUs+1000000)||!gauge||!runtimeGate())return false;
+        const bool complete=mosaico_ocv::readSnapshot(gauge_word,s);
+        const int64_t finished=esp_timer_get_time();
+        fullReadSeen=true;lastFullReadUs=finished;
+        return complete&&finished>=started&&runtimeGate();
+    }
+    bool snapshot(mosaico_ocv::Sample& s) {
+        if(!waitFullSnapshotSlot())return false;
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        return readFullLocked(s);
+    }
+    int64_t nowUs() const {return esp_timer_get_time();}
+    void waitMs(uint32_t ms) {gauge_delay_ms(ms);}
+    bool latchAttempt() {
+        if(gauge_ocv_attempted)return false;
+        gauge_ocv_attempted=true;
+        return true;
+    }
+    mosaico_ocv::SendReport sendOcv(mosaico_ocv::Qualification& qualification) {
+        using namespace mosaico_ocv;
+        SendReport report{};
+        if(!waitFullSnapshotSlot())return report;
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        // RAM attempt is already consumed. Guard refusal means no packet,
+        // distinct from a packet whose ACK is ambiguous. Recheck under the
+        // SAME final battery lock that protects the single closed wire command.
+        report.sampleValid=readFullLocked(report.sample);
+        const int64_t now=esp_timer_get_time();
+        if(!report.sampleValid||!qualification.sample(report.sample,now)||!qualification.ready(now)||!runtimeGate())return report;
+        const uint8_t packet[]={0x00,0x0C,0x00};
+        gauge_feed();
+        const bool ack=i2c_master_transmit(gauge,packet,sizeof(packet),20)==ESP_OK;
+        gauge_feed();
+        report.result=ack?SendResult::Acked:SendResult::AckFailed;
+        return report;
+    }
+};
+
+bool Hal::gaugeOcvMeasure(char* details,size_t detailsSize)
+{
+    // This outer mutex excludes all gauge mutators, while the backend releases
+    // battery_mutex for every one-second watchdog-fed wait so UI reads can run.
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    GaugeOcvBackend backend;
+    mosaico_ocv::Coordinator<GaugeOcvBackend> coordinator(backend);
+    const auto r=coordinator.run();
+    if(details&&detailsSize)std::snprintf(details,detailsSize,
+        "result=%s attempted=%d sent=%d wire_ack=%d edge=%d conditions=%d before_valid=%d after_valid=%d before_soc=%u after_soc=%u before_rm=%u after_rm=%u before_fcc=%u after_fcc=%u before_sec=%u after_sec=%u before_status=%04x after_status=%04x before_ocvcomp=%u after_ocvcomp=%u before_ocvfail=%u after_ocvfail=%u before_ocvgd=%u after_ocvgd=%u mv_min=%u mv_max=%u temp_dK_min=%u temp_dK_max=%u current_min=%d current_max=%d avg_min=%d avg_max=%d ram_one_attempt=1 no_calibration_claim=1",
+        mosaico_ocv::resultName(r.result),r.attempted,r.sent,r.ack,r.edge,r.conditions,r.beforeValid,r.afterValid,
+        r.before.soc,r.after.soc,r.before.remainingMah,r.after.remainingMah,r.before.fcc,r.after.fcc,
+        (r.before.operation>>1)&3U,(r.after.operation>>1)&3U,r.before.batteryStatus,r.after.batteryStatus,
+        (r.before.batteryStatus>>14)&1U,(r.after.batteryStatus>>14)&1U,
+        (r.before.batteryStatus>>13)&1U,(r.after.batteryStatus>>13)&1U,
+        (r.before.batteryStatus>>5)&1U,(r.after.batteryStatus>>5)&1U,
+        r.range.minMv,r.range.maxMv,r.range.minTemp,r.range.maxTemp,
+        r.range.minCurrent,r.range.maxCurrent,r.range.minAverage,r.range.maxAverage);
+    return r.result==mosaico_ocv::Result::Confirmed;
+}
+
+bool Hal::gaugeChargeAudit(char* details, size_t detailsSize)
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    uint16_t v[13]{};
+    const bool complete=gauge&&gauge_charge_read(gauge_word,v);
+    if(details&&detailsSize) {
+        if(!complete)std::snprintf(details,detailsSize,"valid=0 readonly=1 reason=standard_read_failed_or_unavailable");
+        else std::snprintf(details,detailsSize,
+            "valid=1 readonly=1 temperature_dK=%u voltage_mv=%u battery_status=%04x current_ma=%d remaining_mah=%u fcc_mah=%u average_current_ma=%d time_to_full_min=%u soc=%u charge_voltage_mv=%u charge_current_ma=%u op_status=%04x dc_mah=%u fc=%u tca=%u ocvcomp=%u ocvfail=%u ocvgd=%u",
+            v[0],v[1],v[2],static_cast<int16_t>(v[3]),v[4],v[5],static_cast<int16_t>(v[6]),v[7],v[8],v[9],v[10],v[11],v[12],
+            (v[2]>>9)&1U,(v[2]>>6)&1U,(v[2]>>14)&1U,(v[2]>>13)&1U,(v[2]>>5)&1U);
+    }
+    return complete;
+}
 
 bool Hal::gaugeProfileAudit(char* details, size_t detailsSize)
 {
