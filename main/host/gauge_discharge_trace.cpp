@@ -17,6 +17,7 @@ Blob ioBlob;
 Blob verifyBlob;
 std::mutex exportMutex;
 Model exportSnapshot;
+char traceLine[640]; // Protected by exportMutex through the synchronous emit callback.
 Model model;
 bool ready=false, corrupt=false, storageError=false;
 enum class Command { None, Arm, Stop, Clear };
@@ -80,7 +81,7 @@ bool request(Command c){
     pending=c;return true;
 }
 void emitStatus(EmitLine emit,void* ctx,const Model& m,bool isReady,bool bad,bool err,Command cmd,uint64_t writeMs){
-    char line[384];std::snprintf(line,sizeof(line),"{\"type\":\"gauge_trace_status\",\"schema\":1,\"ready\":%u,\"armed\":%u,\"pending\":%u,\"corrupt\":%u,\"storage_error\":%u,\"count\":%u,\"capacity\":64,\"boot\":%lu,\"dirty\":%u,\"last_write_attempt_ms\":%llu,\"low_seen\":%u,\"finalized_charge_after_low\":%u}",unsigned(isReady),unsigned(m.armed),unsigned(cmd),unsigned(bad),unsigned(err),unsigned(m.count),static_cast<unsigned long>(m.boot),unsigned(m.dirty),static_cast<unsigned long long>(writeMs),unsigned(m.lowSeen),unsigned(m.finalizedChargeAfterLow));emit(line,ctx);
+    std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_status\",\"schema\":1,\"ready\":%u,\"armed\":%u,\"pending\":%u,\"corrupt\":%u,\"storage_error\":%u,\"count\":%u,\"capacity\":64,\"boot\":%lu,\"dirty\":%u,\"last_write_attempt_ms\":%llu,\"low_seen\":%u,\"finalized_charge_after_low\":%u}",unsigned(isReady),unsigned(m.armed),unsigned(cmd),unsigned(bad),unsigned(err),unsigned(m.count),static_cast<unsigned long>(m.boot),unsigned(m.dirty),static_cast<unsigned long long>(writeMs),unsigned(m.lowSeen),unsigned(m.finalizedChargeAfterLow));emit(traceLine,ctx);
 }
 }
 bool armConfirm(){return request(Command::Arm);}
@@ -116,9 +117,15 @@ void service(){
 }
 void status(EmitLine emit,void* ctx){
     if(!emit)return;
-    std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
-    if(!lock){emit("{\"type\":\"gauge_trace_status\",\"busy\":1}",ctx);return;}
-    emitStatus(emit,ctx,model,ready,corrupt,storageError,pending,lastWriteAttempt);
+    std::unique_lock<std::mutex> exportLock(exportMutex,std::try_to_lock);
+    if(!exportLock){emit("{\"type\":\"gauge_trace_status\",\"busy\":1}",ctx);return;}
+    bool r,b,e;Command cmd;uint64_t writeMs;
+    {
+        std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
+        if(!lock){emit("{\"type\":\"gauge_trace_status\",\"busy\":1}",ctx);return;}
+        exportSnapshot=model;r=ready;b=corrupt;e=storageError;cmd=pending;writeMs=lastWriteAttempt;
+    }
+    emitStatus(emit,ctx,exportSnapshot,r,b,e,cmd,writeMs);
 }
 void exportRows(EmitLine emit,void* ctx){
     if(!emit)return;
@@ -134,8 +141,8 @@ void exportRows(EmitLine emit,void* ctx){
     emitStatus(emit,ctx,copy,r,b,e,cmd,writeMs);
     emit("{\"type\":\"gauge_trace_schema\",\"schema\":1,\"flags\":\"1=valid,2=capacityValid,4=temperatureValid,8=epochValid,16=nominalConfigured\",\"current_sign\":\"positive=charging\",\"temperature_unit\":\"0.1K\",\"order\":\"oldest_first\"}",ctx);
     for(size_t i=0;i<copy.count;++i){
-        const auto& s=copy.at(i);char line[640];
-        std::snprintf(line,sizeof(line),"{\"type\":\"gauge_trace_row\",\"i\":%u,\"boot\":%lu,\"monotonic_ms\":%llu,\"epoch\":%llu,\"flags\":%u,\"soc\":%u,\"voltage_mv\":%u,\"current_ma\":%d,\"average_current_ma\":%d,\"remaining_mah\":%u,\"full_mah\":%u,\"design_mah\":%u,\"operation_status\":%u,\"battery_status\":%u,\"state_of_health\":%u,\"cycle_count\":%u,\"temperature_deci_k\":%u}",unsigned(i),static_cast<unsigned long>(s.boot),static_cast<unsigned long long>(s.monotonicMs),static_cast<unsigned long long>(s.epoch),unsigned(s.flags),unsigned(s.soc),unsigned(s.voltageMv),int(s.currentMa),int(s.averageCurrentMa),unsigned(s.remainingMah),unsigned(s.fullMah),unsigned(s.designMah),unsigned(s.operationStatus),unsigned(s.batteryStatus),unsigned(s.stateOfHealth),unsigned(s.cycleCount),unsigned(s.temperatureDeciK));emit(line,ctx);
+        const auto& s=copy.at(i);
+        std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_row\",\"i\":%u,\"boot\":%lu,\"monotonic_ms\":%llu,\"epoch\":%llu,\"flags\":%u,\"soc\":%u,\"voltage_mv\":%u,\"current_ma\":%d,\"average_current_ma\":%d,\"remaining_mah\":%u,\"full_mah\":%u,\"design_mah\":%u,\"operation_status\":%u,\"battery_status\":%u,\"state_of_health\":%u,\"cycle_count\":%u,\"temperature_deci_k\":%u}",unsigned(i),static_cast<unsigned long>(s.boot),static_cast<unsigned long long>(s.monotonicMs),static_cast<unsigned long long>(s.epoch),unsigned(s.flags),unsigned(s.soc),unsigned(s.voltageMv),int(s.currentMa),int(s.averageCurrentMa),unsigned(s.remainingMah),unsigned(s.fullMah),unsigned(s.designMah),unsigned(s.operationStatus),unsigned(s.batteryStatus),unsigned(s.stateOfHealth),unsigned(s.cycleCount),unsigned(s.temperatureDeciK));emit(traceLine,ctx);
     }
 }
 }

@@ -52,6 +52,7 @@ extern "C" esp_err_t ml_derp_patch_selftest(void);
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -202,6 +203,25 @@ int SerialDebug::debugPrintf(const char* format, ...)
         return _writer->_uart_tx.enqueue(bytes, count) ? count : -1;
     }
     return static_cast<int>(std::fwrite(bytes, 1, count, stdout));
+}
+
+bool SerialDebug::debugTraceLine(const char* line)
+{
+    // Trace lines are already formatted. Avoid another 1600-byte printf frame
+    // below the command parser and recorder; never truncate a JSON record.
+    static std::mutex mutex;
+    static char bytes[642];
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!line) return false;
+    const std::size_t length = strnlen(line, 640);
+    if (length >= 640 || std::memchr(line, '\r', length) || std::memchr(line, '\n', length)) {
+        if (_writer) ++_writer->_format_overflow;
+        return false;
+    }
+    std::memcpy(bytes, line, length);
+    bytes[length] = '\r'; bytes[length + 1] = '\n';
+    if (_writer && _writer->_reply_uart) return _writer->_uart_tx.enqueue(bytes, length + 2);
+    return std::fwrite(bytes, 1, length + 2, stdout) == length + 2;
 }
 
 SerialDebug::SerialDebug(AppCodexMicro& app) : _app(app)
@@ -1368,9 +1388,25 @@ void SerialDebug::handleLine(char* line)
         if((confirmed&&(!confirm||std::strcmp(confirm,"CONFIRM")))||::strtok_r(nullptr," \t",&save)) {
             result("gauge-trace","FAIL","expected=status_arm_CONFIRM_stop_export_clear_CONFIRM");return;
         }
-        const auto emit=[](const char* line,void*){SerialDebug::debugPrintf("%s\r\n",line);};
-        if(!std::strcmp(action,"status")){GaugeDischargeTrace::status(emit,nullptr);result("gauge-trace","PASS","action=status readonly=1");return;}
-        if(!std::strcmp(action,"export")){GaugeDischargeTrace::exportRows(emit,nullptr);result("gauge-trace","PASS","action=export readonly=1");return;}
+        bool emitted=true;
+        const auto emit=[](const char* line,void* context){
+            if(!SerialDebug::debugTraceLine(line))*static_cast<bool*>(context)=false;
+        };
+        if(!std::strcmp(action,"status")){
+            GaugeDischargeTrace::status(emit,&emitted);
+            result("gauge-trace",emitted?"PASS":"FAIL",emitted?"action=status readonly=1":"reason=trace_output_failed data_retained=1");return;
+        }
+        if(!std::strcmp(action,"export")){
+            // Bulk export can exceed the bounded UART queue before its owner
+            // resumes draining. Keep UART status/control, export via CDC only.
+            if(_writer&&_writer->_reply_uart){result("gauge-trace","FAIL","reason=bulk_export_cdc_only data_retained=1");return;}
+            GaugeDischargeTrace::exportRows(emit,&emitted);
+            char details[128];
+            std::snprintf(details,sizeof(details),"%s main_stack_hwm_bytes=%lu",
+                emitted?"action=export readonly=1":"reason=trace_output_failed data_retained=1",
+                static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)));
+            result("gauge-trace",emitted?"PASS":"FAIL",details);return;
+        }
         bool queued=false;
         if(!std::strcmp(action,"arm"))queued=GaugeDischargeTrace::armConfirm();
         else if(!std::strcmp(action,"stop"))queued=GaugeDischargeTrace::stop();

@@ -37,6 +37,7 @@ private:
     void drainUart();
     void invalidateUartInput();
     static int debugPrintf(const char* format, ...);
+    static bool debugTraceLine(const char* line);
     static SerialDebug* _writer;
     bool _reply_uart = false;
     bool _async_uart = false;

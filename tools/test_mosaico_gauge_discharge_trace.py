@@ -131,6 +131,20 @@ static_assert(roundtrip(),"ring crc power loss canonical schema recovery");
         copy_scope=export.split('copy=model;',1)[1].split('emitStatus(',1)[0]
         self.assertIn('}',copy_scope)
         self.assertNotIn('exportLock.unlock',export)
+        self.assertIn('char traceLine[640];',BACKEND)
+        status=extract_function('void status(')
+        emit_status=extract_function('void emitStatus(')
+        self.assertIn('exportLock(exportMutex,std::try_to_lock)',status)
+        self.assertIn('if(!exportLock)',status)
+        self.assertIn('exportSnapshot=model;',status)
+        status_copy_scope=status.split('exportSnapshot=model;',1)[1].split('emitStatus(',1)[0]
+        self.assertIn('}',status_copy_scope)
+        self.assertIn('emitStatus(emit,ctx,exportSnapshot,',status)
+        for function in (status,export,emit_status):
+            self.assertNotIn('char line[',function)
+            self.assertNotIn('Model copy;',function)
+        self.assertIn('std::snprintf(traceLine,sizeof(traceLine)',emit_status)
+        self.assertIn('std::snprintf(traceLine,sizeof(traceLine)',export)
 
     def test_actual_service_and_nvs_faults(self):
         with tempfile.TemporaryDirectory() as td:
