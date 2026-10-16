@@ -53,6 +53,7 @@ static_assert(!mosaico_gauge::reasonableFcc(100),"legacy 100 rejected");
 #include <cstring>
 #include <cstdio>
 #include <array>
+#include <algorithm>
 #include "mosaico_gauge_model.h"
 #include "mosaico_fcc_limit_journal_codec.h"
 struct esp_mutex{};namespace std {struct mutex{};struct recursive_mutex{};template<class T>struct lock_guard{lock_guard(T&){}};}
@@ -67,7 +68,7 @@ struct Power{bool locked,wifiRunning;int phase;};struct Network{Power powerStats
 struct BleStats{bool advertising,connected;};struct Ble{BleStats diagnostics();};Ble& GetCodexMicroBle();
 namespace MosaicoOta{enum class UiStage{BootChecking};struct UiSnapshot{UiStage stage;};bool copyUiSnapshot(UiSnapshot&);bool busy();bool healthPending();}
 int gauge;
-void gauge_feed();void gauge_delay_ms(uint32_t);bool gauge_word(uint8_t,uint16_t&);bool gauge_identity();
+int64_t esp_timer_get_time();void gauge_feed();void gauge_delay_ms(uint32_t);bool gauge_word(uint8_t,uint16_t&);bool gauge_identity();
 bool gauge_mac_read(uint16_t,uint8_t*);template<class R>bool gauge_profile_read_stable(R,uint16_t(&)[3],const char*&);
 bool gauge_wait_security(uint8_t);bool gauge_wait_config(bool);bool gauge_exit_config();
 enum class GaugeCommand{EnterConfig};bool gauge_control(GaugeCommand);
@@ -178,6 +179,66 @@ constexpr bool cases(){
 }
 static_assert(cases(),"actual commit/reopen/auth/canonical compare, corrupt present never absent");
 ''')
+
+    def test_actual_qualification_loop_and_recent_proof(self):
+        source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
+        methods='    bool prepareRuntimeQuietQualification() {'+source.split('    bool prepareRuntimeQuietQualification() {',1)[1].split('    bool identity(',1)[0]
+        methods=methods.replace('    bool ', '    constexpr bool ').replace('std::lock_guard<std::mutex>', 'TestLock')
+        self.compile(r'''
+#include <algorithm>
+#include "mosaico_fcc_limit_repair_model.h"
+using namespace mosaico_fcc_limit;
+struct Mutex{int* held;};
+struct TestLock{int* held;constexpr TestLock(Mutex& m):held(m.held){++*held;}constexpr ~TestLock(){--*held;}};
+struct Fake {
+ int fault=0,held=0,samples=0,waits=0;int64_t now=0;bool coldMode=false,waitWhileLocked=false;
+ QuietQualification qualification{};Mutex battery_mutex{&held};
+ constexpr bool cold()const{return coldMode;}
+ constexpr bool reject(const char*){return false;}
+ constexpr Load loadRaw(const char*,Journal&){return fault==2?Load::Present:Load::Absent;}
+ constexpr bool identity(Identity& id){id.device=0x0220;id.historicalNominalProof=id.historicalAccessProof=true;return fault!=1;}
+ constexpr bool quietSnapshot(Quiet& q){
+  ++samples;q={0x0026,58,4200,65,100,2982,0,0};
+  if(now>=60000000){
+   if(fault==3||fault==8)return false; // read / runtime gate failure
+   if(fault==5)q.operation|=0x0400;
+   if(fault==6)q.current=4;
+   if(fault==7)q.operation=0x0024;
+   if(fault==12)q.soc=0;
+   if(fault==13)q.mv=4149;
+  }
+  return true;
+ }
+ constexpr bool observedSecurity(Security& s){s={3,false,false,true};return !(fault==4&&now>=60000000);}
+ constexpr int64_t esp_timer_get_time()const{return now;}
+ constexpr void gauge_delay_ms(uint32_t ms){
+  if(held)waitWhileLocked=true;
+  ++waits;now+=int64_t(ms)*1000;
+  if(waits==60){if(fault==9)now-=2000000;if(fault==10)now+=2000000;}
+ }
+ constexpr bool physical(bool cfg,uint8_t sec){return !cfg&&sec==3&&fault!=14;}
+'''+methods+r'''
+};
+constexpr bool cases(){
+ Fake good;if(!good.prepareRuntimeQuietQualification()||good.now!=120000000||good.samples!=121||good.waits!=120||good.waitWhileLocked||good.held)return false;
+ if(!good.qualifyRuntimeQuiet())return false;
+ good.now=122500001;if(good.qualifyRuntimeQuiet())return false;
+ for(int fault:{1,2,3,4,5,6,7,8,9,10,12,13}){
+  Fake f;f.fault=fault;if(f.prepareRuntimeQuietQualification()||f.waitWhileLocked||f.held||f.now>62000000)return false;
+  if(fault>=3&&!f.qualification.failed)return false;
+ }
+ Fake fresh;fresh.fault=14;if(!fresh.prepareRuntimeQuietQualification()||fresh.qualifyRuntimeQuiet())return false;
+ Fake cold;cold.coldMode=true;if(!cold.prepareRuntimeQuietQualification()||!cold.qualifyRuntimeQuiet()||cold.samples||cold.waits||cold.now)return false;
+ return true;
+}
+static_assert(cases(),"actual 120s qualification, failed reads/state/load/gap/backward time, short sample locks");
+''',extra=('-std=c++20',))
+        method=source.split('bool Hal::gaugeFccLimitRepair(',1)[1].split('bool Hal::gaugeReconcileNominal(',1)[0]
+        self.assertLess(method.index('backend.prepareRuntimeQuietQualification()'),method.index('std::lock_guard<std::mutex> battery'))
+        self.assertLess(method.index('std::lock_guard<std::mutex> battery'),method.index('coordinator.run()'))
+        prepare=source.split('bool prepareRuntimeQuietQualification()',1)[1].split('bool qualifyRuntimeQuiet()',1)[0]
+        for forbidden in ('journalSave', 'gauge_access_word', 'writeParameter', 'gauge_control'):
+            self.assertNotIn(forbidden,prepare)
 
     def test_status_readonly_and_warning_clean_codec(self):
         self.compile('#include "mosaico_fcc_limit_journal_codec.h"\n',extra=('-Wall','-Wextra','-Werror'))

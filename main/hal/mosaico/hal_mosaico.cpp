@@ -920,6 +920,7 @@ struct GaugeFccBackend {
     mosaico_fcc_limit::Journal saved{}, runtimeProof{};
     mosaico_fcc_limit::Dm lastObservedDm{};
     bool observedValid=false;
+    mosaico_fcc_limit::QuietQualification qualification{};
     mosaico_fcc_limit::Mode mode=mosaico_fcc_limit::Mode::Runtime;
     bool initialColdLoad=true;
     GaugeFccBackend()=default;
@@ -1006,7 +1007,47 @@ struct GaugeFccBackend {
         }
         if(q.standardDc!=65||(q.standardFcc!=65&&q.standardFcc!=100))return reject("fresh_capacity");
         q.standardFcc=100;
-        return mosaico_fcc_limit::quiet(q)||reject("fresh_physical_not_quiet_full");
+        return mosaico_fcc_limit::quiet(q)||reject("fresh_physical_not_quiet_high_voltage");
+    }
+
+    bool prepareRuntimeQuietQualification() {
+        using namespace mosaico_fcc_limit;
+        if(cold())return true;
+        // The caller owns the transaction mutex, not battery_mutex. Reject
+        // existing history/latches before spending the quiet interval; no save.
+        {
+            std::lock_guard<std::mutex> battery(battery_mutex);
+            Journal old{};Identity id{};
+            if(loadRaw(journalKey,old)!=Load::Absent)return reject("qualification_existing_or_invalid_record");
+            if(!identity(id)||id.device!=0x0220||!id.historicalNominalProof||!id.historicalAccessProof)
+                return reject("qualification_history_or_identity");
+        }
+        for(;;) {
+            Quiet q{};Security s{};bool read=false;
+            {
+                // UI telemetry can run between samples; this lock is never
+                // retained during the one-second watchdog-fed qualification wait.
+                std::lock_guard<std::mutex> battery(battery_mutex);
+                read=quietSnapshot(q)&&observedSecurity(s);
+            }
+            // Timestamp AFTER completed reads: lock/I2C stalls count as gaps.
+            const int64_t now=esp_timer_get_time();
+            if(!read||!qualification.sample(q,s,now)) {
+                qualification.failed=true;
+                return reject("qualification_interrupted_or_not_quiet");
+            }
+            if(qualification.ready(now))return true;
+            const int64_t remaining=QuietQualification::durationUs-(now-qualification.firstUs);
+            gauge_delay_ms(static_cast<uint32_t>(std::min<int64_t>(1000,(remaining+999)/1000)));
+        }
+    }
+    bool qualifyRuntimeQuiet() {
+        if(cold())return true;
+        // Called with battery_mutex held immediately before the first durable
+        // intent. It consumes only a just-completed proof, never waits 120s again.
+        if(!qualification.ready(esp_timer_get_time())||!physical(false,3)||
+           !qualification.ready(esp_timer_get_time()))return reject("qualification_stale_or_fresh_gate");
+        return true;
     }
 
     bool identity(mosaico_fcc_limit::Identity& id) {
@@ -1638,10 +1679,13 @@ bool Hal::gaugeFccLimitStatus(char* details, size_t detailsSize)
 bool Hal::gaugeFccLimitRepair(char* details, size_t detailsSize)
 {
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
-    std::lock_guard<std::mutex> battery(battery_mutex);
     GaugeFccBackend backend;
-    mosaico_fcc_limit::Coordinator<GaugeFccBackend> coordinator(backend);
-    const auto outcome=coordinator.run();
+    auto outcome=mosaico_fcc_limit::Result::Rejected;
+    if(backend.prepareRuntimeQuietQualification()) {
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        mosaico_fcc_limit::Coordinator<GaugeFccBackend> coordinator(backend);
+        outcome=coordinator.run();
+    }
     if(outcome==mosaico_fcc_limit::Result::Verified)backend.why="verified_sealed_runtime_repair";
     const auto& j=backend.saved;
     if(details&&detailsSize)std::snprintf(details,detailsSize,

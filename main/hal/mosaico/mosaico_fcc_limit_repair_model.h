@@ -49,7 +49,7 @@ struct Journal {
     Dm before{}, target{};
 };
 constexpr bool quiet(const Quiet& q) {
-    return q.soc >= 95 && q.soc <= 100 && q.mv >= 4050 && q.mv <= 4350 &&
+    return q.soc >= 1 && q.soc <= 100 && q.mv >= 4150 && q.mv <= 4350 &&
         q.temperatureDeciK >= 2832 && q.temperatureDeciK <= 3181 &&
         q.current >= -3 && q.current <= 3 && q.average >= -3 && q.average <= 3 &&
         !(q.operation & 0x0401) && (q.operation & 0x0020) &&
@@ -63,6 +63,30 @@ constexpr bool coldQuiet(const Quiet& q) {
         q.standardDc == 3000 && q.standardFcc == 3000;
 }
 constexpr bool normal(Security s) { return s.initialized && !s.cal && !s.cfg; }
+
+// Runtime-only sampled quiet qualification. Every observation must be fresh
+// read success plus the external runtime gate; the backend enforces those before
+// calling sample(). Any gap/backward clock/physical violation poisons this call.
+struct QuietQualification {
+    static constexpr int64_t durationUs=120000000;
+    static constexpr int64_t maxGapUs=2500000;
+    bool started=false,failed=false;
+    int64_t firstUs=0,lastUs=0;
+    constexpr bool sample(const Quiet& q,Security s,int64_t now) {
+        if(failed)return false;
+        if(now<0 || !quiet(q) || ((q.operation>>1)&3)!=3 || s.sec!=3 || !normal(s) ||
+           (started&&(now<lastUs||now-lastUs>maxGapUs))) {
+            failed=true;
+            return false;
+        }
+        if(!started) { firstUs=now;started=true; }
+        lastUs=now;
+        return true;
+    }
+    constexpr bool ready(int64_t now) const {
+        return started&&!failed&&now>=lastUs&&now-lastUs<=maxGapUs&&now-firstUs>=durationUs;
+    }
+};
 
 // Backend bool reads must be authenticated/complete; false ACK is ambiguous,
 // never permission to retry. verifyTarget(target, false) requires two fresh
@@ -159,6 +183,7 @@ public:
             !id.historicalAccessProof || !b.quietSnapshot(q) || !quietGate(q) ||
             ((q.operation >> 1) & 3) != 3 || !observe(s) ||
             s.sec != 3 || !normal(s)) return Result::Rejected;
+        if(mode==Mode::Runtime&&!b.qualifyRuntimeQuiet())return Result::Rejected;
         for (unsigned i = 0; i < 6; ++i) j.mac[i] = id.mac[i];
         if (!intent(Unseal)) return Result::Failed;
         accessed = true;

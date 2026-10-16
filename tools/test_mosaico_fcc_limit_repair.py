@@ -15,7 +15,7 @@ HARNESS = r'''
 using namespace mosaico_fcc_limit;
 struct Fake {
     int step=0, failAt=0, unseal=0, full=0, config=0, fcc=0, exits=0, seals=0;
-    int reads=0, verifies=0, mode=0, dc=0, sealWires=0;
+    int reads=0, verifies=0, mode=0, dc=0, sealWires=0, qualifications=0;
     bool forceExitFail=false, unreadableAfterExit=false;
     bool cold=false, grantCold=true;
     bool violation=false, durable=false, loseAck=false, stickySave=false, lagSeen=false;
@@ -23,7 +23,7 @@ struct Fake {
     Journal disk{};
     Security sec{3,false,false,true};
     Dm dm{0x0020,65,100};
-    Quiet q{0x0026,95,4050,65,100,2832,-3,3};
+    Quiet q{0x0026,58,4150,65,100,2832,-3,3};
     constexpr bool tick() { return ++step != failAt; }
     constexpr Load journalLoad(const char* key, Journal& j) {
         if ((key[4]=='b')!=cold) violation=true;
@@ -47,6 +47,7 @@ struct Fake {
         return tick();
     }
     constexpr bool quietSnapshot(Quiet& out) { out=q; return tick(); }
+    constexpr bool qualifyRuntimeQuiet() { ++qualifications; return tick()&&mode!=8; }
     constexpr bool observedSecurity(Security& out) {
         out=sec; return tick() && !(unreadableAfterExit && exits);
     }
@@ -155,7 +156,7 @@ constexpr Fake factory() {
 constexpr bool coldFactory() {
     Fake base=factory();
     if(runCold(base)!=Result::Verified || !bounded(base) || base.dc!=1 ||
-        base.fcc!=1 || base.config!=1 || !(base.disk.intents & Dc)) return false;
+        base.fcc!=1 || base.config!=1 || base.qualifications || !(base.disk.intents & Dc)) return false;
     for(int point=1;point<=base.step;++point) {
         for(int behavior=0;behavior<3;++behavior) {
             Fake f=factory(); f.failAt=point; f.loseAck=behavior==1; f.stickySave=behavior==2;
@@ -197,7 +198,7 @@ constexpr bool success() {
         Fake f; f.dm.fcc=dmFcc;
         if(run(f)!=Result::Verified || !bounded(f) || f.verifies!=2 ||
             f.fcc!=(dmFcc==100 ? 1 : 0) || f.disk.state!=State::Verified ||
-            f.dm.dc!=65 || f.dm.config!=0x0120) return false;
+            f.dm.dc!=65 || f.dm.config!=0x0120 || f.qualifications!=1) return false;
     }
     return true;
 }
@@ -245,8 +246,8 @@ constexpr bool rejects() {
     }
     for(int field=0;field<10;++field) {
         Fake f;
-        if(field==0) f.q.soc=94;
-        if(field==1) f.q.mv=4049;
+        if(field==0) f.q.soc=0;
+        if(field==1) f.q.mv=4149;
         if(field==2) f.q.mv=4351;
         if(field==3) f.q.temperatureDeciK=2831;
         if(field==4) f.q.temperatureDeciK=3182;
@@ -304,6 +305,32 @@ constexpr bool powerLoss() {
     }
     return true;
 }
+constexpr bool qualificationGates() {
+    Quiet q{0x0026,58,4200,65,100,2982,0,0};Security s{3,false,false,true};
+    QuietQualification good;
+    for(int64_t now=0;now<=119000000;now+=1000000)if(!good.sample(q,s,now))return false;
+    if(!good.sample(q,s,119999000)||good.ready(119999000)||!good.sample(q,s,120000000)||!good.ready(120000000))return false;
+    if(good.ready(122500001)||good.ready(119999999))return false;
+    for(int fault=0;fault<8;++fault) {
+        QuietQualification f;Quiet changed=q;Security security=s;
+        if(!f.sample(q,s,1000000))return false;
+        int64_t next=2000000;
+        if(fault==0)next=999999;
+        if(fault==1)next=3500001;
+        if(fault==2)changed.soc=0;
+        if(fault==3)changed.soc=101;
+        if(fault==4)changed.mv=4149;
+        if(fault==5)changed.current=4;
+        if(fault==6)security.cfg=true;
+        if(fault==7)security.sec=2;
+        if(f.sample(changed,security,next)||!f.failed||f.sample(q,s,2000000)||f.ready(121000000))return false;
+    }
+    for(uint16_t soc:{uint16_t(1),uint16_t(58),uint16_t(100)}) {q.soc=soc;if(!quiet(q))return false;}
+    Fake failed;failed.mode=8;
+    if(run(failed)!=Result::Rejected||failed.qualifications!=1||failed.durable||failed.unseal||failed.full||failed.config||failed.fcc||failed.dc||!bounded(failed))return false;
+    return true;
+}
+static_assert(qualificationGates(), "runtime 120s boundary, stale/interrupted proof, no writes on rejection");
 static_assert(coldFactory(), "authorized boot-only factory profile and bounded failure matrix");
 static_assert(success(), "success/skip field path");
 static_assert(standardLag(), "standard FCC lag in CFG until exit REINIT is allowed");
