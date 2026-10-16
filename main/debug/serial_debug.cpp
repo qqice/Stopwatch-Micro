@@ -1334,6 +1334,16 @@ void SerialDebug::handleLine(char* line)
         result("gauge", battery.valid ? "PASS" : "FAIL", details);
         return;
     }
+    if (std::strcmp(command, "gauge-profile") == 0) {
+        if (::strtok_r(nullptr, " \t", &save)) {
+            result("gauge-profile", "FAIL", "expected=no_arguments readonly=1");
+            return;
+        }
+        char details[384]{};
+        const bool ok = GetHAL().gaugeProfileAudit(details, sizeof(details));
+        result("gauge-profile", ok ? "PASS" : "FAIL", details);
+        return;
+    }
     if (std::strcmp(command, "gauge-boot") == 0) {
         if (::strtok_r(nullptr, " \t", &save)) {
             result("gauge-boot", "FAIL", "expected=no_arguments readonly_diagnostic=1");
@@ -1793,6 +1803,7 @@ void SerialDebug::printHelp()
 
     debugPrintf("DBG HELP commands=ping,status,selftest,controls,protocol,debug-transport\r\n");
 #ifdef MOSAICO_BOARD
+    debugPrintf("DBG HELP gauge-profile no_arguments=1 readonly=1 closed_dm_selectors=1 no_unseal=1\r\n");
     debugPrintf("DBG HELP ota=ota-status,ota-update_CONFIRM_EXTERNAL_POWER,ota-rollback-test_CONFIRM\r\n");
 #endif
     debugPrintf(

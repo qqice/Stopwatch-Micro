@@ -533,10 +533,14 @@ bool gauge_control(GaugeCommand command)
     return ok;
 }
 
+// Read-only selector: deliberately not a Field (the capacity write policy stays closed).
+enum class GaugeProfileSelector : uint16_t { GaugingConfig = 0x929B };
+
 bool gauge_mac_read(uint16_t selector, uint8_t block[36])
 {
     using mosaico_gauge::Field;
-    if (selector != static_cast<uint16_t>(Field::Design) && selector != static_cast<uint16_t>(Field::InitialFcc))
+    if (selector != static_cast<uint16_t>(Field::Design) && selector != static_cast<uint16_t>(Field::InitialFcc) &&
+        selector != static_cast<uint16_t>(GaugeProfileSelector::GaugingConfig))
         return false;
     const uint8_t packet[] = {0x3E, static_cast<uint8_t>(selector), static_cast<uint8_t>(selector >> 8)};
     gauge_feed();
@@ -549,6 +553,41 @@ bool gauge_mac_read(uint16_t selector, uint8_t block[36])
         if (!gauge_read(static_cast<uint8_t>(0x40 + i), block + 2 + i, 2)) return false;
     }
     return mosaico_gauge::authenticateDmResponse(block, selector);
+}
+
+// Closed selector set, with independent authenticated reads of each word. The
+// caller holds both locks, including exclusive ownership of the MAC selector.
+template <typename Reader>
+constexpr bool gauge_profile_read_stable(Reader read, uint16_t (&values)[3], const char*& reason)
+{
+    constexpr uint16_t selectors[] = {
+        static_cast<uint16_t>(GaugeProfileSelector::GaugingConfig),
+        static_cast<uint16_t>(mosaico_gauge::Field::InitialFcc),
+        static_cast<uint16_t>(mosaico_gauge::Field::Design)};
+    uint16_t first[3]{};
+    for (unsigned pass = 0; pass < 2; ++pass) {
+        for (unsigned field = 0; field < 3; ++field) {
+            uint8_t block[36]{};
+            if (!read(selectors[field], block) ||
+                !mosaico_gauge::authenticateDmResponse(block, selectors[field])) {
+                reason = "dm_denied_io_or_auth";
+                return false;
+            }
+            const uint16_t value = (static_cast<uint16_t>(block[2]) << 8) | block[3];
+            if (!pass) first[field] = value;
+            else if (first[field] != value) {
+                reason = "dm_unstable";
+                return false;
+            }
+        }
+    }
+    if (first[0] > 0x1FFF) {
+        reason = "dm_config_range";
+        return false;
+    }
+    for (unsigned field = 0; field < 3; ++field) values[field] = first[field];
+    reason = "validated";
+    return true;
 }
 
 bool gauge_identity()
@@ -1307,6 +1346,41 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
 }
 
 bool Hal::gaugeSafetySelfTest() const { return mosaico_gauge::selftest(); }
+
+bool Hal::gaugeProfileAudit(char* details, size_t detailsSize)
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    std::lock_guard<std::mutex> lock(battery_mutex);
+    // Local observations only: no cached telemetry, journal, security or config updates.
+    uint16_t dc = 0, fcc = 0, operation = 0, status = 0, soc = 0, mv = 0, current = 0;
+    bool standard = false;
+    uint16_t profile[3]{};
+    const char* reason = "gauge_unavailable";
+    bool readable = false;
+    if (gauge) {
+        standard = gauge_word(0x3C, dc);
+        standard &= gauge_word(0x12, fcc);
+        standard &= gauge_word(0x3A, operation);
+        standard &= gauge_word(0x0A, status);
+        standard &= gauge_word(0x2C, soc);
+        standard &= gauge_word(0x08, mv);
+        standard &= gauge_word(0x0C, current);
+        readable = gauge_profile_read_stable(gauge_mac_read, profile, reason);
+    }
+    if (!standard && readable) reason = "standard_io";
+    if (details && detailsSize) {
+        const int used = std::snprintf(details, detailsSize,
+            "readonly=1 std_valid=%d std_dc=%u std_fcc=%u op=%04x status=%04x soc=%u voltage_mv=%u current_ma=%d readable=%d stable=%d reason=%s",
+            standard, dc, fcc, operation, status, soc, mv, static_cast<int16_t>(current),
+            readable, readable, reason);
+        if (readable && used >= 0 && static_cast<size_t>(used) < detailsSize)
+            std::snprintf(details + used, detailsSize - static_cast<size_t>(used),
+                " dm_dc=%d dm_fcc=%d cfg_byte0=%u cfg_byte1=%u cedv_hex=%04x fcc_limit=%u",
+                static_cast<int16_t>(profile[2]), static_cast<int16_t>(profile[1]),
+                profile[0] >> 8, profile[0] & 0xFF, profile[0], (profile[0] >> 8) & 1U);
+    }
+    return standard && readable;
+}
 
 bool Hal::gaugeReconcileNominal(char* reason, size_t reasonSize)
 {

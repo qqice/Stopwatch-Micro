@@ -153,6 +153,8 @@ public:
     // true is NOT learned FCC/cell calibration. reason uses blocked_/critical_ IDs.
     bool gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool restore,
                                  char* reason, size_t reasonSize);
+    // Closed, read-only standard + authenticated DM profile evidence; no cache updates.
+    bool gaugeProfileAudit(char* details, size_t detailsSize);
     // Pure safety-model checks; no I2C/NVS writes or hardware operations.
     bool gaugeSafetySelfTest() const;
     // Explicit access-mode transaction only, never an automatic boot action.
@@ -179,6 +181,12 @@ public:
         return false;
     }
     MosaicoClockDiagnostics displayClockDiagnostics() const { return {}; }
+    bool gaugeProfileAudit(char* details, size_t detailsSize)
+    {
+        if (details && detailsSize) std::snprintf(details, detailsSize,
+            "readonly=1 readable=0 stable=0 reason=unsupported_not_mosaico");
+        return false;
+    }
     bool gaugeSafetySelfTest() const { return false; }
     bool gaugeAccess(GaugeAccessAction, char* reason, size_t reasonSize)
     {
