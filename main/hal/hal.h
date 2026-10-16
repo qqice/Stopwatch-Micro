@@ -155,6 +155,10 @@ public:
                                  char* reason, size_t reasonSize);
     // Closed, read-only standard + authenticated DM profile evidence; no cache updates.
     bool gaugeProfileAudit(char* details, size_t detailsSize);
+    // Explicit confirmed runtime action only; no boot/replay caller.
+    bool gaugeFccLimitRepair(char* details, size_t detailsSize);
+    // NVS read-only, with explicit absent/present/invalid record distinction.
+    bool gaugeFccLimitStatus(char* details, size_t detailsSize);
     // Pure safety-model checks; no I2C/NVS writes or hardware operations.
     bool gaugeSafetySelfTest() const;
     // Explicit access-mode transaction only, never an automatic boot action.
@@ -181,6 +185,16 @@ public:
         return false;
     }
     MosaicoClockDiagnostics displayClockDiagnostics() const { return {}; }
+    bool gaugeFccLimitStatus(char* details, size_t detailsSize)
+    {
+        if (details && detailsSize) std::snprintf(details, detailsSize, "readonly=1 runtime_record=absent cold_record=absent reason=unsupported_not_mosaico");
+        return false;
+    }
+    bool gaugeFccLimitRepair(char* details, size_t detailsSize)
+    {
+        if (details && detailsSize) std::snprintf(details, detailsSize, "reason=unsupported_not_mosaico");
+        return false;
+    }
     bool gaugeProfileAudit(char* details, size_t detailsSize)
     {
         if (details && detailsSize) std::snprintf(details, detailsSize,

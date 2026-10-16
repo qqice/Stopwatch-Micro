@@ -50,7 +50,16 @@ static_assert(cases(),"minimum delay, tick phase, bounded watchdog gaps");
             result = subprocess.run([str(COMPILERS[0]), '-std=c++17', '-fsyntax-only', str(src)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
         # No device sequence or requested dwell was shortened.
-        self.assertEqual(source.count('gauge_delay_ms(5000)'), 3)
+        legacy_return = source.split('bool gauge_return_access(', 1)[1].split('esp_err_t gauge_load_reload(', 1)[0]
+        legacy_access = source.split('bool Hal::gaugeAccess(', 1)[1].split('void Hal::i2c_init()', 1)[0]
+        self.assertEqual(legacy_return.count('gauge_delay_ms(5000)'), 1)
+        self.assertEqual(legacy_access.count('gauge_delay_ms(5000)'), 2)
+        backend = source.split('struct GaugeFccBackend {', 1)[1].split('} // namespace', 1)[0]
+        self.assertEqual(backend.count('gauge_delay_ms(5000)'), 3)
+        for method, following in [('sendUnsealPair', 'sendFullPair'),
+                                  ('sendFullPair', 'dmSnapshot'), ('reseal', 'verifyTarget')]:
+            phase = backend.split('bool ' + method + '(', 1)[1].split('bool ' + following + '(', 1)[0]
+            self.assertEqual(phase.count('gauge_delay_ms(5000)'), 1)
         self.assertIn('gauge_delay_ms(2000); // TI:', source)
 
 

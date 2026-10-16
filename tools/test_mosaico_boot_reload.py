@@ -94,6 +94,11 @@ static_assert(cases(), "factory SEC2 guards");
     } reloadScope;'''
   self.assertIn(scope,body)
   body=body.replace(scope,'struct BootReloadScope {} reloadScope;').replace('std::','mock::')
+  # Dependency injection only: route the new profile reader/coordinator into
+  # this fixture. Its real backend/model are exercised by their own tests.
+  body=body.replace('GaugeFccBackend reader;', 'GaugeFccBackend reader(*this);')
+  body=body.replace('GaugeFccBackend backend(permission);', 'GaugeFccBackend backend(*this,permission);')
+  body=body.replace('mosaico_fcc_limit::Coordinator<GaugeFccBackend>', 'MockFccCoordinator<GaugeFccBackend>')
   harness=r'''
 #include <array>
 namespace mock {
@@ -105,6 +110,13 @@ constexpr void memcpy(uint8_t* to, const uint8_t* from, size_t size) {for(size_t
 constexpr int ESP_OK=0, ESP_ERR_NVS_NOT_FOUND=1;
 using esp_err_t=int;
 using namespace mosaico_gauge;
+template<class B> struct MockFccCoordinator {
+ B& backend;
+ constexpr MockFccCoordinator(B& b,mosaico_fcc_limit::Mode mode):backend(b) {
+  if(mode!=mosaico_fcc_limit::Mode::ColdFactory)backend.fixture.badColdMode=true;
+ }
+ constexpr mosaico_fcc_limit::Result run(){return backend.execute();}
+};
 struct Hal {
  enum class GaugeBootReloadStatus {Deferred,Skipped,Critical,Applied};
  enum class GaugeAccessAction {Open,Restore};
@@ -114,13 +126,38 @@ struct GaugePair {uint16_t design=3000,fcc=3000;};
 struct Fixture {
  using GaugeBootReloadStatus=Hal::GaugeBootReloadStatus;
  using GaugeAccessAction=Hal::GaugeAccessAction;
- enum Fault {None,NormalizeFail,PrepareFail,OpenAbortFail,OpenAbortSuccess,FinalStoreFail,ReadFail,UnknownHistory,LowVoltage,Config,Cal,Learned};
+ enum Fault {None,NormalizeFail,PrepareFail,OpenAbortFail,OpenAbortSuccess,FinalStoreFail,ReadFail,UnknownHistory,LowVoltage,Config,Cal,Learned,ColdSuccess,ColdFail,RuntimeInvalid,RuntimeUnverified,ColdFinalStoreFail};
  Fault fault; bool gauge=true, gauge_access_cleanup_attempted=false,gauge_access_cleanup_succeeded=false;
- bool durable=false; unsigned stores=0,opens=0,restores=0,seals=0,applies=0;
+ bool durable=false,badColdMode=false,seenAttemptedPendingSec3=false; unsigned stores=0,opens=0,restores=0,seals=0,applies=0,coldRuns=0,profileReads=0;
  ReloadJournal persisted{}; Journal nominal{}; AccessJournal access{};
  mock::mutex battery_mutex; mock::recursive_mutex gauge_transaction_mutex;
  Hal::GaugeBootReloadInfo gauge_boot_info;
  struct Sample {bool valid=true,capacityValid=true;uint16_t operationStatus=0xa6,designMah=3000,fullMah=3000,remainingMah=197;} battery_telemetry;
+ struct GaugeFccBackend {
+  Fixture& fixture; const char* why="mock_cold_failure";
+  constexpr explicit GaugeFccBackend(Fixture& f):fixture(f){}
+  constexpr GaugeFccBackend(Fixture& f,const mosaico_fcc_limit::Journal&):fixture(f){}
+  constexpr mosaico_fcc_limit::Load loadRaw(const char*,mosaico_fcc_limit::Journal& p){
+   using namespace mosaico_fcc_limit;
+   ++fixture.profileReads;
+   if(fixture.fault==RuntimeInvalid)return Load::Invalid;
+   if(fixture.fault!=ColdSuccess&&fixture.fault!=ColdFail&&fixture.fault!=RuntimeUnverified&&fixture.fault!=ColdFinalStoreFail)return Load::Absent;
+   p.state=fixture.fault==RuntimeUnverified?mosaico_fcc_limit::State::Pending:mosaico_fcc_limit::State::Verified;
+   p.backupValid=p.fullAccessVerified=true;p.before={0x102a,65,100};p.target={0x112a,65,65};
+   p.intents=Unseal|Full|Enter|Config|Fcc|TargetVerified|Exit|Seal;
+   return Load::Present;
+  }
+  constexpr mosaico_fcc_limit::Result execute(){
+   ++fixture.coldRuns;
+   fixture.seenAttemptedPendingSec3=fixture.gauge_boot_info.attempted&&fixture.durable&&
+    fixture.persisted.state==static_cast<uint8_t>(ReloadState::Pending)&&
+    ((fixture.battery_telemetry.operationStatus>>1)&3)==3;
+   if(!fixture.seenAttemptedPendingSec3||fixture.fault==ColdFail)return mosaico_fcc_limit::Result::Failed;
+   fixture.battery_telemetry.designMah=fixture.battery_telemetry.fullMah=65;
+   fixture.battery_telemetry.operationStatus=0xa6;
+   return mosaico_fcc_limit::Result::Verified;
+  }
+ };
  constexpr Fixture(Fault f,bool sec2=false):fault(f) {
   nominal.action=1;nominal.state=static_cast<uint8_t>(State::VerifiedSealedPrior3);
   nominal.targetDesign=nominal.targetFcc=nominal.lastDesign=nominal.lastFcc=65;
@@ -137,7 +174,7 @@ struct Fixture {
  constexpr bool selftest(){return true;}
  constexpr int gauge_load_reload(ReloadJournal& j,const uint8_t*){j=persisted;return durable?ESP_OK:ESP_ERR_NVS_NOT_FOUND;}
  constexpr bool gauge_store_reload(ReloadJournal& j,const uint8_t*) {
-  ++stores;if(fault==PrepareFail || (fault==FinalStoreFail && stores>1))return false;
+  ++stores;if(fault==PrepareFail || ((fault==FinalStoreFail||fault==ColdFinalStoreFail) && stores>1))return false;
   durable=true;persisted=j;return true;
  }
  constexpr int gauge_load_journal(Journal& j,const uint8_t*){j=nominal;return fault==UnknownHistory?2:ESP_OK;}
@@ -183,10 +220,29 @@ constexpr bool faults(){
  F good(F::None,true);return good.run()==S::Applied && good.opens==1 && good.applies==1 && good.seals==2 && good.restores==2;
 }
 static_assert(faults(), "actual boot coordinator fault injection");
+constexpr bool coldRoutes(){
+ using F=Fixture;using S=Hal::GaugeBootReloadStatus;
+ F cold(F::ColdSuccess);if(cold.run()!=S::Applied||cold.coldRuns!=1||!cold.seenAttemptedPendingSec3||
+  cold.opens||cold.applies||cold.restores||cold.seals||cold.badColdMode||cold.stores!=2||
+  cold.persisted.state!=static_cast<uint8_t>(ReloadState::Completed))return false;
+ if(cold.run()!=S::Applied||cold.coldRuns!=1||cold.stores!=2)return false;
+ F sec2(F::ColdSuccess,true);if(sec2.run()!=S::Applied||sec2.coldRuns!=1||!sec2.seenAttemptedPendingSec3||
+  sec2.opens||sec2.applies||sec2.restores!=1||sec2.seals!=1)return false;
+ for(auto fault:{F::RuntimeInvalid,F::RuntimeUnverified,F::ColdFail}){
+  F blocked(fault);if(blocked.run()!=S::Critical||blocked.opens||blocked.applies||blocked.restores||blocked.seals||
+   blocked.persisted.state!=static_cast<uint8_t>(ReloadState::Failed)||blocked.stores!=2)return false;
+  if(blocked.coldRuns!=(fault==F::ColdFail?1U:0U))return false;
+ }
+ F ack(F::ColdFinalStoreFail);if(ack.run()!=S::Critical||ack.coldRuns!=1||ack.opens||ack.applies||
+  ack.persisted.state!=static_cast<uint8_t>(ReloadState::Pending))return false;
+ ack.gauge_boot_info={};if(ack.run()!=S::Critical||ack.coldRuns!=1)return false;
+ return true;
+}
+static_assert(coldRoutes(), "actual cold hook replaces legacy, authenticates permission and finalizes latch");
 '''
   with tempfile.TemporaryDirectory() as directory:
    source=Path(directory)/'boot_faults.cpp'
-   source.write_text('#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').as_posix()+'"\n'+harness.replace('BODY',body),encoding='utf8')
+   source.write_text('#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').as_posix()+'"\n#include "'+(ROOT/'main/hal/mosaico/mosaico_fcc_limit_journal_codec.h').as_posix()+'"\n'+harness.replace('BODY',body),encoding='utf8')
    result=subprocess.run([compiler,'-std=c++17','-fsyntax-only',str(source)],capture_output=True,text=True)
    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
  def test_access_abort_reports_cleanup_ownership(self):

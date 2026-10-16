@@ -28,6 +28,10 @@
 #include "../hal.h"
 #include "../utils/settings/settings.h"
 #include "mosaico_gauge_model.h"
+#include "mosaico_fcc_limit_journal_codec.h"
+#include <host/network_quota.h>
+#include <hal/ble/codex_micro_ble.h>
+#include <ota/mosaico_ota.h>
 #include "mosaico_boot_splash_model.h"
 #include <debug/boot_trace.h>
 #include "mosaico_touch_power_model.h"
@@ -909,6 +913,223 @@ bool gauge_store_reload(mosaico_gauge::ReloadJournal& journal, const uint8_t mac
     return result == ESP_OK && gauge_load_reload(readback, mac) == ESP_OK &&
            std::memcmp(&journal, &readback, sizeof(journal)) == 0;
 }
+
+// Explicit runtime backend plus separately boot-latched ColdFactory privilege.
+// Neither path mutates the legacy nominal/access journals.
+struct GaugeFccBackend {
+    mosaico_fcc_limit::Journal saved{}, runtimeProof{};
+    mosaico_fcc_limit::Dm lastObservedDm{};
+    bool observedValid=false;
+    mosaico_fcc_limit::Mode mode=mosaico_fcc_limit::Mode::Runtime;
+    bool initialColdLoad=true;
+    GaugeFccBackend()=default;
+    explicit GaugeFccBackend(const mosaico_fcc_limit::Journal& permission)
+        : runtimeProof(permission),mode(mosaico_fcc_limit::Mode::ColdFactory) {}
+    bool cold() const {return mode==mosaico_fcc_limit::Mode::ColdFactory;}
+    const char* key() const {return cold()?mosaico_fcc_limit::coldJournalKey:mosaico_fcc_limit::journalKey;}
+    const char* why = "preflight_rejected";
+    bool dirty = false;
+    bool reject(const char* value) { why=value; return false; }
+    bool runtimeGate() {
+        const auto p=GetNetworkQuota().powerStats();
+        const auto b=GetCodexMicroBle().diagnostics();
+        bool otaAllowed=!MosaicoOta::busy()&&!MosaicoOta::healthPending();
+        if(cold()&&MosaicoOta::healthPending()) {
+            MosaicoOta::UiSnapshot ui{};
+            // Normal pending-image startup is not an update/install transaction.
+            otaAllowed=MosaicoOta::copyUiSnapshot(ui)&&ui.stage==MosaicoOta::UiStage::BootChecking;
+        }
+        return ((cold() || (p.locked && p.phase==2)) && !p.wifiRunning && !b.advertising && !b.connected &&
+            otaAllowed) || reject("runtime_radio_or_ota_gate");
+    }
+    mosaico_fcc_limit::Load loadRaw(const char* requestedKey, mosaico_fcc_limit::Journal& j) {
+        using namespace mosaico_fcc_limit;
+        if(std::strcmp(requestedKey,key())) return Load::Invalid;
+        const auto mac=GetHAL().getFactoryMac();
+        nvs_handle_t h=0;esp_err_t e=nvs_open("gaugecal",NVS_READONLY,&h);
+        if(e==ESP_ERR_NVS_NOT_FOUND)return Load::Absent;
+        if(e!=ESP_OK){why="journal_open";return Load::Invalid;}
+        Record r{};size_t size=sizeof(r);e=nvs_get_blob(h,key(),r,&size);nvs_close(h);
+        if(e==ESP_ERR_NVS_NOT_FOUND)return Load::Absent;
+        if(e!=ESP_OK||size!=sizeof(r)||!decode(r,mac.data(),j,mode)){why="journal_invalid";return Load::Invalid;}
+        saved=j;why="journal_present_no_replay";return Load::Present;
+    }
+    mosaico_fcc_limit::Load journalLoad(const char* requestedKey,mosaico_fcc_limit::Journal& j) {
+        using namespace mosaico_fcc_limit;
+        const auto result=loadRaw(requestedKey,j);
+        const bool first=initialColdLoad;initialColdLoad=false;
+        // Only the outer startup attempted/Pending latch grants this new cold
+        // transaction. Last Verified is replaceable, never Pending/Failed/corrupt.
+        if(cold()&&first&&result==Load::Present&&j.state==State::Verified)return Load::Absent;
+        return result;
+    }
+    bool journalSaveReadback(const char* requestedKey,const mosaico_fcc_limit::Journal& j) {
+        using namespace mosaico_fcc_limit;
+        if(std::strcmp(requestedKey,key()))return reject("journal_key");
+        const char* priorWhy=why;
+        Record bytes{};if(!encode(j,bytes,mode))return reject("journal_shape");
+        nvs_handle_t h=0;esp_err_t e=nvs_open("gaugecal",NVS_READWRITE,&h);
+        if(e!=ESP_OK)return reject("journal_write_open");
+        gauge_feed();e=nvs_set_blob(h,key(),bytes,sizeof(bytes));
+        if(e==ESP_OK) { e=nvs_commit(h); }
+        nvs_close(h);
+        gauge_feed();
+        if(e!=ESP_OK)return reject("journal_commit");
+        Journal actual{};if(loadRaw(key(),actual)!=Load::Present)return reject("journal_readback");
+        Record readback{};if(!encode(actual,readback,mode)||!equalRecord(bytes,readback))return reject("journal_compare");
+        saved=actual;why=priorWhy;return true;
+    }
+    bool observedSecurity(mosaico_fcc_limit::Security& s) {
+        uint16_t op=0;if(!gauge_word(0x3A,op))return reject("security_io");
+        s={static_cast<uint8_t>((op>>1)&3),bool(op&0x0400),bool(op&1),bool(op&0x20)};
+        return true;
+    }
+    bool quietSnapshot(mosaico_fcc_limit::Quiet& q) {
+        uint16_t temp=0,current=0,average=0;
+        bool ok=gauge_word(0x3A,q.operation);ok&=gauge_word(0x2C,q.soc);ok&=gauge_word(0x08,q.mv);
+        ok&=gauge_word(0x3C,q.standardDc);ok&=gauge_word(0x12,q.standardFcc);
+        ok&=gauge_word(0x06,temp);ok&=gauge_word(0x0C,current);ok&=gauge_word(0x14,average);
+        q.temperatureDeciK=static_cast<int16_t>(temp);q.current=static_cast<int16_t>(current);q.average=static_cast<int16_t>(average);
+        return (runtimeGate()&&ok)||reject("quiet_snapshot_or_runtime_gate");
+    }
+    bool physical(bool cfg,uint8_t sec) {
+        mosaico_fcc_limit::Quiet q{};
+        if(!quietSnapshot(q))return false;
+        const uint16_t op=q.operation;
+        if(bool(op&0x0400)!=cfg||((op>>1)&3)!=sec)return reject("fresh_security");
+        q.operation=static_cast<uint16_t>(op&~0x0400U);
+        if(cold()) {
+            if((q.standardDc!=3000&&(!cfg||q.standardDc!=65))||
+               (q.standardFcc!=3000&&(!cfg||q.standardFcc!=65)))return reject("cold_fresh_capacity");
+            q.standardDc=3000;q.standardFcc=3000;
+            return mosaico_fcc_limit::coldQuiet(q)||reject("cold_fresh_physical");
+        }
+        if(q.standardDc!=65||(q.standardFcc!=65&&q.standardFcc!=100))return reject("fresh_capacity");
+        q.standardFcc=100;
+        return mosaico_fcc_limit::quiet(q)||reject("fresh_physical_not_quiet_full");
+    }
+
+    bool identity(mosaico_fcc_limit::Identity& id) {
+        using namespace mosaico_gauge;
+        if(!gauge||!selftest()||!runtimeGate()||!gauge_identity())return reject("identity_or_runtime");
+        const auto mac=GetHAL().getFactoryMac();Journal nominal{};AccessJournal access{};ReloadJournal reload{};
+        const esp_err_t r=gauge_load_reload(reload,mac.data());
+        const bool reloadOk=cold()?(r==ESP_OK&&reload.state==uint8_t(ReloadState::Pending)&&gauge_boot_info.attempted):
+            (r==ESP_ERR_NVS_NOT_FOUND||(r==ESP_OK&&reload.state==uint8_t(ReloadState::Completed)));
+        if(!reloadOk||gauge_load_journal(nominal,mac.data())!=ESP_OK||gauge_load_access(access,mac.data())!=ESP_OK||
+           !bootHistoryEligible(nominal,access))return reject("legacy_history_or_failure_latch");
+        id.device=DeviceType;for(unsigned i=0;i<6;++i)id.mac[i]=mac[i];
+        id.historicalNominalProof=true;id.historicalAccessProof=true;
+        if(cold()) {
+            GaugeFccBackend reader;mosaico_fcc_limit::Journal actual{};
+            mosaico_fcc_limit::Record a{},b{};
+            if(reader.loadRaw(mosaico_fcc_limit::journalKey,actual)!=mosaico_fcc_limit::Load::Present||
+               !mosaico_fcc_limit::verifiedRuntimePermission(actual)||
+               !mosaico_fcc_limit::encode(actual,a)||!mosaico_fcc_limit::encode(runtimeProof,b)||
+               !mosaico_fcc_limit::equalRecord(a,b))return reject("cold_runtime_permission");
+            id.authorizedColdProfile=true;id.coldOriginalConfig=actual.before.config;
+        }
+        return true;
+    }
+
+    bool sendUnsealPair() {
+        gauge_delay_ms(5000);
+        if(!physical(false,3))return false;
+        dirty=true;
+        const bool sent=gauge_access_word(AccessWord::UnsealFirst)&&gauge_access_word(AccessWord::UnsealSecond);
+        const bool observed=gauge_wait_security(2);
+        return (sent&&observed)||reject("unseal_failed_no_retry");
+    }
+    bool sendFullPair() {
+        gauge_delay_ms(5000);
+        if(!physical(false,2))return false;
+        const bool sent=gauge_access_word(AccessWord::Full)&&gauge_access_word(AccessWord::Full);
+        const bool observed=gauge_wait_security(1);
+        return (sent&&observed)||reject("full_failed_no_retry");
+    }
+    bool dmSnapshot(mosaico_fcc_limit::Dm& dm) {
+        uint16_t v[3]{};const char* reason="";
+        if(!gauge_profile_read_stable(gauge_mac_read,v,reason))return reject(reason);
+        dm={v[0],v[2],v[1]};
+        lastObservedDm=dm;
+        observedValid=true;
+        return true;
+    }
+    bool enterCfg() {return physical(false,1)&&gauge_control(GaugeCommand::EnterConfig);}
+    bool waitCfg() {return gauge_wait_config(true);}
+    // Closed selectors, separate from old Field/allowedValue APIs and journals.
+    // The DC selector is unreachable from the runtime mode.
+    enum class Parameter : uint16_t { Config=0x929B,Fcc=0x929D,Dc=0x929F };
+    bool writeParameter(Parameter parameter,uint16_t value) {
+        using namespace mosaico_fcc_limit;
+        if(!saved.backupValid||!saved.fullAccessVerified||!physical(true,1))return reject("write_preflight");
+        Dm now{};if(!dmSnapshot(now)||
+            (now.dc!=saved.before.dc&&now.dc!=saved.target.dc)||
+            (now.config!=saved.before.config&&now.config!=saved.target.config)||
+            (now.fcc!=saved.before.fcc&&now.fcc!=saved.target.fcc))return reject("write_unknown_profile");
+        const bool config=parameter==Parameter::Config, dc=parameter==Parameter::Dc;
+        if(dc&&!cold())return reject("runtime_dc_write_forbidden");
+        const uint16_t before=config?saved.before.config:(dc?saved.before.dc:saved.before.fcc);
+        const uint16_t target=config?saved.target.config:(dc?saved.target.dc:saved.target.fcc);
+        const bool forward=value==target;
+        const uint16_t flag=config?(forward?Config:RestoreConfig):(dc?(forward?Dc:RestoreDc):(forward?Fcc:RestoreFcc));
+        if(!(saved.intents&flag)||(value!=before&&value!=target)||
+           (config&&((before^target)!=limitBit))||
+           (!config&&!dc&&parameter!=Parameter::Fcc))return reject("write_intent_or_value");
+        // Recheck after authenticated reads, immediately before the single wire attempt.
+        if(!physical(true,1))return false;
+        const uint16_t selector=static_cast<uint16_t>(parameter);
+        const uint8_t packet[]={0x3E,static_cast<uint8_t>(selector),static_cast<uint8_t>(selector>>8),
+            static_cast<uint8_t>(value>>8),static_cast<uint8_t>(value)};
+        gauge_feed();dirty=true;
+        if(i2c_master_transmit(gauge,packet,sizeof(packet),20)!=ESP_OK)return reject("parameter_ack");
+        gauge_delay_ms(1);
+        const uint8_t commit[]={0x60,mosaico_gauge::macChecksum(packet+1,4),6};
+        if(i2c_master_transmit(gauge,commit,sizeof(commit),20)!=ESP_OK)return reject("parameter_commit_ack");
+        gauge_delay_ms(20);
+        for(unsigned i=0;i<2;++i){uint8_t block[36]{};
+            if(!gauge_mac_read(selector,block)||((uint16_t(block[2])<<8)|block[3])!=value)return reject("parameter_readback");}
+        return true;
+    }
+    bool writeConfigOnly(uint16_t value){return writeParameter(Parameter::Config,value);}
+    bool writeFccOnly(uint16_t value){return writeParameter(Parameter::Fcc,value);}
+    bool writeDcOnly(uint16_t value){return cold()?writeParameter(Parameter::Dc,value):reject("runtime_dc_write_forbidden");}
+    bool exitCfg() {
+        mosaico_fcc_limit::Security s{};if(!observedSecurity(s))return false;
+        if(!s.cfg)return s.initialized&&!s.cal; // SEC2/noCFG needs no exit command.
+        return gauge_exit_config();
+    }
+    bool reseal() {
+        using namespace mosaico_fcc_limit;
+        // Cleanup is independent of NVS/radios, but never Seal active/unknown
+        // CFG or CAL. Match the legacy protective access-return safety rule.
+        Security first{};
+        if(!observedSecurity(first)||!normal(first)||first.sec<1||first.sec>3)
+            return reject("seal_blocked_cfg_cal_or_unknown");
+        if(first.sec==3)return true;
+        gauge_delay_ms(5000);
+        Security fresh{};
+        if(!observedSecurity(fresh)||!normal(fresh)||fresh.sec<1||fresh.sec>3)
+            return reject("seal_blocked_after_grace");
+        if(fresh.sec==3)return true;
+        (void)gauge_access_word(AccessWord::Seal);
+        return gauge_wait_security(3);
+    }
+    bool verifyTarget(mosaico_fcc_limit::Dm target,bool sealed) {
+        using namespace mosaico_fcc_limit;
+        if(!sealed){Dm a{},b{};return dmSnapshot(a)&&dmSnapshot(b)&&same(a,target)&&same(b,target);}
+        for(unsigned i=0;i<2;++i){Security sec{};uint16_t dc=0,fcc=0;
+            if(!gauge_identity()||!observedSecurity(sec)||sec.sec!=3||!normal(sec)||
+                !gauge_word(0x3C,dc)||!gauge_word(0x12,fcc)||dc!=65||fcc!=65)return reject("final_standard_identity_security");}
+        Dm dm{};if(dmSnapshot(dm))return same(dm,target)||reject("sealed_dm_mismatch");
+        Journal durable{};
+        if(loadRaw(key(),durable)!=Load::Present)return reject("sealed_proof_load");
+        const uint16_t required=Unseal|Full|Enter|Config|TargetVerified|(durable.before.fcc!=65?Fcc:0)|(cold()?Dc:0);
+        return (durable.state==State::Pending&&durable.backupValid&&durable.fullAccessVerified&&
+            (durable.intents&required)==required&&same(durable.target,target))||reject("sealed_proof_invalid");
+    }
+};
+
 } // namespace
 
 bool Hal::gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize)
@@ -1382,6 +1603,55 @@ bool Hal::gaugeProfileAudit(char* details, size_t detailsSize)
     return standard && readable;
 }
 
+bool Hal::gaugeFccLimitStatus(char* details, size_t detailsSize)
+{
+    using namespace mosaico_fcc_limit;
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    GaugeFccBackend runtimeReader,coldReader;
+    coldReader.mode=Mode::ColdFactory;
+    Journal runtime{},cold{};
+    const Load runtimeLoad=runtimeReader.loadRaw(journalKey,runtime);
+    const Load coldLoad=coldReader.loadRaw(coldJournalKey,cold);
+    size_t used=0;
+    if(details&&detailsSize) {
+        details[0]='\0';
+        const auto append=[&](const char* label,Load loaded,const Journal& j) {
+            if(used>=detailsSize)return;
+            const bool present=loaded==Load::Present;
+            const char* record=present?"present":(loaded==Load::Absent?"absent":"invalid");
+            const int count=std::snprintf(details+used,detailsSize-used,
+                "%s_record=%s %s_state=%u %s_intents=%u %s_backup=%u %s_full_fa=%u %s_orig_cfg=%04x %s_orig_dc=%u %s_orig_fcc=%u %s_target_cfg=%04x %s_target_dc=%u %s_target_fcc=%u ",
+                label,record,label,present?static_cast<unsigned>(j.state):0U,
+                label,present?j.intents:0U,label,present&&j.backupValid,label,present&&j.fullAccessVerified,
+                label,present?j.before.config:0U,label,present?j.before.dc:0U,label,present?j.before.fcc:0U,
+                label,present?j.target.config:0U,label,present?j.target.dc:0U,label,present?j.target.fcc:0U);
+            if(count>0)used+=static_cast<size_t>(count);
+        };
+        append("runtime",runtimeLoad,runtime);
+        append("cold",coldLoad,cold);
+        if(used<detailsSize)std::snprintf(details+used,detailsSize-used,"readonly=1");
+    }
+    return runtimeLoad!=Load::Invalid&&coldLoad!=Load::Invalid;
+}
+
+bool Hal::gaugeFccLimitRepair(char* details, size_t detailsSize)
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    GaugeFccBackend backend;
+    mosaico_fcc_limit::Coordinator<GaugeFccBackend> coordinator(backend);
+    const auto outcome=coordinator.run();
+    if(outcome==mosaico_fcc_limit::Result::Verified)backend.why="verified_sealed_runtime_repair";
+    const auto& j=backend.saved;
+    if(details&&detailsSize)std::snprintf(details,detailsSize,
+        "reason=%s result=%u dirty=%d journal_state=%u intents=%u backup=%d full_verified=%d orig_config=%04x orig_dc=%u orig_dm_fcc=%u target_config=%04x observed_valid=%d observed_config=%04x observed_dc=%u observed_fcc=%u runtime_only=1",
+        backend.why,static_cast<unsigned>(outcome),backend.dirty,static_cast<unsigned>(j.state),j.intents,
+        j.backupValid,j.fullAccessVerified,j.before.config,j.before.dc,j.before.fcc,j.target.config,
+        backend.observedValid,backend.lastObservedDm.config,backend.lastObservedDm.dc,backend.lastObservedDm.fcc);
+    return outcome==mosaico_fcc_limit::Result::Verified;
+}
+
 bool Hal::gaugeReconcileNominal(char* reason, size_t reasonSize)
 {
     using namespace mosaico_gauge;
@@ -1544,6 +1814,31 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
                 (observedOperation >> 1) & 3, !!(observedOperation & 0x0400), !!(observedOperation & 1));
             else std::snprintf(details, sizeof(details), "boot_critical_normalize_failed_no_retry_security_unreadable");
             return finish(Status::Critical, details);
+        }
+    }
+    // A permanent, authenticated runtime repair profile replaces (never follows)
+    // the legacy nominal/access transaction on known factory cold POR. No
+    // fallback is allowed once this key exists, even if it is corrupt/Failed.
+    {
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        GaugeFccBackend reader;
+        mosaico_fcc_limit::Journal permission{};
+        const auto loaded=reader.loadRaw(mosaico_fcc_limit::journalKey,permission);
+        if(loaded!=mosaico_fcc_limit::Load::Absent) {
+            bool verified=false;
+            const char* why="cold_runtime_profile_invalid_or_unverified";
+            if(loaded==mosaico_fcc_limit::Load::Present&&
+               mosaico_fcc_limit::verifiedRuntimePermission(permission)) {
+                GaugeFccBackend backend(permission);
+                mosaico_fcc_limit::Coordinator<GaugeFccBackend> coordinator(backend,mosaico_fcc_limit::Mode::ColdFactory);
+                verified=coordinator.run()==mosaico_fcc_limit::Result::Verified;
+                why=verified?"cold_fcc_limit_profile_verified_sealed":backend.why;
+            }
+            latch.state=static_cast<uint8_t>(verified?ReloadState::Completed:ReloadState::Failed);
+            if(!gauge_store_reload(latch,mac.data()))return finish(Status::Critical,"cold_profile_final_latch_readback");
+            char details[128]{};
+            std::snprintf(details,sizeof(details),"%s %.88s",verified?"boot_applied65_fcc_limit":"boot_critical_fcc_limit",why);
+            return finish(verified?Status::Applied:Status::Critical,details);
         }
     }
     // Permission begins only AFTER history/factory checks and durable Pending.

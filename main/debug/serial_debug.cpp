@@ -1334,6 +1334,29 @@ void SerialDebug::handleLine(char* line)
         result("gauge", battery.valid ? "PASS" : "FAIL", details);
         return;
     }
+    if (std::strcmp(command, "gauge-fcc-status") == 0) {
+        if (::strtok_r(nullptr, " \t", &save)) {
+            result("gauge-fcc-status", "FAIL", "expected=no_arguments readonly=1");
+            return;
+        }
+        char details[640]{};
+        const bool ok=GetHAL().gaugeFccLimitStatus(details,sizeof(details));
+        result("gauge-fcc-status",ok?"PASS":"FAIL",details);
+        return;
+    }
+    if (std::strcmp(command, "gauge-fcc-limit") == 0) {
+        const char* action=::strtok_r(nullptr," 	",&save);
+        const char* confirm=::strtok_r(nullptr," 	",&save);
+        if ((_writer && _writer->_reply_uart) || !action || std::strcmp(action,"apply") ||
+            !confirm || std::strcmp(confirm,"CONFIRM") || ::strtok_r(nullptr," 	",&save)) {
+            result("gauge-fcc-limit","FAIL","expected=apply_CONFIRM cdc_only=1 runtime_only=1");
+            return;
+        }
+        char details[384]{};
+        const bool ok=GetHAL().gaugeFccLimitRepair(details,sizeof(details));
+        result("gauge-fcc-limit",ok?"PASS":"FAIL",details);
+        return;
+    }
     if (std::strcmp(command, "gauge-profile") == 0) {
         if (::strtok_r(nullptr, " \t", &save)) {
             result("gauge-profile", "FAIL", "expected=no_arguments readonly=1");
@@ -1803,6 +1826,8 @@ void SerialDebug::printHelp()
 
     debugPrintf("DBG HELP commands=ping,status,selftest,controls,protocol,debug-transport\r\n");
 #ifdef MOSAICO_BOARD
+    debugPrintf("DBG HELP gauge-fcc-status no_arguments=1 readonly=1 journal_existence_explicit=1\r\n");
+    debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
     debugPrintf("DBG HELP gauge-profile no_arguments=1 readonly=1 closed_dm_selectors=1 no_unseal=1\r\n");
     debugPrintf("DBG HELP ota=ota-status,ota-update_CONFIRM_EXTERNAL_POWER,ota-rollback-test_CONFIRM\r\n");
 #endif
