@@ -43,7 +43,7 @@ static_assert(!mosaico_gauge::reasonableFcc(100),"legacy 100 rejected");
 
     def test_actual_backend_and_public_method_compile(self):
         source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
-        backend='struct GaugeFccBackend {'+source.split('struct GaugeFccBackend {',1)[1].split('\n} // namespace',1)[0]
+        backend='struct GaugeFccBackend {'+source.split('struct GaugeFccBackend {',1)[1].split('\nstruct GaugeThresholdBackend',1)[0]
         status='bool Hal::gaugeFccLimitStatus('+source.split('bool Hal::gaugeFccLimitStatus(',1)[1].split('\nbool Hal::gaugeFccLimitRepair(',1)[0]
         method='bool Hal::gaugeFccLimitRepair('+source.split('bool Hal::gaugeFccLimitRepair(',1)[1].split('\nbool Hal::gaugeReconcileNominal(',1)[0]
         hook='    // A permanent, authenticated runtime repair profile replaces'+source.split('    // A permanent, authenticated runtime repair profile replaces',1)[1].split('    // Permission begins only AFTER',1)[0]
@@ -261,7 +261,7 @@ static_assert(cases(),"actual 120s qualification, failed reads/state/load/gap/ba
 
     def test_closed_source_boundaries(self):
         source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
-        b=source.split('struct GaugeFccBackend {',1)[1].split('\n} // namespace',1)[0]
+        b=source.split('struct GaugeFccBackend {',1)[1].split('\nstruct GaugeThresholdBackend',1)[0]
         for forbidden in ('gaugeAccess(', 'gaugeSetNominalCapacity(', 'gauge_store_access(', 'gauge_store_journal(', 'gauge_store_reload(', 'sample_battery_locked('):self.assertNotIn(forbidden,b)
         self.assertIn('enum class Parameter : uint16_t { Config=0x929B,Fcc=0x929D,Dc=0x929F };',b)
         self.assertIn('gauge_delay_ms(5000)',b)

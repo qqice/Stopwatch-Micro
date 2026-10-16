@@ -30,6 +30,7 @@
 #include "mosaico_gauge_model.h"
 #include "mosaico_fcc_limit_journal_codec.h"
 #include "mosaico_ocv_diagnostic_model.h"
+#include "mosaico_threshold_audit_model.h"
 #include <host/network_quota.h>
 #include <hal/ble/codex_micro_ble.h>
 #include <ota/mosaico_ota.h>
@@ -252,6 +253,7 @@ bool gauge_access_cleanup_succeeded = false;
 Hal::GaugeBootReloadInfo gauge_boot_info;
 // Volatile per-boot diagnostic latch; only the transaction owner may change it.
 bool gauge_ocv_attempted=false;
+bool gauge_threshold_audit_attempted=false;
 bool battery_valid = false;
 uint8_t battery_soc = 0;
 uint16_t battery_mv = 0;
@@ -502,6 +504,7 @@ void sample_battery_locked(bool refresh = false)
     status &= gauge_word(0x0a, sample.batteryStatus);
     status &= gauge_word(0x2e, sample.stateOfHealth);
     status &= gauge_word(0x2a, sample.cycleCount);
+    sample.temperatureValid = gauge_word(0x06, sample.temperatureDeciK);
     sample.reportedSoc = static_cast<uint8_t>(soc);
     sample.currentMa = static_cast<int16_t>(current);
     sample.averageCurrentMa = static_cast<int16_t>(average);
@@ -917,6 +920,20 @@ bool gauge_store_reload(mosaico_gauge::ReloadJournal& journal, const uint8_t mac
            std::memcmp(&journal, &readback, sizeof(journal)) == 0;
 }
 
+// Threshold-only typed MAC selection. No arbitrary address or parameter commit.
+bool gauge_threshold_read(mosaico_threshold::Selector selector,uint8_t block[36])
+{
+    if(!mosaico_threshold::allowed(selector))return false;
+    const uint16_t value=static_cast<uint16_t>(selector);
+    const uint8_t packet[]={0x3E,static_cast<uint8_t>(value),static_cast<uint8_t>(value>>8)};
+    gauge_feed();
+    if(i2c_master_transmit(gauge,packet,sizeof(packet),20)!=ESP_OK)return false;
+    gauge_delay_ms(20);
+    if(!gauge_read(0x3E,block,2))return false;
+    for(unsigned i=0;i<34;i+=2)if(!gauge_read(static_cast<uint8_t>(0x40+i),block+2+i,2))return false;
+    return mosaico_gauge::authenticateDmResponse(block,value);
+}
+
 // Explicit runtime backend plus separately boot-latched ColdFactory privilege.
 // Neither path mutates the legacy nominal/access journals.
 struct GaugeFccBackend {
@@ -1174,6 +1191,119 @@ struct GaugeFccBackend {
     }
 };
 
+struct GaugeThresholdBackend {
+    using Journal=mosaico_threshold::Journal;
+    using Load=mosaico_threshold::Load;
+    static constexpr const char* Key="thresh_aud_v1";
+    uint16_t expectedConfig=0x112A;
+    mosaico_threshold::Values values{};
+    const char* why="admission_refused";
+    Load journalLoadState=Load::Absent;bool journalLoaded=false;uint8_t lastReadJournalState=0;
+    uint16_t controlStatus=0;bool controlReadable=false;
+    bool standardSeen=false;int64_t lastStandardUs=0;
+    bool beforeStandardValid=false,afterStandardValid=false;
+    struct Standard {uint16_t op=0,soc=0,cycles=0,mv=0,temp=0,dc=0,fcc=0;int16_t current=0,average=0;} before{},after{};
+    bool reject(const char* reason){why=reason;return false;}
+    bool runtimeGate() {
+        const auto p=GetNetworkQuota().powerStats();const auto b=GetCodexMicroBle().diagnostics();
+        return p.locked&&p.phase==2&&!p.wifiRunning&&!b.advertising&&!b.connected&&!MosaicoOta::busy()&&!MosaicoOta::healthPending();
+    }
+    bool standard(Standard& s) {
+        if(standardSeen){
+            const int64_t now=esp_timer_get_time();
+            if(now<lastStandardUs)return false;
+            const int64_t left=1000000-(now-lastStandardUs);
+            if(left>0)gauge_delay_ms(static_cast<uint32_t>((left+999)/1000));
+            if(esp_timer_get_time()<lastStandardUs+1000000)return false;
+        }
+        const int64_t started=esp_timer_get_time();
+        uint16_t current=0,average=0;
+        bool ok=gauge_word(0x3A,s.op);ok&=gauge_word(0x2C,s.soc);ok&=gauge_word(0x2A,s.cycles);
+        ok&=gauge_word(0x08,s.mv);ok&=gauge_word(0x06,s.temp);ok&=gauge_word(0x3C,s.dc);ok&=gauge_word(0x12,s.fcc);
+        ok&=gauge_word(0x0C,current);ok&=gauge_word(0x14,average);s.current=static_cast<int16_t>(current);s.average=static_cast<int16_t>(average);
+        const int64_t finished=esp_timer_get_time();standardSeen=true;lastStandardUs=finished;
+        return ok&&finished>=started;
+    }
+    bool physical(uint8_t security,Standard* observed=nullptr) {
+        Standard s{};
+        if(!runtimeGate()||!standard(s))return reject("physical_or_runtime_gate");
+        if(observed){*observed=s;if(observed==&before)beforeStandardValid=true;}
+        return (((s.op>>1)&3)==security&&!(s.op&0x0401)&&(s.op&0x20)&&
+            s.dc==65&&s.fcc==65&&s.soc<=100&&s.mv>=3500&&s.mv<=4350&&s.temp>=2832&&s.temp<=3181&&
+            s.current>=-130&&s.current<=130&&s.average>=-130&&s.average<=130)||reject("physical_or_runtime_gate");
+    }
+    void readControl() {
+        uint16_t discarded=0;
+        const bool first=gauge_word(0x00,discarded);
+        controlReadable=gauge_word(0x00,controlStatus)&&first&&controlStatus!=0xFFA5;
+    }
+    bool wasAttempted()const{return gauge_threshold_audit_attempted;}
+    bool claimAttempt(){if(wasAttempted())return false;gauge_threshold_audit_attempted=true;return true;}
+    Load load(Journal& journal) {
+        journalLoaded=true;journalLoadState=Load::Invalid;
+        const auto mac=GetHAL().getFactoryMac();nvs_handle_t h=0;
+        esp_err_t e=nvs_open("gaugeaudit",NVS_READONLY,&h);
+        if(e==ESP_ERR_NVS_NOT_FOUND)return journalLoadState=Load::Absent;
+        if(e!=ESP_OK){why="audit_journal_open";return Load::Invalid;}
+        mosaico_threshold::Record r{};size_t n=sizeof(r);e=nvs_get_blob(h,Key,r,&n);nvs_close(h);
+        if(e==ESP_ERR_NVS_NOT_FOUND)return journalLoadState=Load::Absent;
+        if(e!=ESP_OK||n!=sizeof(r)||!mosaico_threshold::decode(r,mac.data(),journal)){why="audit_journal_invalid";return Load::Invalid;}
+        lastReadJournalState=static_cast<uint8_t>(journal.state);why="audit_journal_present";return journalLoadState=Load::Present;
+    }
+    bool saveReadback(const Journal& journal) {
+        mosaico_threshold::Record bytes{},actual{};
+        if(!mosaico_threshold::encode(journal,bytes))return reject("audit_journal_shape");
+        nvs_handle_t h=0;esp_err_t e=nvs_open("gaugeaudit",NVS_READWRITE,&h);
+        if(e!=ESP_OK)return reject("audit_journal_write_open");
+        gauge_feed();e=nvs_set_blob(h,Key,bytes,sizeof(bytes));
+        if(e==ESP_OK){e=nvs_commit(h);}
+        nvs_close(h);gauge_feed();
+        if(e!=ESP_OK)return reject("audit_journal_commit");
+        const char* previous=why;Journal readback{};
+        if(load(readback)!=Load::Present||!mosaico_threshold::encode(readback,actual)||!mosaico_threshold::equal(bytes,actual))return reject("audit_journal_readback");
+        why=previous;return true;
+    }
+    bool preflight(uint8_t outMac[6]) {
+        if(!gauge||!physical(3,&before)||!gauge_identity())return reject("sealed_admission_or_identity");
+        const auto mac=GetHAL().getFactoryMac();mosaico_gauge::Journal nominal{};mosaico_gauge::AccessJournal access{};
+        GaugeFccBackend reader;mosaico_fcc_limit::Journal runtime{};
+        if(gauge_load_journal(nominal,mac.data())!=ESP_OK||gauge_load_access(access,mac.data())!=ESP_OK||
+           !mosaico_gauge::bootHistoryEligible(nominal,access)||reader.loadRaw(mosaico_fcc_limit::journalKey,runtime)!=mosaico_fcc_limit::Load::Present||
+           !mosaico_fcc_limit::verifiedRuntimePermission(runtime))return reject("known_key_and_runtime_history_required");
+        expectedConfig=runtime.target.config;readControl();
+        for(unsigned i=0;i<6;++i)outMac[i]=mac[i];
+        return true;
+    }
+    bool unseal() {
+        gauge_delay_ms(5000);
+        if(!physical(3))return false;
+        const bool sent=gauge_access_word(AccessWord::UnsealFirst)&&gauge_access_word(AccessWord::UnsealSecond);
+        const bool observed=gauge_wait_security(2);return (sent&&observed)||reject("unseal_once_failed");
+    }
+    bool full() {
+        gauge_delay_ms(5000);
+        if(!physical(2))return false;
+        const bool sent=gauge_access_word(AccessWord::Full)&&gauge_access_word(AccessWord::Full);
+        const bool observed=gauge_wait_security(1);return (sent&&observed)||reject("full_once_failed");
+    }
+    bool readThresholds(){return mosaico_threshold::readStable(gauge_threshold_read,expectedConfig,values)||reject("dm_denied_auth_unstable_or_anchor");}
+    uint32_t snapshotCrc()const{return mosaico_threshold::valuesCrc(values);}
+    bool close() {
+        uint16_t op=0;
+        const auto normal=[](uint16_t value){return !(value&0x0401)&&(value&0x20)&&((value>>1)&3)>=1;};
+        if(!gauge_word(0x3A,op)||!normal(op))return reject("close_unknown_cfg_cal");
+        if(((op>>1)&3)!=3){
+            gauge_delay_ms(5000);
+            if(!gauge_word(0x3A,op)||!normal(op))return reject("close_after_grace_unknown_cfg_cal");
+            if(((op>>1)&3)!=3){(void)gauge_access_word(AccessWord::Seal);if(!gauge_wait_security(3))return reject("close_seal_unverified");}
+        }
+        afterStandardValid=standard(after);
+        const bool verified=afterStandardValid&&normal(after.op)&&((after.op>>1)&3)==3&&after.dc==65&&after.fcc==65&&gauge_identity();
+        if(verified)readControl();
+        return verified||reject("close_final_standard_identity");
+    }
+};
+
 } // namespace
 
 bool Hal::gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize)
@@ -1379,6 +1509,18 @@ Hal::BatteryTelemetry Hal::batteryTelemetry(bool refresh)
     std::lock_guard<std::mutex> lock(battery_mutex);
     sample_battery_locked(refresh);
     return battery_telemetry;
+}
+
+bool Hal::gaugeTraceTrySample(BatteryTelemetry& sample)
+{
+    if(MosaicoOta::busy()||MosaicoOta::healthPending())return false;
+    std::unique_lock<std::recursive_mutex> transaction(gauge_transaction_mutex,std::try_to_lock);
+    if(!transaction.owns_lock())return false;
+    std::unique_lock<std::mutex> battery(battery_mutex,std::try_to_lock);
+    if(!battery.owns_lock()||!gauge||MosaicoOta::busy()||MosaicoOta::healthPending())return false;
+    sample_battery_locked(true);
+    sample=battery_telemetry;
+    return true;
 }
 
 bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool restore,
@@ -1611,6 +1753,40 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
 }
 
 bool Hal::gaugeSafetySelfTest() const { return mosaico_gauge::selftest(); }
+
+bool Hal::gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize)
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    GaugeThresholdBackend backend;
+    mosaico_threshold::Result result{};
+    bool ok=false;
+    if(privileged){mosaico_threshold::Coordinator<GaugeThresholdBackend> coordinator(backend);result=coordinator.run();ok=result.success;}
+    else if(gauge){
+        backend.beforeStandardValid=backend.standard(backend.before);backend.after=backend.before;backend.readControl();
+        GaugeFccBackend reader;mosaico_fcc_limit::Journal runtime{};
+        if(reader.loadRaw(mosaico_fcc_limit::journalKey,runtime)==mosaico_fcc_limit::Load::Present&&mosaico_fcc_limit::verifiedRuntimePermission(runtime))backend.expectedConfig=runtime.target.config;
+        ok=backend.readThresholds();
+    }
+    if(details&&detailsSize){
+        int count=std::snprintf(details,detailsSize,
+            "privileged=%d attempted=%d ram_attempted=%d readable=%u/%u anchors=%d profile1_anchor_match=%d profile_active=not_asserted control_valid=%d control_status=%04x control_batt_id=%u endian=BE2_U1first format=typed:decoded/rawBE reason=%s closed=%d audit_record=%s intended_state=%u last_read_state=%u generation=%lu before_standard_valid=%d after_standard_valid=%d before_soc=%u after_soc=%u before_cycles=%u after_cycles=%u before_sec=%u after_sec=%u ",
+            privileged,result.attempted,gauge_threshold_audit_attempted,backend.values.readable,static_cast<unsigned>(mosaico_threshold::fieldCount),backend.values.anchors,
+            backend.values.readable>=3&&backend.values.raw[0]==65&&backend.values.raw[1]==65&&backend.values.raw[2]==0x112A,
+            backend.controlReadable,backend.controlStatus,backend.controlStatus&7U,ok?"validated":backend.why,
+            result.closed,!backend.journalLoaded?"not_loaded":(backend.journalLoadState==mosaico_threshold::Load::Absent?"absent":(backend.journalLoadState==mosaico_threshold::Load::Present?"present":"invalid")),
+            result.attempted?static_cast<unsigned>(result.journal.state):0U,backend.lastReadJournalState,static_cast<unsigned long>(result.journal.generation),backend.beforeStandardValid,backend.afterStandardValid,backend.before.soc,backend.after.soc,
+            backend.before.cycles,backend.after.cycles,(backend.before.op>>1)&3U,(backend.after.op>>1)&3U);
+        size_t used=count>0?static_cast<size_t>(count):detailsSize;
+        for(unsigned i=0;i<backend.values.readable&&used<detailsSize;++i){
+            const auto& field=mosaico_threshold::fields[i];
+            count=std::snprintf(details+used,detailsSize-used,"%s=%ld/%04x ",field.name,
+                static_cast<long>(mosaico_threshold::decoded(field.type,backend.values.raw[i])),backend.values.raw[i]);
+            if(count>0)used+=static_cast<size_t>(count);
+        }
+    }
+    return ok;
+}
 
 // Closed standard-command snapshot. No MAC/control/security path is used.
 template <typename Reader>

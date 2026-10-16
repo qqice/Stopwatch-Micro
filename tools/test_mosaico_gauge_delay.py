@@ -54,7 +54,7 @@ static_assert(cases(),"minimum delay, tick phase, bounded watchdog gaps");
         legacy_access = source.split('bool Hal::gaugeAccess(', 1)[1].split('void Hal::i2c_init()', 1)[0]
         self.assertEqual(legacy_return.count('gauge_delay_ms(5000)'), 1)
         self.assertEqual(legacy_access.count('gauge_delay_ms(5000)'), 2)
-        backend = source.split('struct GaugeFccBackend {', 1)[1].split('} // namespace', 1)[0]
+        backend = source.split('struct GaugeFccBackend {', 1)[1].split('struct GaugeThresholdBackend', 1)[0]
         self.assertEqual(backend.count('gauge_delay_ms(5000)'), 3)
         for method, following in [('sendUnsealPair', 'sendFullPair'),
                                   ('sendFullPair', 'dmSnapshot'), ('reseal', 'verifyTarget')]:

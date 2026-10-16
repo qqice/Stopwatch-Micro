@@ -127,6 +127,8 @@ public:
         uint16_t batteryStatus = 0;
         uint16_t stateOfHealth = 0;
         uint16_t cycleCount = 0;
+        uint16_t temperatureDeciK = 0;
+        bool temperatureValid = false;
     };
 
     struct MosaicoClockDiagnostics {
@@ -146,6 +148,9 @@ public:
     };
 #ifdef MOSAICO_BOARD
     BatteryTelemetry batteryTelemetry(bool refresh = false);
+    // Nonblocking recorder sample. False means no sample (lock/OTA/gauge gate);
+    // true may contain valid=false/temperatureValid=false for an I2C failure.
+    bool gaugeTraceTrySample(BatteryTelemetry& sample);
     // Explicit RAM nominal setup/restore only. For APPLY expectedOld must match
     // current standard + DM design capacity. For RESTORE it must match current
     // authenticated DM_DC, since standard mirrors may lag during interrupted
@@ -159,6 +164,7 @@ public:
     bool gaugeChargeAudit(char* details, size_t detailsSize);
     // Explicit CDC-only manual OCV diagnostic, one RAM-latched attempt per boot.
     bool gaugeOcvMeasure(char* details, size_t detailsSize);
+    bool gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize);
     // Explicit confirmed runtime action only; no boot/replay caller.
     bool gaugeFccLimitRepair(char* details, size_t detailsSize);
     // NVS read-only, with explicit absent/present/invalid record distinction.
@@ -183,6 +189,7 @@ public:
     bool displayRamProbe(uint32_t& errors);
 #else
     BatteryTelemetry batteryTelemetry(bool = false) { return {}; }
+    bool gaugeTraceTrySample(BatteryTelemetry&) { return false; }
     bool gaugeSetNominalCapacity(uint16_t, uint16_t, bool, char* reason, size_t reasonSize)
     {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "unsupported: not Mosaico");
@@ -197,6 +204,11 @@ public:
     bool gaugeFccLimitRepair(char* details, size_t detailsSize)
     {
         if (details && detailsSize) std::snprintf(details, detailsSize, "reason=unsupported_not_mosaico");
+        return false;
+    }
+    bool gaugeThresholdAudit(bool,char* details,size_t detailsSize)
+    {
+        if(details&&detailsSize)std::snprintf(details,detailsSize,"readable=0 reason=unsupported_not_mosaico");
         return false;
     }
     bool gaugeOcvMeasure(char* details, size_t detailsSize)

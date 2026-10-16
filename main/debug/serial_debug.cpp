@@ -33,6 +33,9 @@
 #include <apps/app_codex_micro/view/dot_widgets.h>
 #endif
 #include <host/network_quota.h>
+#ifdef MOSAICO_BOARD
+#include <host/gauge_discharge_trace.h>
+#endif
 #include <host/tailscale_transport.h>
 #include <host/token_history.h>
 #include <host/token_units_font.h>
@@ -1357,6 +1360,37 @@ void SerialDebug::handleLine(char* line)
         result("gauge-fcc-limit",ok?"PASS":"FAIL",details);
         return;
     }
+    if (std::strcmp(command,"gauge-trace")==0) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        if(!action)action="status";
+        const bool confirmed=!std::strcmp(action,"arm")||!std::strcmp(action,"clear");
+        const char* confirm=confirmed?::strtok_r(nullptr," \t",&save):nullptr;
+        if((confirmed&&(!confirm||std::strcmp(confirm,"CONFIRM")))||::strtok_r(nullptr," \t",&save)) {
+            result("gauge-trace","FAIL","expected=status_arm_CONFIRM_stop_export_clear_CONFIRM");return;
+        }
+        const auto emit=[](const char* line,void*){SerialDebug::debugPrintf("%s\r\n",line);};
+        if(!std::strcmp(action,"status")){GaugeDischargeTrace::status(emit,nullptr);result("gauge-trace","PASS","action=status readonly=1");return;}
+        if(!std::strcmp(action,"export")){GaugeDischargeTrace::exportRows(emit,nullptr);result("gauge-trace","PASS","action=export readonly=1");return;}
+        bool queued=false;
+        if(!std::strcmp(action,"arm"))queued=GaugeDischargeTrace::armConfirm();
+        else if(!std::strcmp(action,"stop"))queued=GaugeDischargeTrace::stop();
+        else if(!std::strcmp(action,"clear"))queued=GaugeDischargeTrace::clearConfirm();
+        else {result("gauge-trace","FAIL","reason=unknown_action");return;}
+        result("gauge-trace",queued?"PASS":"FAIL",queued?"queued=1 persisted=0 check_status_pending0=1 gauge_parameter_writes=0":"queued=0 reason=busy_not_ready_or_refused");
+        return;
+    }
+    if (std::strcmp(command,"gauge-thresholds")==0) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        const char* confirm=action?::strtok_r(nullptr," \t",&save):nullptr;
+        const bool privileged=action&&confirm&&!std::strcmp(action,"audit")&&!std::strcmp(confirm,"CONFIRM");
+        if((action&&!privileged)||(privileged&&_writer&&_writer->_reply_uart)||::strtok_r(nullptr," \t",&save)) {
+            result("gauge-thresholds","FAIL","expected=noargs_or_audit_CONFIRM privileged_cdc_only=1");return;
+        }
+        char details[1420]{};
+        const bool ok=GetHAL().gaugeThresholdAudit(privileged,details,sizeof(details));
+        result("gauge-thresholds",ok?"PASS":"FAIL",details);
+        return;
+    }
     if (std::strcmp(command, "gauge-ocv") == 0) {
         const char* action=::strtok_r(nullptr," \t",&save);
         const char* confirm=::strtok_r(nullptr," \t",&save);
@@ -1851,6 +1885,8 @@ void SerialDebug::printHelp()
 #ifdef MOSAICO_BOARD
     debugPrintf("DBG HELP gauge-fcc-status no_arguments=1 readonly=1 journal_existence_explicit=1\r\n");
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
+    debugPrintf("DBG HELP gauge-trace status | arm CONFIRM | stop | export | clear CONFIRM queued_not_persisted=1 gauge_parameter_writes=0\r\n");
+    debugPrintf("DBG HELP gauge-thresholds [audit CONFIRM] default_readonly=1 privileged_cdc_only=1 no_cfg_or_parameter_writes=1\r\n");
     debugPrintf("DBG HELP gauge-ocv measure CONFIRM cdc_only=1 quiet120s_post5s=1 ram_one_attempt=1 sent_is_wire_attempt=1 no_calibration_claim=1\r\n");
     debugPrintf("DBG HELP gauge-charge no_arguments=1 readonly=1 standard_registers_only=1\r\n");
     debugPrintf("DBG HELP gauge-profile no_arguments=1 readonly=1 closed_dm_selectors=1 no_unseal=1\r\n");
