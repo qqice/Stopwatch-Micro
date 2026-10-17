@@ -243,14 +243,15 @@ void CodexMicroView::init(lv_obj_t* parent) {
     _historyAge = createText(_historyPage, 86, 20, 2); place(_historyAge, 354, 54);
     _historyChart = lv_obj_create(_historyPage); lv_obj_remove_style_all(_historyChart);
     lv_obj_set_pos(_historyChart, 0, 300); lv_obj_set_size(_historyChart, 440, 80);
-    lv_obj_remove_flag(_historyChart, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
-    lv_obj_add_flag(_historyChart, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_remove_flag(_historyChart, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE));
+    lv_obj_add_flag(_historyChart, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK | LV_OBJ_FLAG_EVENT_BUBBLE));
     lv_obj_add_event_cb(_historyChart, historyChartEvent, LV_EVENT_DRAW_MAIN, this);
     label(_historyChart, 0, 0, 32, "100%", &lv_font_montserrat_12);
     label(_historyChart, 8, 46, 24, "0%", &lv_font_montserrat_12);
-    _trendHint = label(_historyChart, 34, 62, 290, "7d --", &lv_font_montserrat_12);
+    _trendHint = label(_historyChart, 34, 62, 350, "7d --", &lv_font_montserrat_12);
     auto* now = label(_historyChart, 392, 62, 48, "NOW", &lv_font_montserrat_12);
     lv_obj_remove_flag(now, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_height(_trendHint, 16); lv_label_set_long_mode(_trendHint, LV_LABEL_LONG_MODE_CLIP);
     auto* detail = lv_obj_create(_historyPage); panel(detail, 0, 380, 440, 28, 0);
     lv_obj_add_flag(detail, LV_OBJ_FLAG_EVENT_BUBBLE);
     _details = label(detail, 12, 6, 416, "", &lv_font_montserrat_12);
@@ -466,7 +467,7 @@ void CodexMicroView::openSettings() {
     if (!_settingsPage || _locked || _suppressed || _rotationFault || otaBusy() || _slideTo ||
         _rotationPhase != RotationPhase::Idle || _settingsOpen || _settingsAnimating) return;
     _settingsOpen = true; _settingsClosing = false; _settingsAnimating = true;
-    _touchTracking = false; _swipeConsumed = true; _activity = lv_tick_get(); showSettingsDetail(0); renderSettings();
+    _trendTouch.cancel(); _touchTracking = false; _swipeConsumed = true; _activity = lv_tick_get(); showSettingsDetail(0); renderSettings();
     _wifiNewProfile = false; lv_dropdown_set_text(_wifiProfiles, nullptr);
     WifiSettingsSnapshot wifi{}; GetNetworkQuota().wifiSettingsSnapshot(wifi); lv_textarea_set_text(_wifiSsid, wifi.ssid);
     lv_obj_remove_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_settingsPage);
@@ -481,7 +482,7 @@ void CodexMicroView::closeSettings(bool animate) {
     restoreWifiEditor();
     lv_anim_delete(this, settingsDetailExec);
     lv_anim_delete(this, settingsSheetExec); _settingsOpen = false; _settingsAnimating = animate; _settingsClosing = animate;
-    _touchTracking = false; _swipeConsumed = true; _activity = lv_tick_get();
+    _trendTouch.cancel(); _touchTracking = false; _swipeConsumed = true; _activity = lv_tick_get();
     lv_dropdown_close(_wifiProfiles);
     lv_keyboard_set_textarea(_wifiKeyboard, nullptr); lv_obj_add_flag(_wifiKeyboard, LV_OBJ_FLAG_HIDDEN);
     lv_textarea_set_text(_wifiPassword, ""); _wifiOpenNetwork = false;
@@ -1182,7 +1183,7 @@ void CodexMicroView::refreshOta(uint32_t tick) {
     if (otaBusy()) {
         cancelOrientation(); GetHAL().setMotionIdle(true);
         closeSettings(false);
-        cancelPageSlide(); _touchTracking = false; _swipeConsumed = true;
+        cancelPageSlide(); _trendTouch.cancel(); _touchTracking = false; _swipeConsumed = true;
         _activity = tick;
         // Only an actual accepted operation can wake the display, never discovery polling.
         if (_locked) wakeDisplay();
@@ -1300,7 +1301,7 @@ void CodexMicroView::touchEvent(lv_event_t* e) {
     if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING && code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(e));
     if (self->_rotationFault || self->_suppressed || self->_locked || self->otaBusy() || self->_slideTo || self->_settingsAnimating || self->_rotationPhase != RotationPhase::Idle) {
-        self->_touchTracking = false; self->_swipeConsumed = true;
+        self->_trendTouch.cancel(); self->_touchTracking = false; self->_swipeConsumed = true;
         self->cancelWifiEditorPending();
         return;
     }
@@ -1309,6 +1310,23 @@ void CodexMicroView::touchEvent(lv_event_t* e) {
     auto* input = lv_event_get_indev(e);
     if (!input || lv_indev_get_type(input) != LV_INDEV_TYPE_POINTER) return;
     lv_point_t point{}; lv_indev_get_point(input, &point);
+    // LVGL indev points and object content coordinates share the post-rotation
+    // logical frame. Only a plot-origin contact owns this entire gesture.
+    lv_area_t plotArea; lv_obj_get_content_coords(self->_historyChart, &plotArea);
+    const int localX = point.x - plotArea.x1, localY = point.y - plotArea.y1;
+    if (code == LV_EVENT_PRESSED) {
+        self->_trendTouch.cancel();
+        if (self->_page == Page::History && !self->_settingsOpen && self->_trendTouch.begin(localX, localY)) {
+            self->_activity = lv_tick_get(); self->_touchTracking = false; self->_swipeConsumed = true;
+            self->selectTrendAt(localX);
+            return;
+        }
+    } else if (self->_trendTouch.blocksPageSwipe()) {
+        self->_swipeConsumed = true; self->_touchTracking = false; self->_activity = lv_tick_get();
+        if (code != LV_EVENT_PRESS_LOST) self->selectTrendAt(localX);
+        if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) self->_trendTouch.cancel();
+        return;
+    }
     if (code == LV_EVENT_PRESSED) {
         self->_activity = lv_tick_get(); self->_touchStart = point;
         self->_touchTracking = true; self->_swipeConsumed = false;
@@ -1417,7 +1435,7 @@ void CodexMicroView::cancelOrientation() {
             lv_obj_move_foreground(_rotationCurtain);
         }
         _rotationPhase = RotationPhase::Idle;
-        _touchTracking = false; _swipeConsumed = true;
+        _trendTouch.cancel(); _touchTracking = false; _swipeConsumed = true;
         return;
     }
     if (_rotationPhase == RotationPhase::Idle) return;
@@ -1426,7 +1444,7 @@ void CodexMicroView::cancelOrientation() {
         lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_TRANSP, 0);
     }
-    if (_rotationPhase != RotationPhase::Idle) { _touchTracking = false; _swipeConsumed = true; }
+    if (_rotationPhase != RotationPhase::Idle) { _trendTouch.cancel(); _touchTracking = false; _swipeConsumed = true; }
     _rotationPhase = RotationPhase::Idle;
 }
 void CodexMicroView::orientationExec(void* owner, int32_t opacity) {
@@ -1446,7 +1464,7 @@ void CodexMicroView::orientationCompleted(lv_anim_t* anim) {
     } else if (self->_rotationPhase == RotationPhase::FadeIn) {
         lv_obj_add_flag(self->_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
         self->_rotationPhase = RotationPhase::Idle;
-        self->_touchTracking = false; self->_swipeConsumed = true;
+        self->_trendTouch.cancel(); self->_touchTracking = false; self->_swipeConsumed = true;
     }
 }
 void CodexMicroView::startOrientationFade(bool fadeIn) {
@@ -1474,7 +1492,7 @@ void CodexMicroView::updateOrientation(bool touching) {
                 _rotationFault = !GetHAL().isDisplayOrientationHealthy();
                 cancelOrientation(); return;
             }
-            _touchTracking = false; _swipeConsumed = true;
+            _trendTouch.cancel(); _touchTracking = false; _swipeConsumed = true;
             _rotationPhase = RotationPhase::WaitRotated;
             _rotationFrame = GetDisplayFrameCount();
             lv_obj_invalidate(lv_obj_get_parent(_root));
@@ -1489,7 +1507,7 @@ void CodexMicroView::updateOrientation(bool touching) {
     if (orientation.degrees == GetHAL().getDisplayOrientation()) { _motionGeneration = orientation.generation; return; }
     _rotationGeneration = orientation.generation;
     _rotationTarget = orientation.degrees;
-    _touchTracking = false; _swipeConsumed = true;
+    _trendTouch.cancel(); _touchTracking = false; _swipeConsumed = true;
     lv_obj_remove_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_rotationCurtain);
     startOrientationFade(false);
 }
@@ -1704,6 +1722,42 @@ void CodexMicroView::historyChartEvent(lv_event_t* event) {
         const lv_area_t spot = {area.x1+p.x-2, area.y1+p.y-2, area.x1+p.x+1, area.y1+p.y+1};
         lv_draw_rect(layer, &dot, &spot);
     }
+    const size_t chosen = mosaico_trend::selected(points, count, start, trend.endEpoch, self->_trendTouch.epoch);
+    if (chosen != mosaico_trend::NoPoint) {
+        const auto p = mosaico_trend::position(points[chosen], start, trend.endEpoch);
+        drawLine(p.x, std::max(2, p.y - 7), p.x, std::min(58, p.y + 7), Gold);
+        dot.bg_opa = LV_OPA_TRANSP; dot.border_opa = LV_OPA_COVER;
+        dot.border_width = 2; dot.border_color = lv_color_hex(Gold);
+        const lv_area_t spot = {area.x1+p.x-4, area.y1+p.y-4, area.x1+p.x+4, area.y1+p.y+4};
+        lv_draw_rect(layer, &dot, &spot);
+    }
+}
+void CodexMicroView::selectTrendAt(int localX) {
+    const auto& trend = _history->quotaTrend;
+    const auto* points = _hourly ? trend.hours.data() : trend.days.data();
+    const size_t count = _hourly ? trend.hours.size() : trend.days.size();
+    const uint32_t start = _hourly ? trend.start24hEpoch : trend.start7dEpoch;
+    const size_t index = trend.available ? mosaico_trend::nearest(points, count, start, trend.endEpoch, localX) : mosaico_trend::NoPoint;
+    _trendTouch.epoch = index == mosaico_trend::NoPoint ? UINT32_MAX : points[index].epoch;
+    renderTrendHint(); lv_obj_invalidate(_historyChart);
+}
+void CodexMicroView::renderTrendHint() {
+    const auto& trend = _history->quotaTrend;
+    const auto* points = _hourly ? trend.hours.data() : trend.days.data();
+    const size_t count = _hourly ? trend.hours.size() : trend.days.size();
+    const uint32_t start = _hourly ? trend.start24hEpoch : trend.start7dEpoch;
+    const size_t index = trend.available ? mosaico_trend::selected(points, count, start, trend.endEpoch, _trendTouch.epoch) : mosaico_trend::NoPoint;
+    char value[24] = "--", date[24] = "", hint[72];
+    if (index != mosaico_trend::NoPoint) {
+        percent(points[index].remainingBasisPoints, value, sizeof(value));
+        tm local{};
+        if (MosaicoClock::shanghaiTime(points[index].epoch, local))
+            std::strftime(date, sizeof(date), _hourly ? "%H:%M" : "%m/%d %H:%M", &local);
+    }
+    const uint64_t age = static_cast<uint64_t>(trend.ageSecondsAtReceipt) + (GetHAL().millis() - trend.receivedAtMs) / 1000U;
+    std::snprintf(hint, sizeof(hint), "%s %s%s%s%s", _hourly ? "24h" : "7d", date, date[0] ? "  " : "", value,
+                  trend.capturedEpoch && age > 600 ? " STALE" : "");
+    lv_label_set_text(_trendHint, hint);
 }
 void CodexMicroView::refreshHistory() {
     if (_historyRevision == TokenHistoryRevision()) { updateHistoryHeader(); return; }
@@ -1715,12 +1769,7 @@ void CodexMicroView::updateHistoryHeader(bool force) {
     const uint32_t trendKey = (trend.available ? 1U : 0U) | (trendAge > 600 ? 2U : 0U) | (_hourly ? 4U : 0U);
     if (force || trendKey != _trendAgeKey) {
         _trendAgeKey = trendKey;
-        char value[24] = "--", hint[48];
-        const auto* latest = _hourly ? mosaico_trend::latest(trend.hours) : mosaico_trend::latest(trend.days);
-        if (trend.available && latest) percent(latest->remainingBasisPoints, value, sizeof(value));
-        std::snprintf(hint, sizeof(hint), "%s %s%s", _hourly ? "24h" : "7d", value,
-            trend.capturedEpoch && trendAge > 600 ? " STALE" : "");
-        lv_label_set_text(_trendHint, hint); lv_obj_invalidate(_historyChart);
+        renderTrendHint(); lv_obj_invalidate(_historyChart);
     }
     if (!_history->available) { if (force) { lv_label_set_text(_range, "--"); setText(_historyAge, "?", Gray); } return; }
     const uint64_t age = static_cast<uint64_t>(_history->ageSecondsAtReceipt) + (GetHAL().millis() - _history->receivedAtMs) / 1000U;
@@ -1806,6 +1855,7 @@ bool CodexMicroView::selectHistory(size_t index) {
 bool CodexMicroView::showHistory(bool hourly) {
     if (_rotationFault) return false;
     if (!ready()) return false;
+    _trendTouch.reset();
     _hourly = hourly; if (_selected >= (_hourly ? 24U : 30U)) _selected = SIZE_MAX;
     refreshHistory(); renderHistory(); return setPageForDebug(Page::History);
 }
@@ -1818,7 +1868,7 @@ bool CodexMicroView::setPageForDebug(Page page) {
     cancelOrientation();
     cancelPageSlide();
     if (_touchTracking) _swipeConsumed = true;
-    _touchTracking = false;
+    _trendTouch.cancel(); _touchTracking = false;
     if (page == Page::OTA) {
         if (_page != Page::OTA) _otaReturn = _page;
         renderOta();
@@ -1885,7 +1935,7 @@ void CodexMicroView::setInputSuppressed(bool suppressed) {
     _suppressed = suppressed;
     if (suppressed) clearStandbyDim();
     refreshSessionsLease();
-    if (suppressed) { closeSettings(false); _touchTracking = false; _swipeConsumed = true; cancelOrientation(); GetHAL().setMotionIdle(true); cancelPageSlide(); stopAnimations(); }
+    if (suppressed) { closeSettings(false); _trendTouch.cancel(); _touchTracking = false; _swipeConsumed = true; cancelOrientation(); GetHAL().setMotionIdle(true); cancelPageSlide(); stopAnimations(); }
 }
 void CodexMicroView::togglePage() {
     if (_rotationFault) return;
@@ -1919,7 +1969,7 @@ void CodexMicroView::lockDisplay() {
     if (_locked || !ready() || otaKeepAwake()) return;
     cancelOrientation(); GetHAL().setMotionIdle(true);
     closeSettings(false);
-    cancelPageSlide(); _touchTracking = false; _swipeConsumed = true;
+    cancelPageSlide(); _trendTouch.cancel(); _touchTracking = false; _swipeConsumed = true;
     stopAnimations();
     _locked = true; GetNetworkQuota().setLocked(true);
     refreshSessionsLease();

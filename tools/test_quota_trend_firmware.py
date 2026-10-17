@@ -1,5 +1,5 @@
 """Actual parser/cache bodies against deterministic parsed cJSON trees and chart geometry."""
-import json, re, subprocess, tempfile, unittest
+import json, os, re, subprocess, tempfile, unittest
 from pathlib import Path
 R=Path(__file__).resolve().parents[1]
 V=R/'main/apps/app_codex_micro/view'
@@ -56,10 +56,12 @@ static_assert(geometry(),"fixed 0-100 percent, real epoch x, gaps/reset breaks a
         self.assertIn('mosaico_trend::connects',draw);self.assertIn('points[i].resetBefore ? Gold',draw)
         self.assertNotIn('tokens',draw);self.assertNotIn('maximum',draw)
         header=UI.split('void CodexMicroView::updateHistoryHeader(',1)[1].split('void CodexMicroView::renderHistory()',1)[0]
-        self.assertIn('mosaico_trend::latest(trend.hours) : mosaico_trend::latest(trend.days)',header)
-        self.assertIn('percent(latest->remainingBasisPoints, value, sizeof(value))',header)
-        self.assertIn('trend.capturedEpoch && trendAge > 600 ? " STALE"',header)
-        self.assertIn('char value[24] = "--"',header)
+        self.assertIn('renderTrendHint(); lv_obj_invalidate(_historyChart)',header)
+        hint=UI.split('void CodexMicroView::renderTrendHint()',1)[1].split('void CodexMicroView::refreshHistory()',1)[0]
+        self.assertIn('mosaico_trend::selected(points, count, start, trend.endEpoch, _trendTouch.epoch)',hint)
+        self.assertIn('percent(points[index].remainingBasisPoints, value, sizeof(value))',hint)
+        self.assertIn('trend.capturedEpoch && age > 600 ? " STALE"',hint)
+        self.assertIn('char value[24] = "--"',hint)
         for method,nextmethod in (('modeEvent','refreshBattery'),('cellEvent','modeEvent'),('showHistory','setPageForDebug'),('selectHistory','showHistory')):
             start=UI.index('CodexMicroView::'+method+'(');body=UI[start:UI.index('\n}',start)]
             self.assertNotIn('requestJson',body);self.assertNotIn('fetchHistory',body)
@@ -200,7 +202,8 @@ static_assert(rejection(),"strict point/schema rejection preserves the whole cac
         self.compile(code,'quota-trend-parser-source','c++23')
 
     def test_actual_target_syntax_and_network_version(self):
-        entries=json.loads((R/'.artifacts/mosaico/ota-build/compile_commands.json').read_text())
+        database=Path(os.environ.get('MOSAICO_COMPILE_COMMANDS', str(R/'.artifacts/mosaico/ota-build/compile_commands.json')))
+        entries=json.loads(database.read_text())
         logs=[]
         for name in ('token_history.cpp','network_quota.cpp','view_mosaico.cpp'):
             entry=next(e for e in entries if e['file'].endswith(name))

@@ -14,6 +14,7 @@
 #include "quota_display_cache.h"
 #include "first_quota_lock_gate.h"
 #include "keyboard_style_model.h"
+#include "quota_trend_selection.h"
 
 namespace view {
 class CodexMicroView {
@@ -113,6 +114,8 @@ private:
     void stopAnimations();
     void updateHistoryHeader(bool force = false);
     void renderHistory();
+    void selectTrendAt(int localX);
+    void renderTrendHint();
     void renderSelection();
     void lockDisplay();
     const TokenHistoryCell* selectedCell() const;
@@ -236,6 +239,7 @@ private:
     lv_obj_t* _historyChart = nullptr;
     lv_obj_t* _trendHint = nullptr;
     uint32_t _trendAgeKey = UINT32_MAX;
+    mosaico_trend::TouchSelection _trendTouch{};
     std::unique_ptr<QuotaMonitorSnapshot> _quota;
     mosaico_quota_display::DisplayAge _quotaAge;
     mosaico_quota_display::FirstQuotaLockGate _firstQuotaLockGate;
