@@ -355,6 +355,7 @@ void healthTimeout(void*)
 }
 }
 
+uint32_t imageCapacity() { return MosaicoOtaLayout::imageCap(currentLayout()); }
 bool busy() { return active.load() || approvedRequest.load() || checkQueued.load() || checking.load() || installQueued.load() || rebootQueued.load() || bootPending.load(); }
 bool healthPending() { return bootPending.load(); }
 bool blocksTwt()

@@ -25,6 +25,7 @@ bool automaticInstall();
 bool discoverManifest(const char* json); // Network owner: signature verification and read-only discovery.
 bool finishDownload();
 bool installVerified(); // Network owner only, explicit consent or full-pipeline mode; manual flow does not reboot.
+uint32_t imageCapacity(); // Exact current-layout cap; unknown layout returns zero.
 bool busy();
 bool blocksTwt(); // Atomic control state, independent of UI snapshot lock contention.
 bool healthPending();

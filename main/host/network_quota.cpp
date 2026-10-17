@@ -2092,16 +2092,22 @@ void NetworkQuota::updateFirmware()
     std::unique_ptr<char[]> body(new (std::nothrow) char[BodyCapacity]);
     // Do not route NOR writes through cache-backed PSRAM. SDK fallback copies
     // external input in 32-byte batches, multiplying cache/bus transitions.
-    // One reusable 4KiB internal chunk bounds SRAM use and gives the flash
-    // driver a directly readable source even while caches are suspended.
+    // One reusable 4KiB DMA-capable internal chunk excludes RTC_FAST heaps
+    // (which can also advertise INTERNAL|8BIT), while bounding SRAM use.
+    // Keep the runtime DRAM guards; no allocation-address assumption is safe.
     std::unique_ptr<uint8_t, decltype(&heap_caps_free)> chunk(
-        static_cast<uint8_t*>(heap_caps_malloc(ChunkCapacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<uint8_t*>(heap_caps_malloc(ChunkCapacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_DMA)),
         &heap_caps_free);
+    uint8_t* chunkEnd = chunk ? chunk.get() + ChunkCapacity - 1 : nullptr;
+    ESP_LOGI("NetworkOTA", "flash source start=%p end=%p dram=%d/%d internal=%d/%d capacity=%u",
+             static_cast<void*>(chunk.get()), static_cast<void*>(chunkEnd),
+             chunk && esp_ptr_in_dram(chunk.get()), chunkEnd && esp_ptr_in_dram(chunkEnd),
+             chunk && esp_ptr_internal(chunk.get()), chunkEnd && esp_ptr_internal(chunkEnd),
+             static_cast<unsigned>(ChunkCapacity));
     if (!body || !chunk) { MosaicoOta::fail("ota_buffer_allocation"); return; }
     if (!esp_ptr_in_dram(chunk.get()) || !esp_ptr_in_dram(chunk.get() + ChunkCapacity - 1)) {
         MosaicoOta::fail("ota_buffer_not_internal"); return;
     }
-    ESP_LOGI("NetworkOTA", "flash source internal=1 capacity=%u", static_cast<unsigned>(ChunkCapacity));
     int used = 0;
     MosaicoOtaBreadcrumb(2, 0); // manifest HTTP/parse
     if (!requestJson("/v1/ota/manifest", body.get(), BodyCapacity, used)) {
@@ -2110,8 +2116,9 @@ void NetworkQuota::updateFirmware()
     cJSON* manifest = cJSON_ParseWithLength(body.get(), static_cast<size_t>(used));
     const cJSON* sizeValue = manifest ? cJSON_GetObjectItemCaseSensitive(manifest, "size") : nullptr;
     char imageHash[65]{};
-    const bool fieldsOk = manifest && cJSON_IsNumber(sizeValue) &&
-        sizeValue->valuedouble > 0 && sizeValue->valuedouble <= 0x3E0000 &&
+    const uint32_t imageCapacity = MosaicoOta::imageCapacity();
+    const bool fieldsOk = imageCapacity > 0 && manifest && cJSON_IsNumber(sizeValue) &&
+        sizeValue->valuedouble > 0 && sizeValue->valuedouble <= imageCapacity &&
         std::floor(sizeValue->valuedouble) == sizeValue->valuedouble &&
         copyString(manifest, "sha256", imageHash, sizeof(imageHash));
     const uint32_t size = fieldsOk ? static_cast<uint32_t>(sizeValue->valuedouble) : 0;
