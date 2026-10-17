@@ -165,6 +165,8 @@ public:
     // Explicit CDC-only manual OCV diagnostic, one RAM-latched attempt per boot.
     bool gaugeOcvMeasure(char* details, size_t detailsSize);
     bool gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize);
+    // RAM snapshot only, published after a complete verified sealed privileged audit.
+    bool gaugeThresholdAuditField(size_t index,char* details,size_t detailsSize);
     // Explicit confirmed runtime action only; no boot/replay caller.
     bool gaugeFccLimitRepair(char* details, size_t detailsSize);
     // NVS read-only, with explicit absent/present/invalid record distinction.
@@ -204,6 +206,11 @@ public:
     bool gaugeFccLimitRepair(char* details, size_t detailsSize)
     {
         if (details && detailsSize) std::snprintf(details, detailsSize, "reason=unsupported_not_mosaico");
+        return false;
+    }
+    bool gaugeThresholdAuditField(size_t,char* details,size_t detailsSize)
+    {
+        if(details&&detailsSize)std::snprintf(details,detailsSize,"cached=0 reason=unsupported_not_mosaico");
         return false;
     }
     bool gaugeThresholdAudit(bool,char* details,size_t detailsSize)

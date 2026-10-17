@@ -24,7 +24,13 @@ Storage* storage=nullptr;
 bool allocationError=false, allocationAttempted=false;
 uint64_t lastAllocationAttempt=0;
 bool ready=false, corrupt=false, storageError=false;
-enum class Command { None, Arm, Stop, Clear };
+enum class Command { None, Arm, Stop, Clear, Checkpoint };
+// RAM-only diagnostics: a later success never hides the last failure this boot.
+// Length/CRC/byte mismatches have no SDK error; use ESP_FAIL plus their stage.
+enum class FailureStage : uint8_t { None, ReadOpen, Load, WriteOpen, Set, Commit, Reopen, Read, Length, Crc, Compare };
+esp_err_t lastNvsError=ESP_OK;
+FailureStage failureStage=FailureStage::None;
+void failure(esp_err_t error,FailureStage stage){lastNvsError=error;failureStage=stage;}
 Command pending=Command::None;
 uint64_t lastWriteAttempt=0;
 bool writeAttempted=false;
@@ -45,9 +51,14 @@ void load() {
     auto& model=storage->model;auto& ioBlob=storage->ioBlob;
     nvs_handle_t h;ioBlob={};size_t size=ioBlob.size();
     esp_err_t err=nvs_open(Namespace,NVS_READONLY,&h);
-    if(err==ESP_OK){err=nvs_get_blob(h,Key,ioBlob.data(),&size);nvs_close(h);}
-    if(err==ESP_OK){corrupt=size!=ioBlob.size() || !decode(ioBlob,model);}
-    else if(err!=ESP_ERR_NVS_NOT_FOUND){corrupt=true;storageError=true;}
+    FailureStage stage=FailureStage::ReadOpen;
+    if(err==ESP_OK){stage=FailureStage::Load;err=nvs_get_blob(h,Key,ioBlob.data(),&size);nvs_close(h);}
+    if(err==ESP_OK){
+        if(size!=ioBlob.size()){corrupt=true;failure(ESP_FAIL,FailureStage::Length);}
+        else if(get(ioBlob,BlobSize-4,4)!=crc(ioBlob)){corrupt=true;failure(ESP_FAIL,FailureStage::Crc);}
+        else if(!decode(ioBlob,model)){corrupt=true;failure(ESP_FAIL,FailureStage::Load);}
+    }
+    else if(err!=ESP_ERR_NVS_NOT_FOUND){corrupt=true;storageError=true;failure(err,stage);}
     // A session number is only reused when no evidence from that boot was saved.
     if(!corrupt && model.boot!=UINT32_MAX)++model.boot;
     else if(model.boot==UINT32_MAX)corrupt=true;
@@ -57,25 +68,31 @@ bool save(const Model& value) {
     auto& ioBlob=storage->ioBlob;auto& verifyBlob=storage->verifyBlob;
     if(otaBlocked())return false;
     nvs_handle_t h;
+    FailureStage stage=FailureStage::WriteOpen;
     esp_err_t err=nvs_open(Namespace,NVS_READWRITE,&h);
     if(err==ESP_OK){
         ioBlob=encode(value);
         if(otaBlocked()){nvs_close(h);return false;}
-        err=nvs_set_blob(h,Key,ioBlob.data(),ioBlob.size());
-        if(err==ESP_OK)err=nvs_commit(h);
+        stage=FailureStage::Set;err=nvs_set_blob(h,Key,ioBlob.data(),ioBlob.size());
+        if(err==ESP_OK){stage=FailureStage::Commit;err=nvs_commit(h);}
         nvs_close(h);
         // Only a successful commit acknowledgement permits a durable-success claim.
         // Reopen read-only and compare the entire canonical blob, including CRC.
         if(err==ESP_OK){
-            err=nvs_open(Namespace,NVS_READONLY,&h);
+            stage=FailureStage::Reopen;err=nvs_open(Namespace,NVS_READONLY,&h);
             if(err==ESP_OK){
                 verifyBlob={};size_t size=verifyBlob.size();
-                err=nvs_get_blob(h,Key,verifyBlob.data(),&size);
+                stage=FailureStage::Read;err=nvs_get_blob(h,Key,verifyBlob.data(),&size);
                 nvs_close(h);
-                if(err==ESP_OK && !verifiedReadback(ioBlob,verifyBlob,size))err=ESP_FAIL;
+                if(err==ESP_OK){
+                    if(size!=verifyBlob.size()){stage=FailureStage::Length;err=ESP_FAIL;}
+                    else if(get(verifyBlob,BlobSize-4,4)!=crc(verifyBlob)){stage=FailureStage::Crc;err=ESP_FAIL;}
+                    else if(!verifiedReadback(ioBlob,verifyBlob,size)){stage=FailureStage::Compare;err=ESP_FAIL;}
+                }
             }
         }
     }
+    if(err!=ESP_OK)failure(err,stage);
     storageError=err!=ESP_OK;return !storageError;
 }
 Sample convert(const Hal::BatteryTelemetry& t,uint64_t now) {
@@ -94,11 +111,20 @@ bool request(Command c){
     auto& model=storage->model;
     if(c==Command::Arm && (corrupt || model.count || model.armed))return false;
     if(c==Command::Stop && !model.armed)return false;
+    if(c==Command::Checkpoint && (corrupt || model.armed || !model.count))return false;
     pending=c;return true;
 }
 void emitStatus(EmitLine emit,void* ctx,const Model& m,bool isReady,bool bad,bool err,Command cmd,uint64_t writeMs){
     auto& traceLine=storage->traceLine;
     std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_status\",\"schema\":1,\"ready\":%u,\"armed\":%u,\"pending\":%u,\"corrupt\":%u,\"storage_error\":%u,\"count\":%u,\"capacity\":64,\"boot\":%lu,\"dirty\":%u,\"last_write_attempt_ms\":%llu,\"low_seen\":%u,\"finalized_charge_after_low\":%u,\"storage_external\":1,\"storage_bytes\":%u,\"allocation_error\":%u,\"internal_free\":%u,\"internal_largest\":%u}",unsigned(isReady),unsigned(m.armed),unsigned(cmd),unsigned(bad),unsigned(err),unsigned(m.count),static_cast<unsigned long>(m.boot),unsigned(m.dirty),static_cast<unsigned long long>(writeMs),unsigned(m.lowSeen),unsigned(m.finalizedChargeAfterLow),unsigned(sizeof(Storage)),unsigned(allocationError),unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)));emit(traceLine,ctx);
+}
+void emitNvsStatus(EmitLine emit,void* ctx,esp_err_t error,FailureStage stage){
+    auto& traceLine=storage->traceLine;
+    nvs_stats_t stats{};
+    const esp_err_t statsError=nvs_get_stats(nullptr,&stats);
+    if(statsError!=ESP_OK)stats={}; // Never present partial counts as valid.
+    std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_nvs\",\"last_nvs_error\":%ld,\"failure_stage\":%u,\"stats_error\":%ld,\"total\":%u,\"used\":%u,\"free\":%u,\"available\":%u,\"namespaces\":%u}",static_cast<long>(error),unsigned(stage),static_cast<long>(statsError),unsigned(stats.total_entries),unsigned(stats.used_entries),unsigned(stats.free_entries),unsigned(stats.available_entries),unsigned(stats.namespace_count));
+    emit(traceLine,ctx);
 }
 void emitUnavailable(EmitLine emit,void* ctx,bool error,bool allocationFailed){
     // Allocation-failure-only small stack fallback; normal lines live in PSRAM.
@@ -111,6 +137,7 @@ void emitUnavailable(EmitLine emit,void* ctx,bool error,bool allocationFailed){
 bool armConfirm(){return request(Command::Arm);}
 bool stop(){return request(Command::Stop);}
 bool clearConfirm(){return request(Command::Clear);}
+bool checkpointConfirm(){return request(Command::Checkpoint);}
 void service(){
     std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);if(!lock || otaBlocked())return;
     const uint64_t now=uint64_t(esp_timer_get_time()/1000);
@@ -146,31 +173,37 @@ void status(EmitLine emit,void* ctx){
     std::unique_lock<std::mutex> exportLock(exportMutex,std::try_to_lock);
     if(!exportLock){emit("{\"type\":\"gauge_trace_status\",\"busy\":1}",ctx);return;}
     bool r,b,e,allocated,allocationFailed;Command cmd;uint64_t writeMs;
+    esp_err_t nvsError;FailureStage stage;
     {
         std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
         if(!lock){emit("{\"type\":\"gauge_trace_status\",\"busy\":1}",ctx);return;}
         allocated=storage!=nullptr;allocationFailed=allocationError;
         if(allocated)storage->exportSnapshot=storage->model;
         r=ready;b=corrupt;e=storageError;cmd=pending;writeMs=lastWriteAttempt;
+        nvsError=lastNvsError;stage=failureStage;
     }
     if(!allocated){emitUnavailable(emit,ctx,e,allocationFailed);return;}
     emitStatus(emit,ctx,storage->exportSnapshot,r,b,e,cmd,writeMs);
+    emitNvsStatus(emit,ctx,nvsError,stage);
 }
 void exportRows(EmitLine emit,void* ctx){
     if(!emit)return;
     std::unique_lock<std::mutex> exportLock(exportMutex,std::try_to_lock);
     if(!exportLock){emit("{\"type\":\"gauge_trace_export\",\"busy\":1}",ctx);return;}
     bool r,b,e,allocated,allocationFailed;Command cmd;uint64_t writeMs;
+    esp_err_t nvsError;FailureStage stage;
     {
         std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
         if(!lock){emit("{\"type\":\"gauge_trace_export\",\"busy\":1}",ctx);return;}
         allocated=storage!=nullptr;allocationFailed=allocationError;
         if(allocated)storage->exportSnapshot=storage->model;
         r=ready;b=corrupt;e=storageError;cmd=pending;writeMs=lastWriteAttempt;
+        nvsError=lastNvsError;stage=failureStage;
     }
     if(!allocated){emitUnavailable(emit,ctx,e,allocationFailed);return;}
     auto& copy=storage->exportSnapshot;auto& traceLine=storage->traceLine;
     emitStatus(emit,ctx,copy,r,b,e,cmd,writeMs);
+    emitNvsStatus(emit,ctx,nvsError,stage);
     emit("{\"type\":\"gauge_trace_schema\",\"schema\":1,\"flags\":\"1=valid,2=capacityValid,4=temperatureValid,8=epochValid,16=nominalConfigured\",\"current_sign\":\"positive=charging\",\"temperature_unit\":\"0.1K\",\"order\":\"oldest_first\"}",ctx);
     for(size_t i=0;i<copy.count;++i){
         const auto& s=copy.at(i);

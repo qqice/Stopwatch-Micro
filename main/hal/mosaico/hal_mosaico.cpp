@@ -254,6 +254,10 @@ Hal::GaugeBootReloadInfo gauge_boot_info;
 // Volatile per-boot diagnostic latch; only the transaction owner may change it.
 bool gauge_ocv_attempted=false;
 bool gauge_threshold_audit_attempted=false;
+// Small RAM-only snapshot; never a permission or persistence source. Both mutexes protect it.
+mosaico_threshold::Values gauge_threshold_cached{};
+uint32_t gauge_threshold_cached_generation=0;
+static_assert(sizeof(gauge_threshold_cached)+sizeof(gauge_threshold_cached_generation)<200);
 bool battery_valid = false;
 uint8_t battery_soc = 0;
 uint16_t battery_mv = 0;
@@ -1758,6 +1762,7 @@ bool Hal::gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize)
 {
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     std::lock_guard<std::mutex> battery(battery_mutex);
+    gauge_threshold_cached={};gauge_threshold_cached_generation=0;
     GaugeThresholdBackend backend;
     mosaico_threshold::Result result{};
     bool ok=false;
@@ -1768,9 +1773,11 @@ bool Hal::gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize)
         if(reader.loadRaw(mosaico_fcc_limit::journalKey,runtime)==mosaico_fcc_limit::Load::Present&&mosaico_fcc_limit::verifiedRuntimePermission(runtime))backend.expectedConfig=runtime.target.config;
         ok=backend.readThresholds();
     }
+    if(result.success){gauge_threshold_cached=backend.values;gauge_threshold_cached_generation=result.journal.generation;}
     if(details&&detailsSize){
         int count=std::snprintf(details,detailsSize,
-            "privileged=%d attempted=%d ram_attempted=%d readable=%u/%u anchors=%d profile1_anchor_match=%d profile_active=not_asserted control_valid=%d control_status=%04x control_batt_id=%u endian=BE2_U1first format=typed:decoded/rawBE reason=%s closed=%d audit_record=%s intended_state=%u last_read_state=%u generation=%lu before_standard_valid=%d after_standard_valid=%d before_soc=%u after_soc=%u before_cycles=%u after_cycles=%u before_sec=%u after_sec=%u ",
+            "cache_count=%u cache_generation=%lu schema=%u privileged=%d attempted=%d ram_attempted=%d readable=%u/%u anchors=%d profile1_anchor_match=%d profile_active=not_asserted control_valid=%d control_status=%04x control_batt_id=%u endian=BE2_U1first format=typed:decoded/rawBE reason=%s closed=%d audit_record=%s intended_state=%u last_read_state=%u generation=%lu before_standard_valid=%d after_standard_valid=%d before_soc=%u after_soc=%u before_cycles=%u after_cycles=%u before_sec=%u after_sec=%u ",
+            gauge_threshold_cached.readable,static_cast<unsigned long>(gauge_threshold_cached_generation),result.attempted?result.journal.schema:0U,
             privileged,result.attempted,gauge_threshold_audit_attempted,backend.values.readable,static_cast<unsigned>(mosaico_threshold::fieldCount),backend.values.anchors,
             backend.values.readable>=3&&backend.values.raw[0]==65&&backend.values.raw[1]==65&&backend.values.raw[2]==0x112A,
             backend.controlReadable,backend.controlStatus,backend.controlStatus&7U,ok?"validated":backend.why,
@@ -1778,7 +1785,7 @@ bool Hal::gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize)
             result.attempted?static_cast<unsigned>(result.journal.state):0U,backend.lastReadJournalState,static_cast<unsigned long>(result.journal.generation),backend.beforeStandardValid,backend.afterStandardValid,backend.before.soc,backend.after.soc,
             backend.before.cycles,backend.after.cycles,(backend.before.op>>1)&3U,(backend.after.op>>1)&3U);
         size_t used=count>0?static_cast<size_t>(count):detailsSize;
-        for(unsigned i=0;i<backend.values.readable&&used<detailsSize;++i){
+        for(unsigned i=0;i<backend.values.readable&&i<mosaico_threshold::legacyFieldCount&&used<detailsSize;++i){
             const auto& field=mosaico_threshold::fields[i];
             count=std::snprintf(details+used,detailsSize-used,"%s=%ld/%04x ",field.name,
                 static_cast<long>(mosaico_threshold::decoded(field.type,backend.values.raw[i])),backend.values.raw[i]);
@@ -1786,6 +1793,23 @@ bool Hal::gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize)
         }
     }
     return ok;
+}
+
+bool Hal::gaugeThresholdAuditField(size_t index,char* details,size_t detailsSize)
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    if(!details||detailsSize<160)return false;
+    if(gauge_threshold_cached.readable!=mosaico_threshold::fieldCount||!gauge_threshold_cached_generation||index>=mosaico_threshold::fieldCount){
+        std::snprintf(details,detailsSize,"cached=0 index=%u count=%u reason=no_complete_snapshot_or_index",static_cast<unsigned>(index),gauge_threshold_cached.readable);
+        return false;
+    }
+    const auto& field=mosaico_threshold::fields[index];
+    const uint16_t raw=gauge_threshold_cached.raw[index];
+    const int count=std::snprintf(details,detailsSize,"cached=1 generation=%lu schema=2 index=%u count=%u address=%04x %s=%ld/%04x profile_active=not_asserted",
+        static_cast<unsigned long>(gauge_threshold_cached_generation),static_cast<unsigned>(index),static_cast<unsigned>(mosaico_threshold::fieldCount),
+        static_cast<unsigned>(field.selector),field.name,static_cast<long>(mosaico_threshold::decoded(field.type,raw)),raw);
+    return count>0&&static_cast<size_t>(count)<detailsSize;
 }
 
 // Closed standard-command snapshot. No MAC/control/security path is used.

@@ -1,5 +1,7 @@
 """Bounded recorder model/fault assertions; no hardware, SDK build, or flash."""
 from pathlib import Path
+import json
+import re
 import os
 import shutil
 import subprocess
@@ -112,7 +114,7 @@ static_assert(roundtrip(),"ring crc power loss canonical schema recovery");
         self.assertNotIn('Blob verifyBlob;',save)
         # Readback is reached only after a successful commit ACK; an ACK-lost error
         # returns storageError and leaves the pending request/dirty evidence intact.
-        self.assertIn('if(err==ESP_OK)err=nvs_commit(h);',save)
+        self.assertIn('if(err==ESP_OK){stage=FailureStage::Commit;err=nvs_commit(h);}',save)
         after_commit=save.split('err=nvs_commit(h);',1)[1]
         self.assertLess(after_commit.index('if(err==ESP_OK){'),after_commit.index('NVS_READONLY'))
         self.assertIn('nvs_get_blob(h,Key,verifyBlob.data(),&size)',save)
@@ -175,6 +177,24 @@ static_assert(roundtrip(),"ring crc power loss canonical schema recovery");
             log.parent.mkdir(parents=True,exist_ok=True);log.write_text(result.stdout+result.stderr)
             self.assertEqual(result.returncode,0,str(log))
 
+    def test_diagnostic_json_bounds_and_api(self):
+        for signature in ('void emitStatus(', 'void emitNvsStatus(', 'void exportRows('):
+            function=extract_function(signature)
+            match=re.search(r'std::snprintf\(traceLine,sizeof\(traceLine\),"((?:\\.|[^"\\])*)"',function)
+            self.assertIsNotNone(match,signature)
+            fmt=json.loads('"'+match.group(1)+'"')
+            # ESP32 long/unsigned are 32 bits; uint64 monotonic/epoch are 64 bits.
+            rendered=re.sub(r'%llu|%lu|%ld|%u|%d',lambda m: {'%llu':'18446744073709551615','%lu':'4294967295','%ld':'-2147483648','%u':'4294967295','%d':'-2147483648'}[m.group()],fmt)
+            self.assertLess(len(rendered),640,(signature,len(rendered)))
+            json.loads(rendered)
+        diagnostic=extract_function('void emitNvsStatus(')
+        for key in ('last_nvs_error','failure_stage','stats_error','total','used','free','available','namespaces'):
+            self.assertIn(key,diagnostic)
+        self.assertIn('nvs_get_stats(nullptr,&stats)',diagnostic)
+        self.assertIn('if(statsError!=ESP_OK)stats={};',diagnostic)
+        self.assertIn('bool checkpointConfirm(){return request(Command::Checkpoint);}',BACKEND)
+        self.assertIn('corrupt || model.armed || !model.count',extract_function('bool request('))
+
     def test_passive_and_bounded_source(self):
         for forbidden in ('esp_restart','esp_timer_create','xTaskCreate','vTaskDelay','nvs_erase','gaugeSet','OCV','lightSleep','esp_pm_','esp_wifi_'):
             self.assertNotIn(forbidden,BACKEND)
@@ -209,7 +229,7 @@ def extract_function(signature):
 
 def actual_service_fixture():
     functions='\n'.join(extract_function(s) for s in (
-        'bool ensureStorage(', 'void load()', 'bool save(', 'Sample convert(', 'bool request(', 'void service()'))
+        'void failure(', 'bool ensureStorage(', 'void load()', 'bool save(', 'Sample convert(', 'bool request(', 'void service()'))
     # Only external boundary adapters and constexpr-local definite initialization
     # differ. All production conditionals, calls, assignments, and order remain.
     functions=functions.replace('std::unique_lock<std::mutex>','MockLock')
@@ -218,7 +238,7 @@ def actual_service_fixture():
     functions=functions.replace('nvs_handle_t h;','nvs_handle_t h=0;')
     functions=functions.replace('void* memory=heap_caps_calloc(1,sizeof(Storage),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);','Fixture* memory=allocateStorage();')
     functions=functions.replace('storage=new(memory) Storage;','storage=memory;')
-    for signature in ('bool ensureStorage(', 'void load()', 'bool save(', 'Sample convert(', 'bool request(', 'void service()'):
+    for signature in ('void failure(', 'bool ensureStorage(', 'void load()', 'bool save(', 'Sample convert(', 'bool request(', 'void service()'):
         functions=functions.replace(signature,'constexpr '+signature,1)
     return r'''
 #include "main/host/gauge_discharge_trace_model.h"
@@ -235,7 +255,9 @@ struct Hal { struct BatteryTelemetry {
 struct MockMutex {bool available=true;};
 struct MockLock {bool held;constexpr MockLock(MockMutex& m,int):held(m.available){} constexpr explicit operator bool()const{return held;}};
 struct Fixture {
- enum class Command {None,Arm,Stop,Clear};
+ enum class Command {None,Arm,Stop,Clear,Checkpoint};
+ enum class FailureStage : uint8_t {None,ReadOpen,Load,WriteOpen,Set,Commit,Reopen,Read,Length,Crc,Compare};
+ esp_err_t lastNvsError=ESP_OK;FailureStage failureStage=FailureStage::None;
  MockMutex mutex;
  Model model,staging;
  Fixture* storage=nullptr;
@@ -249,6 +271,8 @@ struct Fixture {
  const char* Namespace="gauge_trace";const char* Key="trace1";
  bool ota=false,admission=true,exists=false,readFail=false,readbackCorrupt=false,ackLost=false;
  unsigned writes=0,commits=0,reads=0;
+ int openReadError=0,openWriteError=0,setError=0,reopenError=0;
+ bool readbackShort=false,readbackDifferent=false;
  Hal::BatteryTelemetry telemetry{};
  constexpr bool otaBlocked()const{return ota;}
  constexpr Fixture& GetHAL(){return *this;}
@@ -256,23 +280,38 @@ struct Fixture {
  constexpr int64_t esp_timer_get_time()const{return int64_t(nowMs*1000);}
  struct Clock {bool valid;int64_t epoch;};
  constexpr Clock clockSnapshot()const{return {false,0};}
- constexpr int nvs_open(const char*,int mode,int* h){*h=mode;return exists||mode==NVS_READWRITE?ESP_OK:ESP_ERR_NVS_NOT_FOUND;}
+ constexpr int nvs_open(const char*,int mode,int* h){
+  *h=mode;if(mode==NVS_READWRITE && openWriteError)return openWriteError;
+  if(mode==NVS_READONLY && openReadError)return openReadError;
+  if(mode==NVS_READONLY && commits && reopenError)return reopenError;
+  return exists||mode==NVS_READWRITE?ESP_OK:ESP_ERR_NVS_NOT_FOUND;
+ }
  constexpr void nvs_close(int){}
  constexpr int nvs_get_blob(int,const char*,void* ptr,size_t*)=delete;
  constexpr int nvs_get_blob(int,const char*,uint8_t* ptr,size_t* size){
   ++reads;if(readFail)return ESP_FAIL;if(!exists)return ESP_ERR_NVS_NOT_FOUND;
   if(*size<BlobSize)return ESP_FAIL;*size=BlobSize;
   for(size_t i=0;i<BlobSize;++i)ptr[i]=disk[i];
-  if(readbackCorrupt)ptr[10]^=1;return ESP_OK;
+  if(readbackShort)*size=BlobSize-1;
+  if(readbackCorrupt)ptr[10]^=1;
+  if(readbackDifferent){Blob other=disk;other[10]^=1;put(other,BlobSize-4,crc(other),4);for(size_t i=0;i<BlobSize;++i)ptr[i]=other[i];}
+  return ESP_OK;
  }
  constexpr int nvs_set_blob(int,const char*,const uint8_t* p,size_t size){
-  ++writes;if(size!=BlobSize)return ESP_FAIL;
+  ++writes;if(setError)return setError;if(size!=BlobSize)return ESP_FAIL;
   for(size_t i=0;i<BlobSize;++i)candidate[i]=p[i];return ESP_OK;
  }
  constexpr int nvs_commit(int){++commits;disk=candidate;exists=true;return ackLost?ESP_FAIL:ESP_OK;}
  constexpr void good(int soc=50,int mv=3800,int current=-10){
   telemetry.valid=true;telemetry.capacityValid=true;telemetry.reportedSoc=uint8_t(soc);
   telemetry.voltageMv=uint16_t(mv);telemetry.currentMa=int16_t(current);telemetry.averageCurrentMa=int16_t(current);
+ }
+ constexpr void frozen(){
+  good();ready=true;storage=this;model.armed=true;
+  Sample s;s.flags=Valid;s.voltageMv=3500;s.soc=27;s.currentMa=-10;
+  for(unsigned i=0;i<62;++i){s.monotonicMs=i*10000;model.append(s);}
+  s.currentMa=10;s.monotonicMs=620000;model.append(s);s.monotonicMs=630000;model.append(s);
+  disk=encode(model);exists=true;
  }
 ''' + functions + r'''
 };
@@ -335,6 +374,49 @@ constexpr bool checkpointAndRecovery(){
  if(end.model.armed||!end.model.finalizedChargeAfterLow||end.model.count!=count||end.writes)return false;
  return end.model.at(1).soc==27&&end.model.at(1).voltageMv==3500;
 }
+constexpr bool diagnosticStages(){
+ for(int kind=1;kind<=8;++kind){
+  Fixture f;f.frozen();const Blob before=encode(f.model);const auto count=f.model.count;
+  if(!f.request(Fixture::Command::Checkpoint))return false;
+  if(kind==1)f.openWriteError=0x1105;
+  if(kind==2)f.setError=0x1106;
+  if(kind==3)f.ackLost=true;
+  if(kind==4)f.reopenError=0x1107;
+  if(kind==5)f.readFail=true;
+  if(kind==6)f.readbackShort=true;
+  if(kind==7)f.readbackCorrupt=true;
+  if(kind==8)f.readbackDifferent=true;
+  f.service();
+  const int codes[]={0,0x1105,0x1106,ESP_FAIL,0x1107,ESP_FAIL,ESP_FAIL,ESP_FAIL,ESP_FAIL};
+  if(!f.storageError||f.lastNvsError!=codes[kind]||int(f.failureStage)!=kind+2||f.pending!=Fixture::Command::Checkpoint)return false;
+  if(f.model.count!=count||f.model.armed||!f.model.finalizedChargeAfterLow||!verifiedReadback(before,encode(f.model),BlobSize))return false;
+  f.openWriteError=0;f.setError=0;f.ackLost=false;f.reopenError=0;f.readFail=false;
+  f.readbackShort=false;f.readbackCorrupt=false;f.readbackDifferent=false;
+  f.nowMs=59999;const unsigned attempts=f.writes;f.service();if(f.writes!=attempts)return false;
+  f.nowMs=60000;f.service();
+  if(f.storageError||f.pending!=Fixture::Command::None||f.model.dirty||f.lastNvsError!=codes[kind]||int(f.failureStage)!=kind+2)return false;
+  if(!verifiedReadback(before,f.disk,BlobSize)||!verifiedReadback(before,encode(f.model),BlobSize))return false;
+ }
+ Fixture absent;if(absent.request(Fixture::Command::Checkpoint))return false;
+ absent.good();absent.service();if(absent.request(Fixture::Command::Checkpoint))return false;
+ Fixture busy;busy.frozen();busy.pending=Fixture::Command::Stop;if(busy.request(Fixture::Command::Checkpoint))return false;
+ Fixture armed;armed.frozen();armed.model.armed=true;if(armed.request(Fixture::Command::Checkpoint))return false;
+ Fixture bad;bad.frozen();bad.corrupt=true;if(bad.request(Fixture::Command::Checkpoint))return false;
+ Fixture unsafe;unsafe.frozen();unsafe.good(50,3299);unsafe.request(Fixture::Command::Checkpoint);unsafe.service();
+ if(unsafe.writes||unsafe.pending!=Fixture::Command::Checkpoint)return false;
+ unsafe.good();unsafe.ota=true;unsafe.service();if(unsafe.writes)return false;
+ Fixture readOpen;readOpen.openReadError=0x1108;readOpen.good();readOpen.service();
+ if(readOpen.lastNvsError!=0x1108||int(readOpen.failureStage)!=1||readOpen.writes)return false;
+ Fixture load;load.exists=true;load.readFail=true;load.good();load.service();
+ if(load.lastNvsError!=ESP_FAIL||int(load.failureStage)!=2||load.writes)return false;
+ Fixture corrupt;corrupt.exists=true;corrupt.good();corrupt.service();
+ if(!corrupt.corrupt||int(corrupt.failureStage)!=9||corrupt.writes)return false;
+ Fixture shortLoad;shortLoad.frozen();shortLoad.ready=false;shortLoad.readbackShort=true;shortLoad.service();
+ if(!shortLoad.corrupt||int(shortLoad.failureStage)!=8||shortLoad.writes)return false;
+ Fixture schema;schema.frozen();schema.ready=false;schema.disk[4]=2;put(schema.disk,BlobSize-4,crc(schema.disk),4);schema.service();
+ return schema.corrupt&&int(schema.failureStage)==2&&!schema.writes;
+}
+static_assert(diagnosticStages(),"exact NVS errors and all failure stages frozen checkpoint unchanged gated retry no erase");
 static_assert(pendingAndFailures(),"actual service: queued arm invalid blocked low ACK lost readback corruption retry");
 static_assert(loadAndClear(),"actual load/save: corrupt record explicit clear readback failure pending preservation");
 static_assert(checkpointAndRecovery(),"actual service: safe checkpoint lowV no write reboot charge freeze evidence");

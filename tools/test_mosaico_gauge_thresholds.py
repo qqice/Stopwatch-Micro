@@ -18,7 +18,16 @@ class ThresholdTests(unittest.TestCase):
 #include "mosaico_threshold_audit_model.h"
 using namespace mosaico_threshold;
 constexpr bool reads(){
- if(fieldCount!=26||allowed(static_cast<Selector>(0x0000))||allowed(static_cast<Selector>(0x9184)))return false;
+ if(fieldCount!=59||allowed(static_cast<Selector>(0x0000))||allowed(static_cast<Selector>(0x9184)))return false;
+ constexpr uint16_t addresses[]={0x92a7,0x92a9,0x92ab,0x92ad,0x92af,0x92b1,0x92b2,0x92b3,
+  0x92bd,0x92bf,0x92c1,0x92c3,0x92c5,0x92c7,0x92c9,0x92cb,0x92cd,0x92cf,0x92d1,
+  0x9271,0x9272,0x9274,0x926f,0x9270,0x9268,0x9269,
+  0x92a3,0x92b6,0x92b9,0x92bc,0x9276,0x927b,0x927c};
+ for(size_t i=0;i<33;++i)if(uint16_t(fields[i+26].selector)!=addresses[i])return false;
+ constexpr Type extraTypes[]={Type::I2,Type::U1,Type::U1,Type::U1,Type::I2,Type::U1,Type::U1};
+ for(size_t i=0;i<7;++i)if(fields[i+52].type!=extraTypes[i])return false;
+ for(uint16_t hole:{0x9253,0x9255,0x9257,0x9259})if(allowed(Selector(hole)))return false;
+ for(size_t i=0;i<fieldCount;++i)for(size_t j=i+1;j<fieldCount;++j)if(fields[i].selector==fields[j].selector)return false;
  if(decoded(Type::I2,0xff9c)!=-100||decoded(Type::U2,0xff9c)!=65436||decoded(Type::U1,0x03ff)!=3||decoded(Type::H1,0x03aa)!=3)return false;
  for(int mode=0;mode<4;++mode){int calls=0;Values v{};
   bool ok=readStable([&](Selector s,uint8_t* b)constexpr{
@@ -30,7 +39,7 @@ constexpr bool reads(){
    b[2]=raw>>8;b[3]=raw;return true;
   },0x112a,v);
   if(ok!=(mode==0))return false;
-  if(ok&&(calls!=52||v.readable!=26||!v.anchors))return false;
+  if(ok&&(calls!=118||v.readable!=59||!v.anchors))return false;
   if(mode==1&&(calls!=6||v.anchors||v.readable!=3))return false;
  }
  Journal j{};j.mac[0]=42;j.generation=1;j.flags=UnsealIntent;Record r{};Journal out{};
@@ -38,8 +47,15 @@ constexpr bool reads(){
  for(unsigned i=0;i<48;++i){r[i]^=1;if(decode(r,j.mac,out))return false;r[i]^=1;}
  uint8_t wrong[6]={43};if(decode(r,wrong,out))return false;
  j.state=State::Completed;if(encode(j,r))return false;
+ // Legacy completed snapshots retain their historical 26-field CRC/count, never relabeled.
+ j.schema=1;j.flags=127;j.readCount=26;j.snapshotCrc=77;
+ if(!encode(j,r)||r[4]!=1||r[20]!=1||!decode(r,j.mac,out)||out.schema!=1||out.readCount!=26||out.snapshotCrc!=77)return false;
+ j.readCount=59;if(encode(j,r))return false;
+ j.schema=2;j.readCount=26;if(encode(j,r))return false;
+ j.schema=3;if(encode(j,r))return false;
+ j.schema=2;
  j.flags=127;j.readCount=fieldCount;j.snapshotCrc=42;
- if(!encode(j,r)||!decode(r,j.mac,out)||out.flags!=127||out.readCount!=26||out.snapshotCrc!=42)return false;
+ if(!encode(j,r)||!decode(r,j.mac,out)||out.flags!=127||out.readCount!=59||out.snapshotCrc!=42)return false;
  return true;
 }
 struct Fake{
@@ -68,11 +84,38 @@ constexpr bool faults(){
   if(f.durable&&f.disk.state!=State::Completed){f.attempted=false;f.fail=0;int old=f.unseals;if(run(f).success||f.unseals!=old)return false;}
  }
  int old=good.unseals;if(run(good).success||good.unseals!=old)return false;
- good.attempted=false;good.fail=0;if(!run(good).success||good.disk.generation!=2)return false;
+ good.attempted=false;good.fail=0;good.disk.schema=1;good.disk.readCount=26;
+ if(!run(good).success||good.disk.generation!=2||good.disk.schema!=2||good.disk.readCount!=59)return false;
+ for(auto state:{State::Pending,State::Failed}){Fake f;f.durable=true;f.disk=good.disk;f.disk.state=state;
+  if(run(f).attempted||f.unseals)return false;}
  return true;
 }
 static_assert(reads(),"exact closed fields, U1/signed BE2 anchors, full CRC/MAC codec");
 static_assert(faults(),"all boundaries ACK/NVS failures, no replay, one key attempt, unconditional cleanup");
+''')
+ def test_actual_cached_field_bounds_no_io(self):
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
+  getter='constexpr bool field('+source.split('bool Hal::gaugeThresholdAuditField(',1)[1].split('// Closed standard-command snapshot',1)[0]
+  getter='\n'.join(line for line in getter.splitlines() if 'std::lock_guard<' not in line).replace('std::snprintf','print')
+  self.compile(r'''
+#include "mosaico_threshold_audit_model.h"
+struct Fake{
+ mosaico_threshold::Values gauge_threshold_cached{};uint32_t gauge_threshold_cached_generation=0;int prints=0;
+ template<class... Args>constexpr int print(char*,size_t,const char*,Args...){++prints;return 100;}
+'''+getter+r'''
+};
+constexpr bool cases(){
+ Fake f;char out[160]{};
+ if(f.field(0,nullptr,sizeof(out))||f.prints||f.field(0,out,159)||f.prints)return false;
+ if(f.field(0,out,sizeof(out))||f.prints!=1)return false;
+ f.gauge_threshold_cached.readable=59;f.gauge_threshold_cached_generation=2;
+ for(size_t i=0;i<59;++i)if(!f.field(i,out,sizeof(out)))return false;
+ if(f.field(59,out,sizeof(out))||f.field(size_t(-1),out,sizeof(out)))return false;
+ f.gauge_threshold_cached.readable=58;
+ if(f.field(0,out,sizeof(out)))return false;
+ return true;
+}
+static_assert(cases(),"actual cache getter: complete generation only, bounds, buffer minimum, no I2C/NVS");
 ''')
  def test_actual_mac_reader_authentication(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
@@ -235,7 +278,7 @@ struct Fake{
   if(fault==5)r[24]^=1;
   if(fault==6)*n=47;
   if(fault==7){Journal changed{};uint8_t mac[6]={42};if(!decode(r,mac,changed))return 2;changed.flags|=FullIntent;if(!encode(changed,r))return 2;}
-  if(fault==9||fault==10){if(fault==9)r[12]^=1;else r[4]=2;put32(r+44,crc32(r,44));}
+  if(fault==9||fault==10){if(fault==9)r[12]^=1;else r[4]=3;put32(r+44,crc32(r,44));}
   return 0;
  }
 '''+methods+r'''
@@ -269,13 +312,14 @@ std::mutex battery_mutex;std::recursive_mutex gauge_transaction_mutex;
 using esp_err_t=int;using nvs_handle_t=int;
 constexpr int ESP_OK=0,ESP_ERR_NVS_NOT_FOUND=1,NVS_READONLY=0,NVS_READWRITE=1;
 int nvs_open(const char*,int,int*);int nvs_get_blob(int,const char*,void*,size_t*);void nvs_close(int);int nvs_set_blob(int,const char*,const void*,size_t);int nvs_commit(int);
+mosaico_threshold::Values gauge_threshold_cached{};uint32_t gauge_threshold_cached_generation=0;
 bool gauge,gauge_threshold_audit_attempted;bool gauge_word(uint8_t,uint16_t&);bool gauge_identity();
 struct Power{bool locked,wifiRunning;int phase;};struct Network{Power powerStats();};Network& GetNetworkQuota();
 struct BleStats{bool advertising,connected;};struct Ble{BleStats diagnostics();};Ble& GetCodexMicroBle();
 namespace MosaicoOta{bool busy();bool healthPending();}
 void gauge_feed();void gauge_delay_ms(uint32_t);int64_t esp_timer_get_time();
 enum class AccessWord{UnsealFirst,UnsealSecond,Full,Seal};bool gauge_access_word(AccessWord);bool gauge_wait_security(uint8_t);
-struct Hal{std::array<uint8_t,6> getFactoryMac();bool gaugeThresholdAudit(bool,char*,size_t);};Hal& GetHAL();
+struct Hal{std::array<uint8_t,6> getFactoryMac();bool gaugeThresholdAudit(bool,char*,size_t);bool gaugeThresholdAuditField(size_t,char*,size_t);};Hal& GetHAL();
 int gauge_load_journal(mosaico_gauge::Journal&,const uint8_t*);int gauge_load_access(mosaico_gauge::AccessJournal&,const uint8_t*);
 struct GaugeFccBackend{mosaico_fcc_limit::Load loadRaw(const char*,mosaico_fcc_limit::Journal&);};
 bool gauge_threshold_read(mosaico_threshold::Selector,uint8_t*);
@@ -286,6 +330,10 @@ bool gauge_threshold_read(mosaico_threshold::Selector,uint8_t*);
   self.assertIn('bootHistoryEligible',backend);self.assertIn('verifiedRuntimePermission',backend)
   readonly=method.split('else if(gauge)',1)[1]
   self.assertNotIn('saveReadback(',readonly);self.assertNotIn('gauge_access_word(',readonly)
+  getter=method.split('bool Hal::gaugeThresholdAuditField(',1)[1]
+  for forbidden in ('gauge_word(', 'gauge_threshold_read(', 'nvs_', 'saveReadback(', 'gauge_access_word('):self.assertNotIn(forbidden,getter)
+  self.assertIn('if(result.success){gauge_threshold_cached=backend.values;',method)
+  self.assertIn('gauge_threshold_cached={};gauge_threshold_cached_generation=0;',method)
   serial=(ROOT/'main/debug/serial_debug.cpp').read_text()
   cmd=serial.split('if (std::strcmp(command,"gauge-thresholds")==0)',1)[1].split('if (std::strcmp(command, "gauge-ocv")',1)[0]
   self.assertIn('privileged&&_writer&&_writer->_reply_uart',cmd)

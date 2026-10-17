@@ -5,6 +5,7 @@ using EmitLine=void(*)(const char* line,void* context);
 void service();
 bool armConfirm(); // Refuses old data/corrupt storage; no implicit overwrite.
 bool stop();
+bool checkpointConfirm(); // Queues unchanged nonempty, disarmed record; safe voltage/cooldown required.
 bool clearConfirm(); // Explicitly queues empty, disarmed record; no erase.
 void status(EmitLine emit,void* context);
 void exportRows(EmitLine emit,void* context); // Header + <=64 bounded JSON lines; does not clear.
