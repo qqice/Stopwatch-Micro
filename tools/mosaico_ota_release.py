@@ -12,13 +12,14 @@ import sys
 import tempfile
 import json
 
-from ota_release import MAX_IMAGE_SIZE, METADATA, canonical_message, valid_version
+from ota_release import DEFAULT_LAYOUT, LAYOUT_IMAGE_CAPS, METADATA, canonical_message, valid_version, image_capacity
 
 
-def validate_image(image: bytes) -> None:
-    from esptool.bin_image import LoadFirmwareImage
-    if not 288 <= len(image) <= MAX_IMAGE_SIZE:
+def validate_image(image: bytes, *, layout: str = DEFAULT_LAYOUT) -> None:
+    capacity = image_capacity(layout)
+    if not 288 <= len(image) <= capacity:
         raise ValueError("image outside OTA app capacity")
+    from esptool.bin_image import LoadFirmwareImage
     if image[0] != 0xE9 or struct.unpack_from("<H", image, 12)[0] != 32:
         raise ValueError("not an ESP32-S31 image")
     if struct.unpack_from("<I", image, 32)[0] != 0xABCD5432 or image[80:112].split(b"\0")[0] != b"Stopwatch-Mosaico":
@@ -37,12 +38,13 @@ def validate_image(image: bytes) -> None:
         raise ValueError("PSRAM-XIP mapping missing")
 
 
-def sign_release(image_path: Path, key_path: Path, output_dir: Path, *, schema1: bool = False) -> dict:
+def sign_release(image_path: Path, key_path: Path, output_dir: Path, *, schema1: bool = False, layout: str = DEFAULT_LAYOUT) -> dict:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
+    capacity = image_capacity(layout)
     with image_path.open("rb") as source:
-        image = source.read(MAX_IMAGE_SIZE + 1)
-    validate_image(image)
+        image = source.read(capacity + 1)
+    validate_image(image, layout=layout)
     key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
     if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
         raise ValueError("signing key must be ECDSA P-256")
@@ -50,8 +52,8 @@ def sign_release(image_path: Path, key_path: Path, output_dir: Path, *, schema1:
     if not valid_version(version):
         raise ValueError("invalid app descriptor version")
     sha = hashlib.sha256(image).hexdigest()
-    signature = key.sign(canonical_message(len(image), sha, None if schema1 else version), ec.ECDSA(hashes.SHA256()))
-    manifest = dict(METADATA, size=len(image), sha256=sha,
+    signature = key.sign(canonical_message(len(image), sha, None if schema1 else version, layout=layout), ec.ECDSA(hashes.SHA256()))
+    manifest = dict(METADATA, layout=layout, size=len(image), sha256=sha,
                     signature=base64.b64encode(signature).decode("ascii"))
     if not schema1:
         manifest.update(schema=2, version=version)
@@ -91,9 +93,11 @@ def main() -> int:
     parser.add_argument("--key", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--schema1", action="store_true", help="legacy bootstrap manifest without signed version")
+    parser.add_argument("--layout", choices=tuple(LAYOUT_IMAGE_CAPS), default=DEFAULT_LAYOUT,
+                        help="signed partition layout (default: legacy dual-v1)")
     args = parser.parse_args()
     try:
-        manifest = sign_release(args.image, args.key, args.output_dir, schema1=args.schema1)
+        manifest = sign_release(args.image, args.key, args.output_dir, schema1=args.schema1, layout=args.layout)
     except Exception:
         # Do not echo exception contents: third-party parsers may include sensitive input.
         print("OTA RELEASE ERROR validation or exclusive publication failed", file=sys.stderr)

@@ -3,6 +3,7 @@
 #include <debug/mosaico_rx_ingress.h>
 #include "mosaico_ota.h"
 #include "mosaico_ota_power.h"
+#include "mosaico_ota_layout.h"
 #include "ota_public_key.h"
 #include <hal/hal.h>
 #include <host/standby_sleep.h>
@@ -33,7 +34,6 @@
 
 namespace MosaicoOta {
 namespace {
-constexpr uint32_t MaxImage = 0x3e0000;
 std::mutex lock;
 std::mutex healthLock;
 std::mutex snapshotLock; // Never held over flash, crypto, NVS, or telemetry calls.
@@ -106,11 +106,29 @@ bool installPowerSafe(bool manual, InstallPowerEvidence* evidence = nullptr)
     captureInstallPower(evidence, b, external || b.currentMa > 3, true);
     return manualInstallPowerSafe(b, external, critical);
 }
+MosaicoOtaLayout::Id currentLayout()
+{
+    MosaicoOtaLayout::Partition parts[7]{};
+    size_t count = 0;
+    auto it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, nullptr);
+    while (it) {
+        const auto* p = esp_partition_get(it);
+        if (count == 7 || !p || p->encrypted) {
+            esp_partition_iterator_release(it);
+            return MosaicoOtaLayout::Id::Unknown;
+        }
+        parts[count++] = {static_cast<uint8_t>(p->type), static_cast<uint8_t>(p->subtype), p->address, p->size};
+        it = esp_partition_next(it);
+    }
+    return MosaicoOtaLayout::identify(parts, count);
+}
+MosaicoOtaLayout::Partition partitionGeometry(const esp_partition_t* p)
+{
+    return {static_cast<uint8_t>(p->type), static_cast<uint8_t>(p->subtype), p->address, p->size};
+}
 bool exactSlot(const esp_partition_t* p)
 {
-    return p && p->type == ESP_PARTITION_TYPE_APP &&
-        ((p->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0 && p->address == 0x20000 && p->size == 0x3e0000) ||
-         (p->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1 && p->address == 0x400000 && p->size == 0x3f0000));
+    return p && MosaicoOtaLayout::exactSlot(currentLayout(), partitionGeometry(p));
 }
 int8_t slot(const esp_partition_t* p) { return exactSlot(p) ? static_cast<int8_t>(p->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0) : -1; }
 void publish(UiStage stage, const char* error = "")
@@ -123,21 +141,7 @@ void publish(UiStage stage, const char* error = "")
     ui.progressBasisPoints = ui.size ? static_cast<uint16_t>(static_cast<uint64_t>(ui.received) * 10000 / ui.size) : 0;
     std::snprintf(ui.error, sizeof(ui.error), "%s", error); ++ui.revision;
 }
-bool exactData(uint8_t subtype, uint32_t address, uint32_t size)
-{
-    const auto* p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, static_cast<esp_partition_subtype_t>(subtype), nullptr);
-    return p && p->address == address && p->size == size;
-}
-bool layoutSafe()
-{
-    const auto* a = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
-    const auto* b = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, nullptr);
-    const auto* d = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
-    return exactSlot(a) && exactSlot(b) && d && d->size == 0x2000 && d->address == 0x10000 &&
-        exactData(ESP_PARTITION_SUBTYPE_DATA_NVS, 0xa000, 0x6000) &&
-        exactData(ESP_PARTITION_SUBTYPE_DATA_PHY, 0x12000, 0x1000) &&
-        exactData(0x41, 0x7f0000, 0x320000) && exactData(0x83, 0xb10000, 0x2ee000);
-}
+bool layoutSafe() { return currentLayout() != MosaicoOtaLayout::Id::Unknown; }
 bool currentReady()
 {
     const auto* running = esp_ota_get_running_partition();
@@ -192,7 +196,7 @@ bool currentImageHash()
     if (!exactSlot(running) || psa_crypto_init() != PSA_SUCCESS) return false;
     const esp_partition_pos_t pos{running->address, running->size};
     if (esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &metadata) != ESP_OK ||
-        !metadata.image.hash_appended || !metadata.image_len || metadata.image_len > MaxImage) return false;
+        !metadata.image.hash_appended || !metadata.image_len || metadata.image_len > MosaicoOtaLayout::imageCap(currentLayout())) return false;
     // SDK process_appended_hash_and_sig includes the appended 32-byte digest in image_len.
     // Hash the ENTIRE release .bin, not metadata.image_digest (which excludes that suffix).
     auto* buffer = static_cast<uint8_t*>(heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
@@ -291,12 +295,13 @@ bool validateDescriptor(const char* json, Descriptor& out, const char*& error)
     out.versionSigned = v2;
     bool versionValid = cJSON_IsString(version) && version->valuestring && std::strlen(version->valuestring) >= 1 && std::strlen(version->valuestring) <= 31;
     if (versionValid) for (const char* c = version->valuestring; *c; ++c) if (*c < 33 || *c > 126) versionValid = false;
-    bool valid = fields && seen == (v2 ? 511U : 255U) && cJSON_IsNumber(schema) &&
+    const auto layout = currentLayout();
+    bool valid = layout != MosaicoOtaLayout::Id::Unknown && fields && seen == (v2 ? 511U : 255U) && cJSON_IsNumber(schema) &&
         (schema->valuedouble == 1 || (v2 && versionValid)) &&
         textEquals(m, "board", "esp-mosaico") && textEquals(m, "chip", "esp32s31") &&
-        textEquals(m, "project", "Stopwatch-Mosaico") && textEquals(m, "layout", "mosaico-dual-v1") &&
+        textEquals(m, "project", "Stopwatch-Mosaico") && textEquals(m, "layout", MosaicoOtaLayout::name(layout)) &&
         cJSON_IsNumber(size) && std::isfinite(size->valuedouble) && size->valuedouble >= 1 &&
-        size->valuedouble <= MaxImage && std::floor(size->valuedouble) == size->valuedouble &&
+        size->valuedouble <= MosaicoOtaLayout::imageCap(layout) && std::floor(size->valuedouble) == size->valuedouble &&
         cJSON_IsString(sha) && sha->valuestring && std::strlen(sha->valuestring) == 64 &&
         cJSON_IsString(sig) && sig->valuestring && std::strlen(sig->valuestring) <= 104;
     if (valid) {
@@ -316,11 +321,11 @@ bool validateDescriptor(const char* json, Descriptor& out, const char*& error)
         std::snprintf(out.version, sizeof(out.version), "%s", v2 ? version->valuestring : "-");
         std::snprintf(out.sha, sizeof(out.sha), "%s", sha->valuestring);
         if (v2) std::snprintf(canonical, sizeof(canonical),
-            "MOSAICO-OTA-v2\nStopwatch-Mosaico\nesp32s31\nmosaico-dual-v1\n%s\n%lu\n%s\n",
-            out.version, static_cast<unsigned long>(out.size), out.sha);
+            "MOSAICO-OTA-v2\nStopwatch-Mosaico\nesp32s31\n%s\n%s\n%lu\n%s\n",
+            MosaicoOtaLayout::name(layout), out.version, static_cast<unsigned long>(out.size), out.sha);
         else std::snprintf(canonical, sizeof(canonical),
-            "MOSAICO-OTA-v1\nStopwatch-Mosaico\nesp32s31\nmosaico-dual-v1\n%lu\n%s\n",
-            static_cast<unsigned long>(out.size), out.sha);
+            "MOSAICO-OTA-v1\nStopwatch-Mosaico\nesp32s31\n%s\n%lu\n%s\n",
+            MosaicoOtaLayout::name(layout), static_cast<unsigned long>(out.size), out.sha);
         valid = mbedtls_base64_decode(signature, sizeof(signature), &signatureSize,
             reinterpret_cast<const unsigned char*>(sig->valuestring), std::strlen(sig->valuestring)) == 0 &&
             signatureSize >= 8 && signatureSize <= 72 &&
@@ -495,7 +500,8 @@ bool beginManifest(const char* json)
     if (!currentReady() || !downloadPowerSafe()) return reject("prewrite_safety");
     const auto* running = esp_ota_get_running_partition();
     target = esp_ota_get_next_update_partition(nullptr);
-    if (!exactSlot(target) || target->address == running->address || expectedSize > target->size)
+    if (!target || !MosaicoOtaLayout::imageFits(currentLayout(), partitionGeometry(target), expectedSize.load()) ||
+        target->address == running->address)
         return reject("target_partition");
     hash = psa_hash_operation_t PSA_HASH_OPERATION_INIT;
     hashLive = true;

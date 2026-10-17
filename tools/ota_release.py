@@ -8,7 +8,17 @@ import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-MAX_IMAGE_SIZE = 0x3E0000
+DEFAULT_LAYOUT = "mosaico-dual-v1"
+LAYOUT_IMAGE_CAPS = {DEFAULT_LAYOUT: 0x3E0000, "mosaico-dual-v2": 0x600000}
+MAX_IMAGE_SIZE = LAYOUT_IMAGE_CAPS[DEFAULT_LAYOUT]
+
+
+def image_capacity(layout: str = DEFAULT_LAYOUT) -> int:
+    if not isinstance(layout, str) or layout not in LAYOUT_IMAGE_CAPS:
+        raise ValueError("invalid OTA layout")
+    return LAYOUT_IMAGE_CAPS[layout]
+
+
 CHUNK_SIZE = 4096
 METADATA = {"schema": 1, "board": "esp-mosaico", "chip": "esp32s31",
             "project": "Stopwatch-Mosaico", "layout": "mosaico-dual-v1"}
@@ -19,10 +29,11 @@ def valid_version(version: object) -> bool:
     return isinstance(version, str) and 0 < len(version) <= 31 and all(33 <= ord(c) <= 126 for c in version)
 
 
-def canonical_message(size: int, sha256: str, version: str | None = None) -> bytes:
+def canonical_message(size: int, sha256: str, version: str | None = None, *, layout: str = DEFAULT_LAYOUT) -> bytes:
+    image_capacity(layout)
     if version is not None and not valid_version(version):
         raise ValueError("invalid OTA version")
-    return (f"MOSAICO-OTA-v{2 if version is not None else 1}\nStopwatch-Mosaico\nesp32s31\nmosaico-dual-v1\n"
+    return (f"MOSAICO-OTA-v{2 if version is not None else 1}\nStopwatch-Mosaico\nesp32s31\n{layout}\n"
             + (version + "\n" if version is not None else "")
             + f"{size}\n{sha256}\n").encode("ascii")
 
@@ -34,11 +45,12 @@ def validate_manifest(manifest: object) -> dict:
     fields = set(METADATA) | {"size", "sha256", "signature"} | ({"version"} if schema == 2 else set())
     if set(manifest) != fields:
         raise ValueError("invalid OTA manifest fields")
-    if type(schema) is not int or schema not in (1, 2) or any(manifest[k] != v for k, v in METADATA.items() if k != "schema"):
+    if type(schema) is not int or schema not in (1, 2) or any(manifest[k] != v for k, v in METADATA.items() if k not in ("schema", "layout")):
         raise ValueError("invalid OTA release metadata")
+    capacity = image_capacity(manifest["layout"])
     if schema == 2 and not valid_version(manifest["version"]):
         raise ValueError("invalid OTA version")
-    if type(manifest["size"]) is not int or not 0 < manifest["size"] <= MAX_IMAGE_SIZE:
+    if type(manifest["size"]) is not int or not 0 < manifest["size"] <= capacity:
         raise ValueError("invalid OTA image size")
     if not isinstance(manifest["sha256"], str) or HASH_RE.fullmatch(manifest["sha256"]) is None:
         raise ValueError("invalid OTA image hash")
@@ -82,7 +94,7 @@ class ImmutableReleaseStore:
             raise ValueError("OTA manifest too large")
         manifest = validate_manifest(json.loads(raw, object_pairs_hook=_unique_object))
         with (directory / "firmware.bin").open("rb") as handle:
-            image = handle.read(MAX_IMAGE_SIZE + 1)
+            image = handle.read(image_capacity(manifest["layout"]) + 1)
         if len(image) != manifest["size"] or hashlib.sha256(image).hexdigest() != manifest["sha256"]:
             raise ValueError("OTA release image does not match manifest")
         self._manifest = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
