@@ -36,7 +36,7 @@ constexpr bool timing() {
 constexpr bool roundtrip() {
  Model m;m.armed=true;m.boot=4;
  for(unsigned i=0;i<70;++i){Sample s;s.monotonicMs=i*10000;s.flags=31;s.soc=i%101;s.voltageMv=3400;s.currentMa=-25;s.averageCurrentMa=7;s.temperatureDeciK=2981;s.epoch=1800000000+i;m.append(s);}
- if(m.count!=64||m.at(0).monotonicMs!=60000)return false;
+ if(m.count!=64||m.at(0).monotonicMs!=0)return false;
  const Blob saved=encode(m);Model restored;
  if(!decode(saved,restored)||!restored.armed||restored.at(0).currentMa!=-25||restored.at(63).averageCurrentMa!=7||restored.at(63).temperatureDeciK!=2981)return false;
  // Recovery starts another segment; monotonic time may restart only on a new boot.
@@ -48,7 +48,7 @@ constexpr bool roundtrip() {
  Blob bad=saved;bad[4]=3;put(bad,BlobSize-4,crc(bad),4);if(decode(bad,recovered))return false;
  bad=saved;bad[11]=4;put(bad,BlobSize-4,crc(bad),4);if(decode(bad,recovered))return false;
  bad=saved;put(bad,8,65,2);put(bad,BlobSize-4,crc(bad),4);if(decode(bad,recovered))return false;
- bad=saved;put(bad,32+RecordSize+4,0,8);put(bad,BlobSize-4,crc(bad),4);if(decode(bad,recovered))return false;
+ bad=saved;put(bad,32+2*RecordSize+4,0,8);put(bad,BlobSize-4,crc(bad),4);if(decode(bad,recovered))return false;
  return BlobSize<=4096;
 }
 constexpr bool finalize() {
@@ -89,6 +89,105 @@ constexpr bool rawRoundtrip(){
  s.flags=Valid;m={};m.append(s);b=encode(m);return get(b,4,2)==1&&decode(b,out)&&!out.at(0).rawCoulombMah;
 }
 static_assert(rawRoundtrip(),"rawCC valid flag schema2 exact lossless schema1 compatibility");
+constexpr bool hasTime(const Model& m,uint32_t boot,uint64_t ms){
+ for(size_t i=0;i<m.count;++i)if(m.at(i).boot==boot&&m.at(i).monotonicMs==ms)return true;
+ return false;
+}
+constexpr bool retainedDischarge(bool highFirst){
+ Model m;m.armed=true;Sample s;s.flags=Valid|RawCoulombValid;s.voltageMv=3700;s.currentMa=-20;
+ s.soc=96;s.operationStatus=0x10;
+ uint64_t now=0, edvTime=0, zeroTime=0, plateauTime=0;
+ for(unsigned i=0;now<=3*60*60*1000ULL;++i){
+  s.monotonicMs=now;s.rawCoulombMah=uint16_t(i);s.epoch=1800000000+now/1000;
+  if(i==20){s.soc=95;plateauTime=now;}
+  if(i==30){s.operationStatus=0x08;edvTime=now;}
+  if(i==40){s.soc=0;zeroTime=now;}
+  // High-cadence and mixed 60s -> 10s discharges, each lasting three hours.
+  m.append(s);now+=(highFirst&&i<40)?60000:10000;
+ }
+ if(m.count!=Capacity||!hasTime(m,1,0)||!hasTime(m,1,edvTime)||!hasTime(m,1,edvTime-(highFirst?60000:10000))||
+    !hasTime(m,1,zeroTime)||!hasTime(m,1,zeroTime-(highFirst?60000:10000))||
+    !hasTime(m,1,plateauTime)||!hasTime(m,1,plateauTime-(highFirst?60000:10000)))return false;
+ for(size_t i=m.count-32;i<m.count;++i){
+  const auto& row=m.at(i);
+  if(row.monotonicMs!=s.monotonicMs-(m.count-1-i)*10000 || row.rawCoulombMah!=s.rawCoulombMah-(m.count-1-i))return false;
+ }
+ Model out;const Blob b=encode(m);return decode(b,out)&&verifiedReadback(b,encode(out),BlobSize);
+}
+constexpr bool untouchedAndLegacy(){
+ for(unsigned schema=1;schema<=2;++schema){
+  Model m;m.armed=true;
+  for(unsigned i=0;i<64;++i){Sample s;s.monotonicMs=i*10000;s.flags=Valid|(schema==2?RawCoulombValid:0);s.rawCoulombMah=schema==2?i:0;m.append(s);}
+  for(unsigned i=0;i<64;++i)if(m.at(i).monotonicMs!=i*10000)return false;
+  const Blob old=encode(m);Model out;
+  if(get(old,4,2)!=schema||!decode(old,out)||!verifiedReadback(old,encode(out),BlobSize))return false;
+  Sample s;s.monotonicMs=640000;s.flags=Valid;out.append(s);
+  if(!hasTime(out,1,0)||!hasTime(out,1,640000))return false;
+ }
+ return BlobSize==3108&&RecordSize==48&&Capacity==64;
+}
+constexpr bool hostileEdges(){
+ Model m;m.armed=true;Sample s;s.flags=Valid;s.voltageMv=3700;s.currentMa=-20;s.soc=96;s.operationStatus=0x10;
+ m.append(s);s.monotonicMs=10000;s.soc=0;s.operationStatus=8;m.append(s);
+ for(unsigned i=2;i<300;++i){
+  if(i%5==0)++m.boot;
+  s.monotonicMs=(i%5)*10000;s.soc=i%2?96:0;s.operationStatus=i%2?16:8;m.append(s);
+  if(m.count>64)return false;
+  for(size_t j=1;j<m.count;++j)if(m.at(j).boot<m.at(j-1).boot ||
+    (m.at(j).boot==m.at(j-1).boot && m.at(j).monotonicMs<m.at(j-1).monotonicMs))return false;
+ }
+ // Under impossible-to-fit change load, earliest observed anchors outrank boot sides.
+ if(!hasTime(m,1,0)||!hasTime(m,1,10000)||!hasTime(m,m.boot,40000))return false;
+ Model out;return decode(encode(m),out);
+}
+constexpr bool invalidNoiseAnchors(){
+ Model m;Sample s;s.flags=Valid;s.soc=96;s.operationStatus=16;m.append(s);
+ for(unsigned i=1;i<160;++i){
+  s.monotonicMs=i*10000;s.flags=(i<5||i>15)?0:Valid;
+  s.soc=i<12?96:0;s.operationStatus=i<10?16:8;
+  // Invalid status/SOC noise before and after the valid observations must
+  // not displace the first valid EDV2=1 / zero anchors.
+  if(!s.flags){s.soc=i%2?96:0;s.operationStatus=i%2?16:8;}
+  m.append(s);
+ }
+ return hasTime(m,1,0)&&hasTime(m,1,100000)&&hasTime(m,1,120000)&&hasTime(m,1,1590000);
+}
+constexpr bool invalidBridgeAndReload(){
+ Model m;Sample s;s.flags=Valid;s.soc=96;s.operationStatus=0;m.append(s);
+ s.flags=0;s.monotonicMs=10000;s.operationStatus=8;m.append(s);
+ s.flags=Valid;s.soc=50;s.monotonicMs=20000;m.append(s); // first valid EDV2=1
+ s.monotonicMs=30000;s.operationStatus=0;m.append(s);
+ s.monotonicMs=40000;s.operationStatus=8;m.append(s);
+ s.monotonicMs=50000;s.soc=0;m.append(s); // first valid zero
+ for(unsigned i=6;i<240;++i){
+  if(i%3==0)++m.boot;
+  s.monotonicMs=(i%3)*10000;s.soc=50;m.append(s);
+ }
+ // The invalid separator may disappear. We retain actual first observations,
+ // not a fabricated edge across that separator or the later true rise pair.
+ if(!hasTime(m,1,0)||!hasTime(m,1,20000)||!hasTime(m,1,50000))return false;
+ Model out;if(!decode(encode(m),out))return false;
+ for(unsigned i=0;i<160;++i){++out.boot;s.monotonicMs=0;out.append(s);}
+ if(!hasTime(out,1,0)||!hasTime(out,1,20000)||!hasTime(out,1,50000))return false;
+ for(size_t i=0;i<out.count;++i){const auto& row=out.at(i);
+  if(row.boot==1&&row.monotonicMs==20000&&(!(row.flags&Valid)||row.operationStatus!=8||row.soc!=50))return false;
+ }
+ return true;
+}
+constexpr bool bootSides(){
+ Model m;Sample s;s.flags=Valid;s.soc=50;
+ for(unsigned i=0;i<180;++i){if(i==70)++m.boot;s.monotonicMs=(i<70?i:i-70)*10000;m.append(s);}
+ Model out;return hasTime(m,1,0)&&hasTime(m,1,690000)&&hasTime(m,2,0)&&
+  hasTime(m,2,1090000)&&decode(encode(m),out);
+}
+static_assert(invalidBridgeAndReload(),"invalid bridge and reload retain observed anchors without original-edge claims");
+static_assert(bootSides(),"both actual reboot sides retained with monotonic reset");
+static_assert(untouchedAndLegacy(),"64 unchanged; both old schemas exact byte roundtrip");
+static_assert(retainedDischarge(false),"three hours 10s preserve observed EDV2 VDQ zero plateau anchors and raw recent32");
+static_assert(retainedDischarge(true),"three hours mixed 60s/10s preserve observation anchors and recent32");
+static_assert(hostileEdges(),"bounded repeated boot/status changes deterministic observation-anchor priority");
+static_assert(invalidNoiseAnchors(),"invalid telemetry cannot replace first valid observation anchors");
+
 static_assert(physicalLowRecovery(),"bad SOC physical-low reboot then charge freezes evidence");
 constexpr bool readbackFaults() {
  Model m;m.armed=true;const Blob expected=encode(m);
@@ -106,7 +205,7 @@ constexpr bool readbackFaults() {
 static_assert(readbackFaults(),"readback exact length CRC and intended bytes");
 static_assert(finalize(),"zero continues recording until two valid charging samples");
 static_assert(timing(),"cadence invalid low zero threshold");
-static_assert(roundtrip(),"ring crc power loss canonical schema recovery");
+static_assert(roundtrip(),"bounded history crc power loss canonical schema recovery");
 '''
         with tempfile.TemporaryDirectory() as td:
             source=Path(td)/'trace.cpp'; source.write_text(code)

@@ -29,7 +29,58 @@ struct Model {
     constexpr bool due(uint64_t now) const {
         return armed && (!sampled || now-lastSampleMs >= (lastLow?10000ULL:60000ULL));
     }
+    // Drop one old observation, never synthesize or reorder records. The newest
+    // 31 existing rows plus the incoming row remain an exact 32-sample tail.
+    // Recomputed priorities need no new persisted state (schema 1/2 unchanged).
+    constexpr void compactOldest() {
+        std::array<uint8_t,Capacity> priority{};
+        priority[0]=255; // The first observation is never evicted.
+        bool edv=false, zero=false, vdq=false, plateau=false, departed=false;
+        for(size_t i=0;i<count;++i){
+            const auto& s=at(i);uint8_t rank=0;
+            // These are first observed values, NOT reconstructed original edges.
+            // Keeping each anchor itself makes the selection stable after gaps
+            // are removed and after schema-1/2 reload (which has no gap metadata).
+            if(s.flags&Valid){
+                if(!edv && (s.operationStatus&0x0008)){rank=240;edv=true;}
+                if(!zero && s.soc==0){if(rank<230)rank=230;zero=true;}
+                if(!vdq && !(s.operationStatus&0x0010)){if(rank<220)rank=220;vdq=true;}
+                if(!plateau && s.soc==96){if(rank<211)rank=211;plateau=true;}
+                else if(plateau && !departed && s.soc!=96){if(rank<210)rank=210;departed=true;}
+            }
+            if(rank>priority[i])priority[i]=rank;
+            // The preceding retained observation is only best-effort context;
+            // it may be invalid or separated by already discarded samples.
+            if(rank && i && priority[i-1]<140)priority[i-1]=140;
+            if(i && at(i-1).boot!=s.boot){
+                if(priority[i-1]<180)priority[i-1]=180;
+                if(priority[i]<180)priority[i]=180;
+            }
+        }
+        // Priority: first row > first valid EDV2=1 > first valid SOC=0 > first
+        // valid VDQ=0 > first valid 96 > first valid non-96 after that 96 >
+        // boot sides > best-effort preceding context > ordinary observations.
+        // Never call these anchors precise transition pairs: sparse legacy data
+        // cannot prove original adjacency, and an initially set bit is only a
+        // window-start observation. Anchor count is bounded independently of
+        // repeated changes; excess boot boundaries/context lose to anchors.
+        // Among equal priorities remove the most crowded point. Equal spacing
+        // evicts the newer old point, retaining early historical coverage.
+        size_t victim=1;uint64_t bestGap=UINT64_MAX;
+        for(size_t i=1;i<=Capacity/2;++i){
+            const auto& before=at(i-1);const auto& after=at(i+1);
+            const uint64_t gap=before.boot==after.boot ? after.monotonicMs-before.monotonicMs : 0;
+            if(priority[i]<priority[victim] ||
+               (priority[i]==priority[victim] && gap<=bestGap)){
+                victim=i;bestGap=gap;
+            }
+        }
+        const size_t start=(head+Capacity-count)%Capacity;
+        for(size_t i=victim;i+1<count;++i)rows[(start+i)%Capacity]=rows[(start+i+1)%Capacity];
+        head=(head+Capacity-1)%Capacity;--count;
+    }
     constexpr void append(Sample s) {
+        if(count==Capacity)compactOldest();
         s.boot=boot;rows[head]=s;head=(head+1)%Capacity;if(count<Capacity)++count;
         if(s.flags&Valid){
             if((s.soc<=5 || s.voltageMv<=3500) && (s.currentMa<0 || s.averageCurrentMa<0))lowSeen=true;
