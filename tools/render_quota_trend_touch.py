@@ -28,15 +28,19 @@ for panel,(mode,span,points,chosen) in enumerate(fixtures):
         d.text((x+17,y+18),'2.5K',font=f(13),fill=FG)
     d.text((px,py-1),'100%',font=f(12),fill=FG);d.text((px+8,py+44),'0%',font=f(12),fill=FG)
     d.line((px+32,py+6,px+32,py+54),fill=GRAY,width=2);d.line((px+32,py+54,px+428,py+54),fill=GRAY,width=2)
+    if chosen>=0:
+        x=px+32+points[chosen][0]*396//span
+        for y in range(6,55,6):d.ellipse((x,py+y,x+1,py+y+1),fill='#5d4e2a')
     previous=None
     for i,(t,bp,gap) in enumerate(points):
         x=px+32+t*396//span;y=py+54-bp*48//10000
         if previous and not gap:d.line((*previous,x,y),fill=CYAN,width=2)
         d.ellipse((x-2,y-2,x+1,y+1),fill=GOLD if gap else CYAN)
-        if i==chosen:
-            d.line((x,max(py+2,y-7),x,min(py+58,y+7)),fill=GOLD,width=2)
-            d.ellipse((x-4,y-4,x+4,y+4),outline=GOLD,width=2)
         previous=(x,y)
+    if chosen>=0:
+        t,bp,_=points[chosen];x=px+32+t*396//span;y=py+54-bp*48//10000
+        d.ellipse((x-4,y-4,x+4,y+4),fill=BG)
+        d.ellipse((x-2,y-2,x+2,y+2),fill=GOLD)
     hint=mode+' --'
     if chosen>=0:
         t,bp,_=points[chosen]
@@ -48,5 +52,5 @@ for panel,(mode,span,points,chosen) in enumerate(fixtures):
     d.text((px+12,438),"10/18  2.5K tokens / observed",font=f(12),fill=FG)
     if panel:d.line((ox,0,ox,479),fill=GRAY)
 OUT.mkdir(parents=True,exist_ok=True)
-im.save(OUT/'trend-touch-preview.png')
-print(OUT/'trend-touch-preview.png')
+im.save(OUT/'trend-cursor77-preview.png')
+print(OUT/'trend-cursor77-preview.png')

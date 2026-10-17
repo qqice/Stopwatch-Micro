@@ -104,7 +104,19 @@ static_assert(gestures(),"plot-origin gesture exclusivity, release and lifecycle
         self.assertLessEqual(62+16,80) # Selection hint wholly inside chart.
         self.assertLessEqual(300+80,380) # Independent token details below chart.
         self.assertIn('mosaico_trend::connects',UI)
-        self.assertIn('dot.border_width = 2',UI)
+        draw=UI.split('void CodexMicroView::historyChartEvent(',1)[1].split('void CodexMicroView::selectTrendAt(',1)[0]
+        self.assertIn('for (int y = 6; y <= 54; y += 6)',draw)
+        self.assertIn('dot.bg_opa = LV_OPA_40',draw)
+        self.assertLess(draw.index('const lv_area_t guide'),draw.index('for (size_t i = 0; i < count; ++i)'))
+        self.assertIn('const lv_area_t halo',draw)
+        self.assertIn('const lv_area_t point',draw)
+        self.assertNotIn('dot.border_width',draw)
+        # Guide dots and the 9px/5px point stay inside the 440x80 chart,
+        # including real 0% and 100% points at both time-axis ends.
+        for x in (32,428):
+            for y in (6,54):
+                self.assertTrue(0<=x-4<x+4<440)
+                self.assertTrue(0<=y-4<y+4<62)
 
 if __name__=='__main__':unittest.main(verbosity=2)
 

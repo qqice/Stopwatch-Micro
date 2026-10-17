@@ -1711,6 +1711,17 @@ void CodexMicroView::historyChartEvent(lv_event_t* event) {
         (GetHAL().millis() - trend.receivedAtMs) / 1000U;
     const uint32_t color = age > 600 ? dimCachedColor(Cyan) : Cyan;
     lv_draw_rect_dsc_t dot; lv_draw_rect_dsc_init(&dot); dot.bg_opa = LV_OPA_COVER; dot.radius = LV_RADIUS_CIRCLE;
+    const size_t chosen = mosaico_trend::selected(points, count, start, trend.endEpoch, self->_trendTouch.epoch);
+    if (chosen != mosaico_trend::NoPoint) {
+        // A subdued dotted time guide sits behind the data, never over labels.
+        const auto p = mosaico_trend::position(points[chosen], start, trend.endEpoch);
+        dot.bg_color = lv_color_hex(Gold); dot.bg_opa = LV_OPA_40;
+        for (int y = 6; y <= 54; y += 6) {
+            const lv_area_t guide = {area.x1+p.x, area.y1+y, area.x1+p.x+1, area.y1+y+1};
+            lv_draw_rect(layer, &dot, &guide);
+        }
+        dot.bg_opa = LV_OPA_COVER;
+    }
     for (size_t i = 0; i < count; ++i) {
         const auto p = mosaico_trend::position(points[i], start, trend.endEpoch);
         if (!p.valid) continue;
@@ -1722,14 +1733,15 @@ void CodexMicroView::historyChartEvent(lv_event_t* event) {
         const lv_area_t spot = {area.x1+p.x-2, area.y1+p.y-2, area.x1+p.x+1, area.y1+p.y+1};
         lv_draw_rect(layer, &dot, &spot);
     }
-    const size_t chosen = mosaico_trend::selected(points, count, start, trend.endEpoch, self->_trendTouch.epoch);
     if (chosen != mosaico_trend::NoPoint) {
         const auto p = mosaico_trend::position(points[chosen], start, trend.endEpoch);
-        drawLine(p.x, std::max(2, p.y - 7), p.x, std::min(58, p.y + 7), Gold);
-        dot.bg_opa = LV_OPA_TRANSP; dot.border_opa = LV_OPA_COVER;
-        dot.border_width = 2; dot.border_color = lv_color_hex(Gold);
-        const lv_area_t spot = {area.x1+p.x-4, area.y1+p.y-4, area.x1+p.x+4, area.y1+p.y+4};
-        lv_draw_rect(layer, &dot, &spot);
+        // Black separation keeps the solid point legible at line intersections.
+        dot.bg_color = lv_color_hex(0); dot.bg_opa = LV_OPA_COVER;
+        const lv_area_t halo = {area.x1+p.x-4, area.y1+p.y-4, area.x1+p.x+4, area.y1+p.y+4};
+        lv_draw_rect(layer, &dot, &halo);
+        dot.bg_color = lv_color_hex(Gold);
+        const lv_area_t point = {area.x1+p.x-2, area.y1+p.y-2, area.x1+p.x+2, area.y1+p.y+2};
+        lv_draw_rect(layer, &dot, &point);
     }
 }
 void CodexMicroView::selectTrendAt(int localX) {
