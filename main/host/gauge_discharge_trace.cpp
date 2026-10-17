@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "gauge_discharge_trace.h"
 #include "gauge_discharge_trace_model.h"
+#include "gauge_trace_storage_codec.h"
 #include "system_clock.h"
 #include <hal/hal.h>
 #include <ota/mosaico_ota.h>
@@ -18,6 +19,7 @@ std::mutex exportMutex;
 struct Storage {
     Model model, staging, exportSnapshot;
     Blob ioBlob{}, verifyBlob{};
+    StorageCodec::Packed packedIo{}, packedVerify{};
     char traceLine[640]{}; // Protected by exportMutex through emit callbacks.
 };
 Storage* storage=nullptr;
@@ -30,6 +32,7 @@ enum class Command { None, Arm, Stop, Clear, Checkpoint };
 enum class FailureStage : uint8_t { None, ReadOpen, Load, WriteOpen, Set, Commit, Reopen, Read, Length, Crc, Compare };
 esp_err_t lastNvsError=ESP_OK;
 FailureStage failureStage=FailureStage::None;
+size_t encodedBytes=0;
 void failure(esp_err_t error,FailureStage stage){lastNvsError=error;failureStage=stage;}
 Command pending=Command::None;
 uint64_t lastWriteAttempt=0;
@@ -48,15 +51,24 @@ bool ensureStorage(uint64_t now) {
     allocationError=false;storageError=false;return true;
 }
 void load() {
-    auto& model=storage->model;auto& ioBlob=storage->ioBlob;
-    nvs_handle_t h;ioBlob={};size_t size=ioBlob.size();
+    auto& model=storage->model;auto& ioBlob=storage->ioBlob;auto& packed=storage->packedIo;
+    nvs_handle_t h;ioBlob={};size_t size=0;
     esp_err_t err=nvs_open(Namespace,NVS_READONLY,&h);
     FailureStage stage=FailureStage::ReadOpen;
-    if(err==ESP_OK){stage=FailureStage::Load;err=nvs_get_blob(h,Key,ioBlob.data(),&size);nvs_close(h);}
     if(err==ESP_OK){
-        if(size!=ioBlob.size()){corrupt=true;failure(ESP_FAIL,FailureStage::Length);}
-        else if(get(ioBlob,BlobSize-4,4)!=crc(ioBlob)){corrupt=true;failure(ESP_FAIL,FailureStage::Crc);}
-        else if(!decode(ioBlob,model)){corrupt=true;failure(ESP_FAIL,FailureStage::Load);}
+        stage=FailureStage::Load;err=nvs_get_blob(h,Key,nullptr,&size);
+        if(err==ESP_OK){
+            if(size<StorageCodec::HeaderSize || size>BlobSize){stage=FailureStage::Length;err=ESP_FAIL;}
+            else err=nvs_get_blob(h,Key,packed.bytes.data(),&size);
+        }
+        nvs_close(h);
+    }
+    if(err==ESP_OK){
+        packed.size=size;encodedBytes=size;
+        const auto result=StorageCodec::unpack(packed,ioBlob);
+        if(result!=StorageCodec::Error::None){
+            corrupt=true;failure(ESP_FAIL,result==StorageCodec::Error::Length?FailureStage::Length:result==StorageCodec::Error::Crc?FailureStage::Crc:FailureStage::Load);
+        }else if(!decode(ioBlob,model)){corrupt=true;failure(ESP_FAIL,FailureStage::Load);}
     }
     else if(err!=ESP_ERR_NVS_NOT_FOUND){corrupt=true;storageError=true;failure(err,stage);}
     // A session number is only reused when no evidence from that boot was saved.
@@ -66,14 +78,15 @@ void load() {
 }
 bool save(const Model& value) {
     auto& ioBlob=storage->ioBlob;auto& verifyBlob=storage->verifyBlob;
+    auto& packed=storage->packedIo;auto& readback=storage->packedVerify;
     if(otaBlocked())return false;
     nvs_handle_t h;
     FailureStage stage=FailureStage::WriteOpen;
     esp_err_t err=nvs_open(Namespace,NVS_READWRITE,&h);
     if(err==ESP_OK){
-        ioBlob=encode(value);
+        ioBlob=encode(value);StorageCodec::pack(ioBlob,packed);encodedBytes=packed.size;
         if(otaBlocked()){nvs_close(h);return false;}
-        stage=FailureStage::Set;err=nvs_set_blob(h,Key,ioBlob.data(),ioBlob.size());
+        stage=FailureStage::Set;err=nvs_set_blob(h,Key,packed.bytes.data(),packed.size);
         if(err==ESP_OK){stage=FailureStage::Commit;err=nvs_commit(h);}
         nvs_close(h);
         // Only a successful commit acknowledgement permits a durable-success claim.
@@ -81,13 +94,15 @@ bool save(const Model& value) {
         if(err==ESP_OK){
             stage=FailureStage::Reopen;err=nvs_open(Namespace,NVS_READONLY,&h);
             if(err==ESP_OK){
-                verifyBlob={};size_t size=verifyBlob.size();
-                stage=FailureStage::Read;err=nvs_get_blob(h,Key,verifyBlob.data(),&size);
+                verifyBlob={};size_t size=readback.bytes.size();
+                stage=FailureStage::Read;err=nvs_get_blob(h,Key,readback.bytes.data(),&size);
                 nvs_close(h);
                 if(err==ESP_OK){
-                    if(size!=verifyBlob.size()){stage=FailureStage::Length;err=ESP_FAIL;}
-                    else if(get(verifyBlob,BlobSize-4,4)!=crc(verifyBlob)){stage=FailureStage::Crc;err=ESP_FAIL;}
-                    else if(!verifiedReadback(ioBlob,verifyBlob,size)){stage=FailureStage::Compare;err=ESP_FAIL;}
+                    readback.size=size;
+                    const auto result=StorageCodec::unpack(readback,verifyBlob);
+                    if(result!=StorageCodec::Error::None){
+                        stage=result==StorageCodec::Error::Length?FailureStage::Length:result==StorageCodec::Error::Crc?FailureStage::Crc:FailureStage::Compare;err=ESP_FAIL;
+                    }else if(!verifiedReadback(ioBlob,verifyBlob,BlobSize)){stage=FailureStage::Compare;err=ESP_FAIL;}
                 }
             }
         }
@@ -98,12 +113,12 @@ bool save(const Model& value) {
 Sample convert(const Hal::BatteryTelemetry& t,uint64_t now) {
     Sample s;s.monotonicMs=now;
     const auto clock=MosaicoClock::snapshot();
-    s.flags=(t.valid?Valid:0)|(t.capacityValid?CapacityValid:0)|(t.temperatureValid?TemperatureValid:0)|(clock.valid?EpochValid:0)|(t.nominalConfigured?NominalConfigured:0);
+    s.flags=(t.valid?Valid:0)|(t.capacityValid?CapacityValid:0)|(t.temperatureValid?TemperatureValid:0)|(clock.valid?EpochValid:0)|(t.nominalConfigured?NominalConfigured:0)|(t.rawCoulombValid?RawCoulombValid:0);
     s.epoch=clock.valid?uint64_t(clock.epoch):0;s.soc=t.reportedSoc;s.voltageMv=t.voltageMv;
     s.currentMa=t.currentMa;s.averageCurrentMa=t.averageCurrentMa;s.remainingMah=t.remainingMah;
     s.fullMah=t.fullMah;s.designMah=t.designMah;s.operationStatus=t.operationStatus;
     s.batteryStatus=t.batteryStatus;s.stateOfHealth=t.stateOfHealth;s.cycleCount=t.cycleCount;
-    s.temperatureDeciK=t.temperatureDeciK;return s;
+    s.temperatureDeciK=t.temperatureDeciK;s.rawCoulombMah=t.rawCoulombMah;return s;
 }
 bool request(Command c){
     std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
@@ -116,20 +131,20 @@ bool request(Command c){
 }
 void emitStatus(EmitLine emit,void* ctx,const Model& m,bool isReady,bool bad,bool err,Command cmd,uint64_t writeMs){
     auto& traceLine=storage->traceLine;
-    std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_status\",\"schema\":1,\"ready\":%u,\"armed\":%u,\"pending\":%u,\"corrupt\":%u,\"storage_error\":%u,\"count\":%u,\"capacity\":64,\"boot\":%lu,\"dirty\":%u,\"last_write_attempt_ms\":%llu,\"low_seen\":%u,\"finalized_charge_after_low\":%u,\"storage_external\":1,\"storage_bytes\":%u,\"allocation_error\":%u,\"internal_free\":%u,\"internal_largest\":%u}",unsigned(isReady),unsigned(m.armed),unsigned(cmd),unsigned(bad),unsigned(err),unsigned(m.count),static_cast<unsigned long>(m.boot),unsigned(m.dirty),static_cast<unsigned long long>(writeMs),unsigned(m.lowSeen),unsigned(m.finalizedChargeAfterLow),unsigned(sizeof(Storage)),unsigned(allocationError),unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)));emit(traceLine,ctx);
+    std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_status\",\"schema\":2,\"ready\":%u,\"armed\":%u,\"pending\":%u,\"corrupt\":%u,\"storage_error\":%u,\"count\":%u,\"capacity\":64,\"boot\":%lu,\"dirty\":%u,\"last_write_attempt_ms\":%llu,\"low_seen\":%u,\"finalized_charge_after_low\":%u,\"storage_external\":1,\"storage_bytes\":%u,\"allocation_error\":%u,\"internal_free\":%u,\"internal_largest\":%u}",unsigned(isReady),unsigned(m.armed),unsigned(cmd),unsigned(bad),unsigned(err),unsigned(m.count),static_cast<unsigned long>(m.boot),unsigned(m.dirty),static_cast<unsigned long long>(writeMs),unsigned(m.lowSeen),unsigned(m.finalizedChargeAfterLow),unsigned(sizeof(Storage)),unsigned(allocationError),unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)));emit(traceLine,ctx);
 }
-void emitNvsStatus(EmitLine emit,void* ctx,esp_err_t error,FailureStage stage){
+void emitNvsStatus(EmitLine emit,void* ctx,esp_err_t error,FailureStage stage,size_t encoded){
     auto& traceLine=storage->traceLine;
     nvs_stats_t stats{};
     const esp_err_t statsError=nvs_get_stats(nullptr,&stats);
     if(statsError!=ESP_OK)stats={}; // Never present partial counts as valid.
-    std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_nvs\",\"last_nvs_error\":%ld,\"failure_stage\":%u,\"stats_error\":%ld,\"total\":%u,\"used\":%u,\"free\":%u,\"available\":%u,\"namespaces\":%u}",static_cast<long>(error),unsigned(stage),static_cast<long>(statsError),unsigned(stats.total_entries),unsigned(stats.used_entries),unsigned(stats.free_entries),unsigned(stats.available_entries),unsigned(stats.namespace_count));
+    std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_nvs\",\"last_nvs_error\":%ld,\"failure_stage\":%u,\"stats_error\":%ld,\"total\":%u,\"used\":%u,\"free\":%u,\"available\":%u,\"namespaces\":%u,\"encoded_bytes\":%u}",static_cast<long>(error),unsigned(stage),static_cast<long>(statsError),unsigned(stats.total_entries),unsigned(stats.used_entries),unsigned(stats.free_entries),unsigned(stats.available_entries),unsigned(stats.namespace_count),unsigned(encoded));
     emit(traceLine,ctx);
 }
 void emitUnavailable(EmitLine emit,void* ctx,bool error,bool allocationFailed){
     // Allocation-failure-only small stack fallback; normal lines live in PSRAM.
     char line[288];
-    std::snprintf(line,sizeof(line),"{\"type\":\"gauge_trace_status\",\"schema\":1,\"ready\":0,\"armed\":0,\"pending\":0,\"storage_error\":%u,\"storage_external\":0,\"storage_bytes\":%u,\"allocation_error\":%u,\"internal_free\":%u,\"internal_largest\":%u}",unsigned(error),unsigned(sizeof(Storage)),unsigned(allocationFailed),unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)));
+    std::snprintf(line,sizeof(line),"{\"type\":\"gauge_trace_status\",\"schema\":2,\"ready\":0,\"armed\":0,\"pending\":0,\"storage_error\":%u,\"storage_external\":0,\"storage_bytes\":%u,\"allocation_error\":%u,\"internal_free\":%u,\"internal_largest\":%u}",unsigned(error),unsigned(sizeof(Storage)),unsigned(allocationFailed),unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)));
     emit(line,ctx);
 }
 
@@ -173,41 +188,41 @@ void status(EmitLine emit,void* ctx){
     std::unique_lock<std::mutex> exportLock(exportMutex,std::try_to_lock);
     if(!exportLock){emit("{\"type\":\"gauge_trace_status\",\"busy\":1}",ctx);return;}
     bool r,b,e,allocated,allocationFailed;Command cmd;uint64_t writeMs;
-    esp_err_t nvsError;FailureStage stage;
+    esp_err_t nvsError;FailureStage stage;size_t encoded;
     {
         std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
         if(!lock){emit("{\"type\":\"gauge_trace_status\",\"busy\":1}",ctx);return;}
         allocated=storage!=nullptr;allocationFailed=allocationError;
         if(allocated)storage->exportSnapshot=storage->model;
         r=ready;b=corrupt;e=storageError;cmd=pending;writeMs=lastWriteAttempt;
-        nvsError=lastNvsError;stage=failureStage;
+        nvsError=lastNvsError;stage=failureStage;encoded=encodedBytes;
     }
     if(!allocated){emitUnavailable(emit,ctx,e,allocationFailed);return;}
     emitStatus(emit,ctx,storage->exportSnapshot,r,b,e,cmd,writeMs);
-    emitNvsStatus(emit,ctx,nvsError,stage);
+    emitNvsStatus(emit,ctx,nvsError,stage,encoded);
 }
 void exportRows(EmitLine emit,void* ctx){
     if(!emit)return;
     std::unique_lock<std::mutex> exportLock(exportMutex,std::try_to_lock);
     if(!exportLock){emit("{\"type\":\"gauge_trace_export\",\"busy\":1}",ctx);return;}
     bool r,b,e,allocated,allocationFailed;Command cmd;uint64_t writeMs;
-    esp_err_t nvsError;FailureStage stage;
+    esp_err_t nvsError;FailureStage stage;size_t encoded;
     {
         std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
         if(!lock){emit("{\"type\":\"gauge_trace_export\",\"busy\":1}",ctx);return;}
         allocated=storage!=nullptr;allocationFailed=allocationError;
         if(allocated)storage->exportSnapshot=storage->model;
         r=ready;b=corrupt;e=storageError;cmd=pending;writeMs=lastWriteAttempt;
-        nvsError=lastNvsError;stage=failureStage;
+        nvsError=lastNvsError;stage=failureStage;encoded=encodedBytes;
     }
     if(!allocated){emitUnavailable(emit,ctx,e,allocationFailed);return;}
     auto& copy=storage->exportSnapshot;auto& traceLine=storage->traceLine;
     emitStatus(emit,ctx,copy,r,b,e,cmd,writeMs);
-    emitNvsStatus(emit,ctx,nvsError,stage);
-    emit("{\"type\":\"gauge_trace_schema\",\"schema\":1,\"flags\":\"1=valid,2=capacityValid,4=temperatureValid,8=epochValid,16=nominalConfigured\",\"current_sign\":\"positive=charging\",\"temperature_unit\":\"0.1K\",\"order\":\"oldest_first\"}",ctx);
+    emitNvsStatus(emit,ctx,nvsError,stage,encoded);
+    emit("{\"type\":\"gauge_trace_schema\",\"schema\":2,\"flags\":\"1=valid,2=capacityValid,4=temperatureValid,8=epochValid,16=nominalConfigured,32=rawCoulombValid\",\"current_sign\":\"positive=charging\",\"temperature_unit\":\"0.1K\",\"order\":\"oldest_first\"}",ctx);
     for(size_t i=0;i<copy.count;++i){
         const auto& s=copy.at(i);
-        std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_row\",\"i\":%u,\"boot\":%lu,\"monotonic_ms\":%llu,\"epoch\":%llu,\"flags\":%u,\"soc\":%u,\"voltage_mv\":%u,\"current_ma\":%d,\"average_current_ma\":%d,\"remaining_mah\":%u,\"full_mah\":%u,\"design_mah\":%u,\"operation_status\":%u,\"battery_status\":%u,\"state_of_health\":%u,\"cycle_count\":%u,\"temperature_deci_k\":%u}",unsigned(i),static_cast<unsigned long>(s.boot),static_cast<unsigned long long>(s.monotonicMs),static_cast<unsigned long long>(s.epoch),unsigned(s.flags),unsigned(s.soc),unsigned(s.voltageMv),int(s.currentMa),int(s.averageCurrentMa),unsigned(s.remainingMah),unsigned(s.fullMah),unsigned(s.designMah),unsigned(s.operationStatus),unsigned(s.batteryStatus),unsigned(s.stateOfHealth),unsigned(s.cycleCount),unsigned(s.temperatureDeciK));emit(traceLine,ctx);
+        std::snprintf(traceLine,sizeof(traceLine),"{\"type\":\"gauge_trace_row\",\"i\":%u,\"boot\":%lu,\"monotonic_ms\":%llu,\"epoch\":%llu,\"flags\":%u,\"soc\":%u,\"voltage_mv\":%u,\"current_ma\":%d,\"average_current_ma\":%d,\"remaining_mah\":%u,\"full_mah\":%u,\"design_mah\":%u,\"operation_status\":%u,\"battery_status\":%u,\"state_of_health\":%u,\"cycle_count\":%u,\"temperature_deci_k\":%u,\"raw_coulomb_mah\":%u}",unsigned(i),static_cast<unsigned long>(s.boot),static_cast<unsigned long long>(s.monotonicMs),static_cast<unsigned long long>(s.epoch),unsigned(s.flags),unsigned(s.soc),unsigned(s.voltageMv),int(s.currentMa),int(s.averageCurrentMa),unsigned(s.remainingMah),unsigned(s.fullMah),unsigned(s.designMah),unsigned(s.operationStatus),unsigned(s.batteryStatus),unsigned(s.stateOfHealth),unsigned(s.cycleCount),unsigned(s.temperatureDeciK),unsigned(s.rawCoulombMah));emit(traceLine,ctx);
     }
 }
 }

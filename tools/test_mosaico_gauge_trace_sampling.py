@@ -29,14 +29,17 @@ struct Fake {
   ++reads;if(reg==fail)return false;
   switch(reg){case 0x2c:out=4;break;case 0x08:out=3803;break;case 0x0c:case 0x14:out=70;break;
    case 0x10:out=3;break;case 0x12:case 0x3c:out=65;break;case 0x3a:out=0xa6;break;
-   case 0x0a:out=0x5028;break;case 0x2e:out=100;break;case 0x2a:out=11;break;case 0x06:out=2982;break;default:return false;}
+   case 0x0a:out=0x5028;break;case 0x2e:out=100;break;case 0x2a:out=11;break;case 0x06:out=2982;break;case 0x22:out=123;break;default:return false;}
   return true;
  }
 '''+sample+r'''
 };
 constexpr bool cases(){
  Fake good;good.sample_battery_locked(true);
- if(!good.battery_telemetry.valid||!good.battery_telemetry.capacityValid||!good.battery_telemetry.nominalConfigured||!good.battery_telemetry.temperatureValid||good.battery_telemetry.temperatureDeciK!=2982||good.reads!=12)return false;
+ if(!good.battery_telemetry.valid||!good.battery_telemetry.capacityValid||!good.battery_telemetry.nominalConfigured||!good.battery_telemetry.temperatureValid||good.battery_telemetry.temperatureDeciK!=2982||!good.battery_telemetry.rawCoulombValid||good.battery_telemetry.rawCoulombMah!=123||good.reads!=13)return false;
+ good.sample_battery_locked();if(good.reads!=13)return false;
+ Fake raw;raw.fail=0x22;raw.sample_battery_locked(true);
+ if(!raw.battery_telemetry.valid||!raw.battery_telemetry.capacityValid||!raw.battery_telemetry.nominalConfigured||!raw.battery_telemetry.temperatureValid||raw.battery_telemetry.rawCoulombValid||raw.battery_telemetry.rawCoulombMah||raw.reads!=13)return false;
  Fake temp;temp.fail=0x06;temp.sample_battery_locked(true);
  if(!temp.battery_telemetry.valid||!temp.battery_telemetry.capacityValid||!temp.battery_telemetry.nominalConfigured||temp.battery_telemetry.temperatureValid||temp.battery_telemetry.temperatureDeciK)return false;
  Fake core;core.fail=0x08;core.sample_battery_locked(true);if(core.battery_telemetry.valid||!core.battery_telemetry.temperatureValid)return false;

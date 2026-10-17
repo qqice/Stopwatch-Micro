@@ -18,7 +18,7 @@ if(MOSAICO_BOARD)
     endif()
     list(APPEND APP_SRCS "apps/app_codex_micro/view/view_mosaico.cpp"
         "apps/app_codex_micro/view/dot_widgets.cpp" "host/quota_monitor.cpp" "ota/mosaico_ota.cpp"
-        "debug/mosaico_rx_observer.cpp" "debug/mosaico_wifi_rx_observer.cpp" "debug/mosaico_rx_ingress.cpp" "main_idle_wait.cpp" "host/touch_sleep.cpp" "host/mosaico_display_settings.cpp" "host/mosaico_session_monitor.cpp" "host/standby_sleep.cpp" "host/powerbank_keepalive.cpp" "host/gauge_discharge_trace.cpp")
+        "debug/mosaico_rx_observer.cpp" "debug/mosaico_wifi_rx_observer.cpp" "debug/mosaico_rx_ingress.cpp" "main_idle_wait.cpp" "host/touch_sleep.cpp" "host/mosaico_display_settings.cpp" "host/mosaico_session_monitor.cpp" "host/standby_sleep.cpp" "host/powerbank_keepalive.cpp" "host/gauge_discharge_trace.cpp" "hal/mosaico/mosaico_nand_probe.cpp")
     set(PLATFORM_SRCS "hal/hal.cpp" "hal/mosaico/hal_mosaico.cpp" "hal/mosaico/bt_config.c" "hal/mosaico/usb_console.c"
         "hal/ble/codex_micro_ble.cpp" "hal/ble/hid_gatt_compat.cpp"
         "hal/utils/button/Button_Class.cpp" "hal/utils/settings/settings.cc")

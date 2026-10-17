@@ -14,6 +14,7 @@
 #include <host/powerbank_keepalive.h>
 #include <host/touch_sleep.h>
 #include <hal/mosaico/usb_console.h>
+#include <hal/mosaico/mosaico_nand_probe.h>
 #include <main_idle_wait.h>
 #include <host/uart_fifo_recovery_model.h>
 #include <host/mosaico_session_monitor.h>
@@ -1347,13 +1348,13 @@ void SerialDebug::handleLine(char* line)
     }
     if (std::strcmp(command, "gauge") == 0) {
         const auto battery = GetHAL().batteryTelemetry(true);
-        char details[260]{};
+        char details[300]{};
         std::snprintf(details, sizeof(details),
-            "valid=%d soc=%u mv=%u current_ma=%d avg_ma=%d rm_mah=%u fcc_mah=%u design_mah=%u capacity_valid=%d nominal_consistent=%d op_status=%04x battery_status=%04x soh=%u cycles=%u",
+            "valid=%d soc=%u mv=%u current_ma=%d avg_ma=%d rm_mah=%u fcc_mah=%u design_mah=%u capacity_valid=%d nominal_consistent=%d op_status=%04x battery_status=%04x soh=%u cycles=%u raw_cc=%u raw_cc_valid=%u",
             battery.valid, battery.reportedSoc, battery.voltageMv, battery.currentMa,
             battery.averageCurrentMa, battery.remainingMah, battery.fullMah, battery.designMah,
             battery.capacityValid, battery.nominalConfigured, battery.operationStatus, battery.batteryStatus,
-            battery.stateOfHealth, battery.cycleCount);
+            battery.stateOfHealth, battery.cycleCount, battery.rawCoulombMah, unsigned(battery.rawCoulombValid));
         result("gauge", battery.valid ? "PASS" : "FAIL", details);
         return;
     }
@@ -1416,10 +1417,33 @@ void SerialDebug::handleLine(char* line)
         result("gauge-trace",queued?"PASS":"FAIL",queued?"queued=1 persisted=0 check_status_pending0=1 gauge_parameter_writes=0":"queued=0 reason=busy_not_ready_or_refused");
         return;
     }
+    if (std::strcmp(command,"nand-probe")==0) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        uint32_t page=0,column=0,length=0;
+        const bool reading=action&&!std::strcmp(action,"page");
+        if(action&&!reading){result(command,"FAIL","expected=noargs_or_page_row_column_length readonly=1");return;}
+        if(reading){
+            const char* a=::strtok_r(nullptr," \t",&save);const char* b=::strtok_r(nullptr," \t",&save);const char* c=::strtok_r(nullptr," \t",&save);
+            if(!parseUnsignedStrict(a,0,65535,page)||!parseUnsignedStrict(b,0,2111,column)||!parseUnsignedStrict(c,1,128,length)||column+length>2112){result(command,"FAIL","reason=bounds readonly=1");return;}
+        }
+        if(::strtok_r(nullptr," \t",&save)){result(command,"FAIL","reason=extra_arguments");return;}
+        const auto power=GetNetworkQuota().powerStats();const auto ble=GetCodexMicroBle().diagnostics();
+        if(!power.locked||power.phase!=2||power.wifiRunning||ble.connected||ble.advertising||MosaicoOta::busy()||MosaicoOta::healthPending()){
+            result(command,"FAIL","reason=requires_locked_radios_off_no_ota readonly=1");return;
+        }
+        // Single main-loop RPC writer; no large automatic buffer on the constrained main stack.
+        static uint8_t bytes[128]{};static char report[512]{};
+        const auto probe=reading?MosaicoNandProbe::readChunk(page,static_cast<uint16_t>(column),bytes,length):MosaicoNandProbe::probe();
+        const bool ok=probe.error==ESP_OK&&probe.cleanupError==ESP_OK;
+        int used=std::snprintf(report,sizeof(report),"readonly=1 error=%ld cleanup=%ld stage=%u id=%02x%02x repeat=%02x%02x consistent=%u exact=%u a0=%02x b0=%02x c0=%02x bytes=%u row=%lu column=%lu data=",
+            static_cast<long>(probe.error),static_cast<long>(probe.cleanupError),unsigned(probe.stage),probe.id[0],probe.id[1],probe.repeatId[0],probe.repeatId[1],unsigned(probe.consistent),unsigned(probe.exactModelVerified),probe.protectionA0,probe.configB0,probe.statusC0,unsigned(probe.bytesRead),static_cast<unsigned long>(page),static_cast<unsigned long>(column));
+        if(ok&&reading&&used>0)for(size_t i=0;i<probe.bytesRead&&size_t(used)+2<sizeof(report);++i)used+=std::snprintf(report+used,sizeof(report)-size_t(used),"%02x",bytes[i]);
+        result(command,ok?"PASS":"FAIL",report);return;
+    }
     if (std::strcmp(command,"gauge-profile-field")==0) {
         const char* value=::strtok_r(nullptr," \t",&save); uint32_t index=0;
-        if(!parseUnsignedStrict(value,0,63,index)||::strtok_r(nullptr," \t",&save)) {
-            result(command,"FAIL","expected=index_0..63 readonly_cached=1");return;
+        if(!parseUnsignedStrict(value,0,65,index)||::strtok_r(nullptr," \t",&save)) {
+            result(command,"FAIL","expected=index_0..65 readonly_cached=1");return;
         }
         char details[192]{};
         const bool ok=GetHAL().gaugeThresholdAuditField(index,details,sizeof(details));

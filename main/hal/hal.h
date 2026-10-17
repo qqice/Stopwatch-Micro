@@ -129,6 +129,8 @@ public:
         uint16_t cycleCount = 0;
         uint16_t temperatureDeciK = 0;
         bool temperatureValid = false;
+        uint16_t rawCoulombMah = 0;
+        bool rawCoulombValid = false;
     };
 
     struct MosaicoClockDiagnostics {

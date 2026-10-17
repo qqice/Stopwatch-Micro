@@ -15,7 +15,7 @@ COMPILER = os.environ.get('CXX') or shutil.which('g++') or shutil.which('clang++
 class TraceTests(unittest.TestCase):
     def test_cpp_model_faults_and_recovery(self):
         code = r'''
-#include "main/host/gauge_discharge_trace_model.h"
+#include "main/host/gauge_trace_storage_codec.h"
 using namespace GaugeDischargeTrace;
 constexpr bool timing() {
  Model m;if(m.due(0)||m.armed||m.count)return false;
@@ -45,7 +45,7 @@ constexpr bool roundtrip() {
  // Torn/corrupt payload never replaces caller state, including armed flag.
  for(unsigned i=0;i<8;++i){Blob bad=saved;bad[i*400]^=0x80;Model out;out.boot=99;
   if(decode(bad,out)||out.boot!=99||out.armed)return false;}
- Blob bad=saved;bad[4]=2;put(bad,BlobSize-4,crc(bad),4);if(decode(bad,recovered))return false;
+ Blob bad=saved;bad[4]=3;put(bad,BlobSize-4,crc(bad),4);if(decode(bad,recovered))return false;
  bad=saved;bad[11]=4;put(bad,BlobSize-4,crc(bad),4);if(decode(bad,recovered))return false;
  bad=saved;put(bad,8,65,2);put(bad,BlobSize-4,crc(bad),4);if(decode(bad,recovered))return false;
  bad=saved;put(bad,32+RecordSize+4,0,8);put(bad,BlobSize-4,crc(bad),4);if(decode(bad,recovered))return false;
@@ -82,6 +82,13 @@ constexpr bool physicalLowRecovery() {
  charging.append(s);if(charging.lowSeen)return false;
  return true;
 }
+constexpr bool rawRoundtrip(){
+ Model m;m.armed=true;Sample s;s.flags=Valid|RawCoulombValid;s.rawCoulombMah=54321;m.append(s);
+ auto b=encode(m);Model out;if(get(b,4,2)!=2||!decode(b,out)||out.at(0).rawCoulombMah!=54321)return false;
+ b[4]=1;put(b,BlobSize-4,crc(b),4);if(decode(b,out))return false;
+ s.flags=Valid;m={};m.append(s);b=encode(m);return get(b,4,2)==1&&decode(b,out)&&!out.at(0).rawCoulombMah;
+}
+static_assert(rawRoundtrip(),"rawCC valid flag schema2 exact lossless schema1 compatibility");
 static_assert(physicalLowRecovery(),"bad SOC physical-low reboot then charge freezes evidence");
 constexpr bool readbackFaults() {
  Model m;m.armed=true;const Blob expected=encode(m);
@@ -117,8 +124,8 @@ static_assert(roundtrip(),"ring crc power loss canonical schema recovery");
         self.assertIn('if(err==ESP_OK){stage=FailureStage::Commit;err=nvs_commit(h);}',save)
         after_commit=save.split('err=nvs_commit(h);',1)[1]
         self.assertLess(after_commit.index('if(err==ESP_OK){'),after_commit.index('NVS_READONLY'))
-        self.assertIn('nvs_get_blob(h,Key,verifyBlob.data(),&size)',save)
-        self.assertIn('!verifiedReadback(ioBlob,verifyBlob,size)',save)
+        self.assertIn('nvs_get_blob(h,Key,readback.bytes.data(),&size)',save)
+        self.assertIn('!verifiedReadback(ioBlob,verifyBlob,BlobSize)',save)
         self.assertIn('storageError=err!=ESP_OK;return !storageError;',save)
         self.assertIn('if(save(next)){model=next;model.dirty=false;pending=Command::None;',BACKEND)
         self.assertIn('if(save(model))model.dirty=false;',BACKEND)
@@ -188,12 +195,82 @@ static_assert(roundtrip(),"ring crc power loss canonical schema recovery");
             self.assertLess(len(rendered),640,(signature,len(rendered)))
             json.loads(rendered)
         diagnostic=extract_function('void emitNvsStatus(')
-        for key in ('last_nvs_error','failure_stage','stats_error','total','used','free','available','namespaces'):
+        for key in ('last_nvs_error','failure_stage','stats_error','total','used','free','available','namespaces','encoded_bytes'):
             self.assertIn(key,diagnostic)
         self.assertIn('nvs_get_stats(nullptr,&stats)',diagnostic)
         self.assertIn('if(statsError!=ESP_OK)stats={};',diagnostic)
         self.assertIn('bool checkpointConfirm(){return request(Command::Checkpoint);}',BACKEND)
         self.assertIn('corrupt || model.armed || !model.count',extract_function('bool request('))
+
+    def test_storage_codec_real_fixture_and_malformed(self):
+        import struct
+        import zlib
+        fixture=ROOT/'.artifacts/private/mosaico/gauge-return-20261017T083713Z-001.json'
+        private_fixture=fixture.exists()
+        if private_fixture:
+            original=json.loads(fixture.read_text(encoding='utf-8-sig'))
+        else:
+            # Deterministic synthetic evidence, no account/device data required.
+            rows=[]
+            for i in range(64):
+                rows.append(dict(boot=3,monotonic_ms=i*10000,epoch=1700000000+i*10,
+                    flags=31,soc=max(0,20-i),voltage_mv=3700-i,current_ma=-28,
+                    average_current_ma=-28,remaining_mah=max(0,13-i//4),full_mah=65,
+                    design_mah=65,operation_status=0xa6,battery_status=0x4029,
+                    state_of_health=100,cycle_count=1,temperature_deci_k=2981))
+            original={'status':dict(armed=0,low_seen=1,finalized_charge_after_low=1,boot=3),'rows':rows}
+        canonical=bytearray(3108)
+        status=original['status']
+        struct.pack_into('<IHHHBBI',canonical,0,0x31544447,1,48,len(original['rows']),status['armed'],status['low_seen']|status['finalized_charge_after_low']<<1,status['boot'])
+        fields=[('boot',0,'I'),('monotonic_ms',4,'Q'),('epoch',12,'Q'),('flags',20,'H'),('soc',22,'H'),('voltage_mv',24,'H'),('current_ma',26,'h'),('average_current_ma',28,'h'),('remaining_mah',30,'H'),('full_mah',32,'H'),('design_mah',34,'H'),('operation_status',36,'H'),('battery_status',38,'H'),('state_of_health',40,'H'),('cycle_count',42,'H'),('temperature_deci_k',44,'H')]
+        for i,row in enumerate(original['rows']):
+            for name,offset,fmt in fields:struct.pack_into('<'+fmt,canonical,32+i*48+offset,row[name])
+        struct.pack_into('<I',canonical,3104,zlib.crc32(canonical[:3104]))
+        code=r'''#include "main/host/gauge_trace_storage_codec.h"
+using namespace GaugeDischargeTrace;
+using namespace GaugeDischargeTrace::StorageCodec;
+constexpr Blob evidence={''' + ','.join(map(str,canonical)) + r'''};
+constexpr bool actualRoundtrip(){
+ Packed packed;pack(evidence,packed);Blob out;
+ if(packed.size!=1070 || unpack(packed,out)!=Error::None || !verifiedReadback(evidence,out,BlobSize))return false;
+ Model m;if(!decode(out,m)||m.count!=64||m.armed||!m.finalizedChargeAfterLow)return false;
+ Packed legacy;legacy.bytes=evidence;legacy.size=BlobSize;
+ if(unpack(legacy,out)!=Error::None||!verifiedReadback(evidence,out,BlobSize))return false;
+ // Incompressible data must remain bounded and fall back without truncation.
+ Blob noise;for(size_t i=0;i<BlobSize;++i)noise[i]=uint8_t((i*73+i/19)%255+1);
+ put(noise,8,64,2);Packed fallback;pack(noise,fallback);
+ return fallback.size==BlobSize&&fallback.bytes==noise;
+}
+constexpr bool malformed(){
+ Packed good;pack(evidence,good);Blob out;
+ Packed bad=good;--bad.size;if(unpack(bad,out)!=Error::Length)return false;
+ bad=good;bad.bytes[4]=2;if(unpack(bad,out)!=Error::Format)return false;
+ bad=good;bad.bytes[5]=2;if(unpack(bad,out)!=Error::Format)return false;
+ bad=good;bad.bytes[10]=1;if(unpack(bad,out)!=Error::Format)return false;
+ bad=good;bad.bytes[12]^=1;if(unpack(bad,out)!=Error::Crc)return false;
+ bad=good;bad.size=BlobSize+1;if(unpack(bad,out)!=Error::Length)return false;
+ bad=good;bad.size=15;if(unpack(bad,out)!=Error::Length)return false;
+ bad=good;bad.bytes[bad.size++]=0x80;put(bad.bytes,8,bad.size-16,2);put(bad.bytes,12,frameCrc(bad),4);
+ if(unpack(bad,out)!=Error::Length)return false; // Trailing decompressed bytes rejected.
+ bad=good;bad.size=17;bad.bytes[16]=0x80;put(bad.bytes,8,1,2);put(bad.bytes,12,frameCrc(bad),4);
+ if(unpack(bad,out)!=Error::Length)return false; // Decompression underrun.
+ bad.bytes[16]=0x7f;put(bad.bytes,12,frameCrc(bad),4);if(unpack(bad,out)!=Error::Length)return false;
+ bad.size=41;for(size_t i=16;i<41;++i)bad.bytes[i]=0xff;put(bad.bytes,8,25,2);put(bad.bytes,12,frameCrc(bad),4);
+ if(unpack(bad,out)!=Error::Length)return false; // Expansion overrun before any out-of-bounds write.
+ bad.bytes=evidence;bad.size=BlobSize;bad.bytes[42]^=1;
+ return unpack(bad,out)==Error::Crc;
+}
+static_assert(actualRoundtrip(),"actual original64 canonical exact roundtrip 1070 bytes legacy fallback");
+static_assert(malformed(),"frame CRC version codec reserved trailing truncated expansion bounds inner CRC");
+'''
+        if not private_fixture:
+            code=code.replace('packed.size!=1070','packed.size>=BlobSize')
+        with tempfile.TemporaryDirectory() as td:
+            source=Path(td)/'trace-codec.cpp';source.write_text(code)
+            result=subprocess.run([COMPILER,'-std=c++20','-fconstexpr-ops-limit=200000000','-fsyntax-only','-I',str(ROOT),str(source)],capture_output=True,text=True)
+            log=ROOT/'.artifacts/mosaico/gauge-discharge-trace-codec.log'
+            log.parent.mkdir(parents=True,exist_ok=True);log.write_text(result.stdout+result.stderr)
+            self.assertEqual(result.returncode,0,str(log))
 
     def test_passive_and_bounded_source(self):
         for forbidden in ('esp_restart','esp_timer_create','xTaskCreate','vTaskDelay','nvs_erase','gaugeSet','OCV','lightSleep','esp_pm_','esp_wifi_'):
@@ -241,7 +318,7 @@ def actual_service_fixture():
     for signature in ('void failure(', 'bool ensureStorage(', 'void load()', 'bool save(', 'Sample convert(', 'bool request(', 'void service()'):
         functions=functions.replace(signature,'constexpr '+signature,1)
     return r'''
-#include "main/host/gauge_discharge_trace_model.h"
+#include "main/host/gauge_trace_storage_codec.h"
 using namespace GaugeDischargeTrace;
 using esp_err_t=int;using nvs_handle_t=int;
 constexpr int ESP_OK=0,ESP_FAIL=-1,ESP_ERR_NVS_NOT_FOUND=1,NVS_READONLY=0,NVS_READWRITE=1;
@@ -250,7 +327,7 @@ struct Hal { struct BatteryTelemetry {
  uint8_t reportedSoc=0;uint16_t voltageMv=0;
  int16_t currentMa=0,averageCurrentMa=0;
  uint16_t remainingMah=0,fullMah=0,designMah=0,operationStatus=0,batteryStatus=0,
- stateOfHealth=0,cycleCount=0,temperatureDeciK=0;
+ stateOfHealth=0,cycleCount=0,temperatureDeciK=0,rawCoulombMah=0;bool rawCoulombValid=false;
 };};
 struct MockMutex {bool available=true;};
 struct MockLock {bool held;constexpr MockLock(MockMutex& m,int):held(m.available){} constexpr explicit operator bool()const{return held;}};
@@ -265,6 +342,8 @@ struct Fixture {
  uint64_t lastAllocationAttempt=0;unsigned allocationCalls=0;
  constexpr Fixture* allocateStorage(){++allocationCalls;return allocationFail?nullptr:this;}
  Blob ioBlob{},verifyBlob{},disk{},candidate{};
+ StorageCodec::Packed packedIo{},packedVerify{};
+ size_t diskSize=BlobSize,candidateSize=0,encodedBytes=0;
  bool ready=false,corrupt=false,storageError=false,writeAttempted=false;
  uint64_t lastWriteAttempt=0,nowMs=0;
  Command pending=Command::None;
@@ -287,21 +366,27 @@ struct Fixture {
   return exists||mode==NVS_READWRITE?ESP_OK:ESP_ERR_NVS_NOT_FOUND;
  }
  constexpr void nvs_close(int){}
- constexpr int nvs_get_blob(int,const char*,void* ptr,size_t*)=delete;
+
  constexpr int nvs_get_blob(int,const char*,uint8_t* ptr,size_t* size){
   ++reads;if(readFail)return ESP_FAIL;if(!exists)return ESP_ERR_NVS_NOT_FOUND;
-  if(*size<BlobSize)return ESP_FAIL;*size=BlobSize;
-  for(size_t i=0;i<BlobSize;++i)ptr[i]=disk[i];
-  if(readbackShort)*size=BlobSize-1;
-  if(readbackCorrupt)ptr[10]^=1;
-  if(readbackDifferent){Blob other=disk;other[10]^=1;put(other,BlobSize-4,crc(other),4);for(size_t i=0;i<BlobSize;++i)ptr[i]=other[i];}
+  if(!ptr){*size=diskSize;return ESP_OK;}
+  if(*size<diskSize)return ESP_FAIL;*size=diskSize;
+  for(size_t i=0;i<diskSize;++i)ptr[i]=disk[i];
+  if(readbackShort)*size=diskSize-1;
+  if(readbackCorrupt)ptr[diskSize-1]^=1;
+  if(readbackDifferent){
+   Blob other=canonicalDisk();other[10]^=1;put(other,BlobSize-4,crc(other),4);
+   StorageCodec::Packed altered;StorageCodec::pack(other,altered);
+   *size=altered.size;for(size_t i=0;i<altered.size;++i)ptr[i]=altered.bytes[i];
+  }
   return ESP_OK;
  }
  constexpr int nvs_set_blob(int,const char*,const uint8_t* p,size_t size){
-  ++writes;if(setError)return setError;if(size!=BlobSize)return ESP_FAIL;
-  for(size_t i=0;i<BlobSize;++i)candidate[i]=p[i];return ESP_OK;
+  ++writes;if(setError)return setError;if(size>BlobSize)return ESP_FAIL;
+  candidate={};candidateSize=size;for(size_t i=0;i<size;++i)candidate[i]=p[i];return ESP_OK;
  }
- constexpr int nvs_commit(int){++commits;disk=candidate;exists=true;return ackLost?ESP_FAIL:ESP_OK;}
+ constexpr int nvs_commit(int){++commits;disk=candidate;diskSize=candidateSize;exists=true;return ackLost?ESP_FAIL:ESP_OK;}
+ constexpr Blob canonicalDisk()const{StorageCodec::Packed stored;stored.bytes=disk;stored.size=diskSize;Blob canonical;StorageCodec::unpack(stored,canonical);return canonical;}
  constexpr void good(int soc=50,int mv=3800,int current=-10){
   telemetry.valid=true;telemetry.capacityValid=true;telemetry.reportedSoc=uint8_t(soc);
   telemetry.voltageMv=uint16_t(mv);telemetry.currentMa=int16_t(current);telemetry.averageCurrentMa=int16_t(current);
@@ -323,8 +408,8 @@ constexpr bool allocationFailureRecovery(){
  f.nowMs=59999;f.service();if(f.allocationCalls!=1||f.reads||f.writes)return false;
  f.allocationFail=false;f.nowMs=60000;f.service();
  if(!f.storage||!f.ready||f.storageError||f.allocationError||f.corrupt||f.allocationCalls!=2||!f.model.armed||f.model.count!=2||f.writes)return false;
- const Blob safe=f.disk;f.nowMs=60001;f.service();
- return f.allocationCalls==2&&verifiedReadback(safe,f.disk,BlobSize)&&f.model.at(0).soc==40;
+ const Blob safe=f.canonicalDisk();f.nowMs=60001;f.service();
+ return f.allocationCalls==2&&verifiedReadback(safe,f.canonicalDisk(),BlobSize)&&f.model.at(0).soc==40;
 }
 static_assert(allocationFailureRecovery(),"PSRAM allocation failure no IO bounded retry recovers prior evidence once");
 constexpr bool pendingAndFailures(){
@@ -337,7 +422,7 @@ constexpr bool pendingAndFailures(){
  f.ota=false;f.ackLost=true;f.service();
  if(f.model.armed||!f.storageError||f.pending!=Fixture::Command::Arm||f.commits!=1||f.reads)return false;
  // Disk may have committed despite lost acknowledgement; RAM remains pending.
- Model onDisk;if(!decode(f.disk,onDisk)||!onDisk.armed)return false;
+ Model onDisk;if(!decode(f.canonicalDisk(),onDisk)||!onDisk.armed)return false;
  f.ackLost=false;f.nowMs=59999;f.service();if(f.commits!=1)return false;
  f.nowMs=60000;f.readbackCorrupt=true;f.service();
  if(f.model.armed||f.pending!=Fixture::Command::Arm||f.commits!=2||!f.storageError)return false;
@@ -360,16 +445,16 @@ constexpr bool checkpointAndRecovery(){
  f.nowMs=1;f.service();if(f.model.count!=1||!f.model.armed)return false;
  f.good(27,3500,-12);f.nowMs=60001;f.service();
  if(!f.model.lowSeen||f.model.count!=2||f.model.dirty||f.commits!=2)return false;
- const Blob safe=f.disk;
+ const Blob safe=f.canonicalDisk();
  f.good(27,3299,-12);f.nowMs=120001;f.service();
- if(!f.model.dirty||f.commits!=2||!verifiedReadback(safe,f.disk,BlobSize))return false;
- Fixture reboot;reboot.disk=f.disk;reboot.exists=true;reboot.good(28,3700,12);reboot.service();
+ if(!f.model.dirty||f.commits!=2||!verifiedReadback(safe,f.canonicalDisk(),BlobSize))return false;
+ Fixture reboot;reboot.disk=f.disk;reboot.diskSize=f.diskSize;reboot.exists=true;reboot.good(28,3700,12);reboot.service();
  if(!reboot.model.lowSeen||!reboot.model.armed||reboot.model.count!=3)return false;
  reboot.nowMs=60000;reboot.service();
  if(reboot.model.armed||!reboot.model.finalizedChargeAfterLow||reboot.model.count!=4||reboot.model.dirty)return false;
- const Blob frozen=reboot.disk;const size_t count=reboot.model.count;
+ const Blob frozen=reboot.canonicalDisk();const size_t count=reboot.model.count;
  reboot.nowMs=3600000;reboot.service();
- if(reboot.model.count!=count||!verifiedReadback(frozen,reboot.disk,BlobSize))return false;
+ if(reboot.model.count!=count||!verifiedReadback(frozen,reboot.canonicalDisk(),BlobSize))return false;
  Fixture end;end.exists=true;end.disk=frozen;end.good(80,4000,30);end.service();
  if(end.model.armed||!end.model.finalizedChargeAfterLow||end.model.count!=count||end.writes)return false;
  return end.model.at(1).soc==27&&end.model.at(1).voltageMv==3500;
@@ -395,7 +480,7 @@ constexpr bool diagnosticStages(){
   f.nowMs=59999;const unsigned attempts=f.writes;f.service();if(f.writes!=attempts)return false;
   f.nowMs=60000;f.service();
   if(f.storageError||f.pending!=Fixture::Command::None||f.model.dirty||f.lastNvsError!=codes[kind]||int(f.failureStage)!=kind+2)return false;
-  if(!verifiedReadback(before,f.disk,BlobSize)||!verifiedReadback(before,encode(f.model),BlobSize))return false;
+  if(!verifiedReadback(before,f.canonicalDisk(),BlobSize)||!verifiedReadback(before,encode(f.model),BlobSize))return false;
  }
  Fixture absent;if(absent.request(Fixture::Command::Checkpoint))return false;
  absent.good();absent.service();if(absent.request(Fixture::Command::Checkpoint))return false;
@@ -410,12 +495,28 @@ constexpr bool diagnosticStages(){
  Fixture load;load.exists=true;load.readFail=true;load.good();load.service();
  if(load.lastNvsError!=ESP_FAIL||int(load.failureStage)!=2||load.writes)return false;
  Fixture corrupt;corrupt.exists=true;corrupt.good();corrupt.service();
- if(!corrupt.corrupt||int(corrupt.failureStage)!=9||corrupt.writes)return false;
+ if(!corrupt.corrupt||int(corrupt.failureStage)!=2||corrupt.writes)return false;
  Fixture shortLoad;shortLoad.frozen();shortLoad.ready=false;shortLoad.readbackShort=true;shortLoad.service();
- if(!shortLoad.corrupt||int(shortLoad.failureStage)!=8||shortLoad.writes)return false;
- Fixture schema;schema.frozen();schema.ready=false;schema.disk[4]=2;put(schema.disk,BlobSize-4,crc(schema.disk),4);schema.service();
+ // A truncated legacy blob is no longer legacy-sized and fails packed magic
+ // validation (Format -> Load), not the packed frame's declared-length check.
+ if(!shortLoad.corrupt||shortLoad.lastNvsError!=ESP_FAIL||shortLoad.failureStage!=Fixture::FailureStage::Load||shortLoad.writes)return false;
+ Fixture packedShort;packedShort.frozen();StorageCodec::pack(packedShort.disk,packedShort.packedIo);
+ packedShort.disk=packedShort.packedIo.bytes;packedShort.diskSize=packedShort.packedIo.size;
+ packedShort.ready=false;packedShort.readbackShort=true;packedShort.service();
+ if(!packedShort.corrupt||packedShort.lastNvsError!=ESP_FAIL||packedShort.failureStage!=Fixture::FailureStage::Length||packedShort.writes)return false;
+ Fixture schema;schema.frozen();schema.ready=false;schema.disk[4]=3;put(schema.disk,BlobSize-4,crc(schema.disk),4);schema.service();
  return schema.corrupt&&int(schema.failureStage)==2&&!schema.writes;
 }
+constexpr bool compressedLegacyRewrite(){
+ Fixture f;f.frozen();const Blob original=f.disk;
+ if(f.diskSize!=BlobSize||!f.request(Fixture::Command::Checkpoint))return false;
+ f.service();if(f.storageError||f.diskSize>=BlobSize||f.diskSize!=f.encodedBytes||f.commits!=1)return false;
+ if(!verifiedReadback(original,f.canonicalDisk(),BlobSize))return false;
+ Fixture boot;boot.disk=f.disk;boot.diskSize=f.diskSize;boot.exists=true;boot.good();boot.service();
+ if(boot.corrupt||boot.writes||boot.model.armed||!boot.model.finalizedChargeAfterLow||boot.model.count!=64)return false;
+ --boot.model.boot;return verifiedReadback(original,encode(boot.model),BlobSize);
+}
+static_assert(compressedLegacyRewrite(),"same-key legacy to packed rewrite reload preserves all64 frozen rows");
 static_assert(diagnosticStages(),"exact NVS errors and all failure stages frozen checkpoint unchanged gated retry no erase");
 static_assert(pendingAndFailures(),"actual service: queued arm invalid blocked low ACK lost readback corruption retry");
 static_assert(loadAndClear(),"actual load/save: corrupt record explicit clear readback failure pending preservation");
