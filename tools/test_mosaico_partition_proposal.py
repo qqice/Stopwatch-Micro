@@ -29,7 +29,8 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual(end, 16 * 1024 * 1024)
         self.assertEqual(proposed["ota_0"][3], 6 * 1024 * 1024)
         self.assertEqual(proposed["ota_1"][3], 6 * 1024 * 1024)
-        self.assertEqual(proposed["reserve"][3], 0x3E0000)
+        self.assertEqual(proposed["reserve_0"][3] + proposed["reserve_1"][3],
+                         0x3E0000)
 
     def test_migration_is_not_an_app_only_update(self):
         current = table("partitions.ota.csv")
@@ -41,6 +42,13 @@ class ProposalTests(unittest.TestCase):
         old_second = current["ota_1"]
         self.assertLess(old_second[2], first[2] + first[3])
         self.assertGreater(old_second[2] + old_second[3], first[2])
+        # The new second image can, however, be staged without touching either
+        # old app. This deliberately trades contiguous reserve space for a
+        # less destructive migration path; it is not a power-fail-safe table.
+        new_second = proposed["ota_1"]
+        for name in ("ota_0", "ota_1"):
+            old = current[name]
+            self.assertGreaterEqual(new_second[2], old[2] + old[3])
         defaults = (ROOT / "boards/mosaico/sdkconfig.defaults").read_text()
         self.assertNotIn("partitions.ota6m.proposal.csv", defaults)
 

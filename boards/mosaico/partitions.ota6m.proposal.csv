@@ -3,9 +3,12 @@
 # Keep credentials, OTA selectors and PHY locations unchanged. NOR is 16 MiB.
 # Reclaims the factory ui_apps/system partitions; their contents are NOT migrated.
 # NAND remains a separate device and is not described in this NOR table.
+# Place the new second slot beyond both old apps so staging it need not overwrite
+# either old healthy image. The table conversion still requires stable power.
 nvs,data,nvs,0xa000,0x6000,
 otadata,data,ota,0x10000,0x2000,
 phy_init,data,phy,0x12000,0x1000,
 ota_0,app,ota_0,0x20000,0x600000,
-ota_1,app,ota_1,0x620000,0x600000,
-reserve,data,0x40,0xc20000,0x3e0000,
+reserve_0,data,0x40,0x620000,0x1e0000,
+ota_1,app,ota_1,0x800000,0x600000,
+reserve_1,data,0x40,0xe00000,0x200000,
