@@ -126,7 +126,7 @@ def checked_image(path, digest):
     return blob
 
 
-def freeze(image, image_sha, table, current, current_sha, old, old_sha, bundle):
+def freeze(image, image_sha, table, current, current_sha, old, old_sha, bundle, *, discard_factory_contents=False):
     bundle = Path(bundle).resolve()
     if bundle == PRIVATE.resolve() or not bundle.is_relative_to(PRIVATE.resolve()) or bundle.exists():
         raise ValueError('bundle must be new private subdirectory')
@@ -136,6 +136,7 @@ def freeze(image, image_sha, table, current, current_sha, old, old_sha, bundle):
     bundle.mkdir(parents=True)
     for name,data in blobs.items(): exclusive(bundle/name,data)
     plan = {'schema':1,'mac':EXPECTED_MAC,'nor_bytes':NOR_SIZE,'dry_plan':True,
+            'discard_factory_contents':discard_factory_contents,'user_authorized_factory_loss':discard_factory_contents,
             'inputs':{n:{'bytes':len(b),'sha256':sha(b)} for n,b in blobs.items()},
             'write_order':['candidate@0x800000','table@0x9000','nonpreserved selector sector'],
             'candidate_erase_length':sector_size(len(blobs['candidate.bin'])),
@@ -201,7 +202,7 @@ def preflight_rom(esp):
     esp.flash_set_parameters(NOR_SIZE)
 
 
-def perform(esp, bundle, blobs, state):
+def perform(esp, bundle, blobs, state, *, discard_factory_contents=False):
     """Injected ROM boundary for host mocks; caller already identity/security checked."""
     progress(bundle,state,'read-old-table')
     table=checked_read(esp,0x9000,SECTOR)
@@ -216,7 +217,9 @@ def perform(esp, bundle, blobs, state):
     untouched=[{'offset':o,'length':n,'md5':esp.flash_md5sum(o,n).lower()} for o,n in complement(ranges)]
     rollback=bundle/'rollback'; rollback.mkdir()
     backups=[]
-    for offset,length in ((0x800000,ranges[0][1]),(0x9000,SECTOR),(0x10000,8192)):
+    backup_ranges=[(0x9000,SECTOR),(0x10000,8192)]
+    if not discard_factory_contents: backup_ranges.insert(0,(0x800000,ranges[0][1]))
+    for offset,length in backup_ranges:
         progress(bundle,state,'backup',backup_offset=offset,backup_done=0,backup_length=length)
         backups.append(backup_region(esp,offset,length,rollback/f'{offset:08x}.bin',
             lambda done,total: progress(bundle,state,'backup',backup_done=done,backup_length=total)))
@@ -230,18 +233,25 @@ def perform(esp, bundle, blobs, state):
         raise ValueError('other selector changed before rollback freeze')
     selector_restore={'file':'rollback-other-selector.bin','offset':select['offset'],'length':SECTOR,
                       'sha256':sha(old_selector),'md5':md5(old_selector)}
-    restore_order=[selector_restore,backups[1],backups[0]]
-    exclusive(rollback/'backup.json',json.dumps({'complete':True,'mac':EXPECTED_MAC,'regions':backups,
+    by_offset={item['offset']:item for item in backups}
+    restore_order=[selector_restore,by_offset[0x9000]]
+    if not discard_factory_contents: restore_order.append(by_offset[0x800000])
+    exclusive(rollback/'backup.json',json.dumps({'complete':not discard_factory_contents,'metadata_backups_complete':True,
+        'all_overwritten_ranges_backed_up':not discard_factory_contents,
+        'factory_backup_skipped':discard_factory_contents,'user_authorized_loss':discard_factory_contents,
+        'mac':EXPECTED_MAC,'regions':backups,
         'untouched':untouched,'restore_order':restore_order,'preserved_selector_offset':0x10000+select['preserve_index']*SECTOR},indent=2).encode())
     instructions=['Explicit recovery authorization required; ROM/no-stub only. No automatic restore or reset. '
                   'Do NOT erase all, write the preserved VALID0 sector, or restore the full 8KiB otadata backup. '
-                  'Restore in this exact order: other-selector -> old table -> factory-data span. '
+                  + ('Restore in this exact order: other-selector -> old table. Factory contents overwritten by candidate are NOT backed up and CANNOT be restored from this bundle; user explicitly authorized loss. '
+                     if discard_factory_contents else 'Restore in this exact order: other-selector -> old table -> factory-data span. ') +
                   'Verify the listed ROM MD5 immediately after EACH write before proceeding. '
                   'Loader/app0/old-app1 remain untouched. Table switching is NOT power-fail atomic.']
     for index,item in enumerate(restore_order,1):
         instructions.append(f"{index}. offset=0x{item['offset']:x} length=0x{item['length']:x} file={item['file']} sha256={item['sha256']} ROM_MD5={item['md5']}")
     exclusive(rollback/'RESTORE.txt',('\n'.join(instructions)+'\n').encode())
-    progress(bundle,state,'backups-verified',backups_complete=True)
+    progress(bundle,state,'backups-verified',backups_complete=not discard_factory_contents,
+             metadata_backups_complete=True,factory_backup_skipped=discard_factory_contents,user_authorized_loss=discard_factory_contents)
     artifacts=[('candidate',0x800000,blobs['candidate.bin'].ljust(ranges[0][1],b'\xff')),
                ('table',0x9000,blobs['new-table.bin']+table[0xc00:]),
                ('selector',select['offset'],select['data'])]
@@ -259,7 +269,7 @@ def perform(esp, bundle, blobs, state):
     progress(bundle,state,'writes-verified',writes_verified=True,complements_verified=True,runtime_accepted=False)
 
 
-def execute(bundle,port):
+def execute(bundle,port, *, discard_factory_contents=False):
     bundle=Path(bundle).resolve()
     if bundle==PRIVATE.resolve() or not bundle.is_relative_to(PRIVATE.resolve()): raise ValueError('private bundle required')
     expected={'candidate.bin','current-ota0.bin','old-ota1.bin','new-table.bin','plan.json'}
@@ -272,10 +282,14 @@ def execute(bundle,port):
     esp=None
     try:
         blobs=load_inputs(bundle)
+        plan=json.loads((bundle/'plan.json').read_text())
+        planned_discard=plan.get('discard_factory_contents',False)
+        if type(planned_discard) is not bool or type(discard_factory_contents) is not bool or planned_discard != discard_factory_contents:
+            raise ValueError('factory-loss authorization must match frozen plan and explicit CLI flag')
         progress(bundle,state,'connect')
         esp=esptool.detect_chip(port,connect_mode='no-reset',connect_attempts=1)
         preflight_rom(esp)
-        perform(esp,bundle,blobs,state)
+        perform(esp,bundle,blobs,state,discard_factory_contents=discard_factory_contents)
     except BaseException as exc:
         failed_stage=state['stage']
         progress(bundle,state,'failed',failed_stage=failed_stage,error_type=type(exc).__name__,automatic_recovery=False)
@@ -295,6 +309,8 @@ def main():
     for name in freeze_hashes:
         parser.add_argument('--'+name)
     parser.add_argument('--port')
+    parser.add_argument('--discard-factory-contents',action='store_true',
+                        help='explicitly accept irreversible loss of overwritten factory resources; omit their backup')
     mode=parser.add_mutually_exclusive_group()
     mode.add_argument('--execute',action='store_true',help='freeze new bundle, then execute')
     mode.add_argument('--execute-frozen',action='store_true',help='execute an existing pristine frozen bundle only')
@@ -305,12 +321,12 @@ def main():
     if args.execute_frozen:
         if any(value is not None for value in freeze_values):
             parser.error('--execute-frozen forbids freeze inputs; frozen bundle is authoritative')
-        execute(args.bundle,args.port)
+        execute(args.bundle,args.port,discard_factory_contents=args.discard_factory_contents)
         return
     if any(value is None for value in freeze_values):
         parser.error('freeze requires image/table/current-image/old-image and all three SHA256 values')
-    bundle=freeze(args.image,args.sha256,args.table,args.current_image,args.current_sha256,args.old_image,args.old_sha256,args.bundle)
-    if args.execute: execute(bundle,args.port)
+    bundle=freeze(args.image,args.sha256,args.table,args.current_image,args.current_sha256,args.old_image,args.old_sha256,args.bundle,discard_factory_contents=args.discard_factory_contents)
+    if args.execute: execute(bundle,args.port,discard_factory_contents=args.discard_factory_contents)
     else: print('DRY_PLAN_ONLY '+str(bundle))
 
 

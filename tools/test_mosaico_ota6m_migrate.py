@@ -207,6 +207,7 @@ class SixMiBMigrationTests(unittest.TestCase):
               '--old-sha256',migration.sha(self.blobs['old-ota1.bin']),'--bundle',str(output)]
         with patch.object(migration,'PRIVATE',self.root), patch.object(migration,'validate_image'), patch('sys.argv',argv), patch.object(migration.esptool,'detect_chip') as detect, contextlib.redirect_stdout(io.StringIO()):
             migration.main(); detect.assert_not_called()
+            self.assertIs(json.loads((output/"plan.json").read_text())["discard_factory_contents"],False)
             with self.assertRaises(ValueError): migration.main()  # exclusive bundle
         (output/'progress.json').write_text('{}')
         with patch.object(migration,'PRIVATE',self.root), patch.object(migration.esptool,'detect_chip') as detect:
@@ -262,6 +263,68 @@ class SixMiBMigrationTests(unittest.TestCase):
             with self.subTest(argv=argv), patch('sys.argv',argv), patch.object(migration.esptool,'detect_chip') as detect, contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit): migration.main()
                 detect.assert_not_called()
+
+    def test_skip_factory_reads_only_metadata_and_restore_without_factory(self):
+        with patch.object(self.rom,'flash_md5sum',wraps=self.rom.flash_md5sum) as checks:
+            migration.perform(self.rom,self.bundle,self.blobs,self.state,discard_factory_contents=True)
+        self.assertEqual(self.rom.writes,[0x800000,0x9000,0x11000])
+        self.assertTrue(all(offset < 0x12000 for offset,length in self.rom.reads))
+        checked=[call.args for call in checks.call_args_list]
+        self.assertIn((0x20000,1024),checked); self.assertIn((0x400000,1024),checked)
+        for region in migration.complement(migration.range_plan(5000,0x11000)):
+            self.assertEqual(checked.count(region),2)
+        rollback=self.bundle/'rollback'
+        self.assertFalse((rollback/'00800000.bin').exists())
+        manifest=json.loads((rollback/'backup.json').read_text())
+        self.assertFalse(manifest['complete'])
+        self.assertTrue(manifest['metadata_backups_complete'])
+        self.assertTrue(manifest['factory_backup_skipped'])
+        self.assertTrue(manifest['user_authorized_loss'])
+        self.assertEqual([v['offset'] for v in manifest['regions']],[0x9000,0x10000])
+        self.assertEqual([v['offset'] for v in manifest['restore_order']],[0x11000,0x9000])
+        restore=(rollback/'RESTORE.txt').read_text()
+        self.assertIn('CANNOT be restored',restore)
+        self.assertNotIn('00800000.bin',restore)
+        self.assertNotIn('old table -> factory-data span',restore)
+
+    def test_skip_metadata_backup_verify_failure_never_writes(self):
+        original=self.rom.read_flash
+        def read(offset,length):
+            data=original(offset,length)
+            return bytes([data[0]^1])+data[1:] if offset==0x11000 else data
+        with patch.object(self.rom,'read_flash',side_effect=read):
+            with self.assertRaises(ValueError):
+                migration.perform(self.rom,self.bundle,self.blobs,self.state,discard_factory_contents=True)
+        self.assertFalse(self.rom.writes)
+        self.assertTrue(all(offset<0x12000 for offset,length in self.rom.reads))
+
+    def test_discard_flag_mismatch_rejected_before_device(self):
+        for frozen,cli in ((True,False),(False,True),(None,True)):
+            with self.subTest(frozen=frozen,cli=cli), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                bundle=Path(directory)
+                for name,blob in self.blobs.items(): (bundle/name).write_bytes(blob)
+                plan={'schema':1,'mac':migration.EXPECTED_MAC,'nor_bytes':migration.NOR_SIZE,
+                      'inputs':{n:{'bytes':len(b),'sha256':migration.sha(b)} for n,b in self.blobs.items()}}
+                if frozen is not None: plan['discard_factory_contents']=frozen
+                (bundle/'plan.json').write_text(json.dumps(plan))
+                with patch.object(migration,'PRIVATE',self.root), patch.object(migration,'validate_image'), patch.object(migration.esptool,'detect_chip') as detect:
+                    with self.assertRaises(ValueError): migration.execute(bundle,'MOCK',discard_factory_contents=cli)
+                    detect.assert_not_called()
+
+    def test_discard_freeze_and_execute_frozen_require_explicit_flag_both_times(self):
+        paths={}
+        for name,blob in self.blobs.items():
+            path=self.root/name; path.write_bytes(blob); paths[name]=path
+        output=self.root/'skipbundle'
+        with patch.object(migration,'PRIVATE',self.root), patch.object(migration,'validate_image'):
+            migration.freeze(paths['candidate.bin'],migration.sha(self.blobs['candidate.bin']),paths['new-table.bin'],
+                paths['current-ota0.bin'],migration.sha(self.blobs['current-ota0.bin']),
+                paths['old-ota1.bin'],migration.sha(self.blobs['old-ota1.bin']),output,discard_factory_contents=True)
+        self.assertIs(json.loads((output/'plan.json').read_text())['discard_factory_contents'],True)
+        argv=['tool','--execute-frozen','--bundle',str(output),'--port','MOCK','--discard-factory-contents']
+        with patch.object(migration,'PRIVATE',self.root), patch.object(migration,'validate_image'), patch('sys.argv',argv), patch.object(migration.esptool,'detect_chip',return_value=self.rom):
+            migration.main()
+        self.assertTrue(json.loads((output/'rollback/backup.json').read_text())['factory_backup_skipped'])
 
     def test_execute_failure_stage_and_no_reset_no_retry(self):
         for name,blob in self.blobs.items(): (self.bundle/name).write_bytes(blob)
