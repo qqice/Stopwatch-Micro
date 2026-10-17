@@ -107,10 +107,14 @@ static_assert(classify("/unknown","/unknown")==FetchPath::Other);
 static_assert(unsigned(FetchStage::None)==0 && unsigned(FetchStage::Success)==12);
 '''
         with tempfile.TemporaryDirectory() as directory:
+            # This fetch-only harness intentionally has no full SDK. Keep the
+            # accessor's numeric return type, without importing socket/WG APIs.
+            (Path(directory) / 'microlink.h').write_text(
+                'typedef struct microlink_tcp_connect_diag microlink_tcp_connect_diag_t;\n', encoding='utf8')
             source = Path(directory) / 'diagnostics.cpp'
             source.write_text(harness, encoding='utf8')
             result = subprocess.run([str(compilers[-1]), '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                                     '-fsyntax-only', '-I', str(R / 'main/host'),
+                                     '-fsyntax-only', '-I', directory, '-I', str(R / 'main/host'),
                                      '-I', str(R / 'components/microlink-source/components/microlink/components/wireguard_lwip/src'), str(source)],
                                     capture_output=True, text=True)
         log = R / '.artifacts/mosaico/tailnet-fetch-diagnostics-source-harness.log'

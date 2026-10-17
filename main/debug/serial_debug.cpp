@@ -1128,6 +1128,14 @@ void SerialDebug::handleLine(char* line)
                       static_cast<unsigned long>(network.failures()),
                       static_cast<unsigned long>(network.historyAccepted()),
                       static_cast<unsigned long>(network.historyFailures()));
+        const auto tcp = GetTailnetQuota().tcpConnectDiagnostics();
+        debugPrintf("DBG TCP_CONNECT id=%lu peer_ip=%lu port=%u stage=%u errno=%ld first_errno=%ld retry_errno=%ld wg_wait_ms=%lu elapsed_ms=%lu wg_before=%u wg_after=%u netif=%u wg_idx=%d peer_valid=%u keypairs=%u derp=%u ep_port=%u key_match=%u key_match_valid=%u\r\n",
+            static_cast<unsigned long>(tcp.request_id), static_cast<unsigned long>(tcp.peer_ip), tcp.peer_port,
+            tcp.stage, static_cast<long>(tcp.error), static_cast<long>(tcp.first_error), static_cast<long>(tcp.retry_error),
+            static_cast<unsigned long>(tcp.wg_wait_ms), static_cast<unsigned long>(tcp.elapsed_ms),
+            tcp.wg_ready_before, tcp.wg_ready_after, tcp.netif_index, tcp.wg_index,
+            tcp.peer_snapshot_valid, tcp.keypair_valid, tcp.endpoint_derp, tcp.endpoint_port, tcp.peer_key_match,
+            tcp.peer_key_match_valid);
         const auto rx = GetTailnetQuota().rxDiagnostics();
         debugPrintf("DBG TAIL_RX derp_frame=%lu derp_enqueue=%lu derp_drop=%lu wg_dequeue=%lu wg_unavailable=%lu pbuf_fail=%lu receiver_index_miss=%lu key_reject=%lu inner_pbuf_fail=%lu decrypt_fail=%lu replay_drop=%lu inner_reject=%lu inner_ok=%lu input_ok=%lu input_error=%lu tcp_synack=%lu owner_dispatch_drop=%lu owner_processed=%lu transport_rx=%lu invalid_packet=%lu empty_keepalive=%lu header_short_read=%lu header_resumed=%lu header_timeout=%lu derp_read_eof=%lu\r\n",
                     static_cast<unsigned long>(rx.derp_frame),
@@ -1628,6 +1636,16 @@ void SerialDebug::handleLine(char* line)
     if (std::strcmp(command, "quota-selftest") == 0) {
         result("quota-selftest", QuotaMonitorRejectionSelfTest() ? "PASS" : "FAIL",
                "known_unknown_windows=1 malformed_depth_size_rejected=1 nonmutating=1");
+        return;
+    }
+    if (std::strcmp(command, "quota-view") == 0) {
+        if (::strtok_r(nullptr, " \t", &save)) {
+            result("quota-view", "FAIL", "expected=no_arguments readonly=1");
+            return;
+        }
+        char details[192]{};
+        const bool ok = _app.debugQuotaDisplay(details, sizeof(details));
+        result("quota-view", ok ? "PASS" : "SKIP", details);
         return;
     }
     if (std::strcmp(command, "quota") == 0) {

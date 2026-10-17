@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <atomic>
 #include <wireguardif_rx_stats.h>
+#include <microlink.h>
 struct microlink_s;
 class TailnetQuota {
 public:
@@ -21,6 +22,7 @@ public:
     };
     FetchDiagnostics fetchDiagnostics(FetchPath path) const;
     wireguardif_rx_stats_t rxDiagnostics() const;
+    microlink_tcp_connect_diag_t tcpConnectDiagnostics() const;
     bool setDerpTxRetryBudgetMs(uint32_t milliseconds); // Physical diagnostic only; RAM, never NVS.
     uint32_t derpTxRetryBudgetMs() const;
     void load();

@@ -124,6 +124,31 @@ CodexMicroView::~CodexMicroView() {
     if (_rotationCurtain) lv_obj_delete(_rotationCurtain);
     GetHAL().setBackLightBrightness(_brightness, false);
 }
+bool CodexMicroView::debugQuotaDisplay(char* out, std::size_t capacity) const {
+    if (out == nullptr || capacity == 0) return false;
+    std::snprintf(out, capacity, "SKIP");
+    if (!ready()) return false;
+    // Inspect the retained dot glyphs, not a freshly formatted backend snapshot.
+    const char* quota = mosaico_dot::text(_lockQuota);
+    const char* reset = mosaico_dot::text(_lockResetTime);
+    if (quota == nullptr || reset == nullptr) return false;
+    char quotaText[33]{}, resetText[33]{};
+    const auto copyAscii = [](const char* source, char (&dest)[33]) {
+        for (std::size_t i = 0; i < sizeof(dest) - 1 && source[i]; ++i) {
+            const unsigned char ch = static_cast<unsigned char>(source[i]);
+            dest[i] = ch >= 32 && ch <= 126 && ch != '"' && ch != '\\' ? static_cast<char>(ch) : '?';
+        }
+    };
+    copyAscii(quota, quotaText);
+    copyAscii(reset, resetText);
+    std::snprintf(out, capacity,
+                  "page=%u locked=%u ui_rev=%u backend_rev=%u lock_quota=\"%s\" lock_reset=\"%s\"",
+                  static_cast<unsigned>(_page), static_cast<unsigned>(_locked),
+                  static_cast<unsigned>(_quotaRevision), static_cast<unsigned>(QuotaMonitorRevision()),
+                  quotaText, resetText);
+    return true;
+}
+
 void CodexMicroView::init(lv_obj_t* parent) {
     _quota.reset(new (std::nothrow) QuotaMonitorSnapshot());
     _history.reset(new (std::nothrow) TokenHistorySnapshot());

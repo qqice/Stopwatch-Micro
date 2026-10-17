@@ -37,6 +37,7 @@ public:
 
     bool otaReady();
     bool debugUiReady();
+    bool debugQuotaDisplay(char* out, size_t capacity);
 #ifdef MOSAICO_BOARD
     bool debugWifiEditorSnapshot(view::CodexMicroView::WifiEditorDebugSnapshot& out);
 #endif

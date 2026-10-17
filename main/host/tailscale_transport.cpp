@@ -37,6 +37,12 @@ TailnetQuota& GetTailnetQuota()
 {
     return instance;
 }
+microlink_tcp_connect_diag_t TailnetQuota::tcpConnectDiagnostics() const
+{
+    microlink_tcp_connect_diag_t d{};
+    microlink_tcp_get_last_connect(&d);
+    return d;
+}
 wireguardif_rx_stats_t TailnetQuota::rxDiagnostics() const
 {
     return wireguardif_rx_stats();

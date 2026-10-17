@@ -9,6 +9,9 @@ enum class Icon { Wifi, WifiOff, Battery, Bolt, Hourglass, ResetCard, Credit, Cl
 // small to fit the retained text shows '?' instead of clipping exact values.
 lv_obj_t* createText(lv_obj_t* parent, int width, int height, int pitch = 10, uint32_t color = 0x67E7AE);
 void setText(lv_obj_t* obj, const char* text, uint32_t color = 0x67E7AE);
+// Read-only retained glyph text, or nullptr for missing/non-text widgets.
+// LVGL-thread/lock only; pointer is valid only while the widget remains alive.
+const char* text(lv_obj_t* obj);
 void setTextPitch(lv_obj_t* obj, int pitch); // Same >=2 request clamp as createText.
 // Caller schedules and gates motion (visible, awake, fresh, actually charging).
 // No internal timers. Phase wraps at 360; text/unsupported icons remain static.

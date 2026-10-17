@@ -41,6 +41,7 @@ public:
     bool otaBusy() const;
     bool locked() const { return _locked; }
     bool lockForDebug();
+    bool debugQuotaDisplay(char* out, std::size_t capacity) const;
     bool standbyDimForDebug(int brightness, uint32_t leaseSeconds);
     void standbyDimDetails(char* out, std::size_t capacity);
     uint32_t lockRefreshCount() const { return _lockRefreshCount; }

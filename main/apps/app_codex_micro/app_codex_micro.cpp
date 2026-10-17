@@ -163,6 +163,18 @@ bool AppCodexMicro::debugUiReady()
     return _view != nullptr && _view->ready();
 }
 
+bool AppCodexMicro::debugQuotaDisplay(char* out, size_t capacity)
+{
+    if (out == nullptr || capacity == 0) return false;
+    std::snprintf(out, capacity, "SKIP");
+    LvglLockGuard lock;
+#ifdef MOSAICO_BOARD
+    return _view != nullptr && _view->debugQuotaDisplay(out, capacity);
+#else
+    return false;
+#endif
+}
+
 bool AppCodexMicro::debugSetScreen(DebugScreen screen)
 {
     LvglLockGuard lock;

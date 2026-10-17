@@ -221,6 +221,10 @@ lv_obj_t* createText(lv_obj_t* parent, int w, int h, int pitch, uint32_t color) 
     if (auto* s = state(obj, Kind::Text)) { s->pitch = detail::max(2, pitch); s->color = color; }
     return obj;
 }
+const char* text(lv_obj_t* obj) {
+    const auto* s = state(obj, Kind::Text);
+    return s ? s->text : nullptr;
+}
 void setTextPitch(lv_obj_t* obj, int pitch) {
     auto* s = state(obj, Kind::Text);
     if (!s) return;
