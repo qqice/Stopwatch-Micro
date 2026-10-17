@@ -12,6 +12,7 @@
 #include <host/mosaico_session_monitor.h>
 #include "charge_supply_state.h"
 #include "quota_display_cache.h"
+#include "first_quota_lock_gate.h"
 #include "keyboard_style_model.h"
 
 namespace view {
@@ -24,6 +25,7 @@ public:
     };
     static bool wifiEditorDebugSnapshot(WifiEditorDebugSnapshot& out);
     enum class Page : uint8_t { Command = 0, History, Agent, OTA, Settings, Sessions };
+    CodexMicroView();
     ~CodexMicroView();
     void init(lv_obj_t* parent);
     void update(const CodexMicroState& state);
@@ -235,6 +237,7 @@ private:
     uint32_t _trendAgeKey = UINT32_MAX;
     std::unique_ptr<QuotaMonitorSnapshot> _quota;
     mosaico_quota_display::DisplayAge _quotaAge;
+    mosaico_quota_display::FirstQuotaLockGate _firstQuotaLockGate;
     std::unique_ptr<TokenHistorySnapshot> _history;
     Page _page = Page::Command;
     int _standbyDimBrightness = -1; // RAM-only lease; zero is valid.
@@ -248,6 +251,8 @@ private:
     std::size_t _selected = SIZE_MAX;
     uint32_t _activity = 0, _refresh = 0, _lockRefreshCount = 0;
     uint32_t _quotaRevision = UINT32_MAX, _historyRevision = UINT32_MAX;
+    uint32_t _quotaObservedRevision = UINT32_MAX;
+    uint32_t _quotaAttemptedRevision = UINT32_MAX, _quotaAttemptTick = 0;
     uint32_t _historyAgeKey = UINT32_MAX;
     uint32_t _motionEpoch = 0, _motionTick = 0, _batteryReadTick = 0;
     bool _batterySeen = false, _batteryValid = false, _batteryCharging = false;

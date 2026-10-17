@@ -110,6 +110,7 @@ void formatCountdown(mosaico_time::Countdown time, char* out, size_t size, bool 
 }
 }
 namespace view {
+CodexMicroView::CodexMicroView() : _firstQuotaLockGate(lv_tick_get()) {}
 CodexMicroView::~CodexMicroView() {
     clearStandbyDim();
     MosaicoSessions::setEnabled(false);
@@ -262,6 +263,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     }
     if (!widgetsReady) { lv_obj_delete(_root); _root = nullptr; if (_rotationCurtain) lv_obj_delete(_rotationCurtain); _rotationCurtain = nullptr; return; }
     _activity = lv_tick_get(); _motionEpoch = _activity; _refresh = _activity; refreshQuota(GetHAL().millis()); refreshHistory();
+    _quotaObservedRevision = _quotaRevision; // Do not acknowledge a failed startup copy.
     refreshClock(_activity, true);
     refreshDisplaySettings();
     if (!GetHAL().isDisplayOrientationHealthy()) { _rotationFault = true; cancelOrientation(); }
@@ -1643,6 +1645,8 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     const bool lockResetKnown = leftTime.known || rightTime.known;
     const uint32_t timeColor = lockResetKnown ? (_quota->stale ? dimCachedColor(Cyan) : Cyan) : Gray;
     setIcon(_lockResetIcon, Icon::Hourglass, timeColor); setText(_lockResetTime, lockReset, timeColor);
+    // Latch only after both dashboard and lock widgets have consumed the cache.
+    _firstQuotaLockGate.quotaRendered(lockKnown);
 }
 void CodexMicroView::historyChartEvent(lv_event_t* event) {
     auto* self = static_cast<CodexMicroView*>(lv_event_get_user_data(event));
@@ -1910,6 +1914,9 @@ void CodexMicroView::update(const CodexMicroState& state) {
     StandbySleep::viewState(_locked,ready() && standbyDimEligible() && !_settingsAnimating && !_slideTo,_rotationFault);
     if (!ready()) return;
     uint32_t tick = lv_tick_get();
+    // Sample before refreshing: a newly rendered first quota gets a UI iteration
+    // before automatic locking. Construction time, not activity, bounds the wait.
+    const bool firstQuotaReady = _firstQuotaLockGate.allowsAutoLock(tick);
     const bool networkReady = GetNetworkQuota().connected() && (!GetTailnetQuota().enabled() || GetTailnetQuota().ready());
     if (networkReady != _otaNetworkReady) { _otaNetworkReady = networkReady; if (!_locked) renderOtaAction(); }
     refreshOta(tick);
@@ -1955,6 +1962,15 @@ void CodexMicroView::update(const CodexMicroState& state) {
                 wifi.restartError ? "REBOOT ERROR" : wifi.error ? "SAVE ERROR" : wifi.scanError ? "SCAN ERROR" : !wifi.available ? "WIFI UNAVAILABLE" : "SAVED");
     }
     if (!_locked) refreshClock(tick);
+    // Consume each backend revision once, including while locked. Failed local
+    // copies retry after one second, without hammering the cache mutex each frame.
+    const uint32_t quotaRevision = QuotaMonitorRevision();
+    if (_quotaObservedRevision != quotaRevision &&
+        (_quotaAttemptedRevision != quotaRevision || tick - _quotaAttemptTick >= 1000U)) {
+        _quotaAttemptedRevision = quotaRevision; _quotaAttemptTick = tick;
+        refreshQuota(GetHAL().millis());
+        if (_quotaRevision == quotaRevision) _quotaObservedRevision = quotaRevision;
+    }
     // Rendering/page callbacks can record activity after the entry tick.
     tick = lv_tick_get();
     const bool keepAwake = otaKeepAwake();
@@ -1962,7 +1978,7 @@ void CodexMicroView::update(const CodexMicroState& state) {
     const uint32_t idleElapsed = tick - _activity;
     const uint32_t timeoutSeconds = _chargeProfile ? _displaySettings.effectiveConfig.chargeTimeoutSeconds :
         std::min<uint32_t>(60, _displaySettings.effectiveConfig.batteryTimeoutSeconds);
-    if (!_locked && !interacting && !keepAwake && timeoutSeconds && idleElapsed >= timeoutSeconds * 1000U && idleElapsed < 0x80000000U) lockDisplay();
+    if (!_locked && !interacting && !keepAwake && timeoutSeconds && firstQuotaReady && idleElapsed >= timeoutSeconds * 1000U && idleElapsed < 0x80000000U) lockDisplay();
     // Revision checks are local memory only; no touch or UI path performs HTTP.
     // lockDisplay records a fresh refresh timestamp; never compare it to an older tick.
     tick = lv_tick_get();
@@ -1973,7 +1989,6 @@ void CodexMicroView::update(const CodexMicroState& state) {
         if (_locked) { ++_lockRefreshCount;requestLockedSessions();renderLockSessions(); }
         _shiftPending = true;
     } else if (!_locked) {
-        if (_quotaRevision != QuotaMonitorRevision()) refreshQuota(GetHAL().millis());
         if (_page == Page::History) refreshHistory();
     }
     if (!_locked && GetHAL().millis() - _batteryReadTick >= 5000) refreshBattery(GetHAL().millis());

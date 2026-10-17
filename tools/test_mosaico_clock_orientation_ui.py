@@ -124,6 +124,7 @@ struct View {
  constexpr void refreshOta() { now+=3; setPageForDebug(); }
  constexpr void compare(bool interacting=false) {
   uint32_t tick=now-3; // The stale entry tick captured before callbacks.
+  const bool firstQuotaReady=true; // Startup gate is covered by test_mosaico_first_quota_lock.
 """+timing+r"""
    ++refreshCount;
   }
