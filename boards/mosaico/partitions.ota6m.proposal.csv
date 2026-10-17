@@ -1,0 +1,11 @@
+# DESIGN ONLY: not selected by sdkconfig, not safe to flash as an ordinary OTA.
+# Requires a separately approved, backed-up migration plus layout-aware firmware.
+# Keep credentials, OTA selectors and PHY locations unchanged. NOR is 16 MiB.
+# Reclaims the factory ui_apps/system partitions; their contents are NOT migrated.
+# NAND remains a separate device and is not described in this NOR table.
+nvs,data,nvs,0xa000,0x6000,
+otadata,data,ota,0x10000,0x2000,
+phy_init,data,phy,0x12000,0x1000,
+ota_0,app,ota_0,0x20000,0x600000,
+ota_1,app,ota_1,0x620000,0x600000,
+reserve,data,0x40,0xc20000,0x3e0000,
