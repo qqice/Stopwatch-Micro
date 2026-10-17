@@ -2,6 +2,9 @@
 #include "gauge_discharge_trace.h"
 #include "gauge_discharge_trace_model.h"
 #include "gauge_trace_storage_codec.h"
+#ifdef MOSAICO_NAND_STORE
+#include "gauge_trace_nand_backend.h"
+#endif
 #include "system_clock.h"
 #include <hal/hal.h>
 #include <ota/mosaico_ota.h>
@@ -26,7 +29,7 @@ Storage* storage=nullptr;
 bool allocationError=false, allocationAttempted=false;
 uint64_t lastAllocationAttempt=0;
 bool ready=false, corrupt=false, storageError=false;
-enum class Command { None, Arm, Stop, Clear, Checkpoint };
+enum class Command { None, Arm, Stop, Clear, Checkpoint, Resume };
 // RAM-only diagnostics: a later success never hides the last failure this boot.
 // Length/CRC/byte mismatches have no SDK error; use ESP_FAIL plus their stage.
 enum class FailureStage : uint8_t { None, ReadOpen, Load, WriteOpen, Set, Commit, Reopen, Read, Length, Crc, Compare };
@@ -36,6 +39,9 @@ size_t encodedBytes=0;
 void failure(esp_err_t error,FailureStage stage){lastNvsError=error;failureStage=stage;}
 Command pending=Command::None;
 uint64_t lastWriteAttempt=0;
+#ifdef MOSAICO_NAND_STORE
+uint64_t nextLoadAttempt=0;
+#endif
 bool writeAttempted=false;
 // Separate namespace/key: never inspect or modify calibration journals.
 constexpr const char* Namespace="gauge_trace";
@@ -52,6 +58,17 @@ bool ensureStorage(uint64_t now) {
 }
 void load() {
     auto& model=storage->model;auto& ioBlob=storage->ioBlob;auto& packed=storage->packedIo;
+#ifdef MOSAICO_NAND_STORE
+    bool selected=false;
+    const bool loaded=NandBackend::load(ioBlob,selected);
+    if(selected){
+        if(!loaded&&NandBackend::retryable())return;
+        if(!loaded||!decode(ioBlob,model)){corrupt=true;storageError=true;}
+        else if(model.boot==UINT32_MAX)corrupt=true;
+        else ++model.boot;
+        ready=true;return;
+    }
+#endif
     nvs_handle_t h;ioBlob={};size_t size=0;
     esp_err_t err=nvs_open(Namespace,NVS_READONLY,&h);
     FailureStage stage=FailureStage::ReadOpen;
@@ -80,6 +97,11 @@ bool save(const Model& value) {
     auto& ioBlob=storage->ioBlob;auto& verifyBlob=storage->verifyBlob;
     auto& packed=storage->packedIo;auto& readback=storage->packedVerify;
     if(otaBlocked())return false;
+#ifdef MOSAICO_NAND_STORE
+    ioBlob=encode(value);bool selected=false;
+    const bool saved=NandBackend::save(ioBlob,selected);
+    if(selected){storageError=!saved;return saved;}
+#endif
     nvs_handle_t h;
     FailureStage stage=FailureStage::WriteOpen;
     esp_err_t err=nvs_open(Namespace,NVS_READWRITE,&h);
@@ -123,9 +145,13 @@ Sample convert(const Hal::BatteryTelemetry& t,uint64_t now) {
 bool request(Command c){
     std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
     if(!lock || !ready || pending!=Command::None)return false;
+#ifdef MOSAICO_NAND_STORE
+    if(NandBackend::busy())return false;
+#endif
     auto& model=storage->model;
     if(c==Command::Arm && (corrupt || model.count || model.armed))return false;
     if(c==Command::Stop && !model.armed)return false;
+    if(c==Command::Resume && (corrupt || model.armed || !model.count || model.finalizedChargeAfterLow))return false;
     if(c==Command::Checkpoint && (corrupt || model.armed || !model.count))return false;
     pending=c;return true;
 }
@@ -151,14 +177,35 @@ void emitUnavailable(EmitLine emit,void* ctx,bool error,bool allocationFailed){
 }
 bool armConfirm(){return request(Command::Arm);}
 bool stop(){return request(Command::Stop);}
+bool resumeConfirm(){return request(Command::Resume);}
 bool clearConfirm(){return request(Command::Clear);}
 bool checkpointConfirm(){return request(Command::Checkpoint);}
+#ifdef MOSAICO_NAND_STORE
+bool nandFormatConfirm(){
+    std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
+    if(!lock||!storage||!ready||corrupt||pending!=Command::None||storage->model.armed||!storage->model.count||otaBlocked())return false;
+    encodeInto(storage->model,storage->ioBlob);
+    return NandBackend::beginFormat(storage->ioBlob);
+}
+void nandStatus(EmitLine emit,void* context){NandBackend::status(emit,context);}
+#endif
 void service(){
+#ifdef MOSAICO_NAND_STORE
+    if(NandBackend::busy())return;
+#endif
     std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);if(!lock || otaBlocked())return;
     const uint64_t now=uint64_t(esp_timer_get_time()/1000);
     if(!ensureStorage(now))return;
     auto& model=storage->model;auto& staging=storage->staging;
+#ifdef MOSAICO_NAND_STORE
+    if(!ready){
+        if(now<nextLoadAttempt)return;
+        load();
+        if(!ready){nextLoadAttempt=now+60000;return;}
+    }
+#else
     if(!ready)load();
+#endif
     const bool command=pending!=Command::None;
     if(corrupt && !command)return;
     const bool canAttempt=!writeAttempted || now-lastWriteAttempt>=60000;
@@ -171,7 +218,7 @@ void service(){
     if(!writable(s) || otaBlocked())return;
     if(command && canAttempt){
         staging=model;auto& next=staging;
-        if(pending==Command::Arm)next.armed=true;
+        if(pending==Command::Arm || pending==Command::Resume)next.armed=true;
         if(pending==Command::Stop)next.armed=false;
         if(pending==Command::Clear){next=Model{};next.boot=model.boot;}
         lastWriteAttempt=now;writeAttempted=true;
@@ -200,6 +247,9 @@ void status(EmitLine emit,void* ctx){
     if(!allocated){emitUnavailable(emit,ctx,e,allocationFailed);return;}
     emitStatus(emit,ctx,storage->exportSnapshot,r,b,e,cmd,writeMs);
     emitNvsStatus(emit,ctx,nvsError,stage,encoded);
+#ifdef MOSAICO_NAND_STORE
+    NandBackend::status(emit,ctx);
+#endif
 }
 void exportRows(EmitLine emit,void* ctx){
     if(!emit)return;
@@ -219,6 +269,9 @@ void exportRows(EmitLine emit,void* ctx){
     auto& copy=storage->exportSnapshot;auto& traceLine=storage->traceLine;
     emitStatus(emit,ctx,copy,r,b,e,cmd,writeMs);
     emitNvsStatus(emit,ctx,nvsError,stage,encoded);
+#ifdef MOSAICO_NAND_STORE
+    NandBackend::status(emit,ctx);
+#endif
     emit("{\"type\":\"gauge_trace_schema\",\"schema\":2,\"flags\":\"1=valid,2=capacityValid,4=temperatureValid,8=epochValid,16=nominalConfigured,32=rawCoulombValid\",\"current_sign\":\"positive=charging\",\"temperature_unit\":\"0.1K\",\"order\":\"oldest_first\"}",ctx);
     for(size_t i=0;i<copy.count;++i){
         const auto& s=copy.at(i);

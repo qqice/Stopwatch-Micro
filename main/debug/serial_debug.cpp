@@ -36,6 +36,9 @@
 #include <host/network_quota.h>
 #ifdef MOSAICO_BOARD
 #include <host/gauge_discharge_trace.h>
+#ifdef MOSAICO_NAND_STORE
+#include <host/gauge_trace_nand_backend.h>
+#endif
 #endif
 #include <host/tailscale_transport.h>
 #include <host/token_history.h>
@@ -516,6 +519,11 @@ void SerialDebug::handleLine(char* line)
     if (_reply_uart && !serial_debug_transport::uartAllowed(command)) {
         result(command, "FAIL", "reason=uart_requires_extended_authorization no_changes=1"); return;
     }
+#ifdef MOSAICO_NAND_STORE
+    if(command&&GaugeDischargeTrace::NandBackend::busy()&&std::strcmp(command,"ping")&&std::strcmp(command,"nand-store")&&std::strcmp(command,"gauge-trace")&&std::strcmp(command,"ota-status")&&std::strcmp(command,"power")){
+        result(command,"FAIL","reason=nand_format_maintenance no_changes=1");return;
+    }
+#endif
     if (_reply_uart && command && !std::strcmp(command, "display-test-frequency")) {
         char value[8]{};
         if (!save || std::sscanf(save, "%7s", value) != 1 || (std::strcmp(value, "160") && std::strcmp(value, "320"))) {
@@ -1384,10 +1392,10 @@ void SerialDebug::handleLine(char* line)
     if (std::strcmp(command,"gauge-trace")==0) {
         const char* action=::strtok_r(nullptr," \t",&save);
         if(!action)action="status";
-        const bool confirmed=!std::strcmp(action,"arm")||!std::strcmp(action,"clear")||!std::strcmp(action,"checkpoint");
+        const bool confirmed=!std::strcmp(action,"arm")||!std::strcmp(action,"resume")||!std::strcmp(action,"clear")||!std::strcmp(action,"checkpoint");
         const char* confirm=confirmed?::strtok_r(nullptr," \t",&save):nullptr;
         if((confirmed&&(!confirm||std::strcmp(confirm,"CONFIRM")))||::strtok_r(nullptr," \t",&save)) {
-            result("gauge-trace","FAIL","expected=status_arm_CONFIRM_stop_export_clear_CONFIRM_checkpoint_CONFIRM");return;
+            result("gauge-trace","FAIL","expected=status_arm_CONFIRM_resume_CONFIRM_stop_export_clear_CONFIRM_checkpoint_CONFIRM");return;
         }
         bool emitted=true;
         const auto emit=[](const char* line,void* context){
@@ -1410,6 +1418,7 @@ void SerialDebug::handleLine(char* line)
         }
         bool queued=false;
         if(!std::strcmp(action,"arm"))queued=GaugeDischargeTrace::armConfirm();
+        else if(!std::strcmp(action,"resume"))queued=GaugeDischargeTrace::resumeConfirm();
         else if(!std::strcmp(action,"stop"))queued=GaugeDischargeTrace::stop();
         else if(!std::strcmp(action,"clear"))queued=GaugeDischargeTrace::clearConfirm();
         else if(!std::strcmp(action,"checkpoint"))queued=GaugeDischargeTrace::checkpointConfirm();
@@ -1417,6 +1426,22 @@ void SerialDebug::handleLine(char* line)
         result("gauge-trace",queued?"PASS":"FAIL",queued?"queued=1 persisted=0 check_status_pending0=1 gauge_parameter_writes=0":"queued=0 reason=busy_not_ready_or_refused");
         return;
     }
+#ifdef MOSAICO_NAND_STORE
+    if (std::strcmp(command,"nand-store")==0) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        const char* confirm=action?::strtok_r(nullptr," \t",&save):nullptr;
+        if(::strtok_r(nullptr," \t",&save)){result(command,"FAIL","reason=extra_arguments");return;}
+        if(!action||(!std::strcmp(action,"status")&&!confirm)){
+            GaugeDischargeTrace::nandStatus([](const char* line,void*){SerialDebug::debugTraceLine(line);},nullptr);
+            result(command,"PASS","readonly=1");return;
+        }
+        if(std::strcmp(action,"format")||!confirm||std::strcmp(confirm,"CONFIRM_ERASE_EXTERNAL_POWER")){
+            result(command,"FAIL","expected=status_or_format_CONFIRM_ERASE_EXTERNAL_POWER");return;
+        }
+        const bool queued=GaugeDischargeTrace::nandFormatConfirm();
+        result(command,queued?"PASS":"FAIL",queued?"queued=1 NAND_ONLY_ERASE=1 original_NVS_retained=1 check_nand_store_status=1":"queued=0 reason=busy_not_ready_or_guard");return;
+    }
+#endif
     if (std::strcmp(command,"nand-probe")==0) {
         const char* action=::strtok_r(nullptr," \t",&save);
         uint32_t page=0,column=0,length=0;

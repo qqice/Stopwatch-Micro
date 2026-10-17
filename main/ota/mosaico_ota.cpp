@@ -7,6 +7,9 @@
 #include <hal/hal.h>
 #include <host/standby_sleep.h>
 #include <host/touch_sleep.h>
+#ifdef MOSAICO_NAND_STORE
+#include <host/gauge_trace_nand_backend.h>
+#endif
 #include <cJSON.h>
 #include <esp_ota_ops.h>
 #include <esp_app_desc.h>
@@ -243,6 +246,9 @@ bool recordAttempt(const InstallPowerEvidence& power)
 }
 bool requestLocked(bool automatic, bool preserveAge = false)
 {
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy())return false;
+#endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (active.load() || approvedRequest.load() || imageReady || selected.load()) return false;
     if (!currentReady()) return reject("running_or_layout_not_ready");
@@ -358,6 +364,9 @@ uint32_t requestAgeMs()
 }
 bool request()
 {
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy())return false;
+#endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::lock_guard<std::mutex> guard(lock);
     { std::lock_guard<std::mutex> uiGuard(snapshotLock);
@@ -414,6 +423,9 @@ bool copyUiSnapshot(UiSnapshot& out)
 }
 bool approveUpdate(const char* expectedSha)
 {
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy())return false;
+#endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || !lowerHex(expectedSha) ||
@@ -466,6 +478,9 @@ void fail(const char* message)
 }
 bool beginManifest(const char* json)
 {
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy())return false;
+#endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || pending || writing || imageReady) return reject("manifest_out_of_sequence");
@@ -566,6 +581,9 @@ bool installVerified()
 }
 bool requestCheck()
 {
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy())return false;
+#endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || selected.load() ||
@@ -590,6 +608,9 @@ void finishCheck(bool transportOk)
 }
 bool approveInstall(const char* expectedSha)
 {
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy())return false;
+#endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || !lowerHex(expectedSha) || std::strcmp(expectedSha, ui.sha256) ||
@@ -601,6 +622,9 @@ bool approveInstall(const char* expectedSha)
 }
 bool requestReboot()
 {
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy())return false;
+#endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || ui.stage != UiStage::ReadyReboot || !selected.load()) return false;

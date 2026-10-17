@@ -18,7 +18,7 @@ if(MOSAICO_BOARD)
     endif()
     list(APPEND APP_SRCS "apps/app_codex_micro/view/view_mosaico.cpp"
         "apps/app_codex_micro/view/dot_widgets.cpp" "host/quota_monitor.cpp" "ota/mosaico_ota.cpp"
-        "debug/mosaico_rx_observer.cpp" "debug/mosaico_wifi_rx_observer.cpp" "debug/mosaico_rx_ingress.cpp" "main_idle_wait.cpp" "host/touch_sleep.cpp" "host/mosaico_display_settings.cpp" "host/mosaico_session_monitor.cpp" "host/standby_sleep.cpp" "host/powerbank_keepalive.cpp" "host/gauge_discharge_trace.cpp" "hal/mosaico/mosaico_nand_probe.cpp")
+        "debug/mosaico_rx_observer.cpp" "debug/mosaico_wifi_rx_observer.cpp" "debug/mosaico_rx_ingress.cpp" "main_idle_wait.cpp" "host/touch_sleep.cpp" "host/mosaico_display_settings.cpp" "host/mosaico_session_monitor.cpp" "host/standby_sleep.cpp" "host/powerbank_keepalive.cpp" "host/gauge_discharge_trace.cpp" "hal/mosaico/mosaico_nand_probe.cpp" "hal/mosaico/mosaico_nand_store.cpp" "host/gauge_trace_nand_backend.cpp")
     set(PLATFORM_SRCS "hal/hal.cpp" "hal/mosaico/hal_mosaico.cpp" "hal/mosaico/bt_config.c" "hal/mosaico/usb_console.c"
         "hal/ble/codex_micro_ble.cpp" "hal/ble/hid_gatt_compat.cpp"
         "hal/utils/button/Button_Class.cpp" "hal/utils/settings/settings.cc")
@@ -65,7 +65,7 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
 )
 
 if(MOSAICO_BOARD)
-    target_compile_definitions(${COMPONENT_LIB} PUBLIC MOSAICO_BOARD=1)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC MOSAICO_BOARD=1 MOSAICO_NAND_STORE=1)
     if(CONFIG_IDF_TARGET_ESP32S31 AND CONFIG_IDF_TARGET_ARCH_RISCV)
         target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler"
             "-Wl,--wrap=esp_vfs_register_fs")
@@ -92,4 +92,24 @@ if(MOSAICO_BOARD)
         APPEND PROPERTY COMPILE_OPTIONS "-include"
         "${CMAKE_CURRENT_LIST_DIR}/hal/mosaico/mosaico_bmi_delay.h"
         "-DMOSAICO_BMI_DELAY_OVERRIDE=1")
+endif()
+
+if(MOSAICO_BOARD)
+    # Exact-version compatibility TUs only; never edit SDK/managed component sources.
+    idf_component_get_property(nand_lib espressif__spi_nand_flash COMPONENT_LIB)
+    idf_component_get_property(nand_dir espressif__spi_nand_flash COMPONENT_DIR)
+    # The project-local readiness deadline uses the public esp_timer API.
+    target_link_libraries(${nand_lib} PRIVATE idf::esp_timer)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/../tools/mosaico_nand_driver_compat.py")
+    set(nand_compat_dir "${CMAKE_CURRENT_BINARY_DIR}/nand-compat-1.4.1")
+    execute_process(COMMAND "${PYTHON}" "${CMAKE_CURRENT_LIST_DIR}/../tools/mosaico_nand_driver_compat.py"
+        --component "${nand_dir}" --output "${nand_compat_dir}"
+        RESULT_VARIABLE nand_compat_result)
+    if(NOT nand_compat_result EQUAL 0)
+        message(FATAL_ERROR "Refusing unverified NAND driver version/patch anchors")
+    endif()
+    foreach(nand_tu nand.c nand_impl.c dhara_glue.c)
+        set_source_files_properties("${nand_dir}/src/${nand_tu}" TARGET_DIRECTORY ${nand_lib} PROPERTIES HEADER_FILE_ONLY TRUE)
+        target_sources(${nand_lib} PRIVATE "${nand_compat_dir}/${nand_tu}")
+    endforeach()
 endif()

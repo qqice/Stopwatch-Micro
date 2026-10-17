@@ -332,7 +332,7 @@ struct Hal { struct BatteryTelemetry {
 struct MockMutex {bool available=true;};
 struct MockLock {bool held;constexpr MockLock(MockMutex& m,int):held(m.available){} constexpr explicit operator bool()const{return held;}};
 struct Fixture {
- enum class Command {None,Arm,Stop,Clear,Checkpoint};
+ enum class Command {None,Arm,Stop,Clear,Checkpoint,Resume};
  enum class FailureStage : uint8_t {None,ReadOpen,Load,WriteOpen,Set,Commit,Reopen,Read,Length,Crc,Compare};
  esp_err_t lastNvsError=ESP_OK;FailureStage failureStage=FailureStage::None;
  MockMutex mutex;

@@ -52,9 +52,10 @@ constexpr uint32_t crc(const Blob& b) {
     for(size_t i=0;i<BlobSize-4;++i){ c^=b[i];for(unsigned j=0;j<8;++j)c=(c>>1)^(0xedb88320U&uint32_t(-int32_t(c&1))); }
     return ~c;
 }
-constexpr Blob encode(const Model& m) {
+constexpr void encodeInto(const Model& m,Blob& b) {
     bool raw=false;for(size_t i=0;i<m.count;++i)raw|=bool(m.at(i).flags&RawCoulombValid);
-    Blob b{};put(b,0,0x31544447,4);put(b,4,raw?2:1,2);put(b,6,RecordSize,2);
+    for(auto& byte:b)byte=0;
+    put(b,0,0x31544447,4);put(b,4,raw?2:1,2);put(b,6,RecordSize,2);
     put(b,8,m.count,2);put(b,10,m.armed,1);put(b,11,(m.lowSeen?1:0)|(m.finalizedChargeAfterLow?2:0),1);put(b,12,m.boot,4);
     for(size_t i=0;i<m.count;++i){const auto& s=m.at(i);size_t p=32+i*RecordSize;
         put(b,p,s.boot,4);put(b,p+4,s.monotonicMs,8);put(b,p+12,s.epoch,8);put(b,p+20,s.flags,2);put(b,p+22,s.soc,2);
@@ -62,8 +63,9 @@ constexpr Blob encode(const Model& m) {
         for(size_t j=0;j<11;++j)put(b,p+24+2*j,v[j],2);
         if(s.flags&RawCoulombValid)put(b,p+46,s.rawCoulombMah,2);
     }
-    put(b,BlobSize-4,crc(b),4);return b;
+    put(b,BlobSize-4,crc(b),4);
 }
+constexpr Blob encode(const Model& m) {Blob b{};encodeInto(m,b);return b;}
 constexpr bool decode(const Blob& b,Model& out) {
     if(get(b,0,4)!=0x31544447 || (get(b,4,2)!=1 && get(b,4,2)!=2) || get(b,6,2)!=RecordSize || get(b,8,2)>Capacity || b[10]>1 || get(b,BlobSize-4,4)!=crc(b))return false;
     Model m;m.armed=b[10];m.lowSeen=b[11]&1;m.finalizedChargeAfterLow=b[11]&2;if(b[11]>3 || (m.finalizedChargeAfterLow && (!m.lowSeen || m.armed)))return false;m.boot=uint32_t(get(b,12,4));

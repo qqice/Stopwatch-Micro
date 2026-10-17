@@ -33,6 +33,13 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.5.3
+  espressif/dhara:
+    component_hash: 88968cff2e88853a29366ad556e9c27596d18e15028b6e9f3cd627665f914440
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.0
   espressif/esp_lcd_co5300:
     component_hash: 21f84c5c825509ebacbddb379555b49092ae165b3e19f0edfbf6f8eff8aa036d
     dependencies:
@@ -123,6 +130,20 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.1.5
+  espressif/spi_nand_flash:
+    component_hash: b36f7e090c67c08b273719756fb52ea31f81296ca41b3da1ca4be6e3b3777be7
+    dependencies:
+    - name: espressif/dhara
+      registry_url: https://components.espressif.com
+      require: private
+      version: 1.*
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.4.1
   espressif/tinyusb:
     component_hash: a72b7d67472914ab76309340fd50d578b31e310963d45ad0f81144bde3314752
     dependencies:
@@ -166,12 +187,14 @@ dependencies:
 direct_dependencies:
 - espressif/bmi270
 - espressif/cjson
+- espressif/dhara
 - espressif/esp_lcd_co5300
 - espressif/esp_lvgl_port
 - espressif/esp_tinyusb
+- espressif/spi_nand_flash
 - idf
 - lvgl/lvgl
 - waveshare/esp_lcd_touch_cst9217
-manifest_hash: ba7a554ed89f65466f66930e685e53f0aa4cde82eee9d60e63d77114aa2db143
+manifest_hash: 48e7c30d6dd2eb2fdcb79477478cfbbf2c083e10d17a1945f8456b754510eb26
 target: esp32s31
 version: 3.0.0

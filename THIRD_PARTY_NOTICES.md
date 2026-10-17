@@ -382,3 +382,13 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR
 INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE FONT
 SOFTWARE.
 ```
+
+## Mosaico NAND storage
+
+The Mosaico-only manifest pins Espressif `spi_nand_flash` 1.4.1 (Apache-2.0)
+and `dhara` 1.0.0 (see the component's ISC license and upstream notices).
+Components are obtained by ESP-IDF Component Manager; SDK sources are not changed.
+`tools/mosaico_nand_driver_compat.py` verifies exact upstream source SHA-256 values
+and generates project-local replacement translation units for timeout, error
+propagation, ECC bit extraction, and explicitly authorized format progress hooks.
+Original component copyright and license headers remain in generated sources.
