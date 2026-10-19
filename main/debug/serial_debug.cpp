@@ -1374,6 +1374,9 @@ void SerialDebug::handleLine(char* line)
         if (!std::strcmp(action,"flush") && !::strtok_r(nullptr," \t",&save)) {
             result(command,MosaicoSystemLog::requestFlush()?"PASS":"BUSY","action=queued no_gauge_changes=1");return;
         }
+        if (!std::strcmp(action,"probe") && !::strtok_r(nullptr," \t",&save)) {
+            MosaicoSystemLog::probe();result(command,"PASS","action=static_fingerprint_probe no_gauge_changes=1");return;
+        }
         uint32_t high=0,low=0,chunk=0;
         const char* hi=::strtok_r(nullptr," \t",&save);const char* lo=::strtok_r(nullptr," \t",&save);
         if ((!std::strcmp(action,"read")||!std::strcmp(action,"chunk")) &&

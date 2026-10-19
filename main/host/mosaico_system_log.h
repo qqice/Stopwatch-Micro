@@ -12,6 +12,7 @@ void begin(uint32_t bootId);
 void service();
 size_t startupInternalReservation(); // Verified resident RTC stack only, <=8192.
 bool requestFlush();
+void probe(); // Explicit operator-only static-format fingerprint test.
 void status(char* out,size_t length);
 bool requestRead(uint64_t seq);
 ReadStatus readStatus();

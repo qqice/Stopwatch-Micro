@@ -14,6 +14,7 @@ class SystemLogTests(unittest.TestCase):
 #include "mosaico_system_log_model.h"
 using namespace MosaicoSystemLog::Model;
 constexpr bool test(){
+ if(!staticFormatAddress(0x502a1000,0x502a0000,0x50330000)||staticFormatAddress(0x50330000,0x502a0000,0x50330000)||staticFormatAddress(0x50340000,0x502a0000,0x50330000)||staticFormatAddress(0x2f000000,0x502a0000,0x50330000)||staticFormatAddress(0,0,0))return false;
  if(startupBudget(80000,0)!=80000||startupBudget(80000,8192)!=88192||startupBudget(80000,99999)!=88192||startupBudget(SIZE_MAX,8192)!=SIZE_MAX)return false;
  if(startupBudget(81920-8192,8192)<81920||startupBudget(81919-8192,8192)>=81920)return false;
  Record r;r.type=Type::Gauge;r.flags=0x1234;r.monotonicMs=0x0102030405060708ULL;r.epoch=0x1020304050607080ULL;for(unsigned i=0;i<11;++i)r.args[i]=0x87654321U+i;
@@ -75,7 +76,9 @@ static_assert(bootRetry());
 
     def test_secret_and_hook_boundary(self):
         hook=SOURCE.split('int logHook(',1)[1].split('bool otaIdle()',1)[0]
-        self.assertIn('esp_ptr_in_drom(fmt)',hook)
+        self.assertIn('staticFormatAddress(',hook)
+        self.assertIn('reinterpret_cast<uintptr_t>(_rodata_start)',hook)
+        self.assertIn('reinterpret_cast<uintptr_t>(_rodata_end)',hook)
         self.assertIn('!xPortInIsrContext()',hook)
         self.assertIn('spi_flash_cache_enabled()',hook)
         self.assertIn('hookLock.test_and_set',hook)

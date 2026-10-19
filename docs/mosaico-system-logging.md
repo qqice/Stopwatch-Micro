@@ -61,11 +61,15 @@ USB CDC and CRC-framed UART expose:
 debug gauge-mode
 debug syslog status
 debug syslog flush
+debug syslog probe
 debug syslog read <sequence_hi32> <sequence_lo32>
 debug syslog chunk <sequence_hi32> <sequence_lo32> <0..15>
 ```
 
-`flush` queues work and does not bypass safety gates. `read` loads a persistent
+`probe` emits one credential-free warning-format fingerprint for acceptance tests.
+`flush` queues work and does not bypass safety gates. Explicit flush/new-read
+requests may retry a resource refusal immediately; automatic retries still back off.
+`read` loads a persistent
 page asynchronously; `chunk` reads its immutable RAM cache. Each 128-byte response
 contains sequence/index/length plus chunk and page CRCs. There is no `clear` or
 `format` command in this interface. As with existing NAND reads, driver ECC

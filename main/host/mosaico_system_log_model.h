@@ -5,6 +5,9 @@
 #include <cstdint>
 namespace MosaicoSystemLog::Model {
 constexpr size_t RecordBytes=64,Capacity=128,ChunkBytes=128;
+constexpr bool staticFormatAddress(uintptr_t p,uintptr_t begin,uintptr_t end) {
+ return begin<end && p>=begin && p<end;
+}
 // Normalize the old pre-logger startup budget, never arbitrary allocations.
 constexpr size_t startupBudget(size_t free,size_t residentRtcStack) {
  const size_t add=residentRtcStack>8192?8192:residentRtcStack;

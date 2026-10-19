@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+extern "C" const char _rodata_start[],_rodata_end[];
 namespace MosaicoSystemLog {
 namespace {
 using namespace Model;
@@ -47,7 +48,9 @@ bool enqueue(const Record& r,bool critical=false){if(!storage||queueLock.test_an
 // A global try guard handles recursion AND concurrent callers without blocking.
 int logHook(const char* fmt,va_list ap){
  if(hookLock.test_and_set(std::memory_order_acquire)){++hookDrops;if(!originalPrint)return 0;va_list copy;va_copy(copy,ap);const int result=originalPrint(fmt,copy);va_end(copy);return result;}
- if(!xPortInIsrContext()&&spi_flash_cache_enabled()&&esp_ptr_in_drom(fmt)){
+ // S31 PSRAM-XIP literals live in ELF rodata at 0x50..., not hardware DROM.
+ // A linker-defined static range rejects heap/stack formats without reading args.
+ if(!xPortInIsrContext()&&spi_flash_cache_enabled()&&staticFormatAddress(reinterpret_cast<uintptr_t>(fmt),reinterpret_cast<uintptr_t>(_rodata_start),reinterpret_cast<uintptr_t>(_rodata_end))){
   unsigned severity=0;for(size_t i=0;fmt&&fmt[i]&&i<20;++i)if((fmt[i]=='W'||fmt[i]=='E')&&fmt[i+1]==' '&&fmt[i+2]=='('){severity=fmt[i]=='W'?1:2;break;}
   if(severity){Record r;r.type=Type::Warning;r.monotonicMs=nowMs();r.args[0]=severity;r.args[1]=hash(fmt);r.args[2]=0;r.args[3]=hookDrops.load();enqueue(r,false);}
  }
@@ -115,6 +118,7 @@ void begin(uint32_t id){
 void service(){if(!storage)return;const auto now=nowMs();if(lastKick&&now-lastKick<1000)return;lastKick=now;auto task=workerHandle.load();if(!task){if(!otaIdle()){gate=1;return;}TaskHandle_t created=nullptr;if(xTaskCreateWithCaps(worker,"system_log",8192,nullptr,1,&created,MALLOC_CAP_RTCRAM|MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)!=pdPASS){taskError=true;return;}workerHandle=created;task=created;taskError=false;}xTaskNotifyGive(task);}
 size_t startupInternalReservation(){return workerHandle.load()&&workerStackRtc.load()?8192:0;}
 bool requestFlush(){if(!storage)return false;nextAttempt=0;flushRequested=true;return true;}
+void probe(){ESP_LOGW("SystemLog","operator fingerprint probe");}
 bool requestRead(uint64_t seq){if(!storage||!seq||readLock.test_and_set(std::memory_order_acquire))return false;if((reader==ReadStatus::Pending||reader==ReadStatus::Ready)&&readSeq==seq){readLock.clear(std::memory_order_release);return true;}if(reader==ReadStatus::Pending){readLock.clear(std::memory_order_release);return false;}readSeq=seq;readError=0;readCode=0;nextAttempt=0;reader=ReadStatus::Pending;readLock.clear(std::memory_order_release);return true;}
 ReadStatus readStatus(){return reader.load();}
 bool readChunk(uint64_t seq,uint16_t index,uint8_t* out,size_t capacity,ChunkMetadata& m){
@@ -125,7 +129,7 @@ void status(char* out,size_t len){if(out&&len)std::snprintf(out,len,"ready=%u ta
 }
 #else
 namespace MosaicoSystemLog {
-void begin(uint32_t){} void service(){} size_t startupInternalReservation(){return 0;} bool requestFlush(){return false;} void status(char* out,size_t n){if(out&&n)out[0]=0;} bool requestRead(uint64_t){return false;} ReadStatus readStatus(){return ReadStatus::Idle;} bool readChunk(uint64_t,uint16_t,uint8_t*,size_t,ChunkMetadata&){return false;}
+void begin(uint32_t){} void service(){} size_t startupInternalReservation(){return 0;} bool requestFlush(){return false;} void probe(){} void status(char* out,size_t n){if(out&&n)out[0]=0;} bool requestRead(uint64_t){return false;} ReadStatus readStatus(){return ReadStatus::Idle;} bool readChunk(uint64_t,uint16_t,uint8_t*,size_t,ChunkMetadata&){return false;}
 }
 #endif
 
