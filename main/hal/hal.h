@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "mosaico/mosaico_sleep_io_model.h"
+#include "mosaico/mosaico_gauge_status_model.h"
 #include "utils/button/Button_Class.hpp"
 #include <system_config.h>
 #include <memory>
@@ -142,6 +143,7 @@ public:
         bool directDmaTrue = false;
     };
     enum class GaugeAccessAction { Open, Restore };
+    using GaugeDiagnosticSnapshot = mosaico_gauge_status::Snapshot;
     enum class GaugeBootReloadStatus { Deferred, Skipped, Applied, Critical };
     struct GaugeBootReloadInfo {
         GaugeBootReloadStatus status = GaugeBootReloadStatus::Deferred;
@@ -149,6 +151,11 @@ public:
         char reason[128] = "boot_reload_not_checked";
     };
 #ifdef MOSAICO_BOARD
+    // Explicit diagnostic I2C only; not part of UI telemetry refresh.
+    bool gaugeDiagnosticSample(GaugeDiagnosticSnapshot& out);
+    bool gaugeModeAudit(char* out, size_t len);
+    // RAM-only copy; phase/validMask distinguish unavailable boot observations.
+    void gaugeBootDiagnostic(GaugeDiagnosticSnapshot& before, GaugeDiagnosticSnapshot& after) const;
     BatteryTelemetry batteryTelemetry(bool refresh = false);
     // Nonblocking recorder sample. False means no sample (lock/OTA/gauge gate);
     // true may contain valid=false/temperatureValid=false for an I2C failure.
@@ -192,6 +199,12 @@ public:
     // Caller must exclude concurrent flash/NVS operations (esp_cache_msync rule).
     bool displayRamProbe(uint32_t& errors);
 #else
+    bool gaugeDiagnosticSample(GaugeDiagnosticSnapshot& out) { out={}; return false; }
+    bool gaugeModeAudit(char* out, size_t len) {
+        if(out && len)std::snprintf(out,len,"readonly=1 reason=unsupported_not_mosaico");
+        return false;
+    }
+    void gaugeBootDiagnostic(GaugeDiagnosticSnapshot& before, GaugeDiagnosticSnapshot& after) const { before={}; after={}; }
     BatteryTelemetry batteryTelemetry(bool = false) { return {}; }
     bool gaugeTraceTrySample(BatteryTelemetry&) { return false; }
     bool gaugeSetNominalCapacity(uint16_t, uint16_t, bool, char* reason, size_t reasonSize)

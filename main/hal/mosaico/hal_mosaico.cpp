@@ -252,6 +252,7 @@ bool boot_factory_reload_scope = false;
 bool gauge_access_cleanup_attempted = false;
 bool gauge_access_cleanup_succeeded = false;
 Hal::GaugeBootReloadInfo gauge_boot_info;
+Hal::GaugeDiagnosticSnapshot gauge_boot_before{}, gauge_boot_after{};
 // Volatile per-boot diagnostic latch; only the transaction owner may change it.
 bool gauge_ocv_attempted=false;
 bool gauge_threshold_audit_attempted=false;
@@ -488,6 +489,41 @@ bool gauge_word(uint8_t reg, uint16_t& value)
     if (!result) return false;
     value = bytes[0] | (static_cast<uint16_t>(bytes[1]) << 8);
     return true;
+}
+
+// Requires gauge_transaction_mutex -> battery_mutex. This adapter is closed:
+// only Control(0x0056), no mutating gauge_control or generic selector exposure.
+struct GaugeStatusReadTransport {
+    bool transmit(const uint8_t* packet, size_t count) {
+        gauge_feed();
+        return gauge && i2c_master_transmit(gauge,packet,count,20)==ESP_OK;
+    }
+    void delayUs(uint32_t us) { esp_rom_delay_us(us); gauge_feed(); }
+    bool read(uint8_t reg, uint8_t* data, size_t count) { return gauge_read(reg,data,count); }
+};
+
+void gauge_diagnostic_locked(Hal::GaugeDiagnosticSnapshot& out, uint8_t phase, uint8_t outcome)
+{
+    using namespace mosaico_gauge_status;
+    out={}; out.phase=phase; out.outcome=outcome; out.sampledUs=esp_timer_get_time();
+    if(!gauge)return;
+    const auto word=[&](uint8_t reg,uint16_t& value,uint32_t bit) {
+        if(gauge_word(reg,value))out.validMask|=bit;
+    };
+    word(0x2c,out.rawSoc,Soc); word(0x10,out.remainingMah,Remaining);
+    word(0x12,out.fullMah,Full); word(0x3c,out.designMah,Design);
+    word(0x08,out.voltageMv,Voltage);
+    uint16_t current=0,average=0;
+    word(0x0c,current,Current); word(0x14,average,Average);
+    out.currentMa=static_cast<int16_t>(current); out.averageCurrentMa=static_cast<int16_t>(average);
+    word(0x22,out.rawCoulombMah,RawCoulomb); word(0x2a,out.cycleCount,Cycles);
+    word(0x3a,out.operationStatus,Operation); word(0x0a,out.batteryStatus,Battery);
+    GaugeStatusReadTransport transport;
+    if(readGaugingStatus(transport,out.gaugingStatus))out.validMask|=Gauging;
+    if((out.validMask & (Gauging|Battery))==(Gauging|Battery)) {
+        out.mode=decodeMode(out.gaugingStatus,out.batteryStatus);
+        if(out.mode!=Unknown)out.validMask|=ModeValid;
+    }
 }
 
 void sample_battery_locked(bool refresh = false)
@@ -2108,6 +2144,32 @@ bool Hal::gaugeReconcileNominal(char* reason, size_t reasonSize)
     return report(true, "reconciled_std_target_observed_sec3_expected_prior3");
 }
 
+bool Hal::gaugeDiagnosticSample(GaugeDiagnosticSnapshot& out)
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    gauge_diagnostic_locked(out,mosaico_gauge_status::Explicit,0);
+    return (out.validMask & mosaico_gauge_status::AllRaw)==mosaico_gauge_status::AllRaw;
+}
+
+void Hal::gaugeBootDiagnostic(GaugeDiagnosticSnapshot& before, GaugeDiagnosticSnapshot& after) const
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    before=gauge_boot_before; after=gauge_boot_after;
+}
+
+bool Hal::gaugeModeAudit(char* out, size_t len)
+{
+    GaugeDiagnosticSnapshot sample{};
+    const bool ok=gaugeDiagnosticSample(sample);
+    if(out && len)std::snprintf(out,len,
+        "readonly=1 valid=%08lx gauging=%04x battery=%04x operation=%04x mac_dsg=%u batt_dsg=%u mode=%s mode_valid=%u",
+        static_cast<unsigned long>(sample.validMask),sample.gaugingStatus,sample.batteryStatus,sample.operationStatus,
+        !!(sample.gaugingStatus & 0x40),!!(sample.batteryStatus & 1),
+        mosaico_gauge_status::modeName(sample.mode),!!(sample.validMask & mosaico_gauge_status::ModeValid));
+    return ok;
+}
+
 Hal::GaugeBootReloadInfo Hal::gaugeBootReloadInfo() const
 {
     // No I2C/NVS and no triggering work. Waiting here prevents a runtime-reset
@@ -2132,6 +2194,26 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", gauge_boot_info.reason);
         return gauge_boot_info.status;
     }
+    // Capture only initialized pre-write evidence. Deferred retries may refresh
+    // it while no reload has been attempted; diagnostic failure never gates reload.
+    {
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        uint16_t operation=0;
+        if(!gauge_boot_info.attempted && gauge && gauge_word(0x3a,operation) && (operation & 0x20))
+            gauge_diagnostic_locked(gauge_boot_before,mosaico_gauge_status::BootBefore,static_cast<uint8_t>(Status::Deferred));
+    }
+    // Destroyed after inner battery locks, before outer transaction lock. Every
+    // terminal path, including early skip/critical, has exactly one after record.
+    struct DiagnosticFinish {
+        ~DiagnosticFinish() {
+            if(gauge_boot_info.status==Status::Deferred || gauge_boot_after.phase)return;
+            std::lock_guard<std::mutex> battery(battery_mutex);
+            if(!gauge_boot_before.phase)gauge_boot_before.phase=mosaico_gauge_status::BootBefore;
+            gauge_boot_before.outcome=static_cast<uint8_t>(gauge_boot_info.status);
+            gauge_diagnostic_locked(gauge_boot_after,mosaico_gauge_status::BootAfter,
+                                    static_cast<uint8_t>(gauge_boot_info.status));
+        }
+    } diagnosticFinish;
     ReloadJournal latch{};
     bool normalizePriorSealed = false;
     const auto mac = getFactoryMac();
