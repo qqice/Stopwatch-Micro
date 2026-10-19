@@ -66,6 +66,17 @@ extern "C" void IRAM_ATTR __wrap_esp_panic_handler(panic_info_t* info)
     __real_esp_panic_handler(info); // Preserve the SDK's complete panic handling.
 }
 
+bool MosaicoPanicNumeric(uint32_t* words, size_t count)
+{
+    if (!words || count != 11 || (capture.magic != CaptureMagic && capture.magic != LegacyCaptureMagic)) return false;
+    words[0] = static_cast<uint32_t>(capture.core); words[1] = capture.cause;
+    words[2] = capture.pc; words[3] = capture.ra; words[4] = capture.mcause;
+    words[5] = capture.mtval; words[6] = capture.otaPhase; words[7] = capture.otaOffset;
+    words[8] = static_cast<uint32_t>(esp_reset_reason());
+    words[9] = capture.magic == CaptureMagic ? 3U : 2U; words[10] = 0;
+    return true;
+}
+
 bool MosaicoPanicStatus(char* out, size_t length)
 {
     if (!out || !length) return false;

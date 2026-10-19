@@ -19,8 +19,8 @@ bool cleanupFailed=false;
 std::atomic_bool formatSession{false};
 Progress progressCallback=nullptr;
 void* progressContext=nullptr;
-struct Workspace {Model::Scratch scratch{};Payload snapshot{};};
-enum class Operation { Load, Save, Format };
+struct Workspace {Model::Scratch scratch{};Payload snapshot{};LogPage logPage{};LogState logState{};std::array<uint32_t,8> traceCrc{};};
+enum class Operation { Load, Save, Format, LogLoad, LogAppend, LogRead };
 struct IO {
     spi_nand_flash_device_t* handle;
     esp_err_t lastError=ESP_OK;
@@ -58,7 +58,8 @@ esp_err_t identity(spi_device_handle_t device){
     if((config&0x10)==0||(config&0x66)!=0)return ESP_ERR_NOT_SUPPORTED;
     return status&1?ESP_ERR_INVALID_STATE:ESP_OK;
 }
-Result transaction(Operation operation,const Payload* input,Payload* output,bool authorized,Progress progress,void* context){
+Result transaction(Operation operation,const Payload* input,Payload* output,bool authorized,Progress progress,void* context,LogPage* logPage=nullptr,LogState* logState=nullptr,uint64_t logSequence=0){
+    const bool journal=operation==Operation::LogLoad||operation==Operation::LogAppend||operation==Operation::LogRead;
     Result result;
     if(!authorized){result.error=ESP_ERR_INVALID_STATE;return result;}
     if(mosaico_nand_compat_version()!=0x01040102U){result.error=ESP_ERR_NOT_SUPPORTED;return result;}
@@ -69,6 +70,7 @@ Result transaction(Operation operation,const Payload* input,Payload* output,bool
     if(!memory){result.error=ESP_ERR_NO_MEM;return result;}
     auto* workspace=new(memory) Workspace;
     if(input)workspace->snapshot=*input;
+    if(logPage&&operation==Operation::LogAppend)workspace->logPage=*logPage;
     spi_device_handle_t device=nullptr;spi_nand_flash_device_t* nand=nullptr;
     bool busOwned=false;uint32_t touched=0,sleepBefore=0,sleepChanged=0;
     auto finish=[&](){
@@ -92,7 +94,11 @@ Result transaction(Operation operation,const Payload* input,Payload* output,bool
             }
         }
         if(result.cleanupError!=ESP_OK)cleanupFailed=true;
-        if(output&&result.error==ESP_OK&&result.cleanupError==ESP_OK)*output=workspace->snapshot;
+        if(result.error==ESP_OK&&result.cleanupError==ESP_OK){
+            if(output)*output=workspace->snapshot;
+            if(logPage)*logPage=workspace->logPage;
+            if(logState)*logState=workspace->logState;
+        }
         workspace->~Workspace();heap_caps_free(memory);return result;
     };
     result.stage=Stage::Bus;
@@ -136,6 +142,54 @@ Result transaction(Operation operation,const Payload* input,Payload* output,bool
     if(result.error!=ESP_OK)return finish();
     if(pageSize!=Model::PageSize||blocks!=1024||result.logicalPages<Model::RequiredPages){result.error=ESP_ERR_NOT_SUPPORTED;return finish();}
     IO io{nand};
+    if(journal){
+        if(result.logicalPages<LogModel::RequiredPages){result.error=ESP_ERR_NOT_SUPPORTED;return finish();}
+        result.stage=Stage::Record;
+        // Preserve a digest of EVERY old logical page, including inactive trace slot.
+        for(unsigned i=0;i<8;++i){
+            if(!io.read(i,workspace->scratch.page)){result.error=io.lastError;return finish();}
+            workspace->traceCrc[i]=Model::crc(workspace->scratch.page,Model::PageSize);
+        }
+        auto checkLog=[&](LogModel::Code code){
+            result.logCode=code;
+            switch(code){
+            case LogModel::Code::Ok:case LogModel::Code::Empty:result.error=ESP_OK;break;
+            case LogModel::Code::NotFormatted:result.error=ESP_ERR_NOT_FOUND;break;
+            case LogModel::Code::Io:result.error=io.lastError==ESP_OK?ESP_FAIL:io.lastError;break;
+            case LogModel::Code::Overflow:result.error=ESP_ERR_INVALID_STATE;break;
+            default:result.error=ESP_ERR_INVALID_CRC;break;
+            }
+        };
+        checkLog(LogModel::load(io,workspace->scratch,workspace->logState));
+        if(result.error!=ESP_OK)return finish();
+        result.formatted=true;
+        if(operation==Operation::LogAppend){
+            checkLog(LogModel::append(io,workspace->scratch,workspace->logPage,workspace->logState));
+        }else if(operation==Operation::LogRead){
+            if(!logSequence||logSequence<workspace->logState.oldestSeq||logSequence>workspace->logState.latestSeq){result.error=ESP_ERR_NOT_FOUND;return finish();}
+            checkLog(LogModel::read(io,workspace->scratch,logSequence,workspace->logPage));
+        }
+        if(result.error!=ESP_OK)return finish();
+        if(operation==Operation::LogAppend){
+            result.stage=Stage::Reopen;
+            const auto expected=workspace->logState;
+            result.error=spi_nand_flash_deinit_device(nand);nand=nullptr;if(result.error!=ESP_OK)return finish();
+            result.error=spi_nand_flash_init_device(&config,&nand);if(result.error!=ESP_OK){nand=nullptr;return finish();}
+            io.handle=nand;
+            checkLog(LogModel::load(io,workspace->scratch,workspace->logState));
+            if(result.error!=ESP_OK)return finish();
+            if(expected.latestSeq!=workspace->logState.latestSeq||expected.oldestSeq!=workspace->logState.oldestSeq){result.error=ESP_ERR_INVALID_CRC;return finish();}
+            workspace->logState.adopted=expected.adopted;
+            checkLog(LogModel::read(io,workspace->scratch,expected.latestSeq,workspace->scratch.verify));
+            if(result.error!=ESP_OK)return finish();
+            if(workspace->scratch.verify!=workspace->logPage){result.error=ESP_ERR_INVALID_CRC;return finish();}
+            for(unsigned i=0;i<8;++i){
+                if(!io.read(i,workspace->scratch.page)){result.error=io.lastError;return finish();}
+                if(workspace->traceCrc[i]!=Model::crc(workspace->scratch.page,Model::PageSize)){result.error=ESP_ERR_INVALID_CRC;return finish();}
+            }
+        }
+        result.stage=Stage::Complete;return finish();
+    }
     if(operation==Operation::Format){
         progressCallback=progress;progressContext=context;if(progress)progress(0,blocks,context);
         result.stage=Stage::Erase;result.error=spi_nand_erase_chip(nand);
@@ -171,6 +225,9 @@ Result transaction(Operation operation,const Payload* input,Payload* output,bool
 }
 Result load(Payload& output,bool authorized){return transaction(Operation::Load,nullptr,&output,authorized,nullptr,nullptr);}
 Result save(const Payload& input,bool authorized){return transaction(Operation::Save,&input,nullptr,authorized,nullptr,nullptr);}
+Result logLoad(LogState& output,bool authorized){return transaction(Operation::LogLoad,nullptr,nullptr,authorized,nullptr,nullptr,nullptr,&output);}
+Result logAppend(LogPage& page,LogState& output,bool authorized){return transaction(Operation::LogAppend,nullptr,nullptr,authorized,nullptr,nullptr,&page,&output);}
+Result logRead(uint64_t sequence,LogPage& output,bool authorized){return transaction(Operation::LogRead,nullptr,nullptr,authorized,nullptr,nullptr,&output,nullptr,sequence);}
 Result formatConfirm(bool authorized,Progress progress,void* context){return transaction(Operation::Format,nullptr,nullptr,authorized,progress,context);}
 }
 // The SHA-guarded generated1.4.1 compatibility TUs call these narrow hooks.

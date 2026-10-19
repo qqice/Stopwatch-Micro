@@ -216,6 +216,7 @@ static_assert(eccMasks(),"actual normalized masks C0=20 rejects before cache/no 
 '''
 
 ADAPTER_SYNTAX_PREFIX=r'''#include "main/hal/mosaico/mosaico_nand_store_model.h"
+#include "main/hal/mosaico/mosaico_nand_log_model.h"
 #include <atomic>
 #include <mutex>
 #include <new>
@@ -314,7 +315,7 @@ def adapter_fixture():
   Model::commit(durable[4],0,1,Model::crc(payload,Model::PayloadSize));current=durable;
  }
 '''
-    source=source.replace('enum class Operation { Load, Save, Format };','enum class Operation { Load, Save, Format };'+mocks)
+    source=source.replace('enum class Operation { Load, Save, Format, LogLoad, LogAppend, LogRead };','enum class Operation { Load, Save, Format, LogLoad, LogAppend, LogRead };'+mocks)
     prefix=ADAPTER_SYNTAX_PREFIX.split('int spi_nand_flash_read_page(',1)[0]
     prefix=prefix.replace('struct spi_nand_flash_device_t {};','struct Fixture;struct spi_nand_flash_device_t {Fixture* owner=nullptr;};')
     prefix+=r'''

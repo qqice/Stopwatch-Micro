@@ -27,6 +27,7 @@ using namespace smooth_ui_toolkit;
 #include <host/standby_sleep.h>
 #include <host/powerbank_keepalive.h>
 #include <host/gauge_discharge_trace.h>
+#include <host/mosaico_system_log.h>
 #include <host/touch_sleep.h>
 #include "main_idle_wait.h"
 #include <hal/mosaico/usb_console.h>
@@ -45,6 +46,9 @@ extern "C" void app_main(void)
 #endif
 #endif
     BootTraceBegin();
+#ifdef MOSAICO_BOARD
+    MosaicoSystemLog::begin(BootTraceCount()); // RAM only until HAL is ready.
+#endif
     // Setup logger
     mclog::set_level(mclog::level_info);
     mclog::set_time_format(mclog::time_format_unix_milliseconds);
@@ -119,6 +123,7 @@ extern "C" void app_main(void)
         GetNetworkQuota().serviceStandbySleep();
         PowerbankKeepalive::serviceAutomatic();
         GaugeDischargeTrace::service();
+        MosaicoSystemLog::service();
         // The monitor has no low-latency remote-control path. Keep its 10Hz
         // motion/100Hz touch responsive without a 1kHz application update loop.
         // Function remains the sole physical wake input. The event candidate

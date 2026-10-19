@@ -51,6 +51,7 @@ void BootTraceStage(uint32_t stage) {
     e.elapsedMs = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     save();
 }
+uint32_t BootTraceCount() { return trace.count; }
 void BootTracePrint(BootTraceWriter writer) {
     if (!writer) writer = std::printf;
     for(unsigned i=0;i<timing.size();++i) {

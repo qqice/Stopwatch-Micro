@@ -29,6 +29,9 @@ uint32_t imageCapacity(); // Exact current-layout cap; unknown layout returns ze
 bool busy();
 bool blocksTwt(); // Atomic control state, independent of UI snapshot lock contention.
 bool healthPending();
+// Same-task, nonblocking lease; successful caller must release after NAND I/O.
+bool tryStorageLease();
+void releaseStorageLease();
 uint32_t requestAgeMs();
 bool request(); // Caller must obtain explicit confirmation of USB/external power.
 bool automaticCheckDue(); // Always false: permanent manual-only discovery policy.

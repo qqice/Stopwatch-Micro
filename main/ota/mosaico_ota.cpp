@@ -36,6 +36,12 @@ namespace MosaicoOta {
 namespace {
 std::mutex lock;
 std::mutex healthLock;
+// All admission transitions share this lease with persistent NAND I/O.
+std::recursive_mutex storageLeaseMutex;
+struct StorageAdmission {
+ std::unique_lock<std::recursive_mutex> held{storageLeaseMutex,std::try_to_lock};
+ explicit operator bool() const { return held.owns_lock(); }
+};
 std::mutex snapshotLock; // Never held over flash, crypto, NVS, or telemetry calls.
 UiSnapshot ui{0, 0, 0, UiStage::Idle, "", "-", "", "", "", -1, -1, false, false, false, 0};
 std::atomic<bool> approvedRequest{false}, autoInstall{false};
@@ -250,6 +256,7 @@ bool recordAttempt(const InstallPowerEvidence& power)
 }
 bool requestLocked(bool automatic, bool preserveAge = false)
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
 #ifdef MOSAICO_NAND_STORE
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
@@ -358,6 +365,12 @@ void healthTimeout(void*)
 uint32_t imageCapacity() { return MosaicoOtaLayout::imageCap(currentLayout()); }
 bool busy() { return active.load() || approvedRequest.load() || checkQueued.load() || checking.load() || installQueued.load() || rebootQueued.load() || bootPending.load(); }
 bool healthPending() { return bootPending.load(); }
+bool tryStorageLease() {
+    if(!storageLeaseMutex.try_lock())return false;
+    if(busy()){storageLeaseMutex.unlock();return false;}
+    return true;
+}
+void releaseStorageLease() { storageLeaseMutex.unlock(); }
 bool blocksTwt()
 {
     const auto stage = statusStage.load();
@@ -370,6 +383,7 @@ uint32_t requestAgeMs()
 }
 bool request()
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
 #ifdef MOSAICO_NAND_STORE
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
@@ -398,6 +412,7 @@ bool automaticCheckDue()
 }
 bool discoverManifest(const char* json)
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::lock_guard<std::mutex> guard(lock);
     if (active.load() || approvedRequest.load() || imageReady || selected.load()) return false;
@@ -429,6 +444,7 @@ bool copyUiSnapshot(UiSnapshot& out)
 }
 bool approveUpdate(const char* expectedSha)
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
 #ifdef MOSAICO_NAND_STORE
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
@@ -452,6 +468,7 @@ void deferUpdate()
 bool automaticInstall() { return autoInstall.load(); }
 bool setAutomaticInstall(bool enabled)
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
     std::lock_guard<std::mutex> guard(lock);
     nvs_handle_t h;
     if (nvs_open("mosaico_ota", NVS_READWRITE, &h) != ESP_OK) return false;
@@ -463,6 +480,7 @@ bool setAutomaticInstall(bool enabled)
 }
 bool takeRequest()
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
     std::lock_guard<std::mutex> guard(lock);
     if(!active.load() && !approvedRequest.load() && !pending.load())return false;
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
@@ -484,6 +502,7 @@ void fail(const char* message)
 }
 bool beginManifest(const char* json)
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
 #ifdef MOSAICO_NAND_STORE
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
@@ -517,6 +536,7 @@ bool beginManifest(const char* json)
 }
 bool writeChunk(uint32_t offset, const uint8_t* data, size_t length)
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !writing || !data || !length || offset != received || received > expectedSize ||
         length > expectedSize - received) return reject("chunk_offset_or_length");
@@ -531,6 +551,7 @@ bool writeChunk(uint32_t offset, const uint8_t* data, size_t length)
 }
 bool finishDownload()
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !writing || received != expectedSize) return reject("incomplete_image");
     publish(UiStage::Verifying);
@@ -556,6 +577,7 @@ bool finishDownload()
 }
 bool installVerified()
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !imageReady || selected.load()) return false;
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
@@ -588,6 +610,7 @@ bool installVerified()
 }
 bool requestCheck()
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
 #ifdef MOSAICO_NAND_STORE
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
@@ -602,6 +625,7 @@ bool requestCheck()
 }
 bool takeCheckRequest()
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
     if(!checkQueued.load())return false;
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (!checkQueued.exchange(false)) return false;
@@ -615,6 +639,7 @@ void finishCheck(bool transportOk)
 }
 bool approveInstall(const char* expectedSha)
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
 #ifdef MOSAICO_NAND_STORE
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
@@ -629,6 +654,7 @@ bool approveInstall(const char* expectedSha)
 }
 bool requestReboot()
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
 #ifdef MOSAICO_NAND_STORE
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
@@ -640,6 +666,7 @@ bool requestReboot()
 }
 bool rebootWithFreshPower()
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (!installPowerSafe(useManualInstallPolicy(usbBypass, automaticMode))) {
         active.store(false);
@@ -652,6 +679,8 @@ bool rebootWithFreshPower()
 }
 void processLocalRequests()
 {
+    // Keep queued->active handoff atomic against NAND storage admission.
+    StorageAdmission storageAdmission; if(!storageAdmission)return;
     const auto pendingStage=statusStage.load();
     const bool installWork=active.load() && imageReady.load() && !selected.load() &&
         (pendingStage==UiStage::ReadyInstall || pendingStage==UiStage::WaitingPower || pendingStage==UiStage::Installing);
@@ -823,6 +852,7 @@ void healthPoll(bool appLoopReady)
 }
 bool rollbackTest()
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::lock_guard<std::mutex> guard(lock);
     if (busy() || imageReady || selected.load() || !gaugeSafe()) return false;

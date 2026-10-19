@@ -36,6 +36,7 @@
 #include <host/network_quota.h>
 #ifdef MOSAICO_BOARD
 #include <host/gauge_discharge_trace.h>
+#include <host/mosaico_system_log.h>
 #ifdef MOSAICO_NAND_STORE
 #include <host/gauge_trace_nand_backend.h>
 #endif
@@ -1361,6 +1362,51 @@ void SerialDebug::handleLine(char* line)
                       static_cast<unsigned long>(mhz), mhz == 320);
         result("display-test-frequency", "PASS", details);
         return;
+    }
+    if (std::strcmp(command, "syslog") == 0) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        if (!action) action="status";
+        static char line[640];
+        if (!std::strcmp(action,"status") && !::strtok_r(nullptr," \t",&save)) {
+            MosaicoSystemLog::status(line,sizeof(line));
+            result(command,"PASS",line);return;
+        }
+        if (!std::strcmp(action,"flush") && !::strtok_r(nullptr," \t",&save)) {
+            result(command,MosaicoSystemLog::requestFlush()?"PASS":"BUSY","action=queued no_gauge_changes=1");return;
+        }
+        uint32_t high=0,low=0,chunk=0;
+        const char* hi=::strtok_r(nullptr," \t",&save);const char* lo=::strtok_r(nullptr," \t",&save);
+        if ((!std::strcmp(action,"read")||!std::strcmp(action,"chunk")) &&
+            parseUnsignedStrict(hi,0,UINT32_MAX,high)&&parseUnsignedStrict(lo,0,UINT32_MAX,low)) {
+            const uint64_t seq=(uint64_t(high)<<32)|low;
+            if (!std::strcmp(action,"read")&&!::strtok_r(nullptr," \t",&save)) {
+                result(command,MosaicoSystemLog::requestRead(seq)?"PASS":"BUSY","action=read_queued");return;
+            }
+            const char* index=::strtok_r(nullptr," \t",&save);
+            if (!std::strcmp(action,"chunk")&&parseUnsignedStrict(index,0,15,chunk)&&!::strtok_r(nullptr," \t",&save)) {
+                static uint8_t bytes[128]; static char encoded[173];size_t length=0;
+                MosaicoSystemLog::ChunkMetadata metadata{};
+                if(!MosaicoSystemLog::readChunk(seq,static_cast<uint16_t>(chunk),bytes,sizeof(bytes),metadata)) {
+                    std::snprintf(line,sizeof(line),"read_state=%u error=%ld log_code=%lu",unsigned(MosaicoSystemLog::readStatus()),long(metadata.error),static_cast<unsigned long>(metadata.logCode));
+                    result(command,"BUSY",line);return;
+                }
+                if(mbedtls_base64_encode(reinterpret_cast<unsigned char*>(encoded),sizeof(encoded)-1,&length,bytes,metadata.bytes)!=0) {
+                    result(command,"FAIL","reason=encoding");return;
+                }
+                encoded[length]=0;
+                // One bounded response per request; sequence/CRC permit idempotent retries.
+                std::snprintf(line,sizeof(line),"DBG RESULT command=syslog status=PASS seq=%llu chunk=%u bytes=%u total=%u page_crc=%08lx chunk_crc=%08lx data=%s",
+                    static_cast<unsigned long long>(metadata.seq),metadata.index,metadata.bytes,metadata.totalBytes,
+                    static_cast<unsigned long>(metadata.pageCrc),static_cast<unsigned long>(metadata.chunkCrc),encoded);
+                (void)debugTraceLine(line);return;
+            }
+        }
+        result(command,"FAIL","expected=status|flush|read_hi_lo|chunk_hi_lo_0..15 no_clear_or_format=1");return;
+    }
+    if (std::strcmp(command, "gauge-mode") == 0) {
+        if (::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","expected=no_arguments readonly=1");return;}
+        static char details[240];
+        const bool ok=GetHAL().gaugeModeAudit(details,sizeof(details));result(command,ok?"PASS":"FAIL",details);return;
     }
     if (std::strcmp(command, "gauge") == 0) {
         const auto battery = GetHAL().batteryTelemetry(true);

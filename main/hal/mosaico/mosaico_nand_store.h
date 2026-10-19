@@ -1,9 +1,12 @@
 #pragma once
 #include "mosaico_nand_store_model.h"
+#include "mosaico_nand_log_model.h"
 #include <esp_err.h>
 
 namespace MosaicoNandStore {
 using Payload=Model::Payload;
+using LogPage=LogModel::Page;
+using LogState=LogModel::State;
 using Progress=void(*)(uint32_t completedBlocks,uint32_t totalBlocks,void* context);
 enum class Stage { Admission, Allocation, Bus, Pins, Device, Identity, Init, Geometry, Erase, Record, Reopen, Complete };
 struct Result {
@@ -12,12 +15,19 @@ struct Result {
     Model::Result record{};
     uint32_t logicalPages=0;
     bool formatted=false;
+    LogModel::Code logCode=LogModel::Code::Empty;
 };
 // Explicit caller authorization is required even for loading: official reads may
 // refresh ECC in our already-owned store. Root gates OTA/radio/voltage/TWDT task.
 // Each call owns and releases SPI3, the Dhara context and all DMA buffers.
 Result load(Payload& output,bool authorized);
 Result save(const Payload& input,bool authorized);
+// Raw page: sessionBoot LE32 at 16, count LE16 at 20, 64-byte records at 60.
+// Header/unused records/CRC finalized by append; state refreshed from media.
+// Load/read never publish metadata. A complete orphan is exposed in RAM only.
+Result logLoad(LogState& output,bool authorized);
+Result logAppend(LogPage& page,LogState& output,bool authorized);
+Result logRead(uint64_t sequence,LogPage& output,bool authorized);
 // Destructive: caller must have received explicit user approval. No implicit call
 // from load/save. Official erase skips factory-marked bad blocks. No filesystem.
 // Callback runs once/block in this task; caller may feed its legitimately enrolled
