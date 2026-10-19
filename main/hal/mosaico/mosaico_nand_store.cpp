@@ -62,7 +62,7 @@ Result transaction(Operation operation,const Payload* input,Payload* output,bool
     const bool journal=operation==Operation::LogLoad||operation==Operation::LogAppend||operation==Operation::LogRead;
     Result result;
     if(!authorized){result.error=ESP_ERR_INVALID_STATE;return result;}
-    if(mosaico_nand_compat_version()!=0x01040102U){result.error=ESP_ERR_NOT_SUPPORTED;return result;}
+    if(mosaico_nand_compat_version()!=0x01040103U){result.error=ESP_ERR_NOT_SUPPORTED;return result;}
     std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
     if(!lock||cleanupFailed){result.error=ESP_ERR_INVALID_STATE;return result;}
     result.stage=Stage::Allocation;

@@ -280,7 +280,7 @@ def adapter_fixture():
  constexpr int gpio_get_io_config(int pin,gpio_io_config_t* out){++sleepReads;if(sleepReads==unsigned(failSleepReadAt))return -81;out->slp_sel=(sleepMask&(1U<<pin))!=0;return ESP_OK;}
  constexpr int gpio_sleep_sel_dis(int pin){++sleepWrites;if(sleepWrites==unsigned(failSleepWriteAt))return -82;if(!stickyDisable&&!(stickyRestore&&sleepWrites>6))sleepMask&=~(1U<<pin);return ESP_OK;}
  constexpr int gpio_sleep_sel_en(int pin){++sleepWrites;if(sleepWrites==unsigned(failSleepWriteAt))return -82;if(!stickyRestore)sleepMask|=1U<<pin;return ESP_OK;}
- constexpr uint32_t mosaico_nand_compat_version(){return 0x01040102;}
+ constexpr uint32_t mosaico_nand_compat_version(){return 0x01040103;}
  constexpr Workspace* allocateWorkspace(){++allocations;if(allocationFail)return nullptr;memory={};return &memory;}
  constexpr void releaseWorkspace(Workspace*){++frees;}
  constexpr int gpio_set_level(int,int){++pinChanges;return ESP_OK;}
