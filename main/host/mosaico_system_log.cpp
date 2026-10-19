@@ -114,8 +114,8 @@ void begin(uint32_t id){
 }
 void service(){if(!storage)return;const auto now=nowMs();if(lastKick&&now-lastKick<1000)return;lastKick=now;auto task=workerHandle.load();if(!task){if(!otaIdle()){gate=1;return;}TaskHandle_t created=nullptr;if(xTaskCreateWithCaps(worker,"system_log",8192,nullptr,1,&created,MALLOC_CAP_RTCRAM|MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)!=pdPASS){taskError=true;return;}workerHandle=created;task=created;taskError=false;}xTaskNotifyGive(task);}
 size_t startupInternalReservation(){return workerHandle.load()&&workerStackRtc.load()?8192:0;}
-bool requestFlush(){if(!storage)return false;flushRequested=true;return true;}
-bool requestRead(uint64_t seq){if(!storage||!seq||readLock.test_and_set(std::memory_order_acquire))return false;if((reader==ReadStatus::Pending||reader==ReadStatus::Ready)&&readSeq==seq){readLock.clear(std::memory_order_release);return true;}if(reader==ReadStatus::Pending){readLock.clear(std::memory_order_release);return false;}readSeq=seq;readError=0;readCode=0;reader=ReadStatus::Pending;readLock.clear(std::memory_order_release);return true;}
+bool requestFlush(){if(!storage)return false;nextAttempt=0;flushRequested=true;return true;}
+bool requestRead(uint64_t seq){if(!storage||!seq||readLock.test_and_set(std::memory_order_acquire))return false;if((reader==ReadStatus::Pending||reader==ReadStatus::Ready)&&readSeq==seq){readLock.clear(std::memory_order_release);return true;}if(reader==ReadStatus::Pending){readLock.clear(std::memory_order_release);return false;}readSeq=seq;readError=0;readCode=0;nextAttempt=0;reader=ReadStatus::Pending;readLock.clear(std::memory_order_release);return true;}
 ReadStatus readStatus(){return reader.load();}
 bool readChunk(uint64_t seq,uint16_t index,uint8_t* out,size_t capacity,ChunkMetadata& m){
  m={};m.seq=seq;m.index=index;m.error=int32_t(readError.load());m.logCode=readCode.load();if(!out||!chunkBounds(index,capacity)||readLock.test_and_set(std::memory_order_acquire))return false;
