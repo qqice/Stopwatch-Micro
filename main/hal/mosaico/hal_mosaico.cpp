@@ -498,7 +498,7 @@ struct GaugeStatusReadTransport {
         gauge_feed();
         return gauge && i2c_master_transmit(gauge,packet,count,20)==ESP_OK;
     }
-    void delayUs(uint32_t us) { esp_rom_delay_us(us); gauge_feed(); }
+    void delayMs(uint32_t ms) { gauge_delay_ms(ms); }
     bool read(uint8_t reg, uint8_t* data, size_t count) { return gauge_read(reg,data,count); }
 };
 
@@ -519,7 +519,9 @@ void gauge_diagnostic_locked(Hal::GaugeDiagnosticSnapshot& out, uint8_t phase, u
     word(0x22,out.rawCoulombMah,RawCoulomb); word(0x2a,out.cycleCount,Cycles);
     word(0x3a,out.operationStatus,Operation); word(0x0a,out.batteryStatus,Battery);
     GaugeStatusReadTransport transport;
-    if(readGaugingStatus(transport,out.gaugingStatus))out.validMask|=Gauging;
+    uint32_t protocolFlags=0;
+    if(readGaugingStatus(transport,out.gaugingStatus,out.rawEcho16,protocolFlags))out.validMask|=Gauging;
+    out.validMask|=protocolFlags;
     if((out.validMask & (Gauging|Battery))==(Gauging|Battery)) {
         out.mode=decodeMode(out.gaugingStatus,out.batteryStatus);
         if(out.mode!=Unknown)out.validMask|=ModeValid;
@@ -2163,11 +2165,13 @@ bool Hal::gaugeModeAudit(char* out, size_t len)
     GaugeDiagnosticSnapshot sample{};
     const bool ok=gaugeDiagnosticSample(sample);
     if(out && len)std::snprintf(out,len,
-        "readonly=1 valid=%08lx gauging=%04x battery=%04x operation=%04x mac_dsg=%u batt_dsg=%u mode=%s mode_valid=%u",
-        static_cast<unsigned long>(sample.validMask),sample.gaugingStatus,sample.batteryStatus,sample.operationStatus,
+        "readonly=1 valid=%08lx gauging=%04x echo=%04x tx=%u echoio=%u dataio=%u battery=%04x operation=%04x mac_dsg=%u batt_dsg=%u mode=%s mode_valid=%u",
+        static_cast<unsigned long>(sample.validMask),sample.gaugingStatus,sample.rawEcho16,
+        !!(sample.validMask & mosaico_gauge_status::TxAck),!!(sample.validMask & mosaico_gauge_status::EchoRead),
+        !!(sample.validMask & mosaico_gauge_status::DataRead),sample.batteryStatus,sample.operationStatus,
         !!(sample.gaugingStatus & 0x40),!!(sample.batteryStatus & 1),
         mosaico_gauge_status::modeName(sample.mode),!!(sample.validMask & mosaico_gauge_status::ModeValid));
-    return ok;
+    return ok && (sample.validMask & mosaico_gauge_status::ModeValid);
 }
 
 Hal::GaugeBootReloadInfo Hal::gaugeBootReloadInfo() const

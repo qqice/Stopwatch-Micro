@@ -27,18 +27,21 @@ struct Bus {
   ++writes;if(n!=3||p[0]!=0||p[1]!=0x56||p[2]!=0)wrong=true;
   return fault!=1;
  }
- constexpr void delayUs(uint32_t us){delay+=us;}
+ constexpr void delayMs(uint32_t ms){if(ms!=20)wrong=true;delay+=ms;}
  constexpr bool read(uint8_t reg,uint8_t* p,size_t n) {
-  ++reads;if(delay<66||reg!=0x3e||n!=4)wrong=true;
-  if(fault==2||fault==3)return false; // timeout or incomplete read
-  p[0]=fault==4?0x55:0x56;p[1]=fault==5?1:0;p[2]=0x40;p[3]=0xa5;return true;
+  ++reads;if(delay!=20||reg!=(reads==1?0x3e:0x40)||n!=2)wrong=true;
+  if(reg==0x3e){if(fault==2)return false;p[0]=fault==4?0x55:0x56;p[1]=fault==5?1:0;}
+  else {if(fault==3)return false;p[0]=0x40;p[1]=0xa5;}
+  return true;
  }
 };
 constexpr bool cases(){
- for(int fault=0;fault<=5;++fault){Bus bus;bus.fault=fault;uint16_t raw=0xffff;
-  bool ok=readGaugingStatus(bus,raw);
-  if(ok!=(fault==0)||bus.wrong||bus.writes!=1||bus.reads!=(fault==1?0:1))return false;
-  if(raw!=(ok?0xa540:0))return false;
+ for(int fault=0;fault<=5;++fault){Bus bus;bus.fault=fault;uint16_t raw=0xffff,echo=0xffff;uint32_t flags=0xffffffff;
+  bool ok=readGaugingStatus(bus,raw,echo,flags);
+  if(ok!=(fault==0)||bus.wrong||bus.writes!=1||bus.reads!=(fault==1?0:2))return false;
+  uint32_t expected=fault==1?0:uint32_t(TxAck)|(fault==2?0U:uint32_t(EchoRead))|(fault==3?0U:uint32_t(DataRead));
+  if(flags!=expected||raw!=((fault==1||fault==3)?0:0xa540))return false;
+  if(echo!=((fault==1||fault==2)?0:fault==4?0x0055:fault==5?0x0156:0x0056))return false;
  }
  uint8_t bytes[]={0x56,0,0x34,0x12};uint16_t raw=9;
  for(size_t n=0;n<8;++n){if(decodeResponse(bytes,n,raw)!=(n==4)||raw!=(n==4?0x1234:0))return false;}
@@ -67,8 +70,8 @@ struct Fake {
  }
  struct GaugeStatusReadTransport {
   constexpr bool transmit(const uint8_t*,size_t){return true;}
-  constexpr void delayUs(uint32_t){}
-  constexpr bool read(uint8_t,uint8_t* p,size_t){p[0]=0x56;p[1]=0;p[2]=0x40;p[3]=0x80;return true;}
+  constexpr void delayMs(uint32_t){}
+  constexpr bool read(uint8_t reg,uint8_t* p,size_t){p[0]=reg==0x3e?0x56:0x40;p[1]=reg==0x3e?0:0x80;return true;}
  };
 '''+diagnostic+r'''
 };
@@ -77,12 +80,13 @@ constexpr bool cases(){
  constexpr uint8_t regs[]={0x2c,0x10,0x12,0x3c,0x08,0x0c,0x14,0x22,0x2a,0x3a,0x0a};
  for(int fail=-1;fail<11;++fail){Fake f;if(fail>=0)f.fail=regs[fail];Snapshot out{};
   out.validMask=0xffffffff;f.gauge_diagnostic_locked(out,BootBefore,2);
-  uint32_t expected=AllRaw|ModeValid;if(fail>=0)expected&=~(1U<<fail);
+  uint32_t expected=AllRaw|ModeValid|TxAck|EchoRead|DataRead;if(fail>=0)expected&=~(1U<<fail);
   if(fail==10)expected&=~ModeValid;
   if(out.validMask!=expected||out.sampledUs!=1234||out.phase!=BootBefore||out.outcome!=2)return false;
   if(fail!=5 && out.currentMa!=-4)return false;
   if(fail!=6 && out.averageCurrentMa!=-1)return false;
   if(fail!=10 && out.mode!=Discharge)return false;
+  if(out.rawEcho16!=0x0056)return false;
  }
  Fake absent;absent.gauge=false;Snapshot out{};out.validMask=AllRaw;
  absent.gauge_diagnostic_locked(out,BootAfter,3);
@@ -95,6 +99,7 @@ static_assert(cases());
         adapter=SOURCE.split('struct GaugeStatusReadTransport {',1)[1].split('void gauge_diagnostic_locked',1)[0]
         self.assertEqual(adapter.count('i2c_master_transmit('),1)
         self.assertNotIn('gauge_control(',adapter)
+        self.assertIn('gauge_delay_ms(ms)',adapter)
         diagnostic=SOURCE.split('void gauge_diagnostic_locked(',1)[1].split('void sample_battery_locked(',1)[0]
         self.assertEqual(diagnostic.count('readGaugingStatus('),1)
         for forbidden in ('gauge_control(', 'gauge_mac_read(', 'nvs_', 'gauge_access_word(', 'sample_battery_locked('):
@@ -102,6 +107,9 @@ static_assert(cases());
         api=SOURCE.split('bool Hal::gaugeDiagnosticSample(',1)[1].split('void Hal::gaugeBootDiagnostic(',1)[0]
         self.assertLess(api.index('transaction(gauge_transaction_mutex)'),api.index('battery(battery_mutex)'))
         self.assertLess(api.index('battery(battery_mutex)'),api.index('gauge_diagnostic_locked('))
+        audit=SOURCE.split('bool Hal::gaugeModeAudit(',1)[1].split('Hal::GaugeBootReloadInfo Hal::gaugeBootReloadInfo()',1)[0]
+        self.assertIn('return ok && (sample.validMask & mosaico_gauge_status::ModeValid)',audit)
+        for field in ('echo=%04x','tx=%u','echoio=%u','dataio=%u'):self.assertIn(field,audit)
         getter=SOURCE.split('void Hal::gaugeBootDiagnostic(',1)[1].split('bool Hal::gaugeModeAudit(',1)[0]
         self.assertNotIn('gauge_diagnostic_locked(',getter)
         self.assertNotIn('gauge_word(',getter)
