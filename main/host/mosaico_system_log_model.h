@@ -9,7 +9,7 @@ using Bytes=std::array<uint8_t,RecordBytes>;
 // args (all numeric):
 // Boot: bootId,resetReason,versionHash,ELF SHA256 words[8].
 // Gauge/GaugeBoot: validMask,phase|outcome<<8|mode<<16,SOC,RM,FCC,DC,V,
-//   signed I low16|signed Iavg high16,RawCC|cycles<<16,op|battery<<16,gauging.
+//   signed I low16|signed Iavg high16,RawCC|cycles<<16,op|battery<<16,rawGauging|rawEcho16<<16 (TxAck/EchoRead/DataRead in validMask).
 // Network: accepted,failures,historyAccepted,historyFailures,wifiAttempts,budgetClosures.
 // Power: locked,wifiRunning,profile,phase,cpuMHz,cycles,offMs low/high,clockError.
 // Ota: stage,received,size,progressBasisPoints,revision,currentSlot,targetSlot,busy,pending.

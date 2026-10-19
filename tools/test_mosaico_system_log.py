@@ -93,7 +93,7 @@ static_assert(bootRetry());
         self.assertIn('!admitted()||!admitted()',read)
         self.assertNotIn('logLoad',read)
         self.assertNotIn('logAppend',read)
-        self.assertIn('MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)!=pdPASS',SOURCE)
+        self.assertIn('MALLOC_CAP_RTCRAM|MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)!=pdPASS',SOURCE)
         self.assertIn('ulTaskNotifyTake(pdTRUE,portMAX_DELAY)',SOURCE)
         self.assertIn('nextAttempt=now+60000',SOURCE)
         self.assertIn('60000ULL<<',SOURCE)

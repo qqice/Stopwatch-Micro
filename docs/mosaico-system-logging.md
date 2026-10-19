@@ -34,7 +34,8 @@ journal are recycled. Header/page CRCs and alternating indexes detect incomplete
 tails. Complete orphan pages can be recovered without modifying the media on a
 read. The next append commits recovered metadata before spending the spare page.
 
-Early boot uses a bounded RAM queue. Background NAND access starts only after
+Early boot uses a bounded RAM queue. The worker stack uses SDK-supported RTC internal RAM (not PSRAM), preserving
+DMA-capable DRAM for NAND and Wi-Fi. Background NAND access starts only after
 the running application is VALID and the gauge/voltage/temperature gates permit
 it. OTA and NAND admission share a lease. Normal samples and flushes are batched
 at approximately 60 seconds; low-SOC/low-voltage gauge samples use 10 seconds,

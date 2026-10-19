@@ -36,7 +36,9 @@ def decode_page(data,expected):
             r['gauge']=dict(valid_mask=a[0],phase=a[1]&255,outcome=(a[1]>>8)&255,mode=(a[1]>>16)&255,
                 soc=a[2],remaining_mah=a[3],fcc_mah=a[4],design_mah=a[5],voltage_mv=a[6],
                 current_ma=signed16(a[7]&65535),average_current_ma=signed16(a[7]>>16),
-                raw_cc=a[8]&65535,cycles=a[8]>>16,operation=a[9]&65535,battery=a[9]>>16,gauging=a[10])
+                raw_cc=a[8]&65535,cycles=a[8]>>16,operation=a[9]&65535,battery=a[9]>>16,
+                gauging=a[10]&65535,response_echo=a[10]>>16,
+                protocol_tx=bool(a[0]&(1<<16)),protocol_echo_io=bool(a[0]&(1<<17)),protocol_data_io=bool(a[0]&(1<<18)))
         rows.append(r)
     return rows
 

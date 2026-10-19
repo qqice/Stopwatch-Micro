@@ -36,6 +36,7 @@ std::atomic<TaskHandle_t> workerHandle{nullptr};
 std::atomic<bool> initialized{false},urgent{false},flushRequested{false},allocationError{false},taskError{false},journalReady{false};
 std::atomic<ReadStatus> reader{ReadStatus::Idle};
 std::atomic<uint32_t> queued{0},drops{0},hookDrops{0},failures{0},lastCode{0},lastError{0},cleanupError{0},readError{0},readCode{0},policy{0},gate{0};
+std::atomic<uint32_t> workerStackRtc{0},dmaLargest{0};
 std::atomic<uint64_t> latest{0},oldest{0},readSeq{0},nextAttempt{0};
 uint32_t bootId=0;uint64_t lastKick=0,lastSample=0,lastFlush=0,lastSlow=0,sampleInterval=60000;unsigned backoff=0;BootCapture bootCapture;size_t pendingConsume=0;
 vprintf_like_t originalPrint=nullptr;
@@ -64,7 +65,7 @@ bool admitted(){
  gate=0;return true;
 }
 void failed(const MosaicoNandStore::Result& r,uint64_t now){lastError=uint32_t(r.error!=ESP_OK?r.error:r.cleanupError);cleanupError=uint32_t(r.cleanupError);lastCode=uint32_t(r.logCode);++failures;const uint64_t delay=60000ULL<<(backoff<6?backoff++:6);nextAttempt=now+delay;}
-bool gauge(const Hal::GaugeDiagnosticSnapshot& s){auto r=record(s.phase==mosaico_gauge_status::Explicit?Type::Gauge:Type::GaugeBoot,s.sampledUs/1000);r.args={s.validMask,uint32_t(s.phase)|(uint32_t(s.outcome)<<8)|(uint32_t(s.mode)<<16),s.rawSoc,s.remainingMah,s.fullMah,s.designMah,s.voltageMv,uint32_t(uint16_t(s.currentMa))|(uint32_t(uint16_t(s.averageCurrentMa))<<16),uint32_t(s.rawCoulombMah)|(uint32_t(s.cycleCount)<<16),uint32_t(s.operationStatus)|(uint32_t(s.batteryStatus)<<16),s.gaugingStatus};if(s.phase!=mosaico_gauge_status::Explicit){r.epoch=0;r.flags&=~uint16_t(1);}return enqueue(r,s.phase!=mosaico_gauge_status::Explicit);}
+bool gauge(const Hal::GaugeDiagnosticSnapshot& s){auto r=record(s.phase==mosaico_gauge_status::Explicit?Type::Gauge:Type::GaugeBoot,s.sampledUs/1000);r.args={s.validMask,uint32_t(s.phase)|(uint32_t(s.outcome)<<8)|(uint32_t(s.mode)<<16),s.rawSoc,s.remainingMah,s.fullMah,s.designMah,s.voltageMv,uint32_t(uint16_t(s.currentMa))|(uint32_t(uint16_t(s.averageCurrentMa))<<16),uint32_t(s.rawCoulombMah)|(uint32_t(s.cycleCount)<<16),uint32_t(s.operationStatus)|(uint32_t(s.batteryStatus)<<16),uint32_t(s.gaugingStatus)|(uint32_t(s.rawEcho16)<<16)};if(s.phase!=mosaico_gauge_status::Explicit){r.epoch=0;r.flags&=~uint16_t(1);}return enqueue(r,s.phase!=mosaico_gauge_status::Explicit);}
 void changed(Record& prior,const Record& next,bool critical=false){if(prior.args!=next.args){enqueue(next,critical);prior=next;}}
 void collect(uint64_t now){
  if(!bootCapture.complete){Hal::GaugeDiagnosticSnapshot before{},after{};GetHAL().gaugeBootDiagnostic(before,after);const auto info=GetHAL().gaugeBootReloadInfo();bootCapture.update(before,after,info.attempted,[](const Hal::GaugeDiagnosticSnapshot& s){return gauge(s);},[](uint8_t outcome,bool attempted){auto r=record(Type::Outcome);r.args[0]=outcome;r.args[1]=attempted;return enqueue(r,true);});}
@@ -99,7 +100,7 @@ void flush(uint64_t now){
  pendingConsume=count;
  journalReady=true;latest=storage->state.latestSeq;oldest=storage->state.oldestSeq;lastError=0;lastCode=uint32_t(result.logCode);backoff=0;nextAttempt=0;lastFlush=now;urgent=false;flushRequested=false;consumeDurable();
 }
-void worker(void*){for(;;){ulTaskNotifyTake(pdTRUE,portMAX_DELAY);const auto now=nowMs();if(!consumeDurable())continue;collect(now);processRead(now);flush(now);}}
+void worker(void*){unsigned marker=0;workerStackRtc=esp_ptr_in_rtc_dram_fast(&marker);for(;;){ulTaskNotifyTake(pdTRUE,portMAX_DELAY);const auto now=nowMs();dmaLargest=heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA|MALLOC_CAP_8BIT);if(!consumeDurable())continue;collect(now);processRead(now);flush(now);}}
 }
 void begin(uint32_t id){
  if(initialized.exchange(true))return;
@@ -111,7 +112,7 @@ void begin(uint32_t id){
 #endif
  originalPrint=esp_log_set_vprintf(logHook);
 }
-void service(){if(!storage)return;const auto now=nowMs();if(lastKick&&now-lastKick<1000)return;lastKick=now;auto task=workerHandle.load();if(!task){if(!otaIdle()){gate=1;return;}TaskHandle_t created=nullptr;if(xTaskCreateWithCaps(worker,"system_log",8192,nullptr,1,&created,MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)!=pdPASS){taskError=true;return;}workerHandle=created;task=created;taskError=false;}xTaskNotifyGive(task);}
+void service(){if(!storage)return;const auto now=nowMs();if(lastKick&&now-lastKick<1000)return;lastKick=now;auto task=workerHandle.load();if(!task){if(!otaIdle()){gate=1;return;}TaskHandle_t created=nullptr;if(xTaskCreateWithCaps(worker,"system_log",8192,nullptr,1,&created,MALLOC_CAP_RTCRAM|MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)!=pdPASS){taskError=true;return;}workerHandle=created;task=created;taskError=false;}xTaskNotifyGive(task);}
 bool requestFlush(){if(!storage)return false;flushRequested=true;return true;}
 bool requestRead(uint64_t seq){if(!storage||!seq||readLock.test_and_set(std::memory_order_acquire))return false;if((reader==ReadStatus::Pending||reader==ReadStatus::Ready)&&readSeq==seq){readLock.clear(std::memory_order_release);return true;}if(reader==ReadStatus::Pending){readLock.clear(std::memory_order_release);return false;}readSeq=seq;readError=0;readCode=0;reader=ReadStatus::Pending;readLock.clear(std::memory_order_release);return true;}
 ReadStatus readStatus(){return reader.load();}
@@ -119,7 +120,7 @@ bool readChunk(uint64_t seq,uint16_t index,uint8_t* out,size_t capacity,ChunkMet
  m={};m.seq=seq;m.index=index;m.error=int32_t(readError.load());m.logCode=readCode.load();if(!out||!chunkBounds(index,capacity)||readLock.test_and_set(std::memory_order_acquire))return false;
  bool ok=reader==ReadStatus::Ready&&readSeq==seq;if(ok){std::memcpy(out,storage->readPage.data()+index*ChunkBytes,ChunkBytes);m.seq=seq;m.index=index;m.bytes=ChunkBytes;m.totalBytes=2048;m.chunkCrc=crc(out,ChunkBytes);m.pageCrc=uint32_t(NL::get(storage->readPage,2044,4));m.error=0;m.logCode=uint32_t(NL::Code::Ok);}readLock.clear(std::memory_order_release);return ok;
 }
-void status(char* out,size_t len){if(out&&len)std::snprintf(out,len,"ready=%u task_ready=%u alloc_err=%u task_err=%u queued=%lu dropped=%lu hook_dropped=%lu write_failures=%lu last_error=%ld cleanup_error=%ld log_code=%lu policy=%lu gate=%lu latest_seq=%llu oldest_seq=%llu read_state=%u retention_pages=8191 format_requested=0 full_text_captured=0 coverage=structured+fmt_hash",unsigned(journalReady.load()),unsigned(workerHandle.load()!=nullptr),unsigned(allocationError.load()),unsigned(taskError.load()),(unsigned long)queued.load(),(unsigned long)drops.load(),(unsigned long)hookDrops.load(),(unsigned long)failures.load(),(long)int32_t(lastError.load()),(long)int32_t(cleanupError.load()),(unsigned long)lastCode.load(),(unsigned long)policy.load(),(unsigned long)gate.load(),(unsigned long long)latest.load(),(unsigned long long)oldest.load(),unsigned(reader.load()));}
+void status(char* out,size_t len){if(out&&len)std::snprintf(out,len,"ready=%u task_ready=%u alloc_err=%u task_err=%u queued=%lu dropped=%lu hook_dropped=%lu write_failures=%lu last_error=%ld cleanup_error=%ld log_code=%lu policy=%lu gate=%lu latest_seq=%llu oldest_seq=%llu read_state=%u retention_pages=8191 format_requested=0 full_text_captured=0 coverage=structured+fmt_hash stack_rtc=%u dma_max=%lu",unsigned(journalReady.load()),unsigned(workerHandle.load()!=nullptr),unsigned(allocationError.load()),unsigned(taskError.load()),(unsigned long)queued.load(),(unsigned long)drops.load(),(unsigned long)hookDrops.load(),(unsigned long)failures.load(),(long)int32_t(lastError.load()),(long)int32_t(cleanupError.load()),(unsigned long)lastCode.load(),(unsigned long)policy.load(),(unsigned long)gate.load(),(unsigned long long)latest.load(),(unsigned long long)oldest.load(),unsigned(reader.load()),unsigned(workerStackRtc.load()),(unsigned long)dmaLargest.load());}
 }
 #else
 namespace MosaicoSystemLog {
