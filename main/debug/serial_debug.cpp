@@ -1390,7 +1390,7 @@ void SerialDebug::handleLine(char* line)
                     std::snprintf(line,sizeof(line),"read_state=%u error=%ld log_code=%lu",unsigned(MosaicoSystemLog::readStatus()),long(metadata.error),static_cast<unsigned long>(metadata.logCode));
                     result(command,"BUSY",line);return;
                 }
-                if(mbedtls_base64_encode(reinterpret_cast<unsigned char*>(encoded),sizeof(encoded)-1,&length,bytes,metadata.bytes)!=0) {
+                if(mbedtls_base64_encode(reinterpret_cast<unsigned char*>(encoded),sizeof(encoded),&length,bytes,metadata.bytes)!=0) {
                     result(command,"FAIL","reason=encoding");return;
                 }
                 encoded[length]=0;

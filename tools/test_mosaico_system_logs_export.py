@@ -1,4 +1,5 @@
 import base64,struct,types,unittest,zlib
+from pathlib import Path
 from unittest.mock import patch
 import mosaico_system_logs as m
 
@@ -12,6 +13,12 @@ def page(seq=5):
     return bytes(p)
 
 class ExportTests(unittest.TestCase):
+    def test_device_encoder_keeps_terminator_capacity(self):
+        # mbedTLS requires both 172 encoded bytes AND its terminating NUL.
+        self.assertEqual(len(base64.b64encode(bytes(128)))+1,173)
+        source=(Path(__file__).resolve().parents[1]/'main/debug/serial_debug.cpp').read_text(encoding='utf8')
+        self.assertIn('static char encoded[173]',source)
+        self.assertIn('sizeof(encoded),&length,bytes,metadata.bytes)',source)
     def test_roundtrip_and_fail_closed(self):
         p=page();r=m.decode_page(p,5)[0]
         self.assertEqual(r['gauge']['current_ma'],-27)
