@@ -10,6 +10,7 @@ struct ChunkMetadata {
 // begin is RAM only, safe before HAL.init. service releases worker after HAL.init.
 void begin(uint32_t bootId);
 void service();
+size_t startupInternalReservation(); // Verified resident RTC stack only, <=8192.
 bool requestFlush();
 void status(char* out,size_t length);
 bool requestRead(uint64_t seq);

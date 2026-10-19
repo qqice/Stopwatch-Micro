@@ -13,6 +13,10 @@
 #include <strings.h>
 #include <cctype>
 #include <initializer_list>
+#ifdef MOSAICO_BOARD
+#include "mosaico_system_log.h"
+#include "mosaico_system_log_model.h"
+#endif
 extern "C" esp_err_t ml_noise_selftest(void);
 
 namespace {
@@ -117,7 +121,14 @@ void TailnetQuota::start()
         return;
     }
     // Keep room for MicroLink's task stacks and the existing BLE/UI workers.
-    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 80 * 1024 ||
+    size_t startupFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#ifdef MOSAICO_BOARD
+    // The old guard was measured before the bounded journal worker existed.
+    // Account only its verified RTC-resident stack; actual largest-block and
+    // allocation checks remain unchanged. DMA buffers still require real DRAM.
+    startupFree = MosaicoSystemLog::Model::startupBudget(startupFree, MosaicoSystemLog::startupInternalReservation());
+#endif
+    if (startupFree < 80 * 1024 ||
         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 16 * 1024)
         return;
     if (ml_noise_selftest() != ESP_OK) return;

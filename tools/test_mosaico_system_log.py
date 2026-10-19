@@ -14,6 +14,8 @@ class SystemLogTests(unittest.TestCase):
 #include "mosaico_system_log_model.h"
 using namespace MosaicoSystemLog::Model;
 constexpr bool test(){
+ if(startupBudget(80000,0)!=80000||startupBudget(80000,8192)!=88192||startupBudget(80000,99999)!=88192||startupBudget(SIZE_MAX,8192)!=SIZE_MAX)return false;
+ if(startupBudget(81920-8192,8192)<81920||startupBudget(81919-8192,8192)>=81920)return false;
  Record r;r.type=Type::Gauge;r.flags=0x1234;r.monotonicMs=0x0102030405060708ULL;r.epoch=0x1020304050607080ULL;for(unsigned i=0;i<11;++i)r.args[i]=0x87654321U+i;
  const auto b=encode(r);if(b.size()!=64||b[0]!=2||b[2]!=0x34||b[4]!=8||b[11]!=1||b[12]!=0x80||b[20]!=0x21)return false;
  const auto d=decode(b);if(d.type!=r.type||d.flags!=r.flags||d.monotonicMs!=r.monotonicMs||d.epoch!=r.epoch||d.args!=r.args)return false;

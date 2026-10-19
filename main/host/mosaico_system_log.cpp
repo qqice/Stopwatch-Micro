@@ -113,6 +113,7 @@ void begin(uint32_t id){
  originalPrint=esp_log_set_vprintf(logHook);
 }
 void service(){if(!storage)return;const auto now=nowMs();if(lastKick&&now-lastKick<1000)return;lastKick=now;auto task=workerHandle.load();if(!task){if(!otaIdle()){gate=1;return;}TaskHandle_t created=nullptr;if(xTaskCreateWithCaps(worker,"system_log",8192,nullptr,1,&created,MALLOC_CAP_RTCRAM|MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)!=pdPASS){taskError=true;return;}workerHandle=created;task=created;taskError=false;}xTaskNotifyGive(task);}
+size_t startupInternalReservation(){return workerHandle.load()&&workerStackRtc.load()?8192:0;}
 bool requestFlush(){if(!storage)return false;flushRequested=true;return true;}
 bool requestRead(uint64_t seq){if(!storage||!seq||readLock.test_and_set(std::memory_order_acquire))return false;if((reader==ReadStatus::Pending||reader==ReadStatus::Ready)&&readSeq==seq){readLock.clear(std::memory_order_release);return true;}if(reader==ReadStatus::Pending){readLock.clear(std::memory_order_release);return false;}readSeq=seq;readError=0;readCode=0;reader=ReadStatus::Pending;readLock.clear(std::memory_order_release);return true;}
 ReadStatus readStatus(){return reader.load();}
@@ -124,7 +125,7 @@ void status(char* out,size_t len){if(out&&len)std::snprintf(out,len,"ready=%u ta
 }
 #else
 namespace MosaicoSystemLog {
-void begin(uint32_t){} void service(){} bool requestFlush(){return false;} void status(char* out,size_t n){if(out&&n)out[0]=0;} bool requestRead(uint64_t){return false;} ReadStatus readStatus(){return ReadStatus::Idle;} bool readChunk(uint64_t,uint16_t,uint8_t*,size_t,ChunkMetadata&){return false;}
+void begin(uint32_t){} void service(){} size_t startupInternalReservation(){return 0;} bool requestFlush(){return false;} void status(char* out,size_t n){if(out&&n)out[0]=0;} bool requestRead(uint64_t){return false;} ReadStatus readStatus(){return ReadStatus::Idle;} bool readChunk(uint64_t,uint16_t,uint8_t*,size_t,ChunkMetadata&){return false;}
 }
 #endif
 
