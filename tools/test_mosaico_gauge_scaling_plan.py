@@ -68,8 +68,39 @@ def synthetic_inputs():
                 else 's' if address == 0x9276 else '%' if address in (0x926f, 0x9270) else '-')
         ranges.append({'address': f'0x{address:04x}', 'parameter': row['parameter'],
                        'type': row['type'], 'length': row['width'], 'Units': unit,
-                       'Min': '0', 'Max': '32767', 'Read': 'x', 'Write': 'x'})
+                       'Min': '0.1' if address == 0x9184 else '30000' if address == 0x9188 else '0',
+                       'Max': '4' if address == 0x9184 else '3000000' if address == 0x9188 else '32767',
+                       'Read': 'x', 'Write': 'x'})
     return {'rows': list(rows.values())}, ranges, audit
+
+
+def synthetic_full_inputs():
+    meta, _, audit = synthetic_inputs()
+    metadata = {r['address']: r for r in meta['rows']}
+    legacy = s.parse_baseline(audit, metadata)
+    fields, ranges = [], []
+    for row in meta['rows']:
+        a, kind, width = row['address'], row['type'], row['width']
+        raw = legacy.get(a, {}).get('rawBE', '00' * width)
+        fields.append({'address': f'{a:04x}', 'name': 'UNTRUSTED name',
+                       'type': kind, 'width': width, 'rawBE': raw,
+                       'value': 'UNTRUSTED value', 'unit': 'UNTRUSTED unit'})
+        bits = width * 8
+        low, high = ((-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+                     if kind == 'I' else (0, (1 << bits) - 1))
+        if kind == 'F':
+            low, high = s.f4.CALIBRATION_RANGES['gain' if a == 0x9184 else 'delta']
+        unit = ('mAh' if a in s.CAPACITY else 'mA' if a in s.CURRENT
+                else '3 µA' if a in s.NATIVE_CURRENT else 's' if a == 0x9276
+                else s.PRESERVE_UNITS.get(a, '-'))
+        ranges.append({'address': f'0x{a:04x}', 'parameter': row['parameter'],
+                       'type': kind, 'length': width, 'Min': str(low), 'Max': str(high),
+                       'Units': unit, 'Read': 'x', 'Write': 'x',
+                       **{key + '_status': 0 for key in ('Min', 'Max', 'Units', 'Read', 'Write')}})
+    document = {'complete_public131': True, 'not_a_full_hidden_model_or_OTP_image': True,
+                'generation': '9', 'parameter_writes': False, 'security_after': 'SEALED',
+                'sources': {'synthetic': 'a' * 64}, 'fields': fields}
+    return meta, ranges, document
 
 
 class ScalingPlanTests(unittest.TestCase):
@@ -214,6 +245,61 @@ class ScalingPlanTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 s.main(argv)
             self.assertEqual(path.read_bytes(), original)
+
+    def test_full131_recompute_complete_roles_and_preservation(self):
+        meta, ranges, backup = synthetic_full_inputs()
+        def set_value(address, value):
+            f = next(r for r in backup['fields'] if r['address'] == address)
+            f['rawBE'] = value.to_bytes(f['width'], 'big', signed=f['type'] == 'I').hex()
+        set_value('9251', 700)
+        set_value('9269', 2)
+        before = copy.deepcopy((meta, ranges, backup))
+        for factor in (2, 4):
+            p = s.make_plan(meta, ranges, backup, factor)
+            rows = {r['address']: r for r in p['matrix']}
+            self.assertEqual(len(rows), 131)
+            self.assertTrue(p['complete_public131_metadata_consistent'])
+            self.assertEqual(p['official_range_count'], 131)
+            self.assertEqual(p['backup_integrity']['security_after'], 'SEALED')
+            self.assertEqual(rows['9269']['unit'], '3uA')
+            self.assertEqual(rows['9269']['candidate']['value'], 2 * factor)
+            for a in ('920e', '9210', '923c', '9264'):
+                self.assertIsNotNone(rows[a]['candidate'])
+            self.assertEqual(rows['9251']['physical_percent'], 7)
+            for a in ('9251', '927b', '91b4', '92b4'):
+                self.assertIsNone(rows[a]['candidate'])
+                self.assertTrue(rows[a]['status'].startswith('PRESERVE'))
+            self.assertEqual(rows['92ab']['status'], 'BLOCKED_EDV_MODEL')
+            self.assertIsNone(rows['92ab']['candidate'])
+            self.assertTrue(rows['9276']['status'].startswith('BLOCKED'))
+            self.assertEqual(rows['a000']['status'], 'BLOCKED_UNREVIEWED')
+            self.assertTrue(all(r['baseline_range_status'] == 'VALIDATED_EXACT' for r in rows.values()))
+            self.assertFalse(p['ready_for_hardware'])
+        self.assertEqual((meta, ranges, backup), before)
+
+    def test_full131_rejects_incomplete_duplicate_type_raw_range_or_security(self):
+        for mode in ('missing', 'duplicate', 'unknown', 'type', 'width', 'raw',
+                     'out_of_range', 'security', 'writes', 'generation', 'range_missing',
+                     'range_duplicate', 'range_status', 'range_type', 'range_bounds'):
+            meta, ranges, backup = synthetic_full_inputs()
+            f = backup['fields'][0]
+            if mode == 'missing': backup['fields'].pop()
+            if mode == 'duplicate': backup['fields'][-1] = copy.deepcopy(f)
+            if mode == 'unknown': f['address'] = 'ffff'
+            if mode == 'type': f['type'] = 'F'
+            if mode == 'width': f['width'] = True
+            if mode == 'raw': f['rawBE'] = '00'
+            if mode == 'out_of_range': ranges[0]['Max'] = '-32768'
+            if mode == 'security': backup['security_after'] = 'UNSEALED'
+            if mode == 'writes': backup['parameter_writes'] = True
+            if mode == 'generation': backup['generation'] = None
+            if mode == 'range_missing': ranges.pop()
+            if mode == 'range_duplicate': ranges[-1] = copy.deepcopy(ranges[0])
+            if mode == 'range_status': ranges[0]['Units_status'] = 1
+            if mode == 'range_type': ranges[0]['type'] = 'B'
+            if mode == 'range_bounds': ranges[0]['Min'] = 'not numeric'
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                s.make_plan(meta, ranges, backup)
 
 
 if __name__ == '__main__':

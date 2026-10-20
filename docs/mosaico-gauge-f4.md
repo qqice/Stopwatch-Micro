@@ -78,3 +78,33 @@ source includes this header, and `readyForHardware` remains false.
 ```powershell
 & C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe -m unittest discover -s tools -p test_mosaico_gauge_units.py
 ```
+
+## Full public131 worksheet input
+
+The planner still accepts the legacy cached 66 records with 11 selected ranges.
+It also accepts a complete public131 backup dictionary with `fields` and all
+131 official reader ranges. In the full mode every address must occur exactly
+once and agree with official metadata type/width; every value is decoded afresh
+from `rawBE` and checked against exact official Min/Max numbers. Saved `value`,
+`name`, and unit strings in the backup do not drive arithmetic. Reader statuses
+for Min/Max/Units/Read/Write must be zero; formulas are reported inputs, never
+executed. Completeness, generation, no parameter writes, and `SEALED` are required
+backup attestations, explicitly not independently verified device facts. The
+output retains input SHA-256 digests and separately labels reported upstream
+digests that this planner did not rehash. It is public-only, not a hidden/OTP image.
+
+Roles are closed address lists, not name matching. Electronics Load `9269` has
+native units of **3 uA**, so its raw candidate scales by k without relabeling it
+mA. EOC Smooth Current `927b` is 0.1 percent and stays unchanged. Battery Low
+`9251` is .01 percent (raw 700 means 7 percent), not mAh. Max Smoothing Current's
+`9276` official seconds unit remains contradictory and blocked. R0 `92ab` remains
+blocked: current scaling changes `ILOAD * R0 * FTZ`; inverse coefficient scaling
+and integer quantization need separate validation, and no R0 target is emitted.
+Closed voltage/time/temperature/percentage/flags/ADC-count roles are preserved;
+other units/model coefficients remain explicitly unreviewed and preserved.
+Full input and complete arithmetic do not make hardware ready.
+
+Counter samples now also carry a `unitEpoch` (default zero for existing four-item
+aggregate initializers). Any apply or restore must advance that epoch. Cross-epoch
+relative deltas are rejected even when boot and factor match again after a
+1 -> 2 -> 1 transition; production epoch lifecycle integration is not provided.

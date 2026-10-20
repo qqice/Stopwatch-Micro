@@ -39,6 +39,8 @@ struct CounterSample {
     uint64_t boot;
     int64_t factor;
     uint64_t monotonicTime;
+    // Increment for every apply/restore transition, even if factor returns to 1.
+    uint64_t unitEpoch = 0;
 };
 
 struct RelativeNativeCounterDelta {
@@ -58,7 +60,8 @@ constexpr bool relativeNativeCounterDelta(const CounterSample& previous,
                                           bool withinHalfRingConfirmed,
                                           RelativeNativeCounterDelta& out) {
     if (!elapsedValid || !withinHalfRingConfirmed || previous.boot != current.boot ||
-        previous.factor != current.factor || !validFactor(current.factor) ||
+        previous.factor != current.factor || previous.unitEpoch != current.unitEpoch ||
+        !validFactor(current.factor) ||
         current.monotonicTime <= previous.monotonicTime) return false;
     const auto modulo = static_cast<uint16_t>(
         static_cast<uint32_t>(current.raw) + 65536U - previous.raw);

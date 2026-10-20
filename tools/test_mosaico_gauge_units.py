@@ -126,7 +126,7 @@ constexpr bool counters(){
   }
  }
  CounterSample a{0,1,4,1},b{1,1,4,2};
- for(int mode=0;mode<9;++mode){auto bad=b;auto prior=a;
+ for(int mode=0;mode<10;++mode){auto bad=b;auto prior=a;
   if(mode==0)bad.boot=2;
   if(mode==1)bad.factor=2;
   if(mode==2)bad.factor=prior.factor=3;
@@ -134,6 +134,7 @@ constexpr bool counters(){
   if(mode==4)bad.monotonicTime=0;
   if(mode==5)bad.raw=32768;
   if(mode==8){prior.raw=32768;bad.raw=0;}
+  if(mode==9){prior.factor=bad.factor=1;prior.unitEpoch=1;bad.unitEpoch=3;}
   RelativeNativeCounterDelta out{2,3,4,5,6};
   if(relativeNativeCounterDelta(prior,bad,mode!=6,mode!=7,out)||
      out.previousRaw!=2||out.currentRaw!=3||out.moduloDelta!=4||
