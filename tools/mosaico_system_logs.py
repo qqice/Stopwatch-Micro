@@ -62,7 +62,9 @@ def read_page(client,seq,timeout=40):
     for index in range(16):
         deadline=time.monotonic()+timeout
         while True:
-            try:r=client.command(f'debug syslog chunk {hi} {lo} {index}','syslog',5)
+            # Tolerate a bounded CDC response pause during periodic work;
+            # timeout alone does not establish a lost or corrupt NAND page.
+            try:r=client.command(f'debug syslog chunk {hi} {lo} {index}','syslog',12)
             except TimeoutError:
                 if time.monotonic()>=deadline:raise
                 continue # Explicit bounded idempotent retry, never firmware mutation.
@@ -97,6 +99,8 @@ def main():
     capture=io.StringIO();client=None;manifest={'complete':False,'pages':[]}
     try:
         client=DebugClient(args.port,uart=args.uart)
+        # Host-only tolerance; never reset USB or change device power policy.
+        client.serial.write_timeout=5
         with contextlib.redirect_stdout(capture):
             client.handshake()
             r=client.command('debug ota-status','ota-status',10)

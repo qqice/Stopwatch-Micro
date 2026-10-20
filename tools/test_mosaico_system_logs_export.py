@@ -34,10 +34,14 @@ class ExportTests(unittest.TestCase):
     def test_chunk_retry_is_idempotent_and_crc_checked(self):
         p=page()
         class Client:
-            calls=[];bad=True
+            calls=[];bad=True;pause=True
             def command(self,text,expected,timeout):
                 self.calls.append(text)
                 if ' read ' in text:return types.SimpleNamespace(status='PASS',details='action=read_queued')
+                if self.pause:
+                    self.pause=False
+                    assert timeout==12
+                    raise TimeoutError('bounded CDC pause')
                 i=int(text.split()[-1]);chunk=p[i*128:(i+1)*128]
                 if self.bad:
                     self.bad=False
@@ -45,6 +49,7 @@ class ExportTests(unittest.TestCase):
                 return types.SimpleNamespace(status='PASS',details=f'seq=5 chunk={i} bytes=128 total=2048 page_crc={m.crc(p[:2044]):08x} chunk_crc={m.crc(chunk):08x} data='+base64.b64encode(chunk).decode())
         c=Client();self.assertEqual(m.read_page(c,5),p)
         self.assertEqual(c.calls[1],c.calls[2])
+        self.assertEqual(c.calls[2],c.calls[3])
         self.assertTrue(all('debug syslog read ' in x or 'debug syslog chunk ' in x for x in c.calls))
 
     def test_failed_read_does_not_hang(self):
