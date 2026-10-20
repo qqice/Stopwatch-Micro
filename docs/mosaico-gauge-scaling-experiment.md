@@ -56,7 +56,37 @@ read-only audit firmware.
   inconsistent scale, gauge transaction failure, excessive temperature or voltage
   outside the existing safe gate. Never force a low-voltage discharge.
 
-Current state: public read-only complement and offline F4 arithmetic are ready
-for acceptance; the whole unit/recovery implementation and hardware admission
-are not complete. No SOC/OCV reset, hidden-register write, OTP programming,
+Current state: all 131 public fields have been double-read and backed up with
+their raw bytes; offline F4 arithmetic and the pure recovery decision model have
+passed host tests. They are not a deployed scaling writer. The whole unit/recovery
+implementation and hardware admission are not complete. No SOC/OCV reset,
+hidden-register write, OTP programming,
 full-chip erase or TWT experiment is part of this protocol.
+
+## Production integration boundary
+
+Do not divide the existing `BatteryTelemetry` fields in place. That API explicitly
+promises native values, and boot recovery, safety transactions and raw history
+share its cache. A separate physical snapshot must derive exact uA/uAh values
+under the same gauge transaction and unit-context lock. Include factor, unitEpoch,
+generation, phase and validity; never pair a new factor with an old sample.
+
+Explicit consumers include HAL `isBatteryCharging`, UI `refreshBattery` and its
+`ChargeSupplyState` anchor, powerbank supply inference, every OTA power gate, and
+the trace recorder's physical +5 mA charge-after-low decision. SOC, voltage,
+temperature, time, flags, raw diagnostics and raw history must retain their units.
+NAND formatting's fixed-65 guard must remain prohibited during an experiment,
+not silently widened to accept any scaled state.
+
+Legacy trace epochs are wall-clock timestamps; NAND generation is a storage
+counter. Neither is a unit epoch. Legacy trace reserved bytes must stay zero.
+Add a separately associated context record (boot, monotonic boundary, factor,
+unitEpoch, generation and phase); missing association cannot default to scale 1.
+The full original/target parameter recovery record is also new storage work:
+current threshold-audit records hold only a snapshot CRC, not all 131 raw values.
+
+The new record's admission and recovery fence must run before both startup
+`gaugeBootReload` and its deferred radios-off revisit. A scaled DC130/260 merely
+being rejected by an old fixed-65 guard is not a recovery implementation. Damaged
+scale state must not fall through to legacy 65 restoration or trusted physical
+telemetry. The retained recovery image must understand this fence too.
