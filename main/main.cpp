@@ -119,6 +119,7 @@ extern "C" void app_main(void)
         MosaicoSessions::service(GetNetworkQuota().displayLocked(), MosaicoOta::busy() || MosaicoOta::healthPending());
         MosaicoOta::healthPoll(ota_app->otaReady());
         const auto sleepBle=GetCodexMicroBle().diagnostics();
+        mosaico_console_usb_service_sleep();
         StandbySleep::service(MosaicoOta::busy() || MosaicoOta::healthPending(), sleepBle.advertising || sleepBle.connected);
         GetNetworkQuota().serviceStandbySleep();
         PowerbankKeepalive::serviceAutomatic();
@@ -129,7 +130,7 @@ extern "C" void app_main(void)
         // Function remains the sole physical wake input. The event candidate
         // retains 20 ms button/release sampling; it never polls touch I2C.
         MainIdleWait::wait(GetNetworkQuota().idleLocked(), MosaicoOta::busy() || MosaicoOta::healthPending(),
-            mosaico_console_usb_snapshot().effective_active, GetNetworkQuota().powerStats().wifiRunning, sleepBle.advertising || sleepBle.connected);
+            mosaico_console_usb_snapshot().service_active, GetNetworkQuota().powerStats().wifiRunning, sleepBle.advertising || sleepBle.connected);
 #else
         // Preserve StopWatch HID/control latency and scheduling.
         vTaskDelay(pdMS_TO_TICKS(GetNetworkQuota().idleLocked() ? 100 : 1));

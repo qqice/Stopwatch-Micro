@@ -30,7 +30,10 @@ typedef struct { void (*callback_rx)(int,cdcacm_event_t*); void (*callback_line_
 typedef int esp_err_t;
 typedef int esp_reset_reason_t;
 enum {ESP_RST_POWERON=1, ESP_RST_SW=3};
-int esp_sleep_enable_usb_wakeup(void);
+int esp_sleep_enable_usb_wakeup(void), esp_sleep_pd_config(int,int);
+#define ESP_PD_DOMAIN_CNNT 1
+#define ESP_PD_OPTION_ON 1
+void usb_phy_set_otg_suspend_state(bool), usb_phy_clear_otg_wakeup_status(void);
 #define TINYUSB_CDC_ACM_0 0
 #define REG_SET_BIT(a,b) (void)0
 bool tud_mounted(void), tud_connected(void), tud_suspended(void);
@@ -43,7 +46,7 @@ int tinyusb_console_init(int), esp_reset_reason(void);
         logs = []
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)/'usb.c'; p.write_text(stub+source)
-            for flags in ([], ['-DCONFIG_IDF_TARGET_ESP32S31=1','-DSOC_PM_SUPPORT_USB_WAKEUP=1'], ['-DCONFIG_IDF_TARGET_ESP32S31=1','-DSOC_PM_SUPPORT_USB_WAKEUP=0'], ['-DCONFIG_TINYUSB_SUSPEND_CALLBACK=1','-DCONFIG_TINYUSB_RESUME_CALLBACK=1']):
+            for flags in ([], ['-DCONFIG_IDF_TARGET_ESP32S31=1','-DSOC_PM_SUPPORT_USB_WAKEUP=1','-DSOC_PM_SUPPORT_CNNT_PD=1'], ['-DCONFIG_IDF_TARGET_ESP32S31=1','-DSOC_PM_SUPPORT_USB_WAKEUP=0'], ['-DCONFIG_TINYUSB_SUSPEND_CALLBACK=1','-DCONFIG_TINYUSB_RESUME_CALLBACK=1']):
                 out = subprocess.run([str(C[-1]),'-std=c11','-Wall','-Wextra','-Werror','-fsyntax-only',
                     '-I'+str(R/'main/hal/mosaico'),*flags,str(p)],capture_output=True,text=True)
                 logs.append(out.stdout+out.stderr)
@@ -69,6 +72,8 @@ int tinyusb_console_init(int), esp_reset_reason(void);
 struct Harness {
  StandbySleep::Model model=StandbySleep::initialModel(true,true);
  bool mounted=false,connected=false,suspended=false,wakeup_ready=true;
+ bool phy_hint_requested=true,cnnt_on_configured=true;
+ int cnnt_error=0; unsigned bridge_requested=0,bridge_serviced=0,hint_arms=0,wake_clears=0;
  int wakeup_error=0;unsigned mounts=0,unmounts=0,suspends=0,resumes=0,rx_events=0;
  bool wanted=true,applied=true,ready=true,fatal=false,initialized=true,bleActive=false,held=false;
  int64_t now=1000000;
@@ -85,7 +90,7 @@ constexpr bool cases() {
  Harness h;
  if(!h.allow(160,true,false)||h.held)return false; // detached wake-ready
  h.connected=true;if(h.allow(160,true,false)||!h.held)return false; // enumeration before mount
- if(h.mosaico_console_usb_snapshot().effective_active)return false; // cadence stays mounted-only
+ if(h.mosaico_console_usb_snapshot().effective_active)return false; // legacy effective_active stays mounted-only; service_active includes connected
  h.mounted=true;if(h.allow(160,true,false)||!h.held)return false; // active even DTR closed
  h.suspended=true;if(!h.allow(160,true,false)||h.held)return false; // suspended
  h.mounted=false;if(!h.allow(160,true,false)||h.held)return false; // connected suspend before mount
@@ -104,11 +109,68 @@ static_assert(cases(),"actual USB snapshot and StandbySleep gate/recovery lifecy
 '''
         StandbySleepTests().compile(code, 'usb-actual-gate')
 
+    def test_actual_bridge_transitions_and_arm_races(self):
+        from tools.test_standby_sleep import function, StandbySleepTests
+        usb = (R/'main/hal/mosaico/usb_console.c').read_text()
+        service = function(usb, 'void mosaico_console_usb_service_sleep(')
+        snap = function(usb, 'mosaico_usb_snapshot_t mosaico_console_usb_snapshot(')
+        code = r'''
+#include "main/hal/mosaico/usb_console.h"
+#define CONFIG_IDF_TARGET_ESP32S31 1
+#define SOC_PM_SUPPORT_USB_WAKEUP 1
+#define SOC_PM_SUPPORT_CNNT_PD 1
+#define atomic_load(p) (*(p))
+#define atomic_store(p,v) (*(p)=(v))
+#define atomic_fetch_add(p,v) (*(p)+=(v))
+struct Harness {
+ bool mounted=false,connected=false,suspended=false,wakeup_ready=false;
+ bool phy_hint_requested=false,cnnt_on_configured=false,hw_hint=false;
+ unsigned bridge_requested=1,bridge_serviced=0,hint_arms=0,wake_clears=0;
+ unsigned mounts=0,unmounts=0,suspends=0,resumes=0,rx_events=0;
+ int wakeup_error=0,cnnt_error=0,race=0;
+ constexpr bool tud_mounted(){return mounted;}
+ constexpr bool tud_connected(){return connected;}
+ constexpr bool tud_suspended(){return suspended;}
+ constexpr void usb_phy_set_otg_suspend_state(bool value){
+  hw_hint=value;
+  if(value && race){++bridge_requested;if(race==2)connected=true;race=0;}
+ }
+ constexpr void usb_phy_clear_otg_wakeup_status(){}
+'''+service.replace('void mosaico_console_usb_service_sleep(', 'constexpr void mosaico_console_usb_service_sleep(')+snap.replace('mosaico_usb_snapshot_t mosaico_console_usb_snapshot(', 'constexpr mosaico_usb_snapshot_t mosaico_console_usb_snapshot(')+r'''
+ constexpr bool safe(){return mosaico_console_usb_snapshot().sleep_safe;}
+};
+constexpr bool cases(){
+ Harness h;
+ h.mosaico_console_usb_service_sleep();if(h.safe()||h.hw_hint)return false;
+ h.wakeup_ready=true;h.mosaico_console_usb_service_sleep();if(!h.safe()||!h.hw_hint)return false;
+ // Initial battery boot arms even without mount/suspend callback.
+ h.connected=true;++h.bridge_requested;if(h.safe())return false;
+ h.mosaico_console_usb_service_sleep();if(h.safe()||h.hw_hint)return false;
+ h.mounted=true;++h.bridge_requested;h.mosaico_console_usb_service_sleep();if(h.safe())return false;
+ // Known observation gap: TinyUSB reset clears all state with no task callback.
+ // Before first SETUP there is no new generation; indistinguishable from offline.
+ h.mounted=false;h.connected=false;h.suspended=false;
+ h.mosaico_console_usb_service_sleep();if(!h.safe())return false;
+ // First SETUP restores connected and immediately blocks snapshot eligibility.
+ h.connected=true;if(h.safe())return false;
+ h.mounted=true;
+ h.suspended=true;++h.bridge_requested;h.mosaico_console_usb_service_sleep();if(!h.safe())return false;
+ h.suspended=false;++h.bridge_requested;h.mosaico_console_usb_service_sleep();if(h.safe()||h.hw_hint)return false;
+ h.mounted=false;h.connected=false;++h.bridge_requested;
+ h.race=1;h.mosaico_console_usb_service_sleep();if(h.safe()||h.hw_hint)return false;
+ h.mosaico_console_usb_service_sleep();if(!h.safe())return false;
+ h.race=2;h.mosaico_console_usb_service_sleep();if(h.safe()||h.hw_hint)return false;
+ h.connected=false;h.wakeup_ready=false;h.mosaico_console_usb_service_sleep();return !h.safe();
+}
+static_assert(cases(),"actual PHY owner transition and arm rollback contract");
+'''
+        StandbySleepTests().compile(code, 'usb-bridge-transitions')
+
     def test_task_activity_and_public_wake_setup(self):
         from tools.test_standby_sleep import function
         usb = (R/'main/hal/mosaico/usb_console.c').read_text()
         for signature in ('static void resumed_event(', 'static void received(', 'static void coding_changed('):
-            self.assertIn('mosaico_idle_usb_notify()', function(usb, signature))
+            self.assertTrue('mosaico_idle_usb_notify()' in function(usb, signature) or 'bridge_event()' in function(usb, signature))
         coding = function(usb, 'static void coding_changed(')
         self.assertIn('bit_rate == 1200', coding)
         self.assertIn('atomic_store(&download_requested, true)', coding)
@@ -130,8 +192,8 @@ static_assert(cases(),"actual USB snapshot and StandbySleep gate/recovery lifecy
             self.assertIn(token, source)
         for name in ('resumed_event', 'received'):
             body = source.split('static void '+name+'(',1)[1].split('\n}',1)[0]
-            self.assertIn('mosaico_idle_usb_notify()',body)
-        self.assertIn('mosaico_idle_usb_notify()',source.split('case TINYUSB_EVENT_ATTACHED:',1)[1].split('break;',1)[0])
+            self.assertIn('bridge_event()',body)
+        self.assertIn('bridge_event()',source.split('case TINYUSB_EVENT_ATTACHED:',1)[1].split('break;',1)[0])
         self.assertNotIn('tinyusb_cdcacm_read',source)
         vfs = (R/'boards/mosaico/managed_components/espressif__esp_tinyusb/vfs_tinyusb.c').read_text()
         self.assertNotIn('tinyusb_cdcacm_register_callback',vfs)

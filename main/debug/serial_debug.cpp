@@ -654,12 +654,15 @@ void SerialDebug::handleLine(char* line)
         bool ok=false;
         if (action && !std::strcmp(action,"usb")) {
             if (::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","reason=arguments no_changes=1");return;}
-            const auto s=mosaico_console_usb_snapshot(); char details[400]{};
-            std::snprintf(details,sizeof(details),"mounted=%lu connected=%lu suspended=%lu effective_active=%lu mounts=%lu unmounts=%lu suspends=%lu resumes=%lu rx_events=%lu wakeup_ready=%lu wakeup_error=%ld sleep_safe=%lu physical_power_proof=0",
+            const auto s=mosaico_console_usb_snapshot(); char details[760]{};
+            std::snprintf(details,sizeof(details),"mounted=%lu connected=%lu suspended=%lu effective_active=%lu mounts=%lu unmounts=%lu suspends=%lu resumes=%lu rx_events=%lu wakeup_ready=%lu wakeup_error=%ld sleep_safe=%lu service_active=%lu bridge_pending=%lu phy_hint_requested=%lu cnnt_on_configured=%lu cnnt_error=%ld hint_arms=%lu wake_clears=%lu hw_readback=0 physical_power_proof=0",
                 static_cast<unsigned long>(s.mounted),static_cast<unsigned long>(s.connected),static_cast<unsigned long>(s.suspended),
                 static_cast<unsigned long>(s.effective_active),static_cast<unsigned long>(s.mounts),static_cast<unsigned long>(s.unmounts),
                 static_cast<unsigned long>(s.suspends),static_cast<unsigned long>(s.resumes),static_cast<unsigned long>(s.rx_events),static_cast<unsigned long>(s.wakeup_ready),
-                static_cast<long>(s.wakeup_error),static_cast<unsigned long>(s.sleep_safe));
+                static_cast<long>(s.wakeup_error),static_cast<unsigned long>(s.sleep_safe),
+                static_cast<unsigned long>(s.service_active),static_cast<unsigned long>(s.bridge_pending),
+                static_cast<unsigned long>(s.phy_hint_requested),static_cast<unsigned long>(s.cnnt_on_configured),static_cast<long>(s.cnnt_error),
+                static_cast<unsigned long>(s.hint_arms),static_cast<unsigned long>(s.wake_clears));
             result(command,"PASS",details);return;
         }
         if (action && !std::strcmp(action,"ui")) {
