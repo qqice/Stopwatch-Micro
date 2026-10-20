@@ -1406,6 +1406,39 @@ void SerialDebug::handleLine(char* line)
         }
         result(command,"FAIL","expected=status|flush|read_hi_lo|chunk_hi_lo_0..15 no_clear_or_format=1");return;
     }
+    if (std::strcmp(command, "gauge-engine") == 0) {
+        if (::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","expected=no_arguments readonly=1");return;}
+        if(MosaicoOta::busy()||MosaicoOta::healthPending()||!MosaicoOta::tryStorageLease()) {
+            result(command,"FAIL","reason=ota_not_idle readonly=1");return;
+        }
+        struct Lease {~Lease(){MosaicoOta::releaseStorageLease();}} lease;
+        if(MosaicoOta::busy()||MosaicoOta::healthPending()){result(command,"FAIL","reason=ota_not_idle readonly=1");return;}
+        // Temporary PSRAM, not a new large handleLine stack frame or DMA DRAM
+        // resident buffer. Parser is single-owner; scope frees on every exit.
+        struct Output {Hal::GaugeEngineSnapshot sample;char cedv[47],smooth[35],identity[23],details[640];};
+        struct Buffer {Output* p;~Buffer(){heap_caps_free(p);}} buffer{
+            static_cast<Output*>(heap_caps_calloc(1,sizeof(Output),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT))};
+        if(!buffer.p){result(command,"FAIL","reason=diagnostic_psram_alloc readonly=1");return;}
+        auto& s=buffer.p->sample;const bool ok=GetHAL().gaugeEngineSample(s);
+        auto& cedv=buffer.p->cedv;auto& smooth=buffer.p->smooth;auto& identity=buffer.p->identity;
+        for(size_t i=0;i<23;++i)std::snprintf(cedv+i*2,3,"%02x",s.rawCedv[i]);
+        for(size_t i=0;i<17;++i)std::snprintf(smooth+i*2,3,"%02x",s.rawSmooth[i]);
+        for(size_t i=0;i<11;++i)std::snprintf(identity+i*2,3,"%02x",s.rawIdentity[i]);
+        using namespace mosaico_gauge_engine;
+        auto& details=buffer.p->details;
+        const bool match=s.validMask&DefinitionMatch;
+        int n=std::snprintf(details,sizeof(details),
+            "readonly=1 valid=%04x phase=%u echo73=%04x echo76=%04x echo02=%04x definition_match=%u raw73=%s raw76=%s raw02=%s device_be=%04x fw_be=%04x build_be=%04x units=raw_not_calibration",
+            s.validMask,s.phase,s.echo73,s.echo76,s.echo02,unsigned(match),cedv,smooth,identity,
+            beWord(s.rawIdentity,0),beWord(s.rawIdentity,2),beWord(s.rawIdentity,4));
+        if(n>0&&static_cast<size_t>(n)<sizeof(details)&&match) {
+            if(s.validMask&Cedv)n+=std::snprintf(details+n,sizeof(details)-n," CEDVRemCap=%u EDVThreshold=%u",leWord(s.rawCedv,0),leWord(s.rawCedv,16));
+            if(n>0&&static_cast<size_t>(n)<sizeof(details)&&(s.validMask&Smooth))
+                std::snprintf(details+n,sizeof(details)-n," SmoothRemCap=%u MaxVPrev=%u MaxVNow=%u DropRate=%u TimeToEDV=%u DeltaRM=%u SmoothCurrent=%u PresentThreshold=%u MaxDeltaSeconds=%u",
+                    leWord(s.rawSmooth,0),leWord(s.rawSmooth,2),leWord(s.rawSmooth,4),leWord(s.rawSmooth,6),leWord(s.rawSmooth,8),leWord(s.rawSmooth,10),leWord(s.rawSmooth,12),leWord(s.rawSmooth,14),s.rawSmooth[16]);
+        }
+        result(command,ok?"PASS":"FAIL",details);return;
+    }
     if (std::strcmp(command, "gauge-mode") == 0) {
         if (::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","expected=no_arguments readonly=1");return;}
         static char details[240];

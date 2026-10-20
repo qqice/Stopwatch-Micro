@@ -86,3 +86,42 @@ clears records, changes gauge parameters, or starts a firmware update.
 The binary record schema and field meanings are in
 `main/host/mosaico_system_log_model.h`; the page schema is in
 `main/hal/mosaico/mosaico_nand_log_model.h`.
+
+
+### Read-only gauge engine (type 13)
+
+`debug gauge-engine` takes no arguments. It uses the existing OTA storage lease
+and refuses busy/pending OTA. The only Control selectors are fixed `0x0002`,
+`0x0073`, `0x0076`; each waits 20 ms, reads the two-byte LE echo at `0x3e`, then
+exactly 11/23/17 bytes starting at `0x40`, using word reads plus the final
+odd byte (not a new unverified bulk-read assumption). Replies use temporary
+PSRAM with safe allocation failure, avoiding a new large parser stack frame. There is no unseal, arbitrary selector,
+configuration write, reset-percent or OCV command in this reader. This is a
+read-request transaction, not a claim that the I2C bus receives no writes.
+
+Identity bytes use the official big-endian DEVICE_NUMBER/FW_VERSION/FW_BUILD
+layout. Only `0220/0003/0004` sets `definition_match`. Named engine fields are
+emitted only for that definition and a complete matching-echo block. Other
+revisions still retain raw bytes. CEDVRemCap (offset 0), EDVThreshold (16), and
+all smooth words (offsets 0,2,4,6,8,10,12,14) are unsigned LE raw values;
+MaxDeltaSeconds is byte 16. XML unit labels are not trusted: these values are
+internal-state evidence, not physical calibration or a correction of SOC.
+
+Existing 60 s / low-battery 10 s system-log sampling also records one type 13.
+It adds 60 ms of explicit waits plus bus/lock time on that same worker, with no
+new task, network request, or change to NAND safety gates. Standard and engine
+samples are sequential, **not** an atomic cross-register snapshot. Boot-before
+and terminal boot-after are RAM-cached alongside existing diagnostic capture
+and each enqueued once; queue-full retries acknowledge only accepted prefixes.
+Existing durable append/consume semantics remain unchanged. Missing boot data
+has zero transport-valid bits and must not be interpreted as a zero measurement.
+
+Record size remains 64 bytes. `args[0]` is `validMask | phase<<16 | outcome<<24`;
+`args[1..10]` contain exactly raw73[23] followed by raw76[17], packed LE. No
+identity bytes or echo values fit in this record. Valid-mask bits 0/1/2 mean
+complete matching-echo CEDV/smooth/identity transport; bit 3 means the exact
+identity definition above. Bits 4/5/6, 7/8/9, 10/11/12 respectively record
+TX/echo-read/data-read success for CEDV, smooth and identity. Echo-read success
+alone does **not** imply selector match. Record flags bit 0 remains epoch-valid
+only and is cleared for cached boot records. Existing type 2/3 schemas and the
+48-byte standard diagnostic snapshot are unchanged.

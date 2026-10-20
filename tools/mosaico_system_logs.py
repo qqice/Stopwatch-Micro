@@ -10,7 +10,7 @@ from serial_debug_test import DebugClient
 
 PAGE_MAGIC=0x31474c4d
 TYPES={1:'boot',2:'gauge',3:'gauge_boot',4:'network',5:'power',6:'ota',7:'heap',
-       8:'warning_fingerprint',9:'loss',10:'gauge_boot_outcome',11:'panic',12:'tcp'}
+       8:'warning_fingerprint',9:'loss',10:'gauge_boot_outcome',11:'panic',12:'tcp',13:'gauge_engine'}
 
 def fields(result):
     return dict(x.split('=',1) for x in result.details.split() if '=' in x)
@@ -39,6 +39,18 @@ def decode_page(data,expected):
                 raw_cc=a[8]&65535,cycles=a[8]>>16,operation=a[9]&65535,battery=a[9]>>16,
                 gauging=a[10]&65535,response_echo=a[10]>>16,
                 protocol_tx=bool(a[0]&(1<<16)),protocol_echo_io=bool(a[0]&(1<<17)),protocol_data_io=bool(a[0]&(1<<18)))
+        if typ==13:
+            raw=struct.pack('<10I',*a[1:]);v=a[0]&65535
+            e=dict(valid_mask=v,phase=(a[0]>>16)&255,outcome=a[0]>>24,
+                   cedv_valid=bool(v&1),smooth_valid=bool(v&2),identity_valid=bool(v&4),
+                   definition_match=bool(v&8),raw73=raw[:23].hex(),raw76=raw[23:].hex(),units='raw_not_calibration')
+            if v&8:
+                if v&1:e.update(CEDVRemCap=struct.unpack_from('<H',raw,0)[0],EDVThreshold=struct.unpack_from('<H',raw,16)[0])
+                if v&2:
+                    for j,key in enumerate(('SmoothRemCap','MaxVPrev','MaxVNow','DropRate','TimeToEDV','DeltaRM','SmoothCurrent','PresentThreshold')):
+                        e[key]=struct.unpack_from('<H',raw,23+j*2)[0]
+                    e['MaxDeltaSeconds']=raw[39]
+            r['gauge_engine']=e
         rows.append(r)
     return rows
 

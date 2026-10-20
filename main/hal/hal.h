@@ -6,6 +6,7 @@
 #pragma once
 #include "mosaico/mosaico_sleep_io_model.h"
 #include "mosaico/mosaico_gauge_status_model.h"
+#include "mosaico/mosaico_gauge_engine_model.h"
 #include "utils/button/Button_Class.hpp"
 #include <system_config.h>
 #include <memory>
@@ -144,6 +145,7 @@ public:
     };
     enum class GaugeAccessAction { Open, Restore };
     using GaugeDiagnosticSnapshot = mosaico_gauge_status::Snapshot;
+    using GaugeEngineSnapshot = mosaico_gauge_engine::Snapshot;
     enum class GaugeBootReloadStatus { Deferred, Skipped, Applied, Critical };
     struct GaugeBootReloadInfo {
         GaugeBootReloadStatus status = GaugeBootReloadStatus::Deferred;
@@ -153,6 +155,8 @@ public:
 #ifdef MOSAICO_BOARD
     // Explicit diagnostic I2C only; not part of UI telemetry refresh.
     bool gaugeDiagnosticSample(GaugeDiagnosticSnapshot& out);
+    bool gaugeEngineSample(GaugeEngineSnapshot& out);
+    void gaugeBootEngine(GaugeEngineSnapshot& before, GaugeEngineSnapshot& after) const;
     bool gaugeModeAudit(char* out, size_t len);
     // RAM-only copy; phase/validMask distinguish unavailable boot observations.
     void gaugeBootDiagnostic(GaugeDiagnosticSnapshot& before, GaugeDiagnosticSnapshot& after) const;
@@ -200,6 +204,8 @@ public:
     bool displayRamProbe(uint32_t& errors);
 #else
     bool gaugeDiagnosticSample(GaugeDiagnosticSnapshot& out) { out={}; return false; }
+    bool gaugeEngineSample(GaugeEngineSnapshot& out) { out={}; return false; }
+    void gaugeBootEngine(GaugeEngineSnapshot& before, GaugeEngineSnapshot& after) const { before={}; after={}; }
     bool gaugeModeAudit(char* out, size_t len) {
         if(out && len)std::snprintf(out,len,"readonly=1 reason=unsupported_not_mosaico");
         return false;

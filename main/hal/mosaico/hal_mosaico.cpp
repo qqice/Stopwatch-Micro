@@ -253,6 +253,7 @@ bool gauge_access_cleanup_attempted = false;
 bool gauge_access_cleanup_succeeded = false;
 Hal::GaugeBootReloadInfo gauge_boot_info;
 Hal::GaugeDiagnosticSnapshot gauge_boot_before{}, gauge_boot_after{};
+Hal::GaugeEngineSnapshot gauge_engine_before{}, gauge_engine_after{};
 // Volatile per-boot diagnostic latch; only the transaction owner may change it.
 bool gauge_ocv_attempted=false;
 bool gauge_threshold_audit_attempted=false;
@@ -489,6 +490,28 @@ bool gauge_word(uint8_t reg, uint16_t& value)
     if (!result) return false;
     value = bytes[0] | (static_cast<uint16_t>(bytes[1]) << 8);
     return true;
+}
+
+// Requires the same transaction -> battery lock order as standard diagnostics.
+void gauge_engine_locked(Hal::GaugeEngineSnapshot& out,uint8_t phase,uint8_t outcome)
+{
+    out={};out.sampledUs=esp_timer_get_time();out.phase=phase;out.outcome=outcome;
+    if(!gauge)return;
+    struct EngineTransport {
+        bool transmit(const uint8_t* p,size_t n){gauge_feed();return gauge&&i2c_master_transmit(gauge,p,n,20)==ESP_OK;}
+        void delayMs(uint32_t ms){gauge_delay_ms(ms);}
+        bool read(uint8_t reg,uint8_t* p,size_t n){
+            if(reg==0x3e&&n==2)return gauge_read(reg,p,n);
+            if(reg!=0x40||(n!=11&&n!=23&&n!=17))return false;
+            // Board-proven word reads, with an exact final odd byte.
+            for(size_t i=0;i<n;i+=2){
+                const size_t count=n-i>=2?2:1;
+                if(!gauge_read(static_cast<uint8_t>(0x40+i),p+i,count))return false;
+            }
+            return true;
+        }
+    } transport;
+    mosaico_gauge_engine::read(transport,out);
 }
 
 // Requires gauge_transaction_mutex -> battery_mutex. This adapter is closed:
@@ -2146,6 +2169,21 @@ bool Hal::gaugeReconcileNominal(char* reason, size_t reasonSize)
     return report(true, "reconciled_std_target_observed_sec3_expected_prior3");
 }
 
+bool Hal::gaugeEngineSample(GaugeEngineSnapshot& out)
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    gauge_engine_locked(out,mosaico_gauge_status::Explicit,0);
+    using namespace mosaico_gauge_engine;
+    return (out.validMask&(Cedv|Smooth|DefinitionMatch))==(Cedv|Smooth|DefinitionMatch);
+}
+
+void Hal::gaugeBootEngine(GaugeEngineSnapshot& before,GaugeEngineSnapshot& after) const
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    before=gauge_engine_before;after=gauge_engine_after;
+}
+
 bool Hal::gaugeDiagnosticSample(GaugeDiagnosticSnapshot& out)
 {
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
@@ -2203,8 +2241,10 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
     {
         std::lock_guard<std::mutex> battery(battery_mutex);
         uint16_t operation=0;
-        if(!gauge_boot_info.attempted && gauge && gauge_word(0x3a,operation) && (operation & 0x20))
+        if(!gauge_boot_info.attempted && gauge && gauge_word(0x3a,operation) && (operation & 0x20)) {
             gauge_diagnostic_locked(gauge_boot_before,mosaico_gauge_status::BootBefore,static_cast<uint8_t>(Status::Deferred));
+            gauge_engine_locked(gauge_engine_before,mosaico_gauge_status::BootBefore,static_cast<uint8_t>(Status::Deferred));
+        }
     }
     // Destroyed after inner battery locks, before outer transaction lock. Every
     // terminal path, including early skip/critical, has exactly one after record.
@@ -2214,6 +2254,9 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
             std::lock_guard<std::mutex> battery(battery_mutex);
             if(!gauge_boot_before.phase)gauge_boot_before.phase=mosaico_gauge_status::BootBefore;
             gauge_boot_before.outcome=static_cast<uint8_t>(gauge_boot_info.status);
+            if(!gauge_engine_before.phase)gauge_engine_before.phase=mosaico_gauge_status::BootBefore;
+            gauge_engine_before.outcome=static_cast<uint8_t>(gauge_boot_info.status);
+            gauge_engine_locked(gauge_engine_after,mosaico_gauge_status::BootAfter,static_cast<uint8_t>(gauge_boot_info.status));
             gauge_diagnostic_locked(gauge_boot_after,mosaico_gauge_status::BootAfter,
                                     static_cast<uint8_t>(gauge_boot_info.status));
         }

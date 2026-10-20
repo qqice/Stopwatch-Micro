@@ -37,7 +37,10 @@ class UartTests(unittest.TestCase):
                 p.write_text(prefix+header+'\nstatic_assert(serial_debug_transport::uartAllowed("bankpulse")=='+expected+');\n'
                     'static_assert(!serial_debug_transport::uartAllowed("bankpulse-extra"));\n'
                     'static_assert(!serial_debug_transport::uartAllowed("vibrate"));\n'
-                    'static_assert(serial_debug_transport::uartAllowed("status"));\n')
+                    'static_assert(serial_debug_transport::uartAllowed("status"));\n'
+                    'static_assert(serial_debug_transport::uartAllowed("gauge-engine"));\n'
+                    'static_assert(!serial_debug_transport::uartAllowed("gauge-engine-extra"));\n'
+                    'static_assert(!serial_debug_transport::uartAllowed("gauge-reset"));\n')
                 result=subprocess.run([str(COMPILERS[-1]),'-std=c++20','-fsyntax-only',str(p)],capture_output=True,text=True)
                 self.assertEqual(result.returncode,0,result.stderr)
 

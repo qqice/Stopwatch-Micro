@@ -39,7 +39,7 @@ std::atomic<ReadStatus> reader{ReadStatus::Idle};
 std::atomic<uint32_t> queued{0},drops{0},hookDrops{0},failures{0},lastCode{0},lastError{0},cleanupError{0},readError{0},readCode{0},policy{0},gate{0};
 std::atomic<uint32_t> workerStackRtc{0},dmaLargest{0};
 std::atomic<uint64_t> latest{0},oldest{0},readSeq{0},nextAttempt{0};
-uint32_t bootId=0;uint64_t lastKick=0,lastSample=0,lastFlush=0,lastSlow=0,sampleInterval=60000;unsigned backoff=0;BootCapture bootCapture;size_t pendingConsume=0;
+uint32_t bootId=0;uint64_t lastKick=0,lastSample=0,lastFlush=0,lastSlow=0,sampleInterval=60000;unsigned backoff=0;BootCapture bootCapture,engineBootCapture;size_t pendingConsume=0;
 vprintf_like_t originalPrint=nullptr;
 uint64_t nowMs(){return uint64_t(esp_timer_get_time())/1000;}
 Record record(Type type,uint64_t sampled=UINT64_MAX){Record r;r.type=type;r.monotonicMs=sampled==UINT64_MAX?nowMs():sampled;const auto c=MosaicoClock::snapshot();r.epoch=c.valid?uint64_t(c.epoch):0;r.flags=c.valid?1:0;return r;}
@@ -69,16 +69,24 @@ bool admitted(){
 }
 void failed(const MosaicoNandStore::Result& r,uint64_t now){lastError=uint32_t(r.error!=ESP_OK?r.error:r.cleanupError);cleanupError=uint32_t(r.cleanupError);lastCode=uint32_t(r.logCode);++failures;const uint64_t delay=60000ULL<<(backoff<6?backoff++:6);nextAttempt=now+delay;}
 bool gauge(const Hal::GaugeDiagnosticSnapshot& s){auto r=record(s.phase==mosaico_gauge_status::Explicit?Type::Gauge:Type::GaugeBoot,s.sampledUs/1000);r.args={s.validMask,uint32_t(s.phase)|(uint32_t(s.outcome)<<8)|(uint32_t(s.mode)<<16),s.rawSoc,s.remainingMah,s.fullMah,s.designMah,s.voltageMv,uint32_t(uint16_t(s.currentMa))|(uint32_t(uint16_t(s.averageCurrentMa))<<16),uint32_t(s.rawCoulombMah)|(uint32_t(s.cycleCount)<<16),uint32_t(s.operationStatus)|(uint32_t(s.batteryStatus)<<16),uint32_t(s.gaugingStatus)|(uint32_t(s.rawEcho16)<<16)};if(s.phase!=mosaico_gauge_status::Explicit){r.epoch=0;r.flags&=~uint16_t(1);}return enqueue(r,s.phase!=mosaico_gauge_status::Explicit);}
+bool engine(const Hal::GaugeEngineSnapshot& s){
+ auto r=record(Type::GaugeEngine,s.sampledUs/1000);
+ r.args[0]=uint32_t(s.validMask)|(uint32_t(s.phase)<<16)|(uint32_t(s.outcome)<<24);
+ for(size_t i=0;i<40;++i){const uint8_t byte=i<23?s.rawCedv[i]:s.rawSmooth[i-23];r.args[1+i/4]|=uint32_t(byte)<<((i%4)*8);}
+ if(s.phase!=mosaico_gauge_status::Explicit){r.epoch=0;r.flags&=~uint16_t(1);}
+ return enqueue(r,s.phase!=mosaico_gauge_status::Explicit);
+}
 void changed(Record& prior,const Record& next,bool critical=false){if(prior.args!=next.args){enqueue(next,critical);prior=next;}}
 void collect(uint64_t now){
  if(!bootCapture.complete){Hal::GaugeDiagnosticSnapshot before{},after{};GetHAL().gaugeBootDiagnostic(before,after);const auto info=GetHAL().gaugeBootReloadInfo();bootCapture.update(before,after,info.attempted,[](const Hal::GaugeDiagnosticSnapshot& s){return gauge(s);},[](uint8_t outcome,bool attempted){auto r=record(Type::Outcome);r.args[0]=outcome;r.args[1]=attempted;return enqueue(r,true);});}
+ if(!engineBootCapture.complete){Hal::GaugeEngineSnapshot before{},after{};GetHAL().gaugeBootEngine(before,after);engineBootCapture.update(before,after,false,[](const Hal::GaugeEngineSnapshot& s){return engine(s);},[](uint8_t,bool){return true;});}
  const auto p=GetNetworkQuota().powerStats();auto r=record(Type::Power);r.args={p.locked,p.wifiRunning,p.profile,p.phase,p.cpuMHz,p.cycles,uint32_t(p.offMs),uint32_t(p.offMs>>32),uint32_t(p.clockError),0,0};if(storage->power.args[0]!=r.args[0]||storage->power.args[1]!=r.args[1]||storage->power.args[2]!=r.args[2]||storage->power.args[3]!=r.args[3]||storage->power.args[4]!=r.args[4]||storage->power.args[5]!=r.args[5]||storage->power.args[8]!=r.args[8])changed(storage->power,r);
  if(MosaicoOta::copyUiSnapshot(storage->otaUi)){const auto& o=storage->otaUi;r=record(Type::Ota);r.args={uint32_t(o.stage),o.received,o.size,o.progressBasisPoints,o.revision,uint32_t(o.currentSlot),uint32_t(o.targetSlot),MosaicoOta::busy(),MosaicoOta::healthPending(),0,0};changed(storage->ota,r,storage->ota.args[0]!=r.args[0]);}
  r=record(Type::Network);r.args={GetNetworkQuota().accepted(),GetNetworkQuota().failures(),GetNetworkQuota().historyAccepted(),GetNetworkQuota().historyFailures(),GetNetworkQuota().wifiConnectAttempts(),GetNetworkQuota().wifiBudgetClosures(),0,0,0,0,0};changed(storage->network,r);
  const auto t=GetTailnetQuota().tcpConnectDiagnostics();r=record(Type::Tcp);r.args={t.request_id,t.stage,uint32_t(t.error),uint32_t(t.first_error),uint32_t(t.retry_error),t.wg_wait_ms,t.elapsed_ms,t.wg_ready_before,t.wg_ready_after,0,0};changed(storage->tcp,r);
  // Pending OTA means RAM only: no gauge/NAND/NVS work at all.
  const uint64_t interval=sampleInterval;
- if(otaIdle()&&(!lastSample||now-lastSample>=interval)){StorageLease lease;if(lease&&otaIdle()){Hal::GaugeDiagnosticSnapshot s{};GetHAL().gaugeDiagnosticSample(s);gauge(s);sampleInterval=(((s.validMask&mosaico_gauge_status::Soc)&&s.rawSoc<=15)||((s.validMask&mosaico_gauge_status::Voltage)&&s.voltageMv<=3500))?10000:60000;lastSample=now;}}
+ if(otaIdle()&&(!lastSample||now-lastSample>=interval)){StorageLease lease;if(lease&&otaIdle()){Hal::GaugeDiagnosticSnapshot s{};GetHAL().gaugeDiagnosticSample(s);gauge(s);Hal::GaugeEngineSnapshot e{};GetHAL().gaugeEngineSample(e);engine(e);sampleInterval=(((s.validMask&mosaico_gauge_status::Soc)&&s.rawSoc<=15)||((s.validMask&mosaico_gauge_status::Voltage)&&s.voltageMv<=3500))?10000:60000;lastSample=now;}}
  if(!lastSlow||now-lastSlow>=60000){r=record(Type::Heap);r.args={uint32_t(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),uint32_t(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),uint32_t(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),uint32_t(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),uint32_t(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),0,0,0,0,0,0};enqueue(r);r=record(Type::Loss);r.args[0]=drops;r.args[1]=hookDrops;r.args[2]=queued;r.args[3]=failures;enqueue(r);lastSlow=now;}
 }
 void processRead(uint64_t now){

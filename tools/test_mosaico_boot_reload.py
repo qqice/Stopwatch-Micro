@@ -88,6 +88,12 @@ static_assert(cases(), "factory SEC2 guards");
   if not compiler: self.skipTest('C++ compiler unavailable')
   body=self.boot_source().split('\nHal::',1)[0]
   body=body[body.index('{'):].strip()
+  # Diagnostics are observational only and independently covered by gauge
+  # status/engine transport and boot-capture tests. Their global-cache RAII
+  # cannot be member-injected into this coordinator-only constexpr fixture.
+  start=body.index('    // Capture only initialized pre-write evidence.')
+  end=body.index('    ReloadJournal latch{};',start)
+  body=body[:start]+body[end:]
   scope='''struct BootReloadScope {
         BootReloadScope() { boot_factory_reload_scope = true; }
         ~BootReloadScope() { boot_factory_reload_scope = false; }

@@ -27,8 +27,14 @@ using Bytes=std::array<uint8_t,RecordBytes>;
 // Outcome: boot reload status,attempted. No reason strings.
 // Panic: core,cause,pc,ra,mcause,mtval,otaPhase,otaOffset,resetReason,magicVersion,reserved.
 // Tcp: requestId,stage,error,firstError,retryError,wgWaitMs,elapsedMs,wgReadyBefore,wgReadyAfter.
+// GaugeEngine: args0=validMask[0..15]|phase<<16|outcome<<24; args1..10
+// exact rawCedv[23]+rawSmooth[17], packed LE. Mask bits0/1/2 are block
+// valid (TX + echo IO + matching selector + complete data); bit3 identity
+// 0220/fw0003/build0004. Bits4/5/6 CEDV TX/echoIO/dataIO, bits7/8/9
+// smooth TX/echoIO/dataIO, bits10/11/12 identity TX/echoIO/dataIO.
+// Echo values and identity bytes are not persisted. flags bit0=epoch-valid only.
 // Temperatures use conservative integer deci-K bounds: ceil(2831.5)..floor(3181.5).
-enum class Type:uint16_t { Boot=1,Gauge=2,GaugeBoot=3,Network=4,Power=5,Ota=6,Heap=7,Warning=8,Loss=9,Outcome=10,Panic=11,Tcp=12 };
+enum class Type:uint16_t { Boot=1,Gauge=2,GaugeBoot=3,Network=4,Power=5,Ota=6,Heap=7,Warning=8,Loss=9,Outcome=10,Panic=11,Tcp=12,GaugeEngine=13 };
 struct Record {Type type=Type::Boot;uint16_t flags=0;uint64_t monotonicMs=0,epoch=0;std::array<uint32_t,11> args{};};
 template<size_t N> constexpr void put(std::array<uint8_t,N>& b,size_t p,uint64_t v,size_t n){for(size_t i=0;i<n;++i)b[p+i]=uint8_t(v>>(8*i));}
 template<size_t N> constexpr uint64_t get(const std::array<uint8_t,N>& b,size_t p,size_t n){uint64_t v=0;for(size_t i=0;i<n;++i)v|=uint64_t(b[p+i])<<(8*i);return v;}
