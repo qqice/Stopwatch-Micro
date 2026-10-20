@@ -95,13 +95,15 @@ static_assert(faults(),"all boundaries ACK/NVS failures, no replay, one key atte
 ''')
  def test_actual_cached_field_bounds_no_io(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
-  getter='constexpr bool field('+source.split('bool Hal::gaugeThresholdAuditField(',1)[1].split('// Closed standard-command snapshot',1)[0]
+  getter='constexpr bool field('+source.split('bool Hal::gaugeThresholdAuditField(',1)[1].split('// Pure cache inspection:',1)[0]
   getter='\n'.join(line for line in getter.splitlines() if 'std::lock_guard<' not in line).replace('std::snprintf','print')
   self.compile(r'''
 #include "mosaico_threshold_audit_model.h"
 #include "mosaico_gauge_calibration_read_model.h"
+#include "mosaico_gauge_public_extra_read_model.h"
 struct Fake{
  mosaico_calibration::Values gauge_calibration_cached{};
+mosaico_public_extra::Values gauge_public_extra_cached{};uint32_t gauge_public_extra_generation=0;
  mosaico_threshold::Values gauge_threshold_cached{};uint32_t gauge_threshold_cached_generation=0;int prints=0;
  template<class... Args>constexpr int print(char*,size_t,const char*,Args...){++prints;return 100;}
 '''+getter+r'''
@@ -314,6 +316,7 @@ static_assert(cases(),"actual separate journal commit/reopen CRC/MAC/schema/byte
 #include "mosaico_gauge_model.h"
 #include "mosaico_fcc_limit_journal_codec.h"
 #include "mosaico_gauge_calibration_read_model.h"
+#include "mosaico_gauge_public_extra_read_model.h"
 namespace std{struct mutex{};struct recursive_mutex{};template<class T>struct lock_guard{lock_guard(T&){}};}
 std::mutex battery_mutex;std::recursive_mutex gauge_transaction_mutex;
 using esp_err_t=int;using nvs_handle_t=int;
@@ -321,16 +324,18 @@ constexpr int ESP_OK=0,ESP_ERR_NVS_NOT_FOUND=1,NVS_READONLY=0,NVS_READWRITE=1;
 int nvs_open(const char*,int,int*);int nvs_get_blob(int,const char*,void*,size_t*);void nvs_close(int);int nvs_set_blob(int,const char*,const void*,size_t);int nvs_commit(int);
 mosaico_threshold::Values gauge_threshold_cached{};uint32_t gauge_threshold_cached_generation=0;
 mosaico_calibration::Values gauge_calibration_cached{};
+mosaico_public_extra::Values gauge_public_extra_cached{};uint32_t gauge_public_extra_generation=0;
 bool gauge,gauge_threshold_audit_attempted;bool gauge_word(uint8_t,uint16_t&);bool gauge_identity();
 struct Power{bool locked,wifiRunning;int phase;};struct Network{Power powerStats();};Network& GetNetworkQuota();
 struct BleStats{bool advertising,connected;};struct Ble{BleStats diagnostics();};Ble& GetCodexMicroBle();
 namespace MosaicoOta{bool busy();bool healthPending();}
 void gauge_feed();void gauge_delay_ms(uint32_t);int64_t esp_timer_get_time();
 enum class AccessWord{UnsealFirst,UnsealSecond,Full,Seal};bool gauge_access_word(AccessWord);bool gauge_wait_security(uint8_t);
-struct Hal{std::array<uint8_t,6> getFactoryMac();bool gaugeThresholdAudit(bool,char*,size_t);bool gaugeThresholdAuditField(size_t,char*,size_t);};Hal& GetHAL();
+struct Hal{std::array<uint8_t,6> getFactoryMac();bool gaugeThresholdAudit(bool,char*,size_t);bool gaugeThresholdAuditField(size_t,char*,size_t);bool gaugePublicExtraField(size_t,char*,size_t);};Hal& GetHAL();
 int gauge_load_journal(mosaico_gauge::Journal&,const uint8_t*);int gauge_load_access(mosaico_gauge::AccessJournal&,const uint8_t*);
 struct GaugeFccBackend{mosaico_fcc_limit::Load loadRaw(const char*,mosaico_fcc_limit::Journal&);};
 bool gauge_threshold_read(mosaico_threshold::Selector,uint8_t*);
+bool gauge_public_extra_read(mosaico_public_extra::Selector,uint8_t[36]);
 bool gauge_calibration_read(mosaico_calibration::Selector,uint8_t*);
 '''+backend+method)
   for forbidden in ('gauge_control(', 'gauge_exit_config(', 'gauge_write_field(', 'gaugeSetNominalCapacity(', 'gaugeOcvMeasure(', 'sample_battery_locked('):self.assertNotIn(forbidden,backend+method)

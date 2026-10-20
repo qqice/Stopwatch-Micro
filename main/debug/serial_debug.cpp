@@ -1558,6 +1558,15 @@ void SerialDebug::handleLine(char* line)
         if(ok&&reading&&used>0)for(size_t i=0;i<probe.bytesRead&&size_t(used)+2<sizeof(report);++i)used+=std::snprintf(report+used,sizeof(report)-size_t(used),"%02x",bytes[i]);
         result(command,ok?"PASS":"FAIL",report);return;
     }
+    if (std::strcmp(command,"gauge-public-extra-field")==0) {
+        const char* value=::strtok_r(nullptr," \t",&save);uint32_t index=0;
+        if(!parseUnsignedStrict(value,0,64,index)||::strtok_r(nullptr," \t",&save)) {
+            result(command,"FAIL","expected=index_0..64 readonly_cached=1");return;
+        }
+        char details[192]{};
+        const bool ok=GetHAL().gaugePublicExtraField(index,details,sizeof(details));
+        result(command,ok?"PASS":"FAIL",details);return;
+    }
     if (std::strcmp(command,"gauge-profile-field")==0) {
         const char* value=::strtok_r(nullptr," \t",&save); uint32_t index=0;
         if(!parseUnsignedStrict(value,0,65,index)||::strtok_r(nullptr," \t",&save)) {
@@ -2084,6 +2093,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP gauge-fcc-status no_arguments=1 readonly=1 journal_existence_explicit=1\r\n");
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
     debugPrintf("DBG HELP gauge-trace status | arm CONFIRM | stop | export | clear CONFIRM | checkpoint CONFIRM queued_not_persisted=1 gauge_parameter_writes=0\r\n");
+    debugPrintf("DBG HELP gauge-public-extra-field index_0..64 readonly_cached=1 raw_only=1\r\n");
     debugPrintf("DBG HELP gauge-thresholds [audit CONFIRM] default_readonly=1 privileged_cdc_only=1 no_cfg_or_parameter_writes=1\r\n");
     debugPrintf("DBG HELP gauge-ocv measure CONFIRM cdc_only=1 quiet120s_post5s=1 ram_one_attempt=1 sent_is_wire_attempt=1 no_calibration_claim=1\r\n");
     debugPrintf("DBG HELP gauge-charge no_arguments=1 readonly=1 standard_registers_only=1\r\n");

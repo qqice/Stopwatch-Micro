@@ -32,6 +32,7 @@
 #include "mosaico_ocv_diagnostic_model.h"
 #include "mosaico_threshold_audit_model.h"
 #include "mosaico_gauge_calibration_read_model.h"
+#include "mosaico_gauge_public_extra_read_model.h"
 #include <host/network_quota.h>
 #include <hal/ble/codex_micro_ble.h>
 #include <ota/mosaico_ota.h>
@@ -262,6 +263,8 @@ bool gauge_threshold_audit_attempted=false;
 // Small RAM-only snapshot; never a permission or persistence source. Both mutexes protect it.
 mosaico_threshold::Values gauge_threshold_cached{};
 mosaico_calibration::Values gauge_calibration_cached{};
+mosaico_public_extra::Values gauge_public_extra_cached{};
+uint32_t gauge_public_extra_generation=0;
 uint32_t gauge_threshold_cached_generation=0;
 static_assert(sizeof(gauge_threshold_cached)+sizeof(gauge_threshold_cached_generation)<200);
 bool battery_valid = false;
@@ -992,6 +995,22 @@ bool gauge_store_reload(mosaico_gauge::ReloadJournal& journal, const uint8_t mac
            std::memcmp(&journal, &readback, sizeof(journal)) == 0;
 }
 
+// Public complement ONLY: exact authenticated read selection, never parameter commit.
+bool gauge_public_extra_read(mosaico_public_extra::Selector selector,uint8_t block[36])
+{
+    if(!gauge||!mosaico_public_extra::allowed(selector))return false;
+    const uint16_t value=static_cast<uint16_t>(selector);
+    const uint8_t packet[]={0x3E,static_cast<uint8_t>(value),static_cast<uint8_t>(value>>8)};
+    gauge_feed();
+    if(i2c_master_transmit(gauge,packet,sizeof(packet),20)!=ESP_OK)return false;
+    gauge_delay_ms(20);
+    if(!gauge_read(0x3E,block,2))return false;
+    for(unsigned i=0;i<34;i+=2)if(!gauge_read(static_cast<uint8_t>(0x40+i),block+2+i,2))return false;
+    // Unlike legacy readers, an FF echo is not accepted for these new fields.
+    return block[0]==static_cast<uint8_t>(value)&&block[1]==static_cast<uint8_t>(value>>8)&&
+        block[35]==36&&block[34]==mosaico_gauge::macChecksum(block,34);
+}
+
 // Calibration-only typed MAC selection. No arbitrary address or parameter commit.
 bool gauge_calibration_read(mosaico_calibration::Selector selector,uint8_t block[36])
 {
@@ -1292,6 +1311,8 @@ struct GaugeThresholdBackend {
     uint16_t expectedConfig=0x112A;
     mosaico_threshold::Values values{};
     mosaico_calibration::Values calibration{};
+    mosaico_public_extra::Values publicExtra{};
+    bool readPublicExtra=false;
     const char* why="admission_refused";
     Load journalLoadState=Load::Absent;bool journalLoaded=false;uint8_t lastReadJournalState=0;
     uint16_t controlStatus=0;bool controlReadable=false;
@@ -1384,7 +1405,10 @@ struct GaugeThresholdBackend {
     bool readThresholds(){
         calibration={};
         if(!mosaico_threshold::readStable(gauge_threshold_read,expectedConfig,values))return reject("dm_denied_auth_unstable_or_anchor");
-        return mosaico_calibration::readStable(gauge_calibration_read,calibration)||reject("calibration_denied_auth_or_unstable");
+        if(!mosaico_calibration::readStable(gauge_calibration_read,calibration))return reject("calibration_denied_auth_or_unstable");
+        // Independent RAM-only result: never changes the 59-field journal/CRC.
+        if(readPublicExtra)(void)mosaico_public_extra::readStable(gauge_public_extra_read,publicExtra);
+        return true;
     }
     // Existing schema-2 journal covers only the 59 threshold fields. Calibration
     // is independently double-verified RAM-only evidence, not part of this CRC.
@@ -1861,7 +1885,8 @@ bool Hal::gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize)
     std::lock_guard<std::mutex> battery(battery_mutex);
     gauge_threshold_cached={};gauge_threshold_cached_generation=0;
     gauge_calibration_cached={};
-    GaugeThresholdBackend backend;
+    gauge_public_extra_cached={};gauge_public_extra_generation=0;
+    GaugeThresholdBackend backend;backend.readPublicExtra=privileged;
     mosaico_threshold::Result result{};
     bool ok=false;
     if(privileged){mosaico_threshold::Coordinator<GaugeThresholdBackend> coordinator(backend);result=coordinator.run();ok=result.success;}
@@ -1873,16 +1898,18 @@ bool Hal::gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize)
     }
     if(result.success){gauge_threshold_cached=backend.values;gauge_threshold_cached_generation=result.journal.generation;}
     mosaico_calibration::publish(result.success,backend.calibration,gauge_calibration_cached);
+    mosaico_public_extra::publish(result.success,result.closed,backend.publicExtra,gauge_public_extra_cached);
+    if(result.success&&result.closed)gauge_public_extra_generation=result.journal.generation;
     if(details&&detailsSize){
         int count=std::snprintf(details,detailsSize,
-            "cache_count=%u cache_generation=%lu schema=%u privileged=%d attempted=%d ram_attempted=%d readable=%u/%u anchors=%d profile1_anchor_match=%d profile_active=not_asserted control_valid=%d control_status=%04x control_batt_id=%u endian=BE2_U1first format=typed:decoded/rawBE reason=%s closed=%d audit_record=%s intended_state=%u last_read_state=%u generation=%lu before_standard_valid=%d after_standard_valid=%d before_soc=%u after_soc=%u before_cycles=%u after_cycles=%u before_sec=%u after_sec=%u calibration_count=%u calibration_ram_only=1 journal_crc_fields=59 ",
+            "cache_count=%u cache_generation=%lu schema=%u privileged=%d attempted=%d ram_attempted=%d readable=%u/%u anchors=%d profile1_anchor_match=%d profile_active=not_asserted control_valid=%d control_status=%04x control_batt_id=%u endian=BE2_U1first format=typed:decoded/rawBE reason=%s closed=%d audit_record=%s intended_state=%u last_read_state=%u generation=%lu before_standard_valid=%d after_standard_valid=%d before_soc=%u after_soc=%u before_cycles=%u after_cycles=%u before_sec=%u after_sec=%u calibration_count=%u calibration_ram_only=1 journal_crc_fields=59 extra_readable=%u/65 extra_complete=%d extra_error=%s ",
             gauge_threshold_cached.readable,static_cast<unsigned long>(gauge_threshold_cached_generation),result.attempted?result.journal.schema:0U,
             privileged,result.attempted,gauge_threshold_audit_attempted,backend.values.readable,static_cast<unsigned>(mosaico_threshold::fieldCount),backend.values.anchors,
             backend.values.readable>=3&&backend.values.raw[0]==65&&backend.values.raw[1]==65&&backend.values.raw[2]==0x112A,
             backend.controlReadable,backend.controlStatus,backend.controlStatus&7U,ok?"validated":backend.why,
             result.closed,!backend.journalLoaded?"not_loaded":(backend.journalLoadState==mosaico_threshold::Load::Absent?"absent":(backend.journalLoadState==mosaico_threshold::Load::Present?"present":"invalid")),
             result.attempted?static_cast<unsigned>(result.journal.state):0U,backend.lastReadJournalState,static_cast<unsigned long>(result.journal.generation),backend.beforeStandardValid,backend.afterStandardValid,backend.before.soc,backend.after.soc,
-            backend.before.cycles,backend.after.cycles,(backend.before.op>>1)&3U,(backend.after.op>>1)&3U,gauge_calibration_cached.readable);
+            backend.before.cycles,backend.after.cycles,(backend.before.op>>1)&3U,(backend.after.op>>1)&3U,gauge_calibration_cached.readable,gauge_public_extra_cached.readable,gauge_public_extra_cached.complete,mosaico_public_extra::errorName(gauge_public_extra_cached.error));
         size_t used=count>0?static_cast<size_t>(count):detailsSize;
         for(unsigned i=0;i<backend.values.readable&&i<mosaico_threshold::legacyFieldCount&&used<detailsSize;++i){
             const auto& field=mosaico_threshold::fields[i];
@@ -1924,6 +1951,25 @@ bool Hal::gaugeThresholdAuditField(size_t index,char* details,size_t detailsSize
         static_cast<unsigned long>(gauge_threshold_cached_generation),static_cast<unsigned>(index),static_cast<unsigned>(mosaico_threshold::fieldCount),
         static_cast<unsigned>(field.selector),field.name,static_cast<long>(mosaico_threshold::decoded(field.type,raw)),raw);
     return count>0&&static_cast<size_t>(count)<detailsSize;
+}
+
+// Pure cache inspection: available on UART, no gauge/security/NVS transaction.
+bool Hal::gaugePublicExtraField(size_t index,char* details,size_t detailsSize)
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    if(!details||detailsSize<160)return false;
+    if(index>=mosaico_public_extra::fieldCount){
+        std::snprintf(details,detailsSize,"cached=0 reason=index_0..64");return false;
+    }
+    const auto& field=mosaico_public_extra::fields[index];
+    const auto& cache=gauge_public_extra_cached;
+    const bool complete=cache.complete&&cache.readable==mosaico_public_extra::fieldCount&&gauge_public_extra_generation;
+    const int n=std::snprintf(details,detailsSize,
+        "cached=%d index=%u address=%04x type=%s width=%u rawBE=%0*x generation=%lu readable=%u/65 complete=%d error=%s ram_only=1",
+        complete,static_cast<unsigned>(index),static_cast<unsigned>(field.selector),mosaico_public_extra::typeName(field.type),field.width,
+        field.width*2,complete?cache.raw[index]:0,static_cast<unsigned long>(gauge_public_extra_generation),cache.readable,complete,mosaico_public_extra::errorName(cache.error));
+    return complete&&n>0&&static_cast<size_t>(n)<detailsSize;
 }
 
 // Closed standard-command snapshot. No MAC/control/security path is used.
