@@ -6,9 +6,18 @@ from serial.tools import list_ports
 from serial_debug_test import DebugClient
 
 def fields(result):return dict(p.split('=',1) for p in result.details.split() if '=' in p)
+
+def prepare_display(client, keep_locked=False):
+ if not keep_locked:
+  return client.command('debug display-wake','display-wake').status=='PASS'
+ # A locked transfer avoids starting an awake BLE session before OTA admission.
+ # Do not fake wake success or alter settings: the caller must prepare the state.
+ state=client.command('debug power','power',10)
+ return state.status=='PASS' and fields(state).get('locked')=='1'
 def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--port',required=True);p.add_argument('--confirm-external-power',action='store_true');p.add_argument('--timeout',type=int,default=900);p.add_argument('--initial-observation-delay',type=int,default=0);p.add_argument('--bypass',action='store_true',help='Use the 0.7+ USB screen-confirmation bypass; safety checks remain enforced')
  p.add_argument('--log',type=Path,help='Optional local serial evidence file; keep private because runtime logs may contain sensitive data')
+ p.add_argument('--keep-locked',action='store_true',help='Require an already locked display; do not wake it before requesting OTA')
  args=p.parse_args()
  if not args.confirm_external_power:raise SystemExit('Confirm USB/external power with --confirm-external-power; not inferred from SOC')
  if not 60<=args.timeout<=1800:raise SystemExit('timeout must be60..1800 seconds')
@@ -25,7 +34,7 @@ def main():
    old=fields(stat)
    if stat.status!='PASS' or old.get('state')!='2' or old.get('running') not in ('ota_0','ota_1') or old.get('busy')!='0':raise SystemExit('OTA runtime is not valid/idle')
    target='ota_1' if old['running']=='ota_0' else 'ota_0'
-   if client.command('debug display-wake','display-wake').status!='PASS':raise SystemExit('Wake refused')
+   if not prepare_display(client,args.keep_locked):raise SystemExit('Display admission refused')
    command='ota-bypass' if args.bypass else 'ota-update'
    ready=client.command('debug '+command+' CONFIRM_EXTERNAL_POWER',command,10)
    if ready.status!='PASS':raise SystemExit('OTA request refused; inspect ota-status')
