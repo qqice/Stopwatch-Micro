@@ -47,3 +47,34 @@ Run the portable tests with the existing SDK Python:
 & C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe -m unittest discover -s tools -p test_mosaico_gauge_f4.py
 & C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe -m unittest discover -s tools -p test_mosaico_gauge_scaling_plan.py
 ```
+
+## Units preparation (not production-integrated)
+
+`main/hal/mosaico/mosaico_gauge_units_model.h` is an unused pure C++ header,
+not a runtime switch or calibration writer. Its factor must explicitly be 1, 2,
+or 4. Current and capacity converters validate the signed-int16 / unsigned-int16
+register domains and return exact integer microamps / microamp-hours, respectively.
+They reject invalid inputs without changing the output. Signed physical mA
+threshold comparisons cross-multiply in a widened type rather than truncating
+the current first; physical thresholds outside signed-int32 are rejected.
+SOC, voltage, time, temperature and flags are not scaled or handled by this API.
+
+`relativeNativeCounterDelta` preserves both raw uint16 counter samples, computes
+the modulo difference first, then interprets a signed displacement and scales
+it into relative counter milliunits. It is **not absolute remaining capacity**;
+the helper makes no additional RawCC-to-mAh claim. It requires the same boot and
+factor, strictly increasing monotonic timestamps, explicit valid elapsed context,
+and caller confirmation that displacement is strictly below half a ring. An
+exact half-ring displacement is ambiguous and rejected. The caller must supply
+that external bound; the helper cannot establish it from two raw samples.
+
+`tools/test_mosaico_gauge_units.py` checks compile-time assertions using a native
+`g++` (`CXX` override) or the installed Espressif cross compiler, without linking
+or executing firmware. Factor 1 is checked for every current/capacity register
+value. Other checks cover signed sub-mA precision, threshold boundaries, ratios,
+wrapping relative counters, invalid contexts and integer extremes. No production
+source includes this header, and `readyForHardware` remains false.
+
+```powershell
+& C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe -m unittest discover -s tools -p test_mosaico_gauge_units.py
+```

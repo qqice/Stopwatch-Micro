@@ -1,0 +1,62 @@
+# Scaling experiment admission (not an executable plan)
+
+The only proposed experimental variable is the reporting scale factor. It is
+not a one-register edit: current/capacity gains and dependent quantities must
+form a coherent unit conversion. No hardware writer exists in the current
+read-only audit firmware.
+
+## Required before any gauge parameter write
+
+1. Read and authenticate all 131 public RAM parameters; retain the original
+   raw bytes, widths, identities and hashes. A 66-field audit is not enough.
+   Preserve all previous NAND traces and original files.
+2. Keep dimensionless values, voltage, temperature, time and all security,
+   charging/EDV configuration bits unchanged. Do not guess missing Qmax/DOD
+   addresses or interpret bqStudio's displayed sense resistance as raw gain.
+3. Independently classify every dependent field, not just capacity/current
+   thresholds. TRM 1.1.5 uses `ILOAD * R0 * FTZ`: scaling ILOAD without handling
+   R0 changes physical EDV compensation. Baseline R0=867 is not divisible by
+   two or four; inverse scaling needs quantified rounding and hardware EDV
+   checks. This is not authorization to write R0 now.
+4. Account for fixed native learning constants: a native 10 mAh charge condition
+   has a different physical meaning after scaling. Do not claim full algorithm
+   invariance from a unit conversion.
+5. Separate raw diagnostic values from physical telemetry throughout HAL,
+   UI charging/supply logic, OTA admission, traces/NAND decoding and boot
+   configuration verification. Keep historical records unambiguous; never
+   reinterpret old raw records using only today's scale factor. A native
+   RawCC delta needs signed modular differencing before division, not division
+   of the unsigned accumulated register.
+6. Durable read-back-verified recovery journal precedes the first write. It
+   must distinguish original, pending, applied and restoring states, bind the
+   exact original/target field sets and scale to device identity, and fail
+   closed on torn records, unexpected current values or power loss. Recovery
+   restores original bytes, not a reconstructed decimal approximation.
+7. The running and retained recovery images must understand the unit journal
+   and restore policy before mutation. Old 0.13.77/83/84 images are not scale
+   aware. Never apply scaled parameters and then blindly boot one of them.
+8. Revalidate after true gauge RAM loss, not just MCU software restart. A
+   factory 3000 mAh profile with default gains is not an applied scaled profile.
+   The display and OTA power policy must not consume it as physical data while
+   recovery is incomplete.
+
+## Bounded hardware protocol once admission is complete
+
+- Use isolated UART TX/RX/GND for logging. V1 is the sole external 5 V source
+  when connected; remove board USB before enabling V1. Do not parallel sources.
+- V1 measures the external power path; its 5 V current is not the cell current.
+  Pure-battery observations require V1 output off/disconnected while UART remains.
+- Start at scale 1, collect the baseline, then test one reviewed scale at a time.
+  Do not simultaneously retune Near Full, SC, EDV voltages or mode thresholds.
+- Accept only consistent native current/capacity ratios, physical supply/OTA
+  behavior, persistent offline logging, no panic, and a demonstrated exact
+  restore to the saved scale-1 parameter set. Scaling is not a cure claim until
+  the recorded plateau is absent in the relevant cold-start sequence.
+- Stop and restore on non-finite/out-of-range reads, identity/profile mismatch,
+  inconsistent scale, gauge transaction failure, excessive temperature or voltage
+  outside the existing safe gate. Never force a low-voltage discharge.
+
+Current state: public read-only complement and offline F4 arithmetic are ready
+for acceptance; the whole unit/recovery implementation and hardware admission
+are not complete. No SOC/OCV reset, hidden-register write, OTP programming,
+full-chip erase or TWT experiment is part of this protocol.
