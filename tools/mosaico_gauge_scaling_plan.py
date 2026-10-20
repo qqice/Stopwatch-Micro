@@ -1,13 +1,15 @@
 """Offline, fail-closed scaling worksheet. No device access or executable writes.
 
 Candidates are arithmetic hypotheses, NOT validated calibration or a deployment
-plan. In particular F4 is opaque: the first-byte exponent hypothesis is unproven.
+plan. F4 storage arithmetic is reference-verified, not hardware calibration.
 """
 import argparse
 import hashlib
 import json
 from pathlib import Path
 import re
+
+import mosaico_gauge_f4 as f4
 
 ROOT = Path(__file__).resolve().parents[1]
 META = ROOT / '.artifacts/references/bqstudio/extracted/official-reader/model-metadata-003/public-model-fields-normalized.json'
@@ -25,7 +27,9 @@ def decode(raw, kind, width):
     if len(data) != width:
         raise ValueError('raw width mismatch')
     if kind == 'F':
-        return None  # deliberately never IEEE754 or an assumed TI decoder
+        if width != 4:
+            raise ValueError('F4 width must be four')
+        return float(f4.decode(data))
     if kind not in {'I', 'U', 'B'}:
         raise ValueError('unsupported type')
     return int.from_bytes(data, 'big', signed=kind == 'I')
@@ -90,7 +94,7 @@ def vct_window(factor, baseline_taper, seconds=40):
 
 
 def make_plan(meta_doc, range_rows, records, factor=4):
-    if factor not in (2, 4):
+    if type(factor) is not int or factor not in (2, 4):
         raise ValueError('factor must be 2 or 4')
     rows = meta_doc['rows']
     if len(rows) != 131:
@@ -114,8 +118,9 @@ def make_plan(meta_doc, range_rows, records, factor=4):
     matrix = []
     blockers = ['Host ALL current/capacity/power consumers must divide by k, not only display; implementation and unit audit incomplete.',
                 'No complete rollback procedure or hardware validation in this worksheet.',
-                'F4 identity/exponent encoding needs physical and official-converter validation.',
-                'Official Read/Write formula x may be a reader default, not proof of Xemics encoding.',
+                'Reference-verified F4 arithmetic does not validate hardware calibration effects or restore.',
+                'EDV compensation uses current times R0: inverse model scaling and integer quantization are unverified.',
+                'Native fixed mAh learning constants change physical meaning under scaling; a unit transform is not complete algorithm invariance.',
                 'Metadata range 0..32767 is input acceptance, not proof of TI product minimum capacity or physical support.',
                 'Unknown metadata fields remain unreviewed; Qmax is absent and is not guessed.',
                 'Max Smoothing Current official unit s conflicts with name: BLOCKED; preserve original.',
@@ -140,13 +145,18 @@ def make_plan(meta_doc, range_rows, records, factor=4):
             entry['action'] = 'ARITHMETIC_CANDIDATE_ONLY'
             if b:
                 if a in FLOATS:
-                    data = bytes.fromhex(b['rawBE'])
-                    exponent = data[0] + (1 if factor == 2 else 2)
-                    reasons.append('opaque F4 exponent hypothesis unvalidated; numeric range cannot be checked')
-                    if exponent > 255:
-                        reasons.append('overflow')
-                    else:
-                        entry['candidate'] = {'hypothetical_rawBE': (bytes([exponent]) + data[1:]).hex()}
+                    parameter = 'gain' if a == 0x9184 else 'delta'
+                    entry['unit'] = 'mA proportional gain' if parameter == 'gain' else 'mAh proportional gain'
+                    entry['unit_basis'] = 'BQ27220 TRM 4.9.1.1/2; proportional calibration, not direct mA/mAh'
+                    entry['format_status'] = 'REFERENCE_VERIFIED_XEMICS_F4'
+                    entry['baseline']['exact_value'] = str(f4.decode(b['rawBE']))
+                    try:
+                        candidate = f4.scale_power_two(b['rawBE'], factor, parameter)
+                        entry['candidate'] = {'rawBE': candidate.hex(),
+                                              'value': float(f4.decode(candidate)),
+                                              'exact_value': str(f4.decode(candidate))}
+                    except ValueError as error:
+                        reasons.append(str(error))
                 else:
                     value = b['value'] * factor
                     bits = m['width'] * 8
@@ -169,6 +179,10 @@ def make_plan(meta_doc, range_rows, records, factor=4):
                 blockers.append('Configuration baseline is not expected 112a.')
         elif a == 0x9276:
             entry['note'] = 'Official s unit contradiction; no scaling guessed.'
+        elif a == 0x92ab:
+            entry['status'] = 'BLOCKED_EDV_MODEL'
+            entry['note'] = ('BQ27220 TRM 1.1.5 uses ILOAD * R0 * FTZ; preserving R0 while scaling '
+                             'current changes compensated EDV voltage. No coefficient write inferred.')
         matrix.append(entry)
     taper = baseline.get(0x9201, {}).get('value')
     return {'schema': 1, 'ready_for_hardware': False, 'all_no_device_changes': True,

@@ -43,14 +43,14 @@ def synthetic_inputs():
                       f'cached=1 generation=1 index={index} count=59 address={address:04x} {label}={value}/{raw}'})
 
     # Invented public test vectors, intentionally unrelated to device readings.
-    calibration = [(0x9180, 'I', 2, 'fff0'), (0x9184, 'F', 4, '70123456'),
-                   (0x9188, 'F', 4, '85010203'), (0x91b4, 'I', 1, '00'),
+    calibration = [(0x9180, 'I', 2, 'fff0'), (0x9184, 'F', 4, '7f000000'),
+                   (0x9188, 'F', 4, '93000000'), (0x91b4, 'I', 1, '00'),
                    (0x91dd, 'U', 1, 'ef'), (0x91de, 'U', 1, '05'),
                    (0x91df, 'U', 1, '11')]
     for address, kind, width, raw in calibration:
         index = len(audit)
         metadata(address, kind, width, f'SyntheticCalibration{index}')
-        decoded = 'opaque' if kind == 'F' else str(s.decode(raw, kind, width))
+        decoded = 'unreported' if kind == 'F' else str(s.decode(raw, kind, width))
         audit.append({'index': index, 'details':
                       f'cached=1 generation=1 index={index} count=66 address={address:04x} type={kind}{width} width={width} raw={raw} decoded={decoded}'})
     # Closed roles without baseline must remain blocked, not receive defaults.
@@ -80,10 +80,10 @@ class ScalingPlanTests(unittest.TestCase):
     def plan(self, factor=4, audit=None):
         return s.make_plan(self.meta, self.ranges, audit or self.audit, factor)
 
-    def test_decode_be_and_opaque(self):
+    def test_decode_be_and_f4(self):
         self.assertEqual(s.decode('ef', 'U', 1), 239)
         self.assertEqual(s.decode('fff0', 'I', 2), -16)
-        self.assertIsNone(s.decode('7e73b645', 'F', 4))
+        self.assertEqual(s.decode('7f000000', 'F', 4), 0.25)
         with self.assertRaises(ValueError):
             s.decode('ef00', 'U', 1)
 
@@ -96,9 +96,22 @@ class ScalingPlanTests(unittest.TestCase):
         self.assertEqual(rows['91df']['baseline']['value'], 17)
         self.assertIsNone(rows['91df']['candidate'])
         self.assertEqual(rows['91de']['candidate']['value'], 20)
-        self.assertEqual(rows['9184']['candidate']['hypothetical_rawBE'], '72123456')
+        self.assertEqual(rows['9184']['candidate']['rawBE'], '81000000')
+        self.assertEqual(rows['9184']['candidate']['value'], 1.0)
+        self.assertEqual(rows['9188']['candidate']['rawBE'], '95000000')
+        self.assertEqual(rows['9184']['format_status'], 'REFERENCE_VERIFIED_XEMICS_F4')
+        self.assertEqual(rows['9184']['status'], 'ARITHMETIC_ONLY')
         self.assertFalse(p['ready_for_hardware'])
         self.assertTrue(p['all_no_device_changes'])
+
+    def test_edv_current_model_and_native_constants_remain_blocked(self):
+        p = self.plan()
+        rows = {r['address']: r for r in p['matrix']}
+        self.assertEqual(rows['92ab']['status'], 'BLOCKED_EDV_MODEL')
+        self.assertIsNone(rows['92ab']['candidate'])
+        self.assertTrue(any('quantization' in b for b in p['blockers']))
+        self.assertTrue(any('fixed mAh' in b for b in p['blockers']))
+        self.assertFalse(p['ready_for_hardware'])
 
     def test_overflow_rejected_and_missing_baseline_blocked(self):
         audit = copy.deepcopy(self.audit)
@@ -109,6 +122,18 @@ class ScalingPlanTests(unittest.TestCase):
         self.assertIn('overflow', rows['91fb']['blocking_reasons'])
         self.assertIn('missing baseline', rows['920e']['blocking_reasons'])
         self.assertIsNone(rows['920e']['candidate'])
+
+    def test_f4_out_of_range_is_blocked_not_a_candidate(self):
+        audit = copy.deepcopy(self.audit)
+        gain = next(r for r in audit if 'address=9184' in r['details'])
+        gain['details'] = gain['details'].replace('raw=7f000000', 'raw=83000000')
+        p = self.plan(audit=audit)
+        row = next(r for r in p['matrix'] if r['address'] == '9184')
+        self.assertEqual(row['status'], 'BLOCKED')
+        self.assertIsNone(row['candidate'])
+        self.assertTrue(any('calibration range' in r for r in row['blocking_reasons']))
+        self.assertFalse(p['ready_for_hardware'])
+        self.assertFalse(any('opaque F4' in b for b in p['blockers']))
 
     def test_metadata_mismatch_and_incomplete_audit_rejected(self):
         with self.assertRaises(ValueError):
