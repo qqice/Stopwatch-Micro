@@ -10,11 +10,12 @@ O=(R/'main/ota/mosaico_ota.cpp').read_text()
 class OtaMemoryTests(unittest.TestCase):
  def test_bounded_internal_owner(self):
   update=N.split('void NetworkQuota::updateFirmware()',1)[1]
-  self.assertIn('heap_caps_malloc(ChunkCapacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_DMA)',update)
-  self.assertIn('decltype(&heap_caps_free)',update)
-  self.assertIn('ChunkCapacity = 4096',update)
+  model=(R/'main/host/mosaico_ota_buffer_model.h').read_text()
+  self.assertIn('ChunkCapacity=4096, BodyCapacity=8192',model)
+  self.assertIn('otaBuffers.acquire(otaBufferAllocator)',update)
+  self.assertNotIn('heap_caps_malloc(',update)
+  self.assertNotIn('new (std::nothrow)',update)
   self.assertLess(update.index('ota_buffer_not_internal'),update.index('beginManifest('))
-  self.assertNotIn('new (std::nothrow) uint8_t[ChunkCapacity]',update)
  def test_allocator_caps_exclude_rtc_sdk_candidate(self):
   # Capability evidence only: the failing device pointer is not yet observed.
   sdk=Path('C:/esp/v6.1/esp-idf')
@@ -25,8 +26,7 @@ class OtaMemoryTests(unittest.TestCase):
   rtc=re.search(r'\[SOC_MEMORY_TYPE_RTCRAM\]\s*= (.+)',layout).group(1)
   ram_caps=common_caps|set(re.findall(r'MALLOC_CAP_[A-Z0-9_]+',ram))
   rtc_caps=common_caps|set(re.findall(r'MALLOC_CAP_[A-Z0-9_]+',rtc))
-  update=N.split('void NetworkQuota::updateFirmware()',1)[1]
-  allocation=re.search(r'heap_caps_malloc\(ChunkCapacity, ([^)]+)\)',update).group(1)
+  allocation=N.split('const uint32_t caps=kind==MosaicoOtaBuffer::Kind::Chunk?',1)[1].split(':',1)[0]
   requested=set(re.findall(r'MALLOC_CAP_[A-Z0-9_]+',allocation))
   old={'MALLOC_CAP_INTERNAL','MALLOC_CAP_8BIT'}
   self.assertTrue(old<=rtc_caps)
@@ -35,13 +35,13 @@ class OtaMemoryTests(unittest.TestCase):
   self.assertIn('MALLOC_CAP_DMA',requested)
  def test_null_and_endpoint_guards_precede_transfer(self):
   update=N.split('void NetworkQuota::updateFirmware()',1)[1]
-  self.assertIn('chunkEnd = chunk ? chunk.get() + ChunkCapacity - 1 : nullptr',update)
-  self.assertIn('chunk && esp_ptr_in_dram(chunk.get())',update)
-  self.assertIn('chunkEnd && esp_ptr_in_dram(chunkEnd)',update)
-  self.assertIn('chunk && esp_ptr_internal(chunk.get())',update)
-  self.assertIn('chunkEnd && esp_ptr_internal(chunkEnd)',update)
+  self.assertIn('chunkEnd=chunk+ChunkCapacity-1',update)
+  self.assertIn('esp_ptr_in_dram(chunk)',update)
+  self.assertIn('esp_ptr_in_dram(chunkEnd)',update)
+  self.assertIn('esp_ptr_internal(chunk)',update)
+  self.assertIn('esp_ptr_internal(chunkEnd)',update)
   self.assertIn('flash source start=%p end=%p dram=%d/%d internal=%d/%d capacity=%u',update)
-  self.assertLess(update.index('if (!body || !chunk)'),update.index('if (!esp_ptr_in_dram(chunk.get())'))
+  self.assertLess(update.index('if(!buffers)'),update.index('chunkEnd=chunk+ChunkCapacity-1'))
   self.assertLess(update.index('ota_buffer_not_internal'),update.index('requestJson("/v1/ota/manifest"'))
   write=O.split('bool writeChunk(',1)[1].split('bool finishDownload()',1)[0]
   self.assertLess(write.index('!data || !length'),write.index('esp_ptr_in_dram(data + length - 1)'))

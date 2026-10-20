@@ -5,6 +5,7 @@
 #include "token_history.h"
 #ifdef MOSAICO_BOARD
 #include "quota_monitor.h"
+#include "mosaico_ota_buffer_model.h"
 #include <debug/mosaico_rx_observer.h>
 #include <debug/mosaico_wifi_rx_observer.h>
 #include <debug/mosaico_rx_ingress.h>
@@ -57,6 +58,29 @@ static_assert(sizeof(esp_test_hw_rx_statistics_t) >= 86, "S31 getter writes thro
 namespace {
 NetworkQuota instance;
 #ifdef MOSAICO_BOARD
+// Startup is the sole allocator; only the network owner's OTA path acquires.
+struct OtaBufferAllocator {
+    uint8_t* allocate(MosaicoOtaBuffer::Kind kind,size_t capacity) {
+        const uint32_t caps=kind==MosaicoOtaBuffer::Kind::Chunk?
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_DMA:
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+        return static_cast<uint8_t*>(heap_caps_malloc(capacity,caps));
+    }
+    void release(uint8_t* memory){heap_caps_free(memory);}
+    bool valid(MosaicoOtaBuffer::Kind kind,const uint8_t* memory,size_t capacity) const {
+        const size_t expected=kind==MosaicoOtaBuffer::Kind::Chunk?
+            MosaicoOtaBuffer::ChunkCapacity:MosaicoOtaBuffer::BodyCapacity;
+        if(!memory||capacity!=expected)return false;
+        const uint8_t* end=memory+capacity-1;
+        if(kind==MosaicoOtaBuffer::Kind::Chunk)
+            return esp_ptr_in_dram(memory)&&esp_ptr_in_dram(end)&&
+                esp_ptr_internal(memory)&&esp_ptr_internal(end)&&
+                esp_ptr_dma_capable(memory)&&esp_ptr_dma_capable(end);
+        return esp_ptr_external_ram(memory)&&esp_ptr_external_ram(end);
+    }
+};
+OtaBufferAllocator otaBufferAllocator;
+MosaicoOtaBuffer::Reservation otaBuffers;
 void sampleNetworkHeap(const char* stage, unsigned& budget) {
     if (budget >= 2) return;
     ++budget;
@@ -96,6 +120,16 @@ NetworkQuota& GetNetworkQuota()
 {
     return instance;
 }
+#ifdef MOSAICO_BOARD
+bool NetworkQuota::prepareOtaBuffers()
+{
+    const bool ready=otaBuffers.prepare(otaBufferAllocator);
+    ESP_LOGI("NetworkOTA", "boot_buffers_ready=%d error=%s chunk_internal_dma=%u body_psram=%u",
+        ready,MosaicoOtaBuffer::errorName(otaBuffers.error()),
+        static_cast<unsigned>(MosaicoOtaBuffer::ChunkCapacity),static_cast<unsigned>(MosaicoOtaBuffer::BodyCapacity));
+    return ready; // Failure never restarts or prevents ordinary app startup.
+}
+#endif
 void NetworkQuota::setLocked(bool locked)
 {
     const bool changed = _locked.exchange(locked) != locked;
@@ -2083,37 +2117,38 @@ void NetworkQuota::updateFirmware()
     }
 #endif
     struct TraceScope { ~TraceScope() { MosaicoOtaBreadcrumb(0, 0); } } traceScope;
-    MosaicoOtaBreadcrumb(1, 0); // allocation and initial heap probe
+    MosaicoOtaBreadcrumb(1, 0); // reserved-buffer check and initial heap probe
     // Probe only during OTA, not normal/locked operation or every GUI frame.
     if (!heap_caps_check_integrity_all(true)) { MosaicoOta::fail("heap_before_ota"); return; }
     // Only the network owner runs this path: no parallel quota HTTP, tailnet
     // pause, idle downclock or deferred gauge reload can race the transfer.
-    constexpr size_t BodyCapacity = 8192, ChunkCapacity = 4096;
-    std::unique_ptr<char[]> body(new (std::nothrow) char[BodyCapacity]);
-    // Do not route NOR writes through cache-backed PSRAM. SDK fallback copies
-    // external input in 32-byte batches, multiplying cache/bus transitions.
-    // One reusable 4KiB DMA-capable internal chunk excludes RTC_FAST heaps
-    // (which can also advertise INTERNAL|8BIT), while bounding SRAM use.
-    // Keep the runtime DRAM guards; no allocation-address assumption is safe.
-    std::unique_ptr<uint8_t, decltype(&heap_caps_free)> chunk(
-        static_cast<uint8_t*>(heap_caps_malloc(ChunkCapacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_DMA)),
-        &heap_caps_free);
-    uint8_t* chunkEnd = chunk ? chunk.get() + ChunkCapacity - 1 : nullptr;
-    ESP_LOGI("NetworkOTA", "flash source start=%p end=%p dram=%d/%d internal=%d/%d capacity=%u",
-             static_cast<void*>(chunk.get()), static_cast<void*>(chunkEnd),
-             chunk && esp_ptr_in_dram(chunk.get()), chunkEnd && esp_ptr_in_dram(chunkEnd),
-             chunk && esp_ptr_internal(chunk.get()), chunkEnd && esp_ptr_internal(chunkEnd),
-             static_cast<unsigned>(ChunkCapacity));
-    if (!body || !chunk) { MosaicoOta::fail("ota_buffer_allocation"); return; }
-    if (!esp_ptr_in_dram(chunk.get()) || !esp_ptr_in_dram(chunk.get() + ChunkCapacity - 1)) {
-        MosaicoOta::fail("ota_buffer_not_internal"); return;
+    constexpr size_t BodyCapacity=MosaicoOtaBuffer::BodyCapacity, ChunkCapacity=MosaicoOtaBuffer::ChunkCapacity;
+    const auto buffers=otaBuffers.acquire(otaBufferAllocator); // No allocation here.
+    if(!buffers){
+        ESP_LOGW("NetworkOTA", "boot_buffers_unavailable error=%s",MosaicoOtaBuffer::errorName(otaBuffers.error()));
+        MosaicoOta::fail("ota_boot_buffers_unavailable");return;
     }
+    char* const body=reinterpret_cast<char*>(buffers.body);
+    uint8_t* const chunk=buffers.chunk;
+    uint8_t* const chunkEnd=chunk+ChunkCapacity-1;
+    ESP_LOGI("NetworkOTA", "flash source start=%p end=%p dram=%d/%d internal=%d/%d capacity=%u",
+        static_cast<void*>(chunk),static_cast<void*>(chunkEnd),esp_ptr_in_dram(chunk),esp_ptr_in_dram(chunkEnd),
+        esp_ptr_internal(chunk),esp_ptr_internal(chunkEnd),static_cast<unsigned>(ChunkCapacity));
+    // Preserve the NOR source's runtime guards even after acquire's validation.
+    if(!esp_ptr_in_dram(chunk)||!esp_ptr_in_dram(chunkEnd)||
+       !esp_ptr_internal(chunk)||!esp_ptr_internal(chunkEnd)){
+        MosaicoOta::fail("ota_buffer_not_internal");return;
+    }
+    // Persistent PSRAM JSON storage is never a NOR write source. Clear the full
+    // body at both transfer boundaries; requestJson also resets byte 0 and used.
+    struct BodyScope {char* p;~BodyScope(){std::memset(p,0,BodyCapacity);}} bodyScope{body};
+    std::memset(body,0,BodyCapacity);
     int used = 0;
     MosaicoOtaBreadcrumb(2, 0); // manifest HTTP/parse
-    if (!requestJson("/v1/ota/manifest", body.get(), BodyCapacity, used)) {
+    if (!requestJson("/v1/ota/manifest", body, BodyCapacity, used)) {
         MosaicoOta::fail("manifest_download"); return;
     }
-    cJSON* manifest = cJSON_ParseWithLength(body.get(), static_cast<size_t>(used));
+    cJSON* manifest = cJSON_ParseWithLength(body, static_cast<size_t>(used));
     const cJSON* sizeValue = manifest ? cJSON_GetObjectItemCaseSensitive(manifest, "size") : nullptr;
     char imageHash[65]{};
     const uint32_t imageCapacity = MosaicoOta::imageCapacity();
@@ -2125,7 +2160,7 @@ void NetworkQuota::updateFirmware()
     cJSON_Delete(manifest);
     if (!fieldsOk) { MosaicoOta::fail("manifest_metadata"); return; }
     MosaicoOtaBreadcrumb(3, 0); // validation + inactive-slot erase
-    if (!MosaicoOta::beginManifest(body.get())) return;
+    if (!MosaicoOta::beginManifest(body)) return;
     const int64_t deadline = esp_timer_get_time() + 600LL * 1000000;
     for (uint32_t offset = 0; offset < size;) {
         MosaicoOtaBreadcrumb(4, offset); // probe before allocating HTTP/JSON
@@ -2144,25 +2179,25 @@ void NetworkQuota::updateFirmware()
         // A failed HTTP read never advances offset or writes bytes. Retrying
         // this hash-bound chunk cannot mix releases or duplicate flash writes.
         for (unsigned attempt = 0; attempt < 3 && esp_timer_get_time() < deadline; ++attempt) {
-            if (requestJson(path, body.get(), BodyCapacity, used)) { downloaded = true; break; }
+            if (requestJson(path, body, BodyCapacity, used)) { downloaded = true; break; }
             if (attempt < 2) vTaskDelay(pdMS_TO_TICKS(300U << attempt));
         }
         if (!downloaded) { MosaicoOta::fail("chunk_download"); return; }
         MosaicoOtaBreadcrumb(6, offset); // JSON allocation / decode / free
-        cJSON* root = cJSON_ParseWithLength(body.get(), static_cast<size_t>(used));
+        cJSON* root = cJSON_ParseWithLength(body, static_cast<size_t>(used));
         const cJSON* position = root ? cJSON_GetObjectItemCaseSensitive(root, "offset") : nullptr;
         const cJSON* data = root ? cJSON_GetObjectItemCaseSensitive(root, "data") : nullptr;
         size_t count = 0;
         const bool ok = cJSON_IsNumber(position) && position->valuedouble == offset &&
             cJSON_IsString(data) && data->valuestring &&
-            mbedtls_base64_decode(chunk.get(), ChunkCapacity, &count,
+            mbedtls_base64_decode(chunk, ChunkCapacity, &count,
                 reinterpret_cast<const unsigned char*>(data->valuestring),
                 std::strlen(data->valuestring)) == 0 &&
             count == std::min<uint32_t>(ChunkCapacity, size - offset);
         cJSON_Delete(root);
         if (!ok) { MosaicoOta::fail("chunk_format"); return; }
         MosaicoOtaBreadcrumb(7, offset); // SDK write + incremental hash
-        if (!MosaicoOta::writeChunk(offset, chunk.get(), count)) return;
+        if (!MosaicoOta::writeChunk(offset, chunk, count)) return;
         offset += static_cast<uint32_t>(count);
         vTaskDelay(pdMS_TO_TICKS(1));
     }

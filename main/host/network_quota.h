@@ -58,6 +58,8 @@ public:
     bool requestWifiRxObservation(bool on, uint32_t ttlSeconds = 120);
     bool requestRxObservation(bool on, uint32_t ttlSeconds = 1200, bool controlOnly = false,
                               uint32_t filterSrcIp = 0, uint16_t filterSrcPort = 0);
+    // Startup owner only, after HAL and before BLE/Wi-Fi; one attempt per boot.
+    bool prepareOtaBuffers();
     void wakeForFirmwareUpdate();
     void serviceStandbySleep(); // Existing main loop; preserves the current CPU/RF target.
 #if SOC_WIFI_HE_SUPPORT

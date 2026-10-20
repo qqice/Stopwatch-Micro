@@ -56,6 +56,7 @@ extern "C" void app_main(void)
     // HAL init
     GetHAL().init();
 #ifdef MOSAICO_BOARD
+    (void)GetNetworkQuota().prepareOtaBuffers(); // Reserve before BLE/Wi-Fi fragment internal DMA SRAM.
     MosaicoDisplay::init();
     MainIdleWait::Lifetime idleWaitLifetime;
 #endif
