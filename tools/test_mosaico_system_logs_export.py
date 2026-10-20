@@ -13,6 +13,12 @@ def page(seq=5):
     return bytes(p)
 
 class ExportTests(unittest.TestCase):
+    def test_uart_export_uses_crc_wake_preamble_without_cdc_reset(self):
+        for uart in (False, True):
+            with patch.object(m,'DebugClient') as client:
+                m.open_client('explicit-port',uart)
+                client.assert_called_once_with('explicit-port',uart=uart,wake_preamble=uart)
+
     def test_device_encoder_keeps_terminator_capacity(self):
         # mbedTLS requires both 172 encoded bytes AND its terminating NUL.
         self.assertEqual(len(base64.b64encode(bytes(128)))+1,173)

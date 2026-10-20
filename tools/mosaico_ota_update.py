@@ -7,6 +7,14 @@ from serial_debug_test import DebugClient
 
 def fields(result):return dict(p.split('=',1) for p in result.details.split() if '=' in p)
 
+def transport_matches(port, uart=False, serial_number=None):
+ # Explicit UART adapters only; CP210x can be the V1 power meter, not a console.
+ identifiers={(0x1366,0x0105),(0x0403,0x6011)} if uart else {(0x303a,0x4001)}
+ return (port.vid,port.pid) in identifiers and (serial_number is None or port.serial_number==serial_number)
+
+def open_client(port, uart=False):
+ return DebugClient(port,uart=uart,wake_preamble=uart)
+
 def prepare_display(client, keep_locked=False):
  if not keep_locked:
   return client.command('debug display-wake','display-wake').status=='PASS'
@@ -18,16 +26,17 @@ def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--port',required=True);p.add_argument('--confirm-external-power',action='store_true');p.add_argument('--timeout',type=int,default=900);p.add_argument('--initial-observation-delay',type=int,default=0);p.add_argument('--bypass',action='store_true',help='Use the 0.7+ USB screen-confirmation bypass; safety checks remain enforced')
  p.add_argument('--log',type=Path,help='Optional local serial evidence file; keep private because runtime logs may contain sensitive data')
  p.add_argument('--keep-locked',action='store_true',help='Require an already locked display; do not wake it before requesting OTA')
+ p.add_argument('--uart',action='store_true',help='Use CRC-framed JLink/FT4232 UART instead of board CDC; requires explicit --port')
  args=p.parse_args()
  if not args.confirm_external_power:raise SystemExit('Confirm USB/external power with --confirm-external-power; not inferred from SOC')
  if not 60<=args.timeout<=1800:raise SystemExit('timeout must be60..1800 seconds')
  if not 0<=args.initial_observation_delay<=600 or args.initial_observation_delay>=args.timeout:raise SystemExit('Invalid initial observation delay')
- entries=[x for x in list_ports.comports() if x.device.upper()==args.port.upper() and (x.vid,x.pid)==(0x303a,0x4001)]
- if len(entries)!=1:raise SystemExit('Explicit port is not the Mosaico runtime CDC')
+ entries=[x for x in list_ports.comports() if x.device.upper()==args.port.upper() and transport_matches(x,args.uart)]
+ if len(entries)!=1:raise SystemExit('Explicit port does not match the selected CDC/UART transport')
  serial_number=entries[0].serial_number
  client=None;captured=io.StringIO()
  try:
-  client=DebugClient(args.port)
+  client=open_client(args.port,args.uart)
   with contextlib.redirect_stdout(captured):
    client.handshake(30)
    stat=client.command('debug ota-status','ota-status')
@@ -50,10 +59,10 @@ def main():
     client.close();client=None;break
   while time.monotonic()<deadline:
    if client is None:
-    matches=[x for x in list_ports.comports() if (x.vid,x.pid)==(0x303a,0x4001) and (not serial_number or x.serial_number==serial_number)]
+    matches=[x for x in list_ports.comports() if transport_matches(x,args.uart,serial_number)]
     if len(matches)==1:
      try:
-      client=DebugClient(matches[0].device)
+      client=open_client(matches[0].device,args.uart)
       with contextlib.redirect_stdout(captured):client.handshake(10)
      except (OSError,TimeoutError):
       if client:client.close()

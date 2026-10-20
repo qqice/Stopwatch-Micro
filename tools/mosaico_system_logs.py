@@ -15,6 +15,9 @@ TYPES={1:'boot',2:'gauge',3:'gauge_boot',4:'network',5:'power',6:'ota',7:'heap',
 def fields(result):
     return dict(x.split('=',1) for x in result.details.split() if '=' in x)
 
+def open_client(port, uart=False):
+    return DebugClient(port,uart=uart,wake_preamble=uart)
+
 def crc(data):return zlib.crc32(data)&0xffffffff
 def signed16(n):return n-65536 if n&32768 else n
 
@@ -98,7 +101,7 @@ def main():
     args.output.mkdir(parents=True,exist_ok=False)
     capture=io.StringIO();client=None;manifest={'complete':False,'pages':[]}
     try:
-        client=DebugClient(args.port,uart=args.uart)
+        client=open_client(args.port,args.uart)
         # Host-only tolerance; never reset USB or change device power policy.
         client.serial.write_timeout=5
         with contextlib.redirect_stdout(capture):
