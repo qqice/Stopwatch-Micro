@@ -39,7 +39,7 @@ std::atomic<ReadStatus> reader{ReadStatus::Idle};
 std::atomic<uint32_t> queued{0},drops{0},hookDrops{0},failures{0},lastCode{0},lastError{0},cleanupError{0},readError{0},readCode{0},policy{0},gate{0};
 std::atomic<uint32_t> workerStackRtc{0},dmaLargest{0};
 std::atomic<uint64_t> latest{0},oldest{0},readSeq{0},nextAttempt{0};
-uint32_t bootId=0;uint64_t lastKick=0,lastSample=0,lastFlush=0,lastSlow=0,sampleInterval=60000;unsigned backoff=0;BootCapture bootCapture,engineBootCapture;size_t pendingConsume=0;
+uint32_t bootId=0;uint64_t lastKick=0,lastSample=0,lastFlush=0,lastSlow=0,sampleInterval=60000;unsigned backoff=0;BootCapture bootCapture,engineBootCapture;PostExitCapture postExitCapture;size_t pendingConsume=0;
 vprintf_like_t originalPrint=nullptr;
 uint64_t nowMs(){return uint64_t(esp_timer_get_time())/1000;}
 Record record(Type type,uint64_t sampled=UINT64_MAX){Record r;r.type=type;r.monotonicMs=sampled==UINT64_MAX?nowMs():sampled;const auto c=MosaicoClock::snapshot();r.epoch=c.valid?uint64_t(c.epoch):0;r.flags=c.valid?1:0;return r;}
@@ -78,6 +78,7 @@ bool engine(const Hal::GaugeEngineSnapshot& s){
 }
 void changed(Record& prior,const Record& next,bool critical=false){if(prior.args!=next.args){enqueue(next,critical);prior=next;}}
 void collect(uint64_t now){
+ if(!postExitCapture.complete){Hal::GaugeDiagnosticSnapshot standard{};Hal::GaugeEngineSnapshot e{};const auto info=GetHAL().gaugeBootReloadInfo();GetHAL().gaugeBootPostExit(standard,e);postExitCapture.update(standard,e,static_cast<uint8_t>(info.status),[](const Hal::GaugeDiagnosticSnapshot& s){return gauge(s);},[](const Hal::GaugeEngineSnapshot& s){return engine(s);});}
  if(!bootCapture.complete){Hal::GaugeDiagnosticSnapshot before{},after{};GetHAL().gaugeBootDiagnostic(before,after);const auto info=GetHAL().gaugeBootReloadInfo();bootCapture.update(before,after,info.attempted,[](const Hal::GaugeDiagnosticSnapshot& s){return gauge(s);},[](uint8_t outcome,bool attempted){auto r=record(Type::Outcome);r.args[0]=outcome;r.args[1]=attempted;return enqueue(r,true);});}
  if(!engineBootCapture.complete){Hal::GaugeEngineSnapshot before{},after{};GetHAL().gaugeBootEngine(before,after);engineBootCapture.update(before,after,false,[](const Hal::GaugeEngineSnapshot& s){return engine(s);},[](uint8_t,bool){return true;});}
  const auto p=GetNetworkQuota().powerStats();auto r=record(Type::Power);r.args={p.locked,p.wifiRunning,p.profile,p.phase,p.cpuMHz,p.cycles,uint32_t(p.offMs),uint32_t(p.offMs>>32),uint32_t(p.clockError),0,0};if(storage->power.args[0]!=r.args[0]||storage->power.args[1]!=r.args[1]||storage->power.args[2]!=r.args[2]||storage->power.args[3]!=r.args[3]||storage->power.args[4]!=r.args[4]||storage->power.args[5]!=r.args[5]||storage->power.args[8]!=r.args[8])changed(storage->power,r);

@@ -157,6 +157,8 @@ public:
     bool gaugeDiagnosticSample(GaugeDiagnosticSnapshot& out);
     bool gaugeEngineSample(GaugeEngineSnapshot& out);
     void gaugeBootEngine(GaugeEngineSnapshot& before, GaugeEngineSnapshot& after) const;
+    // First successful ColdFactory exit only, pre-seal RAM evidence (phase 4).
+    bool gaugeBootPostExit(GaugeDiagnosticSnapshot& standard, GaugeEngineSnapshot& engine) const;
     bool gaugeModeAudit(char* out, size_t len);
     // RAM-only copy; phase/validMask distinguish unavailable boot observations.
     void gaugeBootDiagnostic(GaugeDiagnosticSnapshot& before, GaugeDiagnosticSnapshot& after) const;
@@ -206,6 +208,7 @@ public:
     bool gaugeDiagnosticSample(GaugeDiagnosticSnapshot& out) { out={}; return false; }
     bool gaugeEngineSample(GaugeEngineSnapshot& out) { out={}; return false; }
     void gaugeBootEngine(GaugeEngineSnapshot& before, GaugeEngineSnapshot& after) const { before={}; after={}; }
+    bool gaugeBootPostExit(GaugeDiagnosticSnapshot& standard, GaugeEngineSnapshot& engine) const { standard={}; engine={}; return false; }
     bool gaugeModeAudit(char* out, size_t len) {
         if(out && len)std::snprintf(out,len,"readonly=1 reason=unsupported_not_mosaico");
         return false;

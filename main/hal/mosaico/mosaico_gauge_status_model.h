@@ -11,7 +11,7 @@ enum Valid : uint32_t {
     ModeValid=1U<<12, AllRaw=(1U<<12)-1,
     TxAck=1U<<16, EchoRead=1U<<17, DataRead=1U<<18
 };
-enum Phase : uint8_t { None=0, BootBefore=1, BootAfter=2, Explicit=3 };
+enum Phase : uint8_t { None=0, BootBefore=1, BootAfter=2, Explicit=3, PostExit=4 };
 enum Mode : uint8_t { Unknown=0, Charging=1, Relax=2, Discharge=3 };
 // Fixed-width, trivially copyable RAM value. validMask is transport validity,
 // not cell-health, percentage accuracy or cross-register atomicity evidence.

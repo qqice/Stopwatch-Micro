@@ -69,6 +69,23 @@ struct BootCapture {
   complete=true;return true;
  }
 };
+// Independent acknowledgements: phase 4 is optional, and must not be lost
+// when the legacy before/after capture has already completed or queue is full.
+struct PostExitCapture {
+ bool standardSent=false,engineSent=false,complete=false;
+ template<class Standard,class Engine,class EmitStandard,class EmitEngine>
+ constexpr bool update(const Standard& standard,const Engine& engine,uint8_t terminalOutcome,
+                       EmitStandard emitStandard,EmitEngine emitEngine) {
+  if(complete)return true;
+  if(!terminalOutcome)return false;
+  if(standard.phase!=4 || engine.phase!=4){complete=true;return true;}
+  // Attach terminal outcome only to copies; retain the actual pre-seal times
+  // and validity (including an all-failed sample), never collection time.
+  if(!standardSent){auto s=standard;s.outcome=terminalOutcome;if(!emitStandard(s))return false;standardSent=true;}
+  if(!engineSent){auto e=engine;e.outcome=terminalOutcome;if(!emitEngine(e))return false;engineSent=true;}
+  complete=true;return true;
+ }
+};
 constexpr bool powerGate(bool otaIdle,bool imageValid,bool policy2,bool telemetryValid,bool temperatureValid,uint16_t mv,uint16_t deciK){return otaIdle&&imageValid&&policy2&&telemetryValid&&temperatureValid&&mv>=3300&&deciK>=2832&&deciK<=3181;}
 constexpr bool chunkBounds(uint16_t index,size_t capacity){return index<16&&capacity>=ChunkBytes;}
 } // namespace

@@ -56,6 +56,14 @@ static_assert(!mosaico_gauge::reasonableFcc(100),"legacy 100 rejected");
 #include <algorithm>
 #include "mosaico_gauge_model.h"
 #include "mosaico_fcc_limit_journal_codec.h"
+#include "mosaico_gauge_status_model.h"
+#include "mosaico_gauge_engine_model.h"
+// Observer dependencies only; actual exit observer fault/order semantics are
+// evaluated separately in test_mosaico_gauge_post_exit.py.
+mosaico_gauge_status::Snapshot gauge_boot_post_exit{};
+mosaico_gauge_engine::Snapshot gauge_engine_post_exit{};
+void gauge_diagnostic_locked(mosaico_gauge_status::Snapshot&,uint8_t,uint8_t);
+void gauge_engine_locked(mosaico_gauge_engine::Snapshot&,uint8_t,uint8_t);
 struct esp_mutex{};namespace std {struct mutex{};struct recursive_mutex{};template<class T>struct lock_guard{lock_guard(T&){}};}
 std::mutex battery_mutex;std::recursive_mutex gauge_transaction_mutex;
 using esp_err_t=int;using nvs_handle_t=int;

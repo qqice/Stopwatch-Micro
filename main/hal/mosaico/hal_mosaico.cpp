@@ -254,6 +254,8 @@ bool gauge_access_cleanup_succeeded = false;
 Hal::GaugeBootReloadInfo gauge_boot_info;
 Hal::GaugeDiagnosticSnapshot gauge_boot_before{}, gauge_boot_after{};
 Hal::GaugeEngineSnapshot gauge_engine_before{}, gauge_engine_after{};
+Hal::GaugeDiagnosticSnapshot gauge_boot_post_exit{};
+Hal::GaugeEngineSnapshot gauge_engine_post_exit{};
 // Volatile per-boot diagnostic latch; only the transaction owner may change it.
 bool gauge_ocv_attempted=false;
 bool gauge_threshold_audit_attempted=false;
@@ -1242,7 +1244,15 @@ struct GaugeFccBackend {
     bool exitCfg() {
         mosaico_fcc_limit::Security s{};if(!observedSecurity(s))return false;
         if(!s.cfg)return s.initialized&&!s.cal; // SEC2/noCFG needs no exit command.
-        return gauge_exit_config();
+        const bool exited=gauge_exit_config();
+        // Observer only: the caller already owns transaction -> battery locks.
+        // Preserve the original exit/2s wait, capture before reseal/verification,
+        // and never retry a failed diagnostic or observe runtime FCC repair.
+        if(exited && cold() && !gauge_boot_post_exit.phase) {
+            gauge_diagnostic_locked(gauge_boot_post_exit,mosaico_gauge_status::PostExit,0);
+            gauge_engine_locked(gauge_engine_post_exit,mosaico_gauge_status::PostExit,0);
+        }
+        return exited;
     }
     bool reseal() {
         using namespace mosaico_fcc_limit;
@@ -2196,6 +2206,14 @@ void Hal::gaugeBootDiagnostic(GaugeDiagnosticSnapshot& before, GaugeDiagnosticSn
 {
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     before=gauge_boot_before; after=gauge_boot_after;
+}
+
+bool Hal::gaugeBootPostExit(GaugeDiagnosticSnapshot& standard,GaugeEngineSnapshot& engine) const
+{
+    // RAM-only; never reacquire the battery mutex or perform diagnostic I2C.
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    standard=gauge_boot_post_exit;engine=gauge_engine_post_exit;
+    return standard.phase==mosaico_gauge_status::PostExit && engine.phase==mosaico_gauge_status::PostExit;
 }
 
 bool Hal::gaugeModeAudit(char* out, size_t len)
