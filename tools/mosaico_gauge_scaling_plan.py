@@ -286,6 +286,13 @@ def make_plan(meta_doc, range_rows, records, factor=4):
     taper = baseline.get(0x9201, {}).get('value')
     return {'schema': 1, 'ready_for_hardware': False, 'all_no_device_changes': True,
             'factor': factor, 'physical_capacity_mAh': 65, 'virtual_capacity_mAh': 65 * factor,
+            'published_capacity_range': {
+                'source': 'https://www.ti.com/product/BQ27220',
+                'verified_date': '2026-10-21',
+                'minimum_mAh': 100, 'maximum_mAh': 32000,
+                'native65_below_published_minimum': True,
+                'virtual_candidate_within_published_range': 100 <= 65 * factor <= 32000,
+                'scope': 'Product parametric range; not proof of the plateau cause, hidden firmware limits, analog accuracy or successful scaling.'},
             'valid66_metadata_consistent': not full,
             'complete_public131_metadata_consistent': full,
             'baseline_field_count': len(baseline), 'official_range_count': len(ranges),

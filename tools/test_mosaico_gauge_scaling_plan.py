@@ -111,6 +111,18 @@ class ScalingPlanTests(unittest.TestCase):
     def plan(self, factor=4, audit=None):
         return s.make_plan(self.meta, self.ranges, audit or self.audit, factor)
 
+    def test_published_minimum_is_not_register_or_hardware_admission(self):
+        for factor in (2, 4):
+            p = self.plan(factor)
+            bounds = p['published_capacity_range']
+            self.assertEqual(bounds['minimum_mAh'], 100)
+            self.assertEqual(bounds['source'], 'https://www.ti.com/product/BQ27220')
+            self.assertTrue(bounds['native65_below_published_minimum'])
+            self.assertTrue(bounds['virtual_candidate_within_published_range'])
+            self.assertEqual(p['physical_capacity_mAh'], 65)
+            self.assertEqual(p['virtual_capacity_mAh'], factor * 65)
+            self.assertFalse(p['ready_for_hardware'])
+
     def test_decode_be_and_f4(self):
         self.assertEqual(s.decode('ef', 'U', 1), 239)
         self.assertEqual(s.decode('fff0', 'I', 2), -16)

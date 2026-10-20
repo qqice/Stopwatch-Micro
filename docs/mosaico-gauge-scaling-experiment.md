@@ -5,6 +5,17 @@ not a one-register edit: current/capacity gains and dependent quantities must
 form a coherent unit conversion. No hardware writer exists in the current
 read-only audit firmware.
 
+TI's [BQ27220 product page](https://www.ti.com/product/BQ27220), checked on
+2026-10-21, lists a 100 mAh minimum battery capacity. Native DC65 being accepted
+by a register's numeric range is therefore not evidence of advertised support.
+An x2 candidate reports DC130, but the physical battery remains 65 mAh. This
+supports investigating scaling; it does not prove the cold-start plateau cause
+or make the candidate hardware-ready. TI's
+[scaling application note](https://www.ti.com/lit/an/slua792/slua792.pdf) requires
+dependent current/capacity configuration to follow the ratio. Its worked example
+is another gauge: do not copy its field units or claim gain-only scaling improves
+analog noise or sense-resistor accuracy.
+
 ## Required before any gauge parameter write
 
 1. Read and authenticate all 131 public RAM parameters; retain the original
