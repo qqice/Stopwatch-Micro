@@ -15,6 +15,7 @@
 #include <host/touch_sleep.h>
 #include <hal/mosaico/usb_console.h>
 #include <hal/mosaico/mosaico_nand_probe.h>
+#include <hal/mosaico/mosaico_nand_store.h>
 #include <main_idle_wait.h>
 #include <host/uart_fifo_recovery_model.h>
 #include <host/mosaico_session_monitor.h>
@@ -1366,6 +1367,14 @@ void SerialDebug::handleLine(char* line)
         result("display-test-frequency", "PASS", details);
         return;
     }
+    if (std::strcmp(command, "nand-dma") == 0) {
+        if (::strtok_r(nullptr," \t",&save)) {
+            result(command,"FAIL","reason=readonly_query_no_arguments");return;
+        }
+        char details[256]{};
+        MosaicoNandStore::dmaStatus(details,sizeof(details));
+        result(command,"PASS",details);return;
+    }
     if (std::strcmp(command, "syslog") == 0) {
         const char* action=::strtok_r(nullptr," \t",&save);
         if (!action) action="status";
@@ -2091,6 +2100,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP commands=ping,status,selftest,controls,protocol,debug-transport\r\n");
 #ifdef MOSAICO_BOARD
     debugPrintf("DBG HELP gauge-fcc-status no_arguments=1 readonly=1 journal_existence_explicit=1\r\n");
+    debugPrintf("DBG HELP nand-dma no_arguments=1 readonly_ram=1 no_storage_io=1\r\n");
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
     debugPrintf("DBG HELP gauge-trace status | arm CONFIRM | stop | export | clear CONFIRM | checkpoint CONFIRM queued_not_persisted=1 gauge_parameter_writes=0\r\n");
     debugPrintf("DBG HELP gauge-public-extra-field index_0..64 readonly_cached=1 raw_only=1\r\n");

@@ -15,13 +15,14 @@ compat=trace.compat
 OPER_SHA='19b6145d14a639ed2c41c1a17ad84f9d638587c4d1723c469f9f30ff72aed642'
 
 
-def allocation_fixture(source):
+def allocation_fixture(source,api_source):
     init=trace.extract_function(source,'esp_err_t nand_init_device(')
     init=init.replace('memcpy(&(*handle)->config, config, sizeof(spi_nand_flash_config_t));','(*handle)->config = *config;')
     init=init.replace('heap_caps_calloc(1, sizeof(spi_nand_flash_device_t), MALLOC_CAP_DEFAULT)','allocateDevice()')
     init=init.replace('heap_caps_aligned_alloc(', 'allocateBuffer(')
     before,cleanup=init.split('\nfail:\n',1);cleanup=cleanup.rsplit('}',1)[0]
     init=(before+'\n}').replace('goto fail;', '{'+cleanup+'}').replace('esp_err_t nand_init_device(', 'constexpr esp_err_t nand_init_device(',1)
+    deinit=trace.extract_function(api_source,'esp_err_t spi_nand_flash_deinit_device(').replace('esp_err_t spi_nand_flash_deinit_device(', 'constexpr esp_err_t spi_nand_flash_deinit_device(',1)
     return r'''
 #include <array>
 #include <cstdint>
@@ -40,35 +41,50 @@ struct spi_nand_flash_device_t {spi_nand_flash_config_t config;Chip chip;uint8_t
 struct Fixture {
  spi_nand_flash_device_t device{};std::array<std::array<uint8_t,2080>,3> buffers{};
  unsigned allocations=0,freed=0,live=0;int failAt=0;bool deviceFailure=false,mutexFailure=false;
- std::array<size_t,3> caps{},sizes{},alignments{};
- constexpr spi_nand_flash_device_t* allocateDevice(){if(deviceFailure)return nullptr;++live;return &device;}
- constexpr uint8_t* allocateBuffer(size_t alignment,size_t size,int cap){const auto i=allocations++;caps[i]=cap;sizes[i]=size;alignments[i]=alignment;if(int(allocations)==failAt)return nullptr;++live;return buffers[i].data();}
+ unsigned borrowed=0,released=0;size_t borrowSize=0,borrowAlignment=0,alignment=4;bool leased=false,reserveFailure=false,wrongRelease=false;
+ std::array<size_t,4> caps{},sizes{},alignments{};
+ constexpr spi_nand_flash_device_t* allocateDevice(){if(deviceFailure)return nullptr;device={};++live;return &device;}
+ constexpr uint8_t* allocateBuffer(size_t alignment,size_t size,int cap){const auto i=allocations++;caps[i]=cap;sizes[i]=size;alignments[i]=alignment;if(int(allocations)==failAt)return nullptr;++live;return buffers[i%2].data();}
+ constexpr uint8_t* mosaico_nand_dma_acquire(size_t size,size_t alignment){++borrowed;borrowSize=size;borrowAlignment=alignment;if(reserveFailure||leased)return nullptr;leased=true;return buffers[2].data();}
+ constexpr void mosaico_nand_dma_release(uint8_t* p){if(!p)return;if(p!=buffers[2].data()||!leased){wrongRelease=true;return;}leased=false;++released;}
  constexpr void free(uint8_t* p){if(p){++freed;--live;}}
  constexpr void free(spi_nand_flash_device_t* p){if(p){++freed;--live;}}
  constexpr int xSemaphoreCreateMutex(){if(mutexFailure)return 0;++live;return 1;}
  constexpr void vSemaphoreDelete(int){--live;}
+ constexpr void nand_wl_detach_ops(spi_nand_flash_device_t*){}
  constexpr int detect_chip(spi_nand_flash_device_t*){return ESP_OK;}
  constexpr int unprotect_chip(spi_nand_flash_device_t*){return ESP_OK;}
  constexpr int enable_quad_io_mode(spi_nand_flash_device_t*){return ESP_OK;}
- constexpr size_t spi_nand_get_dma_alignment(){return 32;}
-''' + 'constexpr int cleanup(spi_nand_flash_device_t** handle,int ret){'+cleanup+'}\n' + init + r'''
+ constexpr size_t spi_nand_get_dma_alignment(){return alignment;}
+''' + 'constexpr int cleanup(spi_nand_flash_device_t** handle,int ret){'+cleanup+'}\n' + init + '\n' + deinit + r'''
 };
 constexpr bool initRouting(){
- Fixture f;spi_nand_flash_config_t config{&f.device,0};spi_nand_flash_device_t* handle=nullptr;
- if(f.nand_init_device(&config,&handle)||handle!=&f.device||f.allocations!=3||f.live!=5)return false;
- return f.caps[0]==(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)&&f.caps[1]==f.caps[0]&&f.caps[2]==(MALLOC_CAP_DMA|MALLOC_CAP_8BIT)&&f.sizes[0]==2048&&f.sizes[1]==2048&&f.sizes[2]==2080&&f.alignments[0]==32&&f.alignments[1]==32&&f.alignments[2]==32;
+ Fixture f;f.alignment=32;spi_nand_flash_config_t config{&f.device,0};spi_nand_flash_device_t* handle=nullptr;
+ if(f.nand_init_device(&config,&handle)||handle!=&f.device||f.allocations!=2||f.live!=4)return false;
+ return f.caps[0]==(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)&&f.caps[1]==f.caps[0]&&f.sizes[0]==2048&&f.sizes[1]==2048&&f.alignments[0]==32&&f.alignments[1]==32&&f.borrowed==1&&f.borrowSize==2080&&f.borrowAlignment==32&&f.leased&&!f.wrongRelease;
 }
 constexpr bool allocationFailures(){
- for(int point=1;point<=3;++point){Fixture f;f.failAt=point;spi_nand_flash_config_t config{&f.device,0};spi_nand_flash_device_t* handle=&f.device;
+ for(int point=1;point<=2;++point){Fixture f;f.failAt=point;spi_nand_flash_config_t config{&f.device,0};spi_nand_flash_device_t* handle=&f.device;
   if(f.nand_init_device(&config,&handle)!=ESP_ERR_NO_MEM||handle||f.live||f.freed!=unsigned(point))return false;
  }
  Fixture mutex;mutex.mutexFailure=true;spi_nand_flash_config_t config{&mutex.device,0};spi_nand_flash_device_t* h=&mutex.device;
- if(mutex.nand_init_device(&config,&h)!=ESP_ERR_NO_MEM||h||mutex.live||mutex.freed!=4)return false;
+ if(mutex.nand_init_device(&config,&h)!=ESP_ERR_NO_MEM||h||mutex.live||mutex.freed!=3||mutex.leased||mutex.released!=1||mutex.wrongRelease)return false;
+ Fixture reserve;reserve.reserveFailure=true;config.device_handle=&reserve.device;h=&reserve.device;
+ if(reserve.nand_init_device(&config,&h)!=ESP_ERR_NO_MEM||h||reserve.live||reserve.freed!=3||reserve.leased||reserve.released||reserve.wrongRelease)return false;
  Fixture device;device.deviceFailure=true;config.device_handle=&device.device;h=&device.device;
  return device.nand_init_device(&config,&h)==ESP_ERR_NO_MEM&&h==nullptr&&device.live==0;
 }
-static_assert(initRouting(),"actual init allocates two PSRAM pages and exactly one aligned DMA bounce");
+constexpr bool reopen(){
+ Fixture f;spi_nand_flash_config_t config{&f.device,0};spi_nand_flash_device_t* h=nullptr;
+ if(f.nand_init_device(&config,&h)||f.borrowSize!=2052||f.borrowAlignment!=4)return false;
+ auto* original=h->temp_buffer;
+ if(f.spi_nand_flash_deinit_device(h)||f.live||f.leased||f.released!=1)return false;
+ if(f.nand_init_device(&config,&h)||h->temp_buffer!=original||f.borrowed!=2||f.allocations!=4)return false;
+ return !f.spi_nand_flash_deinit_device(h)&&!f.live&&!f.leased&&f.released==2&&f.freed==6&&!f.wrongRelease;
+}
+static_assert(initRouting(),"actual init allocates two PSRAM pages and borrows one aligned boot DMA bounce without duplicate allocation");
 static_assert(allocationFailures(),"every buffer/mutex allocation failure frees prior allocations and nulls handle");
+static_assert(reopen(),"actual generated init/deinit reuse identical boot DMA ptr at frozen alignment4, no duplicate DMA malloc or boot ptr free");
 '''
 
 
@@ -132,14 +148,14 @@ class MemoryTests(unittest.TestCase):
         cls.generated={name:compat.patched(name,source) for name,source in cls.upstream.items()}
         cls.oper=(trace.COMPONENT/'src/spi_nand_oper.c').read_text(encoding='utf-8')
     def compile(self,source,name):
-        with tempfile.TemporaryDirectory() as td:
+        with tempfile.TemporaryDirectory(dir=ROOT,prefix='.nand-memory-') as td:
             path=Path(td)/'test.cpp';path.write_text(source)
             result=subprocess.run([trace.COMPILER,'-std=c++20','-fconstexpr-ops-limit=500000000','-fsyntax-only','-I',str(ROOT),str(path)],capture_output=True,text=True)
             log=ROOT/'.artifacts/mosaico'/('nand-memory-'+name+'.log');log.parent.mkdir(parents=True,exist_ok=True);log.write_text(result.stdout+result.stderr)
             self.assertEqual(result.returncode,0,str(log))
     def test_dependency_guard_and_sources_unchanged(self):
         original={name:(trace.COMPONENT/'src'/name).read_bytes() for name in (*compat.HASHES,*compat.DEPENDENCY_HASHES)}
-        with tempfile.TemporaryDirectory() as td:
+        with tempfile.TemporaryDirectory(dir=ROOT,prefix='.nand-memory-') as td:
             base=Path(td);output=base/'generated'
             generated=compat.generate(trace.COMPONENT,output)
             self.assertEqual(set(generated),set(compat.HASHES))
@@ -154,19 +170,20 @@ class MemoryTests(unittest.TestCase):
     def test_exact_allocation_routing(self):
         src=self.generated['nand_impl.c']
         self.assertEqual(src.count('MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT'),5)
-        self.assertEqual(src.count('MALLOC_CAP_DMA | MALLOC_CAP_8BIT'),1)
+        self.assertEqual(src.count('MALLOC_CAP_DMA | MALLOC_CAP_8BIT'),0)
         dma='(*handle)->temp_buffer = heap_caps_aligned_alloc(dma_alignment, (*handle)->chip.page_size + dma_alignment, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);'
-        self.assertIn(dma,src);self.assertIn(dma,self.upstream['nand_impl.c'])
+        self.assertNotIn(dma,src);self.assertIn(dma,self.upstream['nand_impl.c'])
+        self.assertIn('(*handle)->temp_buffer = mosaico_nand_dma_acquire((*handle)->chip.page_size + dma_alignment, dma_alignment);',src)
         original=trace.extract_function(self.upstream['nand_impl.c'],'esp_err_t nand_init_device(')
         patched=trace.extract_function(src,'esp_err_t nand_init_device(')
-        cleanup=original.split('fail:\n',1)[1].replace('    free(*handle);','    free(*handle);\n    *handle = NULL;')
+        cleanup=original.split('fail:\n',1)[1].replace('free((*handle)->temp_buffer);','mosaico_nand_dma_release((*handle)->temp_buffer);').replace('    free(*handle);','    free(*handle);\n    *handle = NULL;')
         self.assertEqual(patched.split('fail:\n',1)[1],cleanup)
         for name in ('nand_copy','s_verify_write'):
             signature=('esp_err_t ' if name=='nand_copy' else 'static esp_err_t ')+name+'('
             old=trace.extract_function(self.upstream['nand_impl.c'],signature)
             new=trace.extract_function(src,signature)
             self.assertEqual(new,old.replace('MALLOC_CAP_DMA','MALLOC_CAP_SPIRAM'))
-        self.assertIn('0x01040103U',self.generated['nand.c'])
+        self.assertIn('0x01040104U',self.generated['nand.c'])
         config=(ROOT/'.artifacts/mosaico/nand-storage-sdkconfig').read_text(encoding='utf-8')
         self.assertIn('# CONFIG_NAND_FLASH_VERIFY_WRITE is not set',config)
     def test_bounce_call_paths_pinned(self):
@@ -189,7 +206,7 @@ class MemoryTests(unittest.TestCase):
             self.assertIn('spi_nand_rx_prepare_read_buffers(handle, data, length,',body)
             self.assertIn('memcpy(data, data_read, length)',body)
         self.assertIn('spi_nand_tx_prepare_write_buffers(handle, data, length,',trace.extract_function(oper,'esp_err_t spi_nand_program_load('))
-    def test_actual_allocation_failures(self):self.compile(allocation_fixture(self.generated['nand_impl.c']),'allocation')
+    def test_actual_allocation_failures(self):self.compile(allocation_fixture(self.generated['nand_impl.c'],self.generated['nand.c']),'allocation')
     def test_actual_bounce_helpers(self):self.compile(bounce_fixture(self.oper),'bounce')
 
 if __name__=='__main__':unittest.main()

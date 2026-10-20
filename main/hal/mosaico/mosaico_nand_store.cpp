@@ -1,9 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 #include "mosaico_nand_store.h"
+#include "mosaico_nand_dma_reserve_model.h"
+#include "../../ota/mosaico_ota.h"
 #include <spi_nand_flash.h>
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 #include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
+#include <cstdio>
 #include <atomic>
 #include <mutex>
 #include <new>
@@ -15,6 +19,24 @@ extern "C" uint32_t mosaico_nand_compat_version();
 namespace MosaicoNandStore {
 namespace {
 std::mutex mutex;
+MosaicoNandDma::Reservation<> dmaReservation;
+struct DmaAllocator {
+    uint8_t* allocate(size_t alignment,size_t size){
+        return static_cast<uint8_t*>(heap_caps_aligned_alloc(alignment,size,MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT|MALLOC_CAP_DMA));
+    }
+    bool valid(const uint8_t* pointer,size_t size,size_t alignment){
+        if(!pointer||!size||reinterpret_cast<uintptr_t>(pointer)%alignment)return false;
+        // Check every byte, not just an address that might straddle heap regions.
+        for(size_t i=0;i<size;++i)if(!esp_ptr_internal(pointer+i)||!esp_ptr_dma_capable(pointer+i)||!esp_ptr_byte_accessible(pointer+i))return false;
+        return true;
+    }
+    void release(uint8_t* pointer){heap_caps_free(pointer);} // Unpublished prepare failure only.
+} dmaAllocator;
+struct StorageLease {
+    bool held=MosaicoOta::tryStorageLease();
+    ~StorageLease(){if(held)MosaicoOta::releaseStorageLease();}
+    explicit operator bool()const{return held;}
+};
 bool cleanupFailed=false;
 std::atomic_bool formatSession{false};
 Progress progressCallback=nullptr;
@@ -62,10 +84,13 @@ Result transaction(Operation operation,const Payload* input,Payload* output,bool
     const bool journal=operation==Operation::LogLoad||operation==Operation::LogAppend||operation==Operation::LogRead;
     Result result;
     if(!authorized){result.error=ESP_ERR_INVALID_STATE;return result;}
-    if(mosaico_nand_compat_version()!=0x01040103U){result.error=ESP_ERR_NOT_SUPPORTED;return result;}
+    StorageLease storageLease;
+    if(!storageLease){result.error=ESP_ERR_INVALID_STATE;return result;}
+    if(mosaico_nand_compat_version()!=0x01040104U){result.error=ESP_ERR_NOT_SUPPORTED;return result;}
     std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
     if(!lock||cleanupFailed){result.error=ESP_ERR_INVALID_STATE;return result;}
     result.stage=Stage::Allocation;
+    if(!dmaReservation.isReady()){result.error=ESP_ERR_NO_MEM;return result;}
     void* memory=heap_caps_calloc(1,sizeof(Workspace),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if(!memory){result.error=ESP_ERR_NO_MEM;return result;}
     auto* workspace=new(memory) Workspace;
@@ -223,12 +248,26 @@ Result transaction(Operation operation,const Payload* input,Payload* output,bool
     result.stage=Stage::Complete;return finish();
 }
 }
+bool prepareDmaBuffer(){return dmaReservation.prepare(dmaAllocator);}
+void dmaStatus(char* output,size_t length){
+    if(!output||!length)return;
+    std::snprintf(output,length,"prepared=%u ready=%u leased=%u faulted=%u capacity=%u alignment=%u error=%s",
+        unsigned(dmaReservation.wasAttempted()),unsigned(dmaReservation.isReady()),
+        unsigned(dmaReservation.isLeased()),unsigned(dmaReservation.isFaulted()),
+        unsigned(MosaicoNandDma::Capacity),unsigned(MosaicoNandDma::Alignment),MosaicoNandDma::errorName(dmaReservation.error()));
+}
 Result load(Payload& output,bool authorized){return transaction(Operation::Load,nullptr,&output,authorized,nullptr,nullptr);}
 Result save(const Payload& input,bool authorized){return transaction(Operation::Save,&input,nullptr,authorized,nullptr,nullptr);}
 Result logLoad(LogState& output,bool authorized){return transaction(Operation::LogLoad,nullptr,nullptr,authorized,nullptr,nullptr,nullptr,&output);}
 Result logAppend(LogPage& page,LogState& output,bool authorized){return transaction(Operation::LogAppend,nullptr,nullptr,authorized,nullptr,nullptr,&page,&output);}
 Result logRead(uint64_t sequence,LogPage& output,bool authorized){return transaction(Operation::LogRead,nullptr,nullptr,authorized,nullptr,nullptr,&output,nullptr,sequence);}
 Result formatConfirm(bool authorized,Progress progress,void* context){return transaction(Operation::Format,nullptr,nullptr,authorized,progress,context);}
+}
+extern "C" void* mosaico_nand_dma_acquire(size_t size,size_t alignment){
+    return MosaicoNandStore::dmaReservation.acquire(size,alignment,MosaicoNandStore::dmaAllocator);
+}
+extern "C" void mosaico_nand_dma_release(void* pointer){
+    MosaicoNandStore::dmaReservation.release(pointer);
 }
 // The SHA-guarded generated1.4.1 compatibility TUs call these narrow hooks.
 extern "C" bool mosaico_nand_compat_format_authorized(){return MosaicoNandStore::formatSession.load(std::memory_order_acquire);}

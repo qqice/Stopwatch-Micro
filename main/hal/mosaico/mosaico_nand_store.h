@@ -2,12 +2,16 @@
 #include "mosaico_nand_store_model.h"
 #include "mosaico_nand_log_model.h"
 #include <esp_err.h>
+#include <cstddef>
 
 namespace MosaicoNandStore {
 using Payload=Model::Payload;
 using LogPage=LogModel::Page;
 using LogState=LogModel::State;
 using Progress=void(*)(uint32_t completedBlocks,uint32_t totalBlocks,void* context);
+// Once at boot after HAL ready, before BLE/radio allocations. No late retry.
+bool prepareDmaBuffer();
+void dmaStatus(char* output,size_t length); // RAM-only; never initializes NAND.
 enum class Stage { Admission, Allocation, Bus, Pins, Device, Identity, Init, Geometry, Erase, Record, Reopen, Complete };
 struct Result {
     esp_err_t error=ESP_OK,cleanupError=ESP_OK;
@@ -19,7 +23,8 @@ struct Result {
 };
 // Explicit caller authorization is required even for loading: official reads may
 // refresh ECC in our already-owned store. Root gates OTA/radio/voltage/TWDT task.
-// Each call owns and releases SPI3, the Dhara context and all DMA buffers.
+// Each call releases SPI3, Dhara/PSRAM workspaces and its DMA-buffer lease.
+// The independent boot DMA reservation remains allocated for this boot.
 Result load(Payload& output,bool authorized);
 Result save(const Payload& input,bool authorized);
 // Raw page: sessionBoot LE32 at 16, count LE16 at 20, 64-byte records at 60.

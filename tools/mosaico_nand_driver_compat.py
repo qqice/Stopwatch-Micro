@@ -21,7 +21,12 @@ def patched(name,source):
     if name=='nand_impl.c':
         # CPU/Dhara buffers are never submitted directly as DMA: spi_nand_oper.c
         # RX/TX preparation bounces non-DMA user buffers through temp_buffer.
-        # Keep aligned DMA temp_buffer (and all SPI flags) exactly upstream.
+        # Borrow the independent boot DMA reservation; never late-allocate temp.
+        source=replace_once(source,'#include <string.h>', '#include <string.h>\nextern void *mosaico_nand_dma_acquire(size_t size, size_t alignment);\nextern void mosaico_nand_dma_release(void *pointer);')
+        source=replace_once(source,
+            '    (*handle)->temp_buffer = heap_caps_aligned_alloc(dma_alignment, (*handle)->chip.page_size + dma_alignment, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);',
+            '    (*handle)->temp_buffer = mosaico_nand_dma_acquire((*handle)->chip.page_size + dma_alignment, dma_alignment);')
+        source=replace_once(source,'    free((*handle)->temp_buffer);', '    mosaico_nand_dma_release((*handle)->temp_buffer);')
         for member in ('work_buffer','read_buffer'):
             old=f'    (*handle)->{member} = heap_caps_aligned_alloc(dma_alignment, (*handle)->chip.page_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);'
             source=replace_once(source,old,old.replace('MALLOC_CAP_DMA','MALLOC_CAP_SPIRAM'))
@@ -40,7 +45,9 @@ def patched(name,source):
         source=replace_once(source,'        if (expected_operation_time_us >= ROM_WAIT_THRESHOLD_US) {\n            vTaskDelay(1);\n        }','        vTaskDelay(1); // Yield on every busy poll, including read/program.')
         source=replace_once(source,'        esp_err_t err = nand_erase_good_block(handle, (uint32_t)i);','        esp_err_t err = nand_erase_good_block(handle, (uint32_t)i);\n        mosaico_nand_compat_progress((uint32_t)i + 1, handle->chip.num_blocks);')
     elif name=='nand.c':
-        source=replace_once(source,'static const char *TAG = "nand_api";', 'static const char *TAG = "nand_api";\nuint32_t mosaico_nand_compat_version(void) { return 0x01040103U; }')
+        source=replace_once(source,'#include <string.h>', '#include <string.h>\nextern void mosaico_nand_dma_release(void *pointer);')
+        source=replace_once(source,'    free(handle->temp_buffer);', '    mosaico_nand_dma_release(handle->temp_buffer);')
+        source=replace_once(source,'static const char *TAG = "nand_api";', 'static const char *TAG = "nand_api";\nuint32_t mosaico_nand_compat_version(void) { return 0x01040104U; }')
         source=replace_once(source,'{\n#ifdef CONFIG_NAND_FLASH_ENABLE_BDL\n    ESP_LOGE(TAG, "spi_nand_flash_init_device()', '{\n    if (config == NULL || handle == NULL) return ESP_ERR_INVALID_ARG;\n    *handle = NULL;\n#ifdef CONFIG_NAND_FLASH_ENABLE_BDL\n    ESP_LOGE(TAG, "spi_nand_flash_init_device()')
         source=replace_once(source,'        ESP_LOGE(TAG, "Failed to attach wear-leveling operations");','        ESP_LOGE(TAG, "Failed to attach wear-leveling operations");\n        goto fail;')
         source=replace_once(source,'        ret = ESP_FAIL;\n        return ret;','        ret = ESP_FAIL;\n        goto fail;')

@@ -217,6 +217,8 @@ static_assert(eccMasks(),"actual normalized masks C0=20 rejects before cache/no 
 
 ADAPTER_SYNTAX_PREFIX=r'''#include "main/hal/mosaico/mosaico_nand_store_model.h"
 #include "main/hal/mosaico/mosaico_nand_log_model.h"
+#include "main/hal/mosaico/mosaico_nand_dma_reserve_model.h"
+#include <cstdio>
 #include <atomic>
 #include <mutex>
 #include <new>
@@ -225,7 +227,8 @@ constexpr int ESP_OK=0,ESP_FAIL=-1,ESP_ERR_INVALID_ARG=1,ESP_ERR_NO_MEM=2,ESP_ER
 constexpr int GPIO_NUM_24=24,GPIO_NUM_25=25,GPIO_MODE_OUTPUT=1,GPIO_PULLUP_ENABLE=1,GPIO_PULLDOWN_DISABLE=0,GPIO_INTR_DISABLE=0;
 constexpr int SPI3_HOST=3,SPI_DMA_CH_AUTO=3,SPI_DEVICE_HALFDUPLEX=1,SPI_NAND_IO_MODE_SIO=0;
 constexpr int SPI_TRANS_VARIABLE_ADDR=1,SPI_TRANS_VARIABLE_CMD=2,SPI_TRANS_VARIABLE_DUMMY=4,SPI_TRANS_USE_RXDATA=8;
-constexpr int MALLOC_CAP_SPIRAM=1,MALLOC_CAP_8BIT=2;
+constexpr int MALLOC_CAP_SPIRAM=1,MALLOC_CAP_8BIT=2,MALLOC_CAP_INTERNAL=4,MALLOC_CAP_DMA=8;
+namespace MosaicoOta {bool tryStorageLease();void releaseStorageLease();}
 struct gpio_io_config_t {bool slp_sel=false;};
 struct gpio_config_t {uint64_t pin_bit_mask=0;int mode=0,pull_up_en=0,pull_down_en=0,intr_type=0;};
 struct spi_bus_config_t {int mosi_io_num=0,miso_io_num=0,sclk_io_num=0,quadwp_io_num=0,quadhd_io_num=0,max_transfer_sz=0;};
@@ -250,13 +253,24 @@ int spi_bus_add_device(int,const spi_device_interface_config_t*,spi_device_handl
 int spi_bus_remove_device(spi_device_handle_t);int spi_bus_free(int);
 int spi_device_polling_transmit(spi_device_handle_t,spi_transaction_t*);
 void* heap_caps_calloc(size_t,size_t,int);void heap_caps_free(void*);
+void* heap_caps_aligned_alloc(size_t,size_t,int);
+bool esp_ptr_internal(const void*);bool esp_ptr_dma_capable(const void*);bool esp_ptr_byte_accessible(const void*);
 '''
 
 def adapter_fixture():
     import re
     header=re.sub(r'^#.*$', '',(ROOT/'main/hal/mosaico/mosaico_nand_store.h').read_text(encoding='utf-8-sig'),flags=re.M)
     source=(ROOT/'main/hal/mosaico/mosaico_nand_store.cpp').read_text(encoding='utf-8-sig')
-    source=source.split('namespace MosaicoNandStore {\nnamespace {',1)[1].split('\n}\nResult load(',1)[0]
+    source=source.split('namespace MosaicoNandStore {\nnamespace {',1)[1].split('\n}\nbool prepareDmaBuffer(',1)[0]
+    source=re.sub(r'struct DmaAllocator \{.*?\} dmaAllocator;', '',source,flags=re.S)
+    source=source.replace('MosaicoNandDma::Reservation<> dmaReservation;', 'MockReservation dmaReservation;')
+    source=re.sub(r'struct StorageLease \{.*?\n\};',r'''struct StorageLease {
+    Fixture& owner;bool held;
+    constexpr StorageLease(Fixture& f):owner(f),held(!f.leaseDenied){++owner.leaseAttempts;if(held)++owner.leaseDepth;}
+    constexpr ~StorageLease(){if(held){--owner.leaseDepth;++owner.leaseReleases;}}
+    constexpr explicit operator bool()const{return held;}
+};''',source,flags=re.S)
+    source=source.replace('StorageLease storageLease;', 'StorageLease storageLease{*this};')
     source=source.replace('std::mutex','MockMutex').replace('std::unique_lock<MockMutex>','MockLock').replace('std::try_to_lock','0')
     source=source.replace('std::atomic_bool','MockAtomic')
     source=source.replace('void* memory=heap_caps_calloc(1,sizeof(Workspace),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);','Workspace* memory=allocateWorkspace();')
@@ -271,6 +285,7 @@ def adapter_fixture():
  std::array<Model::Page,Model::RequiredPages> durable{},current{};
  bool allocationFail=false,occupied=false,busLive=false,deviceLive=false,geometryBad=false,unsafeErase=false;
  bool failRemove=false,failDeinit=false,failFree=false;
+ bool leaseDenied=false;unsigned leaseAttempts=0,leaseDepth=0,leaseReleases=0;
  unsigned allocations=0,frees=0,inits=0,deinits=0,dmaBuffers=0,removes=0,busFrees=0,pinChanges=0,reads=0,writes=0,erases=0;
  int failInitAt=0,readError=0,eraseError=0;
  bool firstInitFormat=false,secondInitFormat=false;
@@ -280,7 +295,7 @@ def adapter_fixture():
  constexpr int gpio_get_io_config(int pin,gpio_io_config_t* out){++sleepReads;if(sleepReads==unsigned(failSleepReadAt))return -81;out->slp_sel=(sleepMask&(1U<<pin))!=0;return ESP_OK;}
  constexpr int gpio_sleep_sel_dis(int pin){++sleepWrites;if(sleepWrites==unsigned(failSleepWriteAt))return -82;if(!stickyDisable&&!(stickyRestore&&sleepWrites>6))sleepMask&=~(1U<<pin);return ESP_OK;}
  constexpr int gpio_sleep_sel_en(int pin){++sleepWrites;if(sleepWrites==unsigned(failSleepWriteAt))return -82;if(!stickyRestore)sleepMask|=1U<<pin;return ESP_OK;}
- constexpr uint32_t mosaico_nand_compat_version(){return 0x01040103;}
+ constexpr uint32_t mosaico_nand_compat_version(){return 0x01040104;}
  constexpr Workspace* allocateWorkspace(){++allocations;if(allocationFail)return nullptr;memory={};return &memory;}
  constexpr void releaseWorkspace(Workspace*){++frees;}
  constexpr int gpio_set_level(int,int){++pinChanges;return ESP_OK;}
@@ -322,6 +337,7 @@ def adapter_fixture():
 struct MockMutex {bool available=true;};
 struct MockLock {bool held;constexpr MockLock(MockMutex& mutex,int):held(mutex.available){}constexpr explicit operator bool()const{return held;}};
 struct MockAtomic {bool value;constexpr void store(bool v,std::memory_order){value=v;}constexpr bool load(std::memory_order)const{return value;}};
+struct MockReservation {bool available=true;constexpr bool isReady()const{return available;}};
 '''
     return prefix+header+r'''
 using namespace MosaicoNandStore;
@@ -329,7 +345,7 @@ struct Fixture {
 '''+source+r'''
 };
 constexpr Payload pattern(uint8_t seed){Payload out;for(size_t i=0;i<out.size();++i)out[i]=uint8_t(seed+i*13);return out;}
-constexpr bool clean(const Fixture& f){return !f.dmaBuffers&&f.allocations==f.frees&&!f.formatSession.load(std::memory_order_acquire)&&f.progressCallback==nullptr&&f.progressContext==nullptr;}
+constexpr bool clean(const Fixture& f){return !f.leaseDepth&&!f.dmaBuffers&&f.allocations==f.frees&&!f.formatSession.load(std::memory_order_acquire)&&f.progressCallback==nullptr&&f.progressContext==nullptr;}
 constexpr bool adapterLifecycle(){
  Fixture f;const auto original=pattern(1);f.seed(original);Payload output=pattern(9);
  auto loaded=f.transaction(Fixture::Operation::Load,nullptr,&output,true,nullptr,nullptr);
@@ -402,6 +418,18 @@ constexpr bool sleepStateFaults(){
 static_assert(sleepStateFaults(),"all6 sleep selectors snapshots disables readbacks and restores checked before IO; all failure positions fence safely");
 static_assert(adapterLifecycle(),"actual transaction flow load-save-freshresume-format scoped DMA+PSRAM lifetimes");
 static_assert(adapterFailures(),"actual transaction SDKfaultmatrix init/reopen/remove/free/deinit/geometry/admission outputunchanged cleanupfence and format-reset");
+constexpr bool newAdmission(){
+ Fixture denied;denied.leaseDenied=true;Payload out=pattern(1);
+ auto result=denied.transaction(Fixture::Operation::Load,nullptr,&out,true,nullptr,nullptr);
+ if(result.error!=ESP_ERR_INVALID_STATE||denied.allocations||denied.nandCommands||denied.leaseAttempts!=1||denied.leaseReleases||denied.leaseDepth)return false;
+ Fixture noReserve;noReserve.dmaReservation.available=false;
+ result=noReserve.transaction(Fixture::Operation::Load,nullptr,&out,true,nullptr,nullptr);
+ if(result.error!=ESP_ERR_NO_MEM||noReserve.allocations||noReserve.nandCommands||noReserve.leaseReleases!=1||noReserve.leaseDepth)return false;
+ Fixture nested;nested.seed(out);nested.leaseDepth=1;
+ result=nested.transaction(Fixture::Operation::Load,nullptr,&out,true,nullptr,nullptr);
+ return result.error==ESP_OK&&nested.leaseDepth==1&&nested.leaseReleases==1;
+}
+static_assert(newAdmission(),"OTA lease denial and missing boot reservation perform zero hardware; same-task outer lease survives nested transaction");
 '''
 
 class StoreTests(unittest.TestCase):
@@ -471,8 +499,9 @@ static_assert(formatFaults(),"format marker faults before/after every IO are nev
         self.compile(prefix+header+body,'adapter-syntax')
     def test_adapter_boundaries(self):
         cpp=(ROOT/'main/hal/mosaico/mosaico_nand_store.cpp').read_text()
-        for forbidden in ('nvs_','esp_restart','esp_vfs_','littlefs','SPI_NAND_IO_MODE_QIO','nand_wrap_','MALLOC_CAP_INTERNAL','xTaskCreate'):
+        for forbidden in ('nvs_','esp_restart','esp_vfs_','littlefs','SPI_NAND_IO_MODE_QIO','nand_wrap_','xTaskCreate'):
             self.assertNotIn(forbidden,cpp)
+        self.assertEqual(cpp.count('MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT|MALLOC_CAP_DMA'),1)
         self.assertIn('MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT',cpp)
         self.assertEqual(cpp.count('spi_nand_erase_chip(nand)'),1)
         self.assertIn('if(operation==Operation::Format)',cpp)

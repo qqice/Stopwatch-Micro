@@ -124,9 +124,30 @@ static_assert(bootRetry());
         worst=re.sub(r'%ld','-2147483648',worst)
         worst=re.sub(r'%lu','4294967295',worst)
         worst=re.sub(r'%u','4294967295',worst)
-        self.assertLessEqual(len(worst),500)
+        # The syslog command owns a 640-byte response buffer; include its NUL.
+        self.assertLess(len(worst),640)
+        debug=(ROOT/'main/debug/serial_debug.cpp').read_text()
+        self.assertIn('static char line[640]',debug)
+        self.assertLess(len(worst)+len('DBG RESULT command=syslog status=PASS \r\n'),1536)
         self.assertIn('chunkBounds(index,capacity)',chunk)
         self.assertIn('readSeq==seq',chunk)
+
+    def test_nand_reservation_order_and_readonly_diagnostics(self):
+        main=(ROOT/'main/main.cpp').read_text()
+        self.assertLess(main.index('GetHAL().init();'),main.index('MosaicoNandStore::prepareDmaBuffer();'))
+        for later in ['MosaicoSessions::init();','GetNetworkQuota().begin();']:
+            self.assertLess(main.index('MosaicoNandStore::prepareDmaBuffer();'),main.index(later))
+        debug=(ROOT/'main/debug/serial_debug.cpp').read_text()
+        command=debug.split('std::strcmp(command, "nand-dma") == 0',1)[1].split('std::strcmp(command, "syslog")',1)[0]
+        self.assertIn('MosaicoNandStore::dmaStatus',command)
+        self.assertIn('readonly_query_no_arguments',command)
+        for forbidden in ['prepareDmaBuffer','GetHAL','logLoad','logAppend','formatConfirm']:
+            self.assertNotIn(forbidden,command)
+        self.assertIn('"nand-dma"',(ROOT/'main/debug/serial_debug_transport.h').read_text())
+        failed=SOURCE.split('void failed(',1)[1].split('bool gauge(',1)[0]
+        self.assertIn('storeFailureStage=uint32_t(r.stage)',failed)
+        self.assertEqual(SOURCE.count('storeFailureStage='),1)
+        self.assertIn('store_failure_stage=%lu',SOURCE)
 
 if __name__=='__main__':unittest.main()
 

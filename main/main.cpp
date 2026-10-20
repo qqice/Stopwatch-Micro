@@ -31,6 +31,7 @@ using namespace smooth_ui_toolkit;
 #include <host/touch_sleep.h>
 #include "main_idle_wait.h"
 #include <hal/mosaico/usb_console.h>
+#include <hal/mosaico/mosaico_nand_store.h>
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
 #include <ota/panic_capture.h>
 #endif
@@ -57,6 +58,7 @@ extern "C" void app_main(void)
     GetHAL().init();
 #ifdef MOSAICO_BOARD
     (void)GetNetworkQuota().prepareOtaBuffers(); // Reserve before BLE/Wi-Fi fragment internal DMA SRAM.
+    (void)MosaicoNandStore::prepareDmaBuffer(); // Independent NAND DMA reservation; never borrow OTA memory.
     MosaicoDisplay::init();
     MainIdleWait::Lifetime idleWaitLifetime;
 #endif
