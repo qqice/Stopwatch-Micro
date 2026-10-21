@@ -8,9 +8,13 @@ constexpr size_t RecordBytes=64,Capacity=128,ChunkBytes=128;
 constexpr bool staticFormatAddress(uintptr_t p,uintptr_t begin,uintptr_t end) {
  return begin<end && p>=begin && p<end;
 }
-// Normalize the old pre-logger startup budget, never arbitrary allocations.
-constexpr size_t startupBudget(size_t free,size_t residentRtcStack) {
- const size_t add=residentRtcStack>8192?8192:residentRtcStack;
+// Normalize only independently verified boot residency, never arbitrary
+// allocations. Caps are separate; this does not create usable heap or change
+// largest-block/real allocation/selftest admission.
+constexpr size_t startupBudget(size_t free,size_t residentRtcStack,size_t residentNandDma=0) {
+ const size_t rtc=residentRtcStack>8192?8192:residentRtcStack;
+ const size_t nand=residentNandDma>2112?2112:residentNandDma;
+ const size_t add=rtc+nand;
  return free>SIZE_MAX-add?SIZE_MAX:free+add;
 }
 using Bytes=std::array<uint8_t,RecordBytes>;

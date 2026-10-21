@@ -16,12 +16,14 @@
 #ifdef MOSAICO_BOARD
 #include "mosaico_system_log.h"
 #include "mosaico_system_log_model.h"
+#include <hal/mosaico/mosaico_nand_store.h>
 #endif
 extern "C" esp_err_t ml_noise_selftest(void);
 
 namespace {
 TailnetQuota instance;
 portMUX_TYPE fetchDiagnosticsMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE startupDiagnosticsMux = portMUX_INITIALIZER_UNLOCKED;
 bool parseUrl(const char* url, char* host, uint16_t& port, uint32_t& peer, char* path)
 {
     unsigned a, b, c, d, p;
@@ -110,28 +112,55 @@ void TailnetQuota::load()
     nvs_close(handle);
     _valid = ok && parseUrl(url, _host, _port, _peer, _path) && std::strncmp(_key, "tskey-auth-", 11) == 0;
 }
+TailnetQuota::StartupDiagnostics TailnetQuota::startupDiagnostics() const
+{
+    portENTER_CRITICAL(&startupDiagnosticsMux);
+    const auto value = _startup_diagnostics;
+    portEXIT_CRITICAL(&startupDiagnosticsMux);
+    return value;
+}
+void TailnetQuota::publishStartupDiagnostics(StartupDiagnostics value)
+{
+    portENTER_CRITICAL(&startupDiagnosticsMux);
+    const auto previous = _startup_diagnostics.attempts;
+    value.attempts = previous == UINT32_MAX ? previous : previous + 1;
+    _startup_diagnostics = value;
+    portEXIT_CRITICAL(&startupDiagnosticsMux);
+}
 void TailnetQuota::start()
 {
-    if (!_enabled || !_valid) return;
+    StartupDiagnostics diagnostic{};
+    const auto finish = [&](StartupDecision decision, int32_t error=0) {
+        diagnostic.decision=decision;diagnostic.error=error;
+        publishStartupDiagnostics(diagnostic);
+    };
+    if (!_enabled) { finish(StartupDecision::Disabled); return; }
+    if (!_valid) { finish(StartupDecision::InvalidConfig); return; }
     if (_client) {
         if (_pause_requested) {
-            if (microlink_stop(_client) != ESP_OK) return;
-            if (microlink_start(_client) == ESP_OK) _pause_requested = false;
-        }
+            const auto stopped=microlink_stop(_client);
+            if (stopped != ESP_OK) { finish(StartupDecision::ResumeStopFailed,stopped); return; }
+            const auto started=microlink_start(_client);
+            if (started == ESP_OK) _pause_requested = false;
+            finish(started==ESP_OK?StartupDecision::Resumed:StartupDecision::ResumeStartFailed,started);
+        } else finish(StartupDecision::AlreadyStarted);
         return;
     }
-    // Keep room for MicroLink's task stacks and the existing BLE/UI workers.
-    size_t startupFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // Keep the existing 80K total/16K largest guard. Only verified boot-resident
+    // RTC stack and independent NAND DMA bytes normalize the historic budget.
+    // Neither credit is real free DRAM; allocation and selftest still must pass.
+    diagnostic.actualFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    diagnostic.largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    diagnostic.normalizedBudget=diagnostic.actualFree;
 #ifdef MOSAICO_BOARD
-    // The old guard was measured before the bounded journal worker existed.
-    // Account only its verified RTC-resident stack; actual largest-block and
-    // allocation checks remain unchanged. DMA buffers still require real DRAM.
-    startupFree = MosaicoSystemLog::Model::startupBudget(startupFree, MosaicoSystemLog::startupInternalReservation());
+    diagnostic.rtcReservation=MosaicoSystemLog::startupInternalReservation();
+    diagnostic.nandReservation=MosaicoNandStore::startupInternalReservation();
+    diagnostic.normalizedBudget=MosaicoSystemLog::Model::startupBudget(diagnostic.actualFree,diagnostic.rtcReservation,diagnostic.nandReservation);
 #endif
-    if (startupFree < 80 * 1024 ||
-        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 16 * 1024)
-        return;
-    if (ml_noise_selftest() != ESP_OK) return;
+    if (diagnostic.normalizedBudget < 80 * 1024) { finish(StartupDecision::BudgetRejected); return; }
+    if (diagnostic.largest < 16 * 1024) { finish(StartupDecision::LargestRejected); return; }
+    const auto selftest=ml_noise_selftest();
+    if (selftest != ESP_OK) { finish(StartupDecision::SelftestFailed,selftest); return; }
     // Avoid per-packet USB logging while the display is idle; errors remain visible.
     for (const char* tag : {"ml_coord", "ml_derp", "ml_net_io", "ml_wg_mgr", "ml_stun", "ml_tcp", "ml_noise"}) {
         esp_log_level_set(tag, ESP_LOG_ERROR);
@@ -149,7 +178,10 @@ void TailnetQuota::start()
     config.max_peers        = 4;
     config.priority_peer_ip = _peer;
     _client                 = microlink_init(&config);
-    if (_client) _pause_requested = microlink_start(_client) != ESP_OK;
+    if (!_client) { finish(StartupDecision::InitFailed,ESP_FAIL); return; }
+    const auto started=microlink_start(_client);
+    _pause_requested = started != ESP_OK;
+    finish(started==ESP_OK?StartupDecision::Started:StartupDecision::StartFailed,started);
 }
 bool TailnetQuota::pause()
 {

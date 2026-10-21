@@ -1822,12 +1822,19 @@ void SerialDebug::handleLine(char* line)
         return;
     }
     if (std::strcmp(command, "tailscale") == 0) {
-        char details[100]{};
+        char details[256]{};
         auto& tail        = GetTailnetQuota();
         const uint32_t ip = tail.ip();
-        std::snprintf(details, sizeof(details), "enabled=%d state=%d ip=%lu.%lu.%lu.%lu", tail.enabled(), tail.state(),
+        const auto startup = tail.startupDiagnostics(); // Cached, consistent; no start/heap/I/O here.
+        std::snprintf(details, sizeof(details),
+                      "enabled=%d state=%d ip=%lu.%lu.%lu.%lu startup_free=%lu largest=%lu rtc_reserved=%lu nand_reserved=%lu budget=%lu decision=%u error=%ld attempts=%lu",
+                      tail.enabled(), tail.state(),
                       static_cast<unsigned long>(ip >> 24), static_cast<unsigned long>((ip >> 16) & 255),
-                      static_cast<unsigned long>((ip >> 8) & 255), static_cast<unsigned long>(ip & 255));
+                      static_cast<unsigned long>((ip >> 8) & 255), static_cast<unsigned long>(ip & 255),
+                      static_cast<unsigned long>(startup.actualFree), static_cast<unsigned long>(startup.largest),
+                      static_cast<unsigned long>(startup.rtcReservation), static_cast<unsigned long>(startup.nandReservation),
+                      static_cast<unsigned long>(startup.normalizedBudget), unsigned(startup.decision),
+                      static_cast<long>(startup.error), static_cast<unsigned long>(startup.attempts));
         result("tailscale", "PASS", details);
         return;
     }

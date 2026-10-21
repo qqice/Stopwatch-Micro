@@ -11,6 +11,9 @@ using LogState=LogModel::State;
 using Progress=void(*)(uint32_t completedBlocks,uint32_t totalBlocks,void* context);
 // Once at boot after HAL ready, before BLE/radio allocations. No late retry.
 bool prepareDmaBuffer();
+// Read-only boot residency credit; zero unless the independent DMA allocation
+// was validated and remains ready/non-faulted. No allocation or NAND I/O.
+size_t startupInternalReservation();
 void dmaStatus(char* output,size_t length); // RAM-only; never initializes NAND.
 enum class Stage { Admission, Allocation, Bus, Pins, Device, Identity, Init, Geometry, Erase, Record, Reopen, Complete };
 struct Result {

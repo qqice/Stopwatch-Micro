@@ -20,6 +20,19 @@ public:
         uint32_t received = 0, contentLength = 0, elapsedMs = 0;
         bool result = false;
     };
+    enum class StartupDecision : uint8_t {
+        None=0,Disabled=1,InvalidConfig=2,AlreadyStarted=3,ResumeStopFailed=4,
+        ResumeStartFailed=5,Resumed=6,BudgetRejected=7,LargestRejected=8,
+        SelftestFailed=9,InitFailed=10,StartFailed=11,Started=12
+    };
+    // Last completed start() call only. Numeric cache, not readiness/success IO.
+    struct StartupDiagnostics {
+        size_t actualFree=0,largest=0,rtcReservation=0,nandReservation=0,normalizedBudget=0;
+        StartupDecision decision=StartupDecision::None;
+        int32_t error=0;
+        uint32_t attempts=0;
+    };
+    StartupDiagnostics startupDiagnostics() const;
     FetchDiagnostics fetchDiagnostics(FetchPath path) const;
     wireguardif_rx_stats_t rxDiagnostics() const;
     microlink_tcp_connect_diag_t tcpConnectDiagnostics() const;
@@ -40,6 +53,8 @@ public:
     uint32_t ip() const;
 
 private:
+    void publishStartupDiagnostics(StartupDiagnostics value);
+    StartupDiagnostics _startup_diagnostics{};
     void publishFetchDiagnostics(FetchPath path, const FetchDiagnostics& value);
     FetchDiagnostics _fetch_diagnostics[4]{};
     std::atomic<bool> _enabled{false};

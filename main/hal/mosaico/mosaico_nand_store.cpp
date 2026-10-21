@@ -249,6 +249,7 @@ Result transaction(Operation operation,const Payload* input,Payload* output,bool
 }
 }
 bool prepareDmaBuffer(){return dmaReservation.prepare(dmaAllocator);}
+size_t startupInternalReservation(){return dmaReservation.isReady()?MosaicoNandDma::Capacity:0;}
 void dmaStatus(char* output,size_t length){
     if(!output||!length)return;
     std::snprintf(output,length,"prepared=%u ready=%u leased=%u faulted=%u capacity=%u alignment=%u error=%s",
