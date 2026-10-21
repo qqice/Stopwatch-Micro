@@ -21,6 +21,7 @@
 #include <host/mosaico_session_monitor.h>
 #include <cJSON.h>
 #include <mbedtls/base64.h>
+#include <microlink.h>
 #endif
 
 #include <apps/app_codex_micro/app_codex_micro.h>
@@ -1172,6 +1173,22 @@ void SerialDebug::handleLine(char* line)
                       static_cast<unsigned long>(network.failures()),
                       static_cast<unsigned long>(network.historyAccepted()),
                       static_cast<unsigned long>(network.historyFailures()));
+#ifdef MOSAICO_BOARD
+        microlink_peer_path_diag_t peerPath{};
+        microlink_peer_path_get_diagnostics(&peerPath);
+        debugPrintf("DBG PEER_PATH version=%lu probe_stale=%lu foreign_sender=%lu probe_cancelled=%lu pending_deferred=%lu endpoint_promoted=%lu oneshot_requested=%lu key_mismatch=%lu invalid_state=%lu connect_error=%lu owner_error=%lu cumulative_boot=1 cached_only=1\r\n",
+            static_cast<unsigned long>(peerPath.version),
+            static_cast<unsigned long>(peerPath.probe_stale),
+            static_cast<unsigned long>(peerPath.foreign_sender),
+            static_cast<unsigned long>(peerPath.probe_cancelled),
+            static_cast<unsigned long>(peerPath.pending_deferred),
+            static_cast<unsigned long>(peerPath.endpoint_promoted),
+            static_cast<unsigned long>(peerPath.oneshot_requested),
+            static_cast<unsigned long>(peerPath.key_mismatch),
+            static_cast<unsigned long>(peerPath.invalid_state),
+            static_cast<unsigned long>(peerPath.connect_error),
+            static_cast<unsigned long>(peerPath.owner_error));
+#endif
         const auto tcp = GetTailnetQuota().tcpConnectDiagnostics();
         debugPrintf("DBG TCP_CONNECT id=%lu peer_ip=%lu port=%u stage=%u errno=%ld first_errno=%ld retry_errno=%ld wg_wait_ms=%lu elapsed_ms=%lu wg_before=%u wg_after=%u netif=%u wg_idx=%d peer_valid=%u keypairs=%u derp=%u ep_port=%u key_match=%u key_match_valid=%u\r\n",
             static_cast<unsigned long>(tcp.request_id), static_cast<unsigned long>(tcp.peer_ip), tcp.peer_port,

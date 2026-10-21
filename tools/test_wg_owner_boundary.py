@@ -62,7 +62,28 @@ class WGOwnerTests(unittest.TestCase):
         self.assertIn('if (dispatch != ERR_OK) pbuf_free(p)', s)
     def test_manager_no_raw_unowned_peer_state(self):
         s = (BASE/'src/ml_wg_mgr.c').read_text(encoding='utf-8')
-        self.assertEqual(s.count('struct wireguard_device *dev'), 2) # owner init + owner peer callback
+        # New state consumers must be explicitly owner-dispatched, rather than
+        # merely increasing a hard-coded total of raw device accesses.
+        callbacks = (('static esp_err_t wg_init_interface(microlink_t *ml) {',
+                      'wg_init_interface_owner_cb'),
+                     ('static void wg_peer_state_in_owner(void *arg) {',
+                      'wg_peer_state_in_owner'),
+                     ('static void wg_direct_path_in_owner(void *arg) {',
+                      'wg_direct_path_in_owner'))
+        ranges = []
+        for signature, callback in callbacks:
+            start = s.index(signature)
+            end = s.index('\n}', start) + 2
+            ranges.append((start, end))
+            self.assertIn('struct wireguard_device *dev', s[start:end])
+            self.assertIn('wireguardif_owner_call(' + callback + ', &c)', s)
+            if callback == 'wg_init_interface_owner_cb':
+                self.assertIn('if (!wireguardif_owner_current())', s[start:end])
+                self.assertLess(s.index('wireguardif_owner_call(' + callback, start),
+                                s.index('struct wireguard_device *dev', start))
+        for match in re.finditer(re.escape('struct wireguard_device *dev'), s):
+            self.assertTrue(any(a <= match.start() < b for a, b in ranges),
+                            'raw device access outside reviewed owner callbacks')
         self.assertIn('LWIP_ASSERT_CORE_LOCKED();', s)
         for name in ('wg_init_interface', 'wg_update_vpn_ip'):
             self.assertIn(f'wireguardif_owner_call({name}_owner_cb, &c)', s)

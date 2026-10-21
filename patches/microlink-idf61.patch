@@ -1087,22 +1087,40 @@ new file mode 100644
 +#endif
 +#endif
 diff --git a/components/microlink/include/microlink.h b/components/microlink/include/microlink.h
+index 9126a53..b3014fe 100644
 --- a/components/microlink/include/microlink.h
 +++ b/components/microlink/include/microlink.h
-@@ -22,6 +22,12 @@
- 
+@@ -23,6 +23,29 @@ extern "C" {
  /* Opaque handle */
  typedef struct microlink_s microlink_t;
-+
+ 
 +/**
 + * Run a deterministic ChaCha20-Poly1305 known-answer and tamper-rejection test.
 + * This performs no network or account operation.
 + */
 +esp_err_t ml_noise_selftest(void);
- 
++
++/* Numeric, device-wide cumulative boot counters. Getter copies cached metadata
++ * only: no WG/peer reads, owner dispatch, clock, socket, keys or reset. */
++typedef struct {
++    uint32_t version;
++    uint32_t probe_stale;
++    uint32_t foreign_sender;
++    uint32_t probe_cancelled;
++    uint32_t pending_deferred;
++    uint32_t endpoint_promoted;
++    uint32_t oneshot_requested;
++    uint32_t key_mismatch;
++    uint32_t invalid_state;
++    uint32_t connect_error;
++    uint32_t owner_error;
++} microlink_peer_path_diag_t;
++void microlink_peer_path_get_diagnostics(microlink_peer_path_diag_t *out);
++
  /* Configuration */
  typedef struct {
-@@ -181,6 +187,11 @@
+     const char *auth_key;       /* Tailscale auth key (tskey-auth-...) */
+@@ -181,6 +204,11 @@ esp_err_t microlink_send(microlink_t *ml, uint32_t dest_vpn_ip,
  /**
   * @brief Register callbacks
   */
@@ -1114,7 +1132,7 @@ diff --git a/components/microlink/include/microlink.h b/components/microlink/inc
  void microlink_set_state_callback(microlink_t *ml, microlink_state_cb_t cb, void *user_data);
  void microlink_set_peer_callback(microlink_t *ml, microlink_peer_cb_t cb, void *user_data);
  void microlink_set_data_callback(microlink_t *ml, microlink_data_cb_t cb, void *user_data);
-@@ -314,16 +325,42 @@
+@@ -314,16 +342,42 @@ uint16_t microlink_udp_get_local_port(const microlink_udp_socket_t *sock);
  /* Opaque TCP socket handle */
  typedef struct microlink_tcp_socket microlink_tcp_socket_t;
  
@@ -4228,7 +4246,7 @@ index 3919101..4a1e7f0 100644
  
      if (err != ERR_OK) {
 diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_wg_mgr.c
-index ed40942..e3f7240 100644
+index ed40942..04c8e42 100644
 --- a/components/microlink/src/ml_wg_mgr.c
 +++ b/components/microlink/src/ml_wg_mgr.c
 @@ -24,8 +24,12 @@
@@ -4244,7 +4262,31 @@ index ed40942..e3f7240 100644
  #include "wireguard.h"
  #include "mbedtls/base64.h"
  #include <string.h>
-@@ -66,12 +70,22 @@ typedef struct {
+@@ -59,6 +63,23 @@ static inline bool is_lan_ip(uint32_t ip) {
+            (((ip >> 16) & 0xFFF0) == 0xAC10);          /* 172.16-31.x.x */
+ }
+ 
++/* Cached metadata only; never hold this lock across WG calls or logging. */
++static portMUX_TYPE ml_peer_path_diag_mux = portMUX_INITIALIZER_UNLOCKED;
++static microlink_peer_path_diag_t ml_peer_path_diag = { .version = 1 };
++
++static void peer_path_count(uint32_t *counter) {
++    portENTER_CRITICAL(&ml_peer_path_diag_mux);
++    ++*counter;
++    portEXIT_CRITICAL(&ml_peer_path_diag_mux);
++}
++
++void microlink_peer_path_get_diagnostics(microlink_peer_path_diag_t *out) {
++    if (!out) return;
++    portENTER_CRITICAL(&ml_peer_path_diag_mux);
++    *out = ml_peer_path_diag;
++    portEXIT_CRITICAL(&ml_peer_path_diag_mux);
++}
++
+ /* Pending DISCO probe tracking */
+ typedef struct {
+     uint8_t txid[DISCO_TXID_LEN];
+@@ -66,12 +87,23 @@ typedef struct {
      uint16_t dest_port;
      uint64_t sent_ms;
      int peer_index;
@@ -4258,7 +4300,8 @@ index ed40942..e3f7240 100644
 +/* Retire transactions before slot reuse, including remove/re-add of one key. */
 +static void disco_cancel_peer_probes(int peer_idx) {
 +    for (int i = 0; i < MAX_PENDING_PROBES; i++) {
-+        if (pending_probes[i].peer_index == peer_idx) {
++        if (pending_probes[i].active && pending_probes[i].peer_index == peer_idx) {
++            peer_path_count(&ml_peer_path_diag.probe_cancelled);
 +            pending_probes[i].active = false;
 +        }
 +    }
@@ -4267,7 +4310,7 @@ index ed40942..e3f7240 100644
  /* ============================================================================
   * Base64 Key Encoding (wireguard-lwip API requires base64 keys)
   * ========================================================================== */
-@@ -124,13 +138,13 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+@@ -124,13 +156,13 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
                                  const uint8_t *data, size_t len, void *ctx) {
      microlink_t *ml = (microlink_t *)ctx;
      if (!ml || !ml->derp.connected) {
@@ -4283,7 +4326,7 @@ index ed40942..e3f7240 100644
          const char *hostname = "?";
          for (int i = 0; i < ml->peer_count; i++) {
              if (memcmp(ml->peers[i].public_key, peer_public_key, 32) == 0) {
-@@ -138,35 +152,7 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+@@ -138,35 +170,7 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
                  break;
              }
          }
@@ -4320,7 +4363,7 @@ index ed40942..e3f7240 100644
      }
  
      esp_err_t err = ml_derp_queue_send(ml, peer_public_key, data, len);
-@@ -181,6 +167,48 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
+@@ -181,6 +185,48 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
   * on that thread. */
  static struct udp_pcb *s_wg_output_pcb = NULL;
  
@@ -4369,7 +4412,7 @@ index ed40942..e3f7240 100644
  static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
                                  const uint8_t *data, size_t len, void *ctx) {
      microlink_t *ml = (microlink_t *)ctx;
-@@ -195,7 +223,8 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
+@@ -195,7 +241,8 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
               (int)dest_port,
               len >= 1 ? data[0] : -1);
  
@@ -4379,7 +4422,7 @@ index ed40942..e3f7240 100644
      if (!s_wg_output_pcb) return ERR_CONN;
  
      struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
-@@ -206,7 +235,10 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
+@@ -206,7 +253,10 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
      IP_SET_TYPE_VAL(dst, IPADDR_TYPE_V4);
      ip4_addr_set_u32(ip_2_ip4(&dst), dest_ip);  /* already network byte order */
  
@@ -4390,7 +4433,7 @@ index ed40942..e3f7240 100644
      pbuf_free(p);
      return err;
  }
-@@ -215,7 +247,19 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
+@@ -215,7 +265,19 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
   * WireGuard Interface Initialization
   * ========================================================================== */
  
@@ -4410,7 +4453,7 @@ index ed40942..e3f7240 100644
      /* Convert our WG private key to base64 */
      char privkey_b64[64];
      key_to_base64(ml->wg_private_key, privkey_b64, sizeof(privkey_b64));
-@@ -315,14 +359,9 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
+@@ -315,14 +377,9 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
          struct wireguard_device *dev = (struct wireguard_device *)netif->state;
          if (dev) {
              bool match = (memcmp(dev->public_key, ml->wg_public_key, 32) == 0);
@@ -4427,7 +4470,7 @@ index ed40942..e3f7240 100644
              }
          }
      }
-@@ -331,7 +370,20 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
+@@ -331,7 +388,20 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
      return ESP_OK;
  }
  
@@ -4448,7 +4491,7 @@ index ed40942..e3f7240 100644
      if (ml->wg_netif && ml->vpn_ip != 0) {
          struct netif *netif = (struct netif *)ml->wg_netif;
          uint8_t a = (ml->vpn_ip >> 24) & 0xFF;
-@@ -346,6 +398,26 @@ static void wg_update_vpn_ip(microlink_t *ml) {
+@@ -346,6 +416,102 @@ static void wg_update_vpn_ip(microlink_t *ml) {
   * Peer Management (owned exclusively by this task)
   * ========================================================================== */
  
@@ -4472,10 +4515,86 @@ index ed40942..e3f7240 100644
 +    return wireguardif_owner_call(wg_peer_state_in_owner, &c) == ERR_OK && c.key_match;
 +}
 +
++/* Serialize PONG path promotion with all WireGuard state changes. A direct
++ * discovery must neither replace a live initiation nor rekey a valid session. */
++typedef struct {
++    struct netif *netif;
++    int index;
++    uint8_t expected_key[32];
++    ip_addr_t endpoint;
++    u16_t port;
++    bool tried;
++    bool started;
++} wg_direct_path_ctx;
++
++static void wg_direct_path_in_owner(void *arg) {
++    wg_direct_path_ctx *c = (wg_direct_path_ctx *)arg;
++    if (!c->netif || !c->netif->state ||
++        c->index < 0 || c->index >= WIREGUARD_MAX_PEERS) {
++        peer_path_count(&ml_peer_path_diag.invalid_state);
++        return;
++    }
++    struct wireguard_device *dev = (struct wireguard_device *)c->netif->state;
++    struct wireguard_peer *peer = &dev->peers[c->index];
++    if (!peer->valid) {
++        peer_path_count(&ml_peer_path_diag.invalid_state);
++        return;
++    }
++    if (memcmp(peer->public_key, c->expected_key, 32) != 0) {
++        peer_path_count(&ml_peer_path_diag.key_mismatch);
++        return;
++    }
++
++    if (peer->curr_keypair.valid || peer->prev_keypair.valid) {
++        /* Endpoint-only promotion: retain keys, initiation, timers and active. */
++        peer->connect_ip = c->endpoint;
++        peer->connect_port = c->port;
++        peer->ip = c->endpoint;
++        peer->port = c->port;
++        peer_path_count(&ml_peer_path_diag.endpoint_promoted);
++        return;
++    }
++    if (peer->handshake.valid && peer->handshake.initiator &&
++        !wireguard_expired(peer->last_initiation_tx, REKEY_TIMEOUT)) {
++        peer_path_count(&ml_peer_path_diag.pending_deferred);
++        return;
++    }
++
++    peer->connect_ip = c->endpoint;
++    peer->connect_port = c->port;
++    if (c->tried) return;
++    bool was_active = peer->active;
++    c->started = wireguardif_connect(c->netif, (u8_t)c->index) == ERR_OK;
++    peer_path_count(c->started ? &ml_peer_path_diag.oneshot_requested :
++                                &ml_peer_path_diag.connect_error);
++    /* Preserve an application's retry request, but do not create unsolicited
++     * infinite retries when discovery starts a passive peer's one-shot. */
++    peer->active = was_active;
++}
++
++static void wg_promote_direct_path(microlink_t *ml, ml_peer_t *p,
++                                   uint32_t ip, uint16_t port) {
++    wg_direct_path_ctx c = {
++        .netif = (struct netif *)ml->wg_netif,
++        .index = p->wg_peer_index,
++        .port = port,
++        .tried = p->tried_initial_handshake,
++    };
++    memcpy(c.expected_key, p->public_key, sizeof(c.expected_key));
++    IP_SET_TYPE_VAL(c.endpoint, IPADDR_TYPE_V4);
++    ip4_addr_set_u32(ip_2_ip4(&c.endpoint), htonl(ip));
++    err_t dispatch = wireguardif_owner_call(wg_direct_path_in_owner, &c);
++    if (dispatch != ERR_OK) peer_path_count(&ml_peer_path_diag.owner_error);
++    if (dispatch == ERR_OK && c.started) {
++        p->tried_initial_handshake = true;
++        ESP_LOGI(TAG, "WG one-shot handshake to %s (first direct path)", p->hostname);
++    }
++}
++
  static int find_peer_by_key(microlink_t *ml, const uint8_t *pubkey) {
      for (int i = 0; i < ml->peer_count; i++) {
          if (ml->peers[i].active && memcmp(ml->peers[i].public_key, pubkey, 32) == 0) {
-@@ -415,6 +487,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+@@ -415,6 +581,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
                  microlink_ip_to_str(ml->peers[evict_idx].vpn_ip, evict_ip);
                  ESP_LOGW(TAG, "Evicting LRU peer %s (%s) for priority peer %s",
                           ml->peers[evict_idx].hostname, evict_ip, update->hostname);
@@ -4483,7 +4602,7 @@ index ed40942..e3f7240 100644
                  if (ml->peers[evict_idx].wg_peer_index >= 0 && ml->wg_netif) {
                      wireguardif_remove_peer((struct netif *)ml->wg_netif,
                                              ml->peers[evict_idx].wg_peer_index);
-@@ -434,6 +507,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+@@ -434,6 +601,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
          }
      }
  
@@ -4492,7 +4611,7 @@ index ed40942..e3f7240 100644
      ml_peer_t *p = &ml->peers[idx];
      p->vpn_ip = update->vpn_ip;
      memcpy(p->public_key, update->public_key, 32);
-@@ -457,6 +532,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+@@ -457,6 +626,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
      p->trust_until_ms = 0;
      p->last_send_ms = 0;
      p->last_upgrade_ms = 0;
@@ -4500,7 +4619,7 @@ index ed40942..e3f7240 100644
      p->has_direct_path = false;
      p->best_ip = 0;
      p->best_port = 0;
-@@ -464,10 +540,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+@@ -464,10 +634,8 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
  
      char ip_str[16];
      microlink_ip_to_str(update->vpn_ip, ip_str);
@@ -4513,7 +4632,7 @@ index ed40942..e3f7240 100644
  
      /* Add to wireguard-lwip */
      if (ml->wg_netif) {
-@@ -519,15 +593,10 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
+@@ -519,15 +687,10 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
              p->wg_peer_index = wg_peer_idx;
  
              /* Verify the WG internal peer key matches what we passed */
@@ -4533,7 +4652,7 @@ index ed40942..e3f7240 100644
              }
  
              /* DON'T initiate handshakes to all peers on add.
-@@ -591,6 +660,8 @@ static void remove_peer(microlink_t *ml, const ml_peer_update_t *update) {
+@@ -591,6 +754,8 @@ static void remove_peer(microlink_t *ml, const ml_peer_update_t *update) {
      int idx = find_peer_by_key(ml, update->public_key);
      if (idx < 0) return;
  
@@ -4542,7 +4661,7 @@ index ed40942..e3f7240 100644
      /* Remove from wireguard-lwip */
      if (ml->wg_netif && ml->peers[idx].wg_peer_index >= 0) {
          struct netif *netif = (struct netif *)ml->wg_netif;
-@@ -647,6 +718,25 @@ static void process_peer_updates(microlink_t *ml) {
+@@ -647,6 +812,25 @@ static void process_peer_updates(microlink_t *ml) {
      }
  }
  
@@ -4568,7 +4687,7 @@ index ed40942..e3f7240 100644
  /* ============================================================================
   * DISCO Protocol
   * ========================================================================== */
-@@ -689,6 +779,7 @@ static void disco_build_ping(microlink_t *ml, int peer_idx,
+@@ -689,6 +873,7 @@ static void disco_build_ping(microlink_t *ml, int peer_idx,
          if (!pending_probes[i].active) {
              memcpy(pending_probes[i].txid, txid, DISCO_TXID_LEN);
              pending_probes[i].peer_index = peer_idx;
@@ -4576,35 +4695,103 @@ index ed40942..e3f7240 100644
              pending_probes[i].sent_ms = ml_get_time_ms();
              pending_probes[i].active = true;
              registered = true;
-@@ -912,6 +1003,14 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
+@@ -907,11 +1092,24 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
+ 
+         int peer_idx = pending_probes[i].peer_index;
+         if (peer_idx < 0 || peer_idx >= ml->peer_count) {
++            peer_path_count(&ml_peer_path_diag.probe_stale);
+             pending_probes[i].active = false;
+             continue;
          }
  
          ml_peer_t *p = &ml->peers[peer_idx];
 +        if (!p->active ||
 +            memcmp(pending_probes[i].disco_key, p->disco_key, 32) != 0) {
++            peer_path_count(&ml_peer_path_diag.probe_stale);
 +            pending_probes[i].active = false;
 +            continue;
 +        }
 +        /* Authentication proves sender identity, not ownership of this txid.
 +         * A foreign sender must not consume a current peer's pending probe. */
-+        if (memcmp(pending_probes[i].disco_key, sender_disco_key, 32) != 0) continue;
++        if (memcmp(pending_probes[i].disco_key, sender_disco_key, 32) != 0) {
++            peer_path_count(&ml_peer_path_diag.foreign_sender);
++            continue;
++        }
          uint64_t rtt_ms = now - pending_probes[i].sent_ms;
  
          ESP_LOGI(TAG, "DISCO PONG from %s: RTT=%llu ms (via %s)",
-@@ -982,10 +1081,8 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
-                          * If handshake succeeds, the response handler will
-                          * establish the session regardless of active flag. */
-                         {
+@@ -927,69 +1125,8 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
+             p->has_direct_path = true;
+             p->trust_until_ms = now + ML_DISCO_TRUST_DURATION_MS;
+ 
+-            /* Update WireGuard endpoint to direct path.
+-             * Always update the stored endpoint. Only force a handshake if we
+-             * already have an active WG session (peer has us in their config).
+-             * For idle peers, the next incoming initiation will use this endpoint. */
+             if (ml->wg_netif && p->wg_peer_index >= 0) {
+-                struct netif *netif = (struct netif *)ml->wg_netif;
+-                ip_addr_t ep_ip;
+-                IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
+-                ip4_addr_set_u32(ip_2_ip4(&ep_ip), htonl(pkt->src_ip));
+-                wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
+-                                             &ep_ip, pkt->src_port);
+-
+-                /* Only call connect (forces handshake) if:
+-                 * 1. Peer has an active WG session, AND
+-                 * 2. The endpoint actually changed (avoid re-handshake on every heartbeat PONG) */
+-                ip_addr_t cur_ip;
+-                u16_t cur_port;
+-                err_t is_up = wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index,
+-                                                       &cur_ip, &cur_port);
+-                if (is_up == ERR_OK) {
+-                    /* Check if endpoint actually changed */
+-                    uint32_t cur_ip_u32 = ip4_addr_get_u32(ip_2_ip4(&cur_ip));
+-                    uint32_t new_ip_u32 = htonl(pkt->src_ip);
+-                    if (cur_ip_u32 != new_ip_u32 || cur_port != pkt->src_port) {
+-                        wireguardif_connect(netif, (u8_t)p->wg_peer_index);
+-                        ESP_LOGI(TAG, "WG endpoint SWITCHED to direct: %d.%d.%d.%d:%d for %s",
+-                                 (int)((pkt->src_ip >> 24) & 0xFF), (int)((pkt->src_ip >> 16) & 0xFF),
+-                                 (int)((pkt->src_ip >> 8) & 0xFF), (int)(pkt->src_ip & 0xFF),
+-                                 (int)pkt->src_port, p->hostname);
+-                    }
+-                } else {
+-                    ESP_LOGI(TAG, "WG endpoint stored (no session): %d.%d.%d.%d:%d for %s",
+-                             (int)((pkt->src_ip >> 24) & 0xFF), (int)((pkt->src_ip >> 16) & 0xFF),
+-                             (int)((pkt->src_ip >> 8) & 0xFF), (int)(pkt->src_ip & 0xFF),
+-                             (int)pkt->src_port, p->hostname);
+-                    /* First direct path discovery — send a one-shot handshake
+-                     * via direct UDP. Do NOT use wireguardif_connect() which
+-                     * sets peer->active=true and causes infinite handshake
+-                     * retries (every 5s) when the peer has us trimmed.
+-                     * Instead, just fire a single handshake init. If the peer
+-                     * has us configured, it will respond and establish session.
+-                     * If not, we stop and wait for them to initiate. */
+-                    if (!p->tried_initial_handshake) {
+-                        p->tried_initial_handshake = true;
+-                        /* Store endpoint so wireguardif_connect sends to it */
+-                        wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
+-                                                     &ep_ip, pkt->src_port);
+-                        /* Fire one handshake init but don't leave peer active.
+-                         * wireguardif_connect sets active=true internally, so
+-                         * we immediately clear it after to prevent retries. */
+-                        wireguardif_connect(netif, (u8_t)p->wg_peer_index);
+-                        /* Clear active to prevent infinite retry loop.
+-                         * If handshake succeeds, the response handler will
+-                         * establish the session regardless of active flag. */
+-                        {
 -                            struct wireguard_device *dev = (struct wireguard_device *)netif->state;
 -                            if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
 -                                dev->peers[p->wg_peer_index].active = false;
 -                            }
-+                            wg_peer_owner_ctx c = { .netif = netif, .index = (u8_t)p->wg_peer_index, .clear_active = true };
-+                            (void)wireguardif_owner_call(wg_peer_state_in_owner, &c);
-                         }
-                         ESP_LOGI(TAG, "WG one-shot handshake to %s (first direct path)", p->hostname);
-                     }
-@@ -1018,9 +1115,8 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
+-                        }
+-                        ESP_LOGI(TAG, "WG one-shot handshake to %s (first direct path)", p->hostname);
+-                    }
+-                }
++                wg_promote_direct_path(ml, p, pkt->src_ip, pkt->src_port);
+             }
+         }
+ 
+@@ -1018,9 +1155,8 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
      /* Verify DISCO magic */
      if (memcmp(pkt->data, DISCO_MAGIC, 6) != 0) return;
  
@@ -4616,7 +4803,7 @@ index ed40942..e3f7240 100644
  
      /* Extract sender's disco public key */
      const uint8_t *sender_disco_key = pkt->data + 6;
-@@ -1145,11 +1241,13 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
+@@ -1145,11 +1281,13 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
   * ========================================================================== */
  
  static void process_wg_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
@@ -4630,7 +4817,7 @@ index ed40942..e3f7240 100644
          free(pkt->data);
          return;
      }
-@@ -1157,17 +1255,19 @@ static void process_wg_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
+@@ -1157,17 +1295,19 @@ static void process_wg_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
      struct netif *netif = (struct netif *)ml->wg_netif;
      void *device = netif->state;
      if (!device) {
@@ -4651,7 +4838,7 @@ index ed40942..e3f7240 100644
          free(pkt->data);
          return;
      }
-@@ -1331,14 +1431,16 @@ esp_err_t ml_wg_mgr_trigger_handshake(microlink_t *ml, uint32_t dest_vpn_ip) {
+@@ -1331,14 +1471,16 @@ esp_err_t ml_wg_mgr_trigger_handshake(microlink_t *ml, uint32_t dest_vpn_ip) {
      err_t is_up = wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index, NULL, NULL);
      if (is_up == ERR_OK) return ESP_OK;
  
@@ -4675,7 +4862,7 @@ index ed40942..e3f7240 100644
      if (p->best_ip != 0 && p->best_port != 0) {
          ip_addr_t ep_ip;
          IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
-@@ -1368,17 +1470,12 @@ bool ml_wg_mgr_peer_is_up(microlink_t *ml, uint32_t vpn_ip) {
+@@ -1368,17 +1510,12 @@ bool ml_wg_mgr_peer_is_up(microlink_t *ml, uint32_t vpn_ip) {
      bool up = wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index, &cur_ip, &cur_port) == ERR_OK;
      if (up) {
          /* Verify WG internal peer key matches our DISCO peer */
@@ -4697,7 +4884,7 @@ index ed40942..e3f7240 100644
          }
      }
      return up;
-@@ -1518,8 +1615,7 @@ void ml_wg_mgr_task(void *arg) {
+@@ -1518,8 +1655,7 @@ void ml_wg_mgr_task(void *arg) {
  
      if (wait_bits & ML_EVT_SHUTDOWN_REQUEST) {
          ESP_LOGI(TAG, "Shutdown requested before registration, exiting");
@@ -4707,7 +4894,7 @@ index ed40942..e3f7240 100644
      }
  
      ESP_LOGI(TAG, "Coord registered, initializing WireGuard...");
-@@ -1530,6 +1626,7 @@ void ml_wg_mgr_task(void *arg) {
+@@ -1530,6 +1666,7 @@ void ml_wg_mgr_task(void *arg) {
      } else {
          /* Update VPN IP if coord already set it */
          wg_update_vpn_ip(ml);
@@ -4715,7 +4902,7 @@ index ed40942..e3f7240 100644
          xEventGroupSetBits(ml->events, ML_EVT_WG_READY);
      }
  
-@@ -1612,9 +1709,9 @@ void ml_wg_mgr_task(void *arg) {
+@@ -1612,9 +1749,9 @@ void ml_wg_mgr_task(void *arg) {
          }
  
          /* Run WireGuard periodic processing (handshakes, keepalives, rekeys).
@@ -4728,7 +4915,7 @@ index ed40942..e3f7240 100644
          uint64_t now = ml_get_time_ms();
          if (ml->wg_netif && now - last_wg_periodic_ms >= 400) {
              uint64_t t0 = now;
-@@ -1639,18 +1736,33 @@ void ml_wg_mgr_task(void *arg) {
+@@ -1639,18 +1776,33 @@ void ml_wg_mgr_task(void *arg) {
          vTaskDelay(pdMS_TO_TICKS(10));
      }
  
