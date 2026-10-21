@@ -20,7 +20,9 @@ bool factory_stats(){auto& w=*factory_workspace;nvs_stats_t s{};w.headroomValid=
 // Returns 0=absent, 1=valid, -1=invalid/error; no arbitrary namespace/key.
 int factory_load(){auto& w=*factory_workspace;w.persistedValid=false;nvs_handle_t h=0;const auto e=nvs_open(factory::nvsNamespace,NVS_READONLY,&h);if(e==ESP_ERR_NVS_NOT_FOUND)return 0;if(e!=ESP_OK)return -1;
  size_t a=w.journal.size();auto first=nvs_get_blob(h,factory::journalKey,w.journal.data(),&a);if(first==ESP_ERR_NVS_NOT_FOUND){nvs_close(h);return 0;}size_t b=w.journalIo.size();auto second=nvs_get_blob(h,factory::journalKey,w.journalIo.data(),&b);nvs_close(h);
- if(first!=ESP_OK||second!=ESP_OK||a!=w.journal.size()||b!=w.journalIo.size()||w.journal!=w.journalIo||!factory::decode(w.journal,GetHAL().getFactoryMac(),w.decoded))return -1;w.persistedValid=true;return 1;
+ if(first!=ESP_OK||second!=ESP_OK||a!=w.journal.size()||b!=w.journalIo.size()||w.journal!=w.journalIo||!factory::decode(w.journal,GetHAL().getFactoryMac(),w.decoded))return -1;
+ w.persistedValid=true;
+ return 1;
 }
 bool factory_save(){auto& w=*factory_workspace;if(!factory::encode(w.record,w.journal))return false;nvs_handle_t h=0;if(nvs_open(factory::nvsNamespace,NVS_READWRITE,&h)!=ESP_OK)return false;gauge_feed();auto e=nvs_set_blob(h,factory::journalKey,w.journal.data(),w.journal.size());if(e==ESP_OK)e=nvs_commit(h);nvs_close(h);gauge_feed();if(e!=ESP_OK)return false;
  // Save readback must not overwrite the caller's expected bytes.
@@ -52,7 +54,9 @@ struct FactoryBackend {
  FactoryWorkspace& w;explicit FactoryBackend(FactoryWorkspace& work):w(work){}
  bool reject(const char* why){w.reason=why;return false;}
  bool admit(){
-  if(w.attempted)return reject("blocked_once_this_boot");const int loaded=factory_load();if(loaded<0)return reject("blocked_journal_invalid");
+  if(w.attempted)return reject("blocked_once_this_boot");
+  const int loaded=factory_load();
+  if(loaded<0)return reject("blocked_journal_invalid");
   if(loaded==1&&(w.decoded.state!=factory::State::Completed||w.decoded.generation==0xffffffffU))return reject("blocked_persistent_pending_failed_or_generation");
   if(loaded==1&&!factory_prior_backup())return reject("blocked_previous_completed_backup_invalid");
   if(!factory_stats()||w.available<factory::requiredEntries)return reject("blocked_nvs_available_entries");
@@ -64,7 +68,8 @@ struct FactoryBackend {
   factory::Standard a{},b{};if(!factory_physical(3,&a)||!factory_identity())return reject("blocked_fresh_factory3k_identity");gauge_delay_ms(1000);
   if(!factory_physical(3,&b)||!factory_identity()||a.dc!=b.dc||a.fcc!=b.fcc||a.op!=b.op)return reject("blocked_second_factory3k_sample");
   const uint32_t generation=loaded==1?w.decoded.generation+1:1;w.record={};w.record.generation=generation;w.record.mac=mac;w.record.before=b;
-  if(!factory_key(generation,w.key))return reject("blocked_generation_key");factory::initBackup(w.record,w.raw);
+  if(!factory_key(generation,w.key))return reject("blocked_generation_key");
+  factory::initBackup(w.record,w.raw);
   w.attempted=true;w.complete=false;w.live=false;w.reason="capturing_factory3k_public131";return true;
  }
  bool intent(uint16_t flags){w.record.flags|=flags;return factory_save()||reject("failed_intent_commit_readback");}
@@ -86,14 +91,19 @@ struct FactoryBackend {
   // Never send Seal for unknown security, CFG, CAL or uninitialized state.
   uint16_t op=0;if(!gauge_word(0x3a,op)||!factory::safe(op))return reject("failed_cleanup_unknown_cfg_cal");
   if(((op>>1)&3)==3)return true;
-  if(!w.accessTouched)return reject("failed_cleanup_unowned_access");gauge_delay_ms(5000);
-  if(!gauge_word(0x3a,op)||!factory::safe(op))return reject("failed_cleanup_after_grace_unsafe");if(((op>>1)&3)==3)return true;
-  if(w.sealAttempted)return reject("failed_cleanup_seal_once_cap");w.sealAttempted=true;
+  if(!w.accessTouched)return reject("failed_cleanup_unowned_access");
+  gauge_delay_ms(5000);
+  if(!gauge_word(0x3a,op)||!factory::safe(op))return reject("failed_cleanup_after_grace_unsafe");
+  if(((op>>1)&3)==3)return true;
+  if(w.sealAttempted)return reject("failed_cleanup_seal_once_cap");
+  w.sealAttempted=true;
   const bool sent=gauge_access_word(AccessWord::Seal);const bool observed=gauge_wait_security(3);return (sent&&observed)||reject("failed_cleanup_seal_once");
  }
  bool final(){return (factory_physical(3,&w.record.after)&&factory_identity())||reject("failed_final_factory3k_identity");}
  bool backup(){
-  if(!factory::validBackup(w.raw,w.record))return reject("failed_backup_shape");nvs_handle_t h=0;if(nvs_open(factory::nvsNamespace,NVS_READWRITE,&h)!=ESP_OK)return reject("failed_backup_open");
+  if(!factory::validBackup(w.raw,w.record))return reject("failed_backup_shape");
+  nvs_handle_t h=0;
+  if(nvs_open(factory::nvsNamespace,NVS_READWRITE,&h)!=ESP_OK)return reject("failed_backup_open");
   size_t n=w.io.size();auto e=nvs_get_blob(h,w.key,w.io.data(),&n);if(e==ESP_ERR_NVS_NOT_FOUND){e=nvs_set_blob(h,w.key,w.raw.data(),w.raw.size());if(e==ESP_OK)e=nvs_commit(h);if(e==ESP_OK){n=w.io.size();e=nvs_get_blob(h,w.key,w.io.data(),&n);}}
   nvs_close(h);return (e==ESP_OK&&n==w.io.size()&&w.io==w.raw&&factory::validBackup(w.io,w.record))||reject("failed_backup_collision_commit_readback");
  }

@@ -31,7 +31,9 @@ constexpr bool decode(const JournalBytes& b,const std::array<uint8_t,6>& mac,Jou
  Standard* ss[]={&v.before,&v.after};for(unsigned i=0;i<2;++i){auto& s=*ss[i];const auto* p=b.data()+32+i*14;s.dc=get16(p);s.fcc=get16(p+2);s.op=get16(p+4);s.mv=get16(p+6);s.temp=get16(p+8);s.rm=get16(p+10);s.soc=p[12];if(p[13])return false;}
  // Journal envelope records safe physical range; current/average were fresh
  // admission observations but are not reconstructed as historical measurements.
- if(!shape(v))return false;j=v;return true;
+ if(!shape(v))return false;
+ j=v;
+ return true;
 }
 constexpr void initBackup(const Journal& j,BackupBytes& b){b={};b[0]='F';b[1]='3';b[2]='B';b[3]='1';b[4]=1;put32(b.data()+8,j.generation);for(unsigned i=0;i<6;++i)b[12+i]=j.mac[i];put16(b.data()+18,0x220);put16(b.data()+20,3);put16(b.data()+22,4);put16(b.data()+24,131);for(size_t i=0;i<131;++i){const auto& f=mosaico_gauge_recovery::layout[i];put16(b.data()+64+i*7,f.address);b[66+i*7]=f.width;}}
 constexpr uint32_t sourceCrc(const BackupBytes& b){return crc(b.data()+64,917);}
@@ -39,7 +41,9 @@ constexpr void sealBackup(BackupBytes& b){put32(b.data()+28,sourceCrc(b));put32(
 constexpr bool validBackup(const BackupBytes& b,const Journal& j){
  if(b[0]!='F'||b[1]!='3'||b[2]!='B'||b[3]!='1'||b[4]!=1||get32(b.data()+8)!=j.generation||get16(b.data()+18)!=0x220||get16(b.data()+20)!=3||get16(b.data()+22)!=4||get16(b.data()+24)!=131||get32(b.data()+28)!=j.sourceCrc||sourceCrc(b)!=j.sourceCrc||get32(b.data()+981)!=crc(b.data(),981))return false;
  for(unsigned i=0;i<6;++i)if(b[12+i]!=j.mac[i])return false;
- for(unsigned i=5;i<8;++i)if(b[i])return false;for(unsigned i=26;i<28;++i)if(b[i])return false;for(unsigned i=32;i<64;++i)if(b[i])return false;
+ for(unsigned i=5;i<8;++i)if(b[i])return false;
+ for(unsigned i=26;i<28;++i)if(b[i])return false;
+ for(unsigned i=32;i<64;++i)if(b[i])return false;
  for(size_t i=0;i<131;++i){const auto& f=mosaico_gauge_recovery::layout[i];const auto* p=b.data()+64+i*7;if(get16(p)!=f.address||p[2]!=f.width)return false;for(unsigned k=f.width;k<4;++k)if(p[3+k])return false;}
  return true;
 }
