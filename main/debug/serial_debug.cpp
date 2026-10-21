@@ -2193,6 +2193,15 @@ void SerialDebug::printStatus()
         static_cast<unsigned long>(ble.wirelessUsageAccepted), static_cast<unsigned long>(ble.wirelessUsageRejected),
         static_cast<unsigned long>(ble.queuePending), static_cast<unsigned long>(ble.halfOpenRecoveries));
     const Hal::PerformanceDiagnostics performance = GetHAL().performanceDiagnostics();
+#ifdef MOSAICO_BOARD
+    // Read-only instantaneous health inputs. Do NOT duplicate the expensive
+    // integrity sweep or modify the OTA health criterion/deadline.
+    debugPrintf("DBG STATUS ota_app_ready=%d internal_free=%lu internal_largest=%lu psram_free=%lu\r\n",
+                _app.otaReady(),
+                static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+#endif
     debugPrintf(
         "DBG STATUS perf_lvgl_core=%d perf_tx_core=%d lvgl_calls=%lu lvgl_max_us=%lu touch_reads=%lu "
         "touch_gap_max_us=%lu queue_high=%lu tx_max_us=%lu tx_total_us=%lu\r\n",
