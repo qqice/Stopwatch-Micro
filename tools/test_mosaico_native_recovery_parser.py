@@ -1,5 +1,5 @@
 """Execute the extracted production console parser; no device or private gauge data."""
-import tempfile,subprocess,struct,sys,unittest
+import tempfile,subprocess,struct,sys,unittest,os
 from pathlib import Path
 import test_mosaico_gauge_scale_backend as base
 ROOT=base.ROOT
@@ -34,7 +34,7 @@ extern "C" void _start(){
    for name,text in base.HEADERS.items():(td/name).write_text(text)
    src=td/'parser.cpp';src.write_text(code);elf=td/'parser.elf'
    args=[str(base.CLANG),'--target=riscv32-unknown-elf','-march=rv32im','-mabi=ilp32','-std=c++20','-O1','-ffunction-sections','-fdata-sections','-fno-builtin','-fno-exceptions','-fno-rtti','-nostdinc++','-nostdlib','-I'+str(td),str(src),'--ld-path='+str(base.CLANG.parent/'ld.lld.exe'),'-Wl,--gc-sections','-Wl,-e,_start','-Wl,-Ttext=0x10000','-o',str(elf)]
-   run=subprocess.run(args,capture_output=True,text=True);self.assertEqual(run.returncode,0,run.stderr)
+   run=subprocess.run(args,capture_output=True,text=True,env={**os.environ,"TMP":str(td),"TEMP":str(td)});self.assertEqual(run.returncode,0,run.stderr)
    raw=elf.read_bytes()
   sys.path.insert(0,str(ROOT/'.artifacts/tools/unicorn-2.1.4-private-001/package'))
   from unicorn import Uc,UC_ARCH_RISCV,UC_MODE_RISCV32

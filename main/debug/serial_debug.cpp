@@ -1367,6 +1367,23 @@ void SerialDebug::handleLine(char* line)
         result("display-test-frequency", "PASS", details);
         return;
     }
+    if (std::strcmp(command, "gauge-factory-audit") == 0) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        const char* value=action?::strtok_r(nullptr," \t",&save):nullptr;
+        if(!action)action="status";
+        const bool status=!std::strcmp(action,"status"),capture=!std::strcmp(action,"capture");
+        const bool field=!std::strcmp(action,"field");uint32_t index=0;
+        const bool valid=status?!value:capture?(value&&!std::strcmp(value,"CONFIRM")&&
+            !(_writer&&_writer->_reply_uart)):field&&parseUnsignedStrict(value,0,130,index);
+        if(!valid||::strtok_r(nullptr," \t",&save)){
+            result(command,"FAIL","expected=status|capture_CONFIRM_CDC_only|field_0..130 readonly_parameters=1");return;
+        }
+        char details[1024]{};
+        const bool ok=status?GetHAL().gaugeFactoryAuditStatus(details,sizeof(details)):
+            capture?GetHAL().gaugeFactoryAuditCapture(details,sizeof(details)):
+                GetHAL().gaugeFactoryAuditField(index,details,sizeof(details));
+        result(command,ok?"PASS":"FAIL",details);return;
+    }
     if (std::strcmp(command, "gauge-native-recovery") == 0) {
         const char* action=::strtok_r(nullptr," \t",&save);
         const char* confirm=action?::strtok_r(nullptr," \t",&save):nullptr;
@@ -2171,6 +2188,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP gauge-fcc-status no_arguments=1 readonly=1 journal_existence_explicit=1\r\n");
     debugPrintf("DBG HELP nand-dma no_arguments=1 readonly_ram=1 no_storage_io=1\r\n");
     debugPrintf("DBG HELP gauge-native-recovery evidence | resolve CONFIRM <8hexCRC> explicit_ram_only=1 failed_records_preserved=1\r\n");
+    debugPrintf("DBG HELP gauge-factory-audit status | capture CONFIRM (CDC_only) | field <0..130> read_only_parameters=1 separate_backup=1\r\n");
     debugPrintf("DBG HELP gauge-scale status | prepare CONFIRM | restore-plan | observed <index0..130> | images <signed_manifests_base64> | apply CONFIRM_EXTERNAL_POWER | restore CONFIRM bounded_x2_trial=1 no_SOC_OCV_RESET=1\r\n");
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
     debugPrintf("DBG HELP gauge-trace status | arm CONFIRM | stop | export | clear CONFIRM | checkpoint CONFIRM queued_not_persisted=1 gauge_parameter_writes=0\r\n");
