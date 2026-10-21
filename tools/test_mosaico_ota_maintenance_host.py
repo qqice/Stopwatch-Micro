@@ -51,7 +51,18 @@ class Client:
    else:d='maintenance=1 grant=1 sha='+SHA
   elif text=='debug ota-maintenance status':
    if self.mode=='expired':d='maintenance=1 grant=0 selected=1 ttl_ms=0 sha='+SHA
-   elif self.observations>=4:d='maintenance=0 grant=0 selected=0 ttl_ms=0 sha=-'
+   elif self.observations>=4:
+    if self.mode=='postboot_none':return None
+    if self.mode=='postboot_timeout':raise TimeoutError('synthetic postboot status timeout')
+    if self.mode=='postboot_oserror':raise OSError('synthetic postboot status unavailable')
+    d={'postboot_fail':'maintenance=0 grant=0',
+       'postboot_missing_maintenance':'grant=0',
+       'postboot_missing_grant':'maintenance=0',
+       'postboot_missing_both':'',
+       'postboot_maintenance_on':'maintenance=1 grant=0',
+       'postboot_grant_on':'maintenance=0 grant=1',
+       'postboot_both_on':'maintenance=1 grant=1'}.get(self.mode,'maintenance=0 grant=0 selected=0 ttl_ms=0 sha=-')
+    if self.mode=='postboot_fail':status='FAIL'
    else:d='maintenance=1 grant=1 selected=0 ttl_ms=590000 sha='+SHA
   elif text=='debug ota-maintenance power':d='reason=maintenance_unsafe_power cached_only=1 no_i2c=1 no_power_proof=1'
   elif text=='debug status':
@@ -90,13 +101,19 @@ class MaintenanceTests(unittest.TestCase):
    allowed={'debug ota-status','debug display-wake','debug status','debug ping',
             'debug ota-maintenance status','debug ota-maintenance power',REQUEST}
    self.assertTrue(set(c.commands)<=allowed)
-   if mode in ('reject','wrong_fw','expired','close_fail','wrong_hash','invalid_preflight'):
+   if mode in ('reject','wrong_fw','expired','close_fail','wrong_hash','invalid_preflight') or mode.startswith('postboot_'):
     self.assertIsNotNone(failure);self.assertFalse(events[-1]['accepted'])
+    if mode.startswith('postboot_'):
+     self.assertIn('not accepted',str(failure))
    else:
     self.assertIsNone(failure);self.assertTrue(events[-1]['accepted'])
     self.assertIn('MAINTENANCE_NETWORK_OTA_ACCEPTED',output.getvalue())
    return c.commands,events,output.getvalue()
- def test_uart_exact_request_once(self):self.run_case()
+ def test_uart_exact_request_once(self):
+  commands,_,_=self.run_case()
+  self.assertEqual(commands,['debug ota-status','debug display-wake',REQUEST,
+                             'debug ota-status','debug ota-status','debug ota-status',
+                             'debug status','debug ota-maintenance status'])
  def test_cdc_identity_and_mode(self):self.run_case(uart=False)
  def test_lost_ack_barrier_readonly_eventual_valid(self):
   commands,events,_=self.run_case('lost_ack')
@@ -117,6 +134,25 @@ class MaintenanceTests(unittest.TestCase):
   _,events,_=self.run_case('expired');self.assertTrue(any(e['event']=='needs_operator_grant' for e in events))
  def test_close_failure_final_log_still_fsynced(self):self.run_case('close_fail')
  def test_preflight_idle_valid_before_request(self):self.run_case('invalid_preflight')
+ def assert_postboot_rejected(self,modes):
+  for mode in modes:
+   with self.subTest(mode=mode):
+    commands,events,output=self.run_case(mode)
+    rejected=next(e for e in events if e['event']=='not_accepted')
+    self.assertEqual((rejected['accepted'],rejected['running'],rejected['state'],rejected['sdk_valid'],rejected['firmware']),
+                     (False,'ota_1','VALID',True,VERSION))
+    self.assertFalse(next(e for e in events if e['event']=='postboot_maintenance_status')['grant_off_verified'])
+    self.assertFalse(any(e['event']=='accepted' for e in events))
+    self.assertNotIn('MAINTENANCE_NETWORK_OTA_ACCEPTED',output)
+    self.assertEqual(commands.count(REQUEST),1)
+    self.assertEqual(commands[-2:],['debug status','debug ota-maintenance status'])
+    self.assertFalse(any('reboot' in s or 'grant ' in s or ' clear' in s for s in commands))
+ def test_postboot_unavailable_not_accepted(self):
+  self.assert_postboot_rejected(('postboot_none','postboot_timeout','postboot_oserror'))
+ def test_postboot_failed_or_incomplete_off_not_accepted(self):
+  self.assert_postboot_rejected(('postboot_fail','postboot_missing_maintenance','postboot_missing_grant','postboot_missing_both'))
+ def test_postboot_maintenance_or_grant_on_not_accepted(self):
+  self.assert_postboot_rejected(('postboot_maintenance_on','postboot_grant_on','postboot_both_on'))
  def test_flags_validated_before_inventory_or_open(self):
   with tempfile.TemporaryDirectory(prefix='.ota-maintenance-args-',dir=ROOT) as td:
    log=Path(td)/'new.jsonl'

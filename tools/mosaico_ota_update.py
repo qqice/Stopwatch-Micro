@@ -38,7 +38,8 @@ def maintenance_update(args, serial_number):
   record('command',command=command,timeout_s=timeout)
   try:
    with contextlib.redirect_stdout(output):reply=client.command(command,expected,timeout)
-   record('response',command=command,status=reply.status,details=reply.details,raw=output.getvalue())
+   record('response',command=command,status=reply.status if reply is not None else None,
+          details=reply.details if reply is not None else None,raw=output.getvalue())
    return reply,output.getvalue()
   except BaseException as exc:
    record('command_error',command=command,error=repr(exc),raw=output.getvalue())
@@ -133,9 +134,13 @@ def maintenance_update(args, serial_number):
     if version_reply.status!='PASS' or versions!=[args.expected_version]:
      raise SystemExit('Opposite slot VALID but firmware version mismatch; completion NOT accepted')
     grant=diagnostic('debug ota-maintenance status','ota-maintenance')
+    grant_off_verified=grant is not None and grant.status=='PASS' and fields(grant).get('maintenance')=='0' and fields(grant).get('grant')=='0'
     record('postboot_maintenance_status',available=grant is not None,
-           grant_off_verified=grant is not None and grant.status=='PASS' and
-           fields(grant).get('maintenance')=='0' and fields(grant).get('grant')=='0')
+           grant_off_verified=grant_off_verified)
+    if not grant_off_verified:
+     record('not_accepted',accepted=False,running=target,state='VALID',sdk_valid=True,
+            firmware=args.expected_version,grant_off_verified=False)
+     raise SystemExit('Opposite slot SDK VALID but maintenance/grant OFF unverified; not accepted; no retry or renewal')
     accepted=True
     record('accepted',running=target,state='VALID',firmware=args.expected_version,
            request_ack_unknown=request_ack_unknown)
