@@ -31,7 +31,7 @@ struct Owner {
  MosaicoWifiRetry::Policy wifiRetry;
  Twt _twt;
  Flag _force_refresh;
- bool wasLocked=false, updateWindow=false, _wifi_scan_complete=true;
+ bool wasLocked=false, updateWindow=false, _wifi_scan_complete=true, gaugeHold=false;
  bool wifiRunning=true, connected=true, tailnetReady=true;
  unsigned _accepted=0, logs=0, cycleStarts=0;
  int64_t nextRefresh=0, windowDeadline=0, refreshBaseUs=0;
@@ -123,7 +123,7 @@ static_assert(ownerTests());
 
     def test_owner_path_and_bounded_private_logs(self):
         lock = SOURCE.index('firstQuotaBootstrap = firstQuotaRefresh.takeOnLock(_accepted != 0);')
-        opening = SOURCE.index('if (locked && !updateWindow && (_force_refresh.exchange(false) || now >= nextRefresh))', lock)
+        opening = SOURCE.index('if (locked && !gaugeHold && !updateWindow && (_force_refresh.exchange(false) || now >= nextRefresh))', lock)
         off = SOURCE.index('if (locked && !updateWindow) {', opening)
         self.assertLess(lock, opening)
         self.assertLess(opening, off)

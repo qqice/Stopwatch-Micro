@@ -35,7 +35,8 @@ struct Fixture {
  constexpr bool exitCfg() {'''+body+r'''
 };
 constexpr bool cases(){
- static_assert(sizeof(Standard)==48);static_assert(sizeof(Engine)==72);
+ static_assert(sizeof(Standard)==80);static_assert(sizeof(Engine)==104);
+ static_assert(offsetof(Standard,units)==48);static_assert(offsetof(Engine,units)==72);
  for(unsigned fault=0;fault<7;++fault){
   Fixture f;
   if(fault==1)f.isCold=false;
@@ -134,7 +135,7 @@ using namespace MosaicoSystemLog::Model;
 struct Harness {
  Record captured{};bool critical=false;
  constexpr Record record(Type type,uint64_t ms){Record r;r.type=type;r.monotonicMs=ms;r.epoch=123;r.flags=1;return r;}
- constexpr bool enqueue(const Record& r,bool urgent){captured=r;critical=urgent;return true;}
+ constexpr bool enqueueWithUnits(const mosaico_gauge_unit_tag::Tag&,const Record& r,bool urgent){captured=r;critical=urgent;return true;}
 '''+pack+r'''
 };
 constexpr bool cases(){

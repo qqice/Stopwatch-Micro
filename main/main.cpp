@@ -119,13 +119,14 @@ extern "C" void app_main(void)
 #endif
 #ifdef MOSAICO_BOARD
         TouchSleep::service(GetNetworkQuota().displayLocked(), MosaicoOta::busy() || MosaicoOta::healthPending());
-        MosaicoSessions::service(GetNetworkQuota().displayLocked(), MosaicoOta::busy() || MosaicoOta::healthPending());
+        MosaicoSessions::service(GetNetworkQuota().displayLocked(), MosaicoOta::busy() || MosaicoOta::healthPending() || GetHAL().gaugeScaleTrialActive());
         MosaicoOta::healthPoll(ota_app->otaReady());
         const auto sleepBle=GetCodexMicroBle().diagnostics();
         mosaico_console_usb_service_sleep();
         StandbySleep::service(MosaicoOta::busy() || MosaicoOta::healthPending(), sleepBle.advertising || sleepBle.connected);
         GetNetworkQuota().serviceStandbySleep();
         PowerbankKeepalive::serviceAutomatic();
+        GetHAL().gaugeScalePoll(); // Bounded trial restore; no work when inactive.
         GaugeDischargeTrace::service();
         MosaicoSystemLog::service();
         // The monitor has no low-latency remote-control path. Keep its 10Hz

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <type_traits>
+#include "mosaico_gauge_unit_tag.h"
 namespace mosaico_gauge_engine {
 enum Valid : uint16_t { Cedv=1, Smooth=2, Identity=4, DefinitionMatch=8,
  CedvTx=16, CedvEcho=32, CedvData=64, SmoothTx=128, SmoothEcho=256, SmoothData=512,
@@ -11,6 +12,7 @@ struct Snapshot {
  uint64_t sampledUs;
  uint16_t validMask,echo73,echo76,echo02;
  uint8_t phase,outcome,rawCedv[23],rawSmooth[17],rawIdentity[11];
+ mosaico_gauge_unit_tag::Tag units;
 };
 static_assert(std::is_trivial<Snapshot>::value && std::is_standard_layout<Snapshot>::value);
 constexpr uint16_t leWord(const uint8_t* p,size_t o){return uint16_t(p[o])|(uint16_t(p[o+1])<<8);}

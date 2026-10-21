@@ -10,7 +10,7 @@ from serial_debug_test import DebugClient
 
 PAGE_MAGIC=0x31474c4d
 TYPES={1:'boot',2:'gauge',3:'gauge_boot',4:'network',5:'power',6:'ota',7:'heap',
-       8:'warning_fingerprint',9:'loss',10:'gauge_boot_outcome',11:'panic',12:'tcp',13:'gauge_engine'}
+       8:'warning_fingerprint',9:'loss',10:'gauge_boot_outcome',11:'panic',12:'tcp',13:'gauge_engine',14:'gauge_unit_context'}
 
 def fields(result):
     return dict(x.split('=',1) for x in result.details.split() if '=' in x)
@@ -35,6 +35,11 @@ def decode_page(data,expected):
         typ,flags,ms,epoch,*a=struct.unpack_from('<HHQQ11I',data,60+i*64)
         r=dict(page_seq=seq,page_boot=boot,index=i,type=TYPES.get(typ,'unknown'),type_id=typ,
                flags=flags,monotonic_ms=ms,epoch=epoch,args=a)
+        if typ==14:
+            factor=a[0]|(a[1]<<32)
+            r['unit_context']={'factor':factor-(1<<64) if factor&(1<<63) else factor,
+                'unit_epoch':a[2]|(a[3]<<32),'generation':a[4]|(a[5]<<32),
+                'verified':bool(a[6]),'phase':a[7],'next_record_only':a[8]==1}
         if typ in (2,3):
             r['gauge']=dict(valid_mask=a[0],phase=a[1]&255,outcome=(a[1]>>8)&255,mode=(a[1]>>16)&255,
                 soc=a[2],remaining_mah=a[3],fcc_mah=a[4],design_mah=a[5],voltage_mv=a[6],
@@ -91,13 +96,37 @@ def read_page(client,seq,timeout=40):
     decode_page(data,seq)
     return data
 
+def attach_unit_contexts(rows):
+    """Associate only an adjacent, same-boot/time prefix; never assume scale1.
+
+    Run after concatenating pages: a 64-byte prefix/payload pair may straddle
+    a page boundary. Raw fields/args remain untouched; old rows stay identical.
+    """
+    previous=None
+    for row in rows:
+        if row['type_id'] in (2,3,13):
+            row.pop('unit_context',None);row.pop('physical_units_verified',None)
+        if row['type_id'] in (2,3,13) and previous and previous['type_id']==14:
+            context=previous.get('unit_context',{})
+            if (context.get('next_record_only') and previous['page_boot']==row['page_boot']
+                    and previous['monotonic_ms']==row['monotonic_ms']):
+                row['unit_context']=dict(context)
+                factor=context.get('factor')
+                row['physical_units_verified']=bool(context.get('verified') and
+                    ((factor==1 and context.get('phase')==1) or
+                     (factor in (2,4) and context.get('phase')==3)))
+        previous=row
+    return rows
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--port',required=True);p.add_argument('--uart',action='store_true')
     p.add_argument('--output',type=Path,required=True,help='New private directory, never overwritten')
     p.add_argument('--latest',type=int,default=4,help='Newest N committed pages; frozen range at start')
+    p.add_argument('--page-timeout',type=int,default=130,help='Bounded per-chunk wait; covers the firmware 60s safety-admission retry')
     args=p.parse_args()
     if not 1<=args.latest<=8191:raise SystemExit('latest must be 1..8191')
+    if not 40<=args.page_timeout<=180:raise SystemExit('page-timeout must be 40..180')
     args.output.mkdir(parents=True,exist_ok=False)
     capture=io.StringIO();client=None;manifest={'complete':False,'pages':[]}
     try:
@@ -114,12 +143,13 @@ def main():
         manifest.update(status=s,first=max(first,last-args.latest+1),last=last)
         rows=[]
         for seq in range(manifest['first'],last+1) if last else ():
-            with contextlib.redirect_stdout(capture):data=read_page(client,seq)
+            with contextlib.redirect_stdout(capture):data=read_page(client,seq,timeout=args.page_timeout)
             name=f'page-{seq:020d}.bin'
             with (args.output/name).open('xb') as f:f.write(data)
             manifest['pages'].append(dict(seq=seq,file=name,sha256=hashlib.sha256(data).hexdigest()))
             rows.extend(decode_page(data,seq))
             print(f'PAGE_VERIFIED seq={seq} records={len(rows)}',flush=True)
+        attach_unit_contexts(rows)
         with (args.output/'records.jsonl').open('x',encoding='utf8') as f:
             for row in rows:f.write(json.dumps(row,separators=(',',':'))+'\n')
         manifest['complete']=True

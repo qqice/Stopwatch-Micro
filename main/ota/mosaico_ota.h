@@ -2,6 +2,9 @@
 #include <cstddef>
 #include <cstdint>
 namespace MosaicoOta {
+struct VerifiedImageDescriptor {uint32_t size;uint8_t hash[32];char version[32];};
+// Signature/layout verification ONLY. No discovery, requests or OTA-state writes.
+bool verifySignedImageDescriptor(const char* json,VerifiedImageDescriptor& out);
 enum class UiStage : uint8_t { Idle, Checking, Available, WaitingPower, Downloading, Verifying, ReadyInstall, Installing, ReadyReboot, BootChecking, Complete, Failed };
 struct UiSnapshot {
     uint32_t revision, size, received;

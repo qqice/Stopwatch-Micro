@@ -736,6 +736,9 @@ bool NetworkQuota::requestWifiRestart()
 }
 void NetworkQuota::serviceWifiSettings()
 {
+    // Retain queued settings until the bounded gauge trial has safely restored;
+    // a deferred reconnect/restart must not race its radio-off safety gate.
+    if(GetHAL().gaugeScaleTrialActive())return;
     // Same sole-owner safety gate as display persistence. Never hold the GUI
     // cache mutex over NVS operations or restart, never rebuild live netifs.
     if (MosaicoOta::busy() || MosaicoOta::healthPending()) return;
@@ -1538,7 +1541,11 @@ void NetworkQuota::run()
 #else
         esp_wifi_set_config(WIFI_IF_STA, &config) != ESP_OK ||
 #endif
+#ifdef MOSAICO_BOARD
+        (!GetHAL().gaugeScaleTrialActive() && esp_wifi_start() != ESP_OK)) {
+#else
         esp_wifi_start() != ESP_OK) {
+#endif
         ++_failures;
 #ifdef MOSAICO_BOARD
         MosaicoDisplay::startFallbackOwner();
@@ -1552,7 +1559,11 @@ void NetworkQuota::run()
     _wifi_scan_handler=esp_event_handler_register(WIFI_EVENT,WIFI_EVENT_SCAN_DONE,&NetworkQuota::scanEvent,this)==ESP_OK;
     MosaicoWifi::scrub(&config,sizeof(config));
 #endif
+#ifdef MOSAICO_BOARD
+    recordWifiRunning(!GetHAL().gaugeScaleTrialActive());
+#else
     recordWifiRunning(true);
+#endif
     esp_sntp_config_t timeConfig = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
 #ifdef MOSAICO_BOARD
     timeConfig.sync_cb = MosaicoClock::onSntpTime;
@@ -1633,7 +1644,13 @@ void NetworkQuota::run()
         if (MosaicoOta::busy() && MosaicoOta::requestAgeMs() > 120000)
             MosaicoOta::fail("network_ready_timeout");
 #endif
-        const bool locked = idleLocked();
+        const bool gaugeHold =
+#ifdef MOSAICO_BOARD
+            GetHAL().gaugeScaleTrialActive();
+#else
+            false;
+#endif
+        const bool locked = idleLocked() || gaugeHold;
         const int64_t now = esp_timer_get_time();
         int64_t refreshIntervalUs=RefreshIntervalUs;
         int64_t updateWindowUs=UpdateWindowUs;
@@ -1648,7 +1665,7 @@ void NetworkQuota::run()
         if (updateWindow) windowDeadline=std::min(windowDeadline,refreshBaseUs+updateWindowUs);
         // Network/OTA can close the lease, never reopen a stale GUI request.
         // Main-loop Sessions service is the sole advertising-enable owner.
-        if (!MosaicoSessions::enabled() || MosaicoOta::busy() || MosaicoOta::healthPending())
+        if (!MosaicoSessions::enabled() || MosaicoOta::busy() || MosaicoOta::healthPending() || gaugeHold)
             GetCodexMicroBle().requestRadioIdle(true);
 #else
         GetCodexMicroBle().requestRadioIdle(locked);
@@ -1676,7 +1693,8 @@ void NetworkQuota::run()
         if (!locked && wasLocked) { wifiRetry.reset(); _wifi_scan_complete=false; } // Explicit wake gets a fresh attempt.
 #endif
         wasLocked = locked;
-        if (locked && !updateWindow && (_force_refresh.exchange(false) || now >= nextRefresh)) {
+        if(gaugeHold)closeWindow(MosaicoTwt::CycleReason::Cancel);
+        if (locked && !gaugeHold && !updateWindow && (_force_refresh.exchange(false) || now >= nextRefresh)) {
             updateWindow   = true;
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
             recordTwtCycle(MosaicoTwt::CyclePhase::Start);
@@ -1718,7 +1736,7 @@ void NetworkQuota::run()
                     wait(1000);
                     continue;
                 }
-                if (!idleLocked()) continue;
+                if (!idleLocked()&&!gaugeHold) continue;
 #ifdef MOSAICO_BOARD
                 cancelWifiScan(); drainWifiScan();
 #endif
@@ -1744,7 +1762,7 @@ void NetworkQuota::run()
                 _connected    = false;
                 hadConnection = false;
             }
-            if (!idleLocked()) continue;
+            if (!idleLocked()&&!gaugeHold) continue;
             const auto ble = GetCodexMicroBle().diagnostics();
             if (GetCodexMicroBle().connected() || ble.advertising) {
                 setPhase(1);
@@ -1767,6 +1785,7 @@ void NetworkQuota::run()
 #endif
             const int64_t remaining = (nextRefresh - esp_timer_get_time()) / 1000;
             uint32_t waitMs = static_cast<uint32_t>(remaining > 0 ? remaining : 1);
+            if(gaugeHold)waitMs=1000; // No busy loop when a refresh deadline passes during the bounded trial.
 #ifdef MOSAICO_BOARD
             if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Deferred)
                 waitMs = std::min<uint32_t>(waitMs, 60000);
@@ -1779,6 +1798,12 @@ void NetworkQuota::run()
         }
         setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
         if (!_wifi_running) {
+#ifdef MOSAICO_BOARD
+            // Same lease as gauge mutation: no start/readiness race after a
+            // phase2 admission but before the Pending intent becomes visible.
+            struct RadioStartLease {bool held=MosaicoOta::tryStorageLease();~RadioStartLease(){if(held)MosaicoOta::releaseStorageLease();}} radioLease;
+            if(!radioLease.held||GetHAL().gaugeScaleTrialActive()){wait(100);continue;}
+#endif
             if (esp_wifi_start() != ESP_OK) {
                 setPhase(4);
                 wait(1000);

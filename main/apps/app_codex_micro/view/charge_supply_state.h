@@ -7,6 +7,9 @@ namespace mosaico_charge {
 // Without that anchor, exactly 100% SOC in the deadband selects the supply
 // profile (including cold boot); a drop to 99% releases this SOC-only inference.
 // Negative current or invalid telemetry clears both states. No USB/NVS state.
+// Input contract: HAL batteryPolicyTelemetry physical-policy mA, rounded away
+// from zero so strict integer +/-3 mA thresholds retain sub-mA semantics.
+// Never feed native scaled registers; invalid unit context must pass valid=false.
 struct ChargeSupplyState {
     bool external = false;
     bool chargedAnchor = false;

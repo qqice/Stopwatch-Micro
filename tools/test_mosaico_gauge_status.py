@@ -51,7 +51,7 @@ constexpr bool cases(){
      decodeMode(uint16_t(high<<8)|0x40,1)!=Discharge || decodeMode(uint16_t(high<<8),1)!=Unknown)return false;
  }
  Snapshot s{};s.gaugingStatus=0xa500;s.batteryStatus=1;s.mode=decodeMode(s.gaugingStatus,s.batteryStatus);
- return s.mode==Unknown&&s.gaugingStatus==0xa500&&s.batteryStatus==1&&s.validMask==0&&sizeof(s)<=48;
+ return s.mode==Unknown&&s.gaugingStatus==0xa500&&s.batteryStatus==1&&s.validMask==0&&sizeof(s)==80&&offsetof(Snapshot,units)==48;
 }
 static_assert(cases());
 ''')
@@ -60,10 +60,12 @@ static_assert(cases());
         diagnostic='constexpr void gauge_diagnostic_locked('+SOURCE.split('void gauge_diagnostic_locked(',1)[1].split('void sample_battery_locked(',1)[0]
         self.compile(r'''
 #include "mosaico_gauge_status_model.h"
+#include "mosaico_gauge_physical_model.h"
 struct Hal {using GaugeDiagnosticSnapshot=mosaico_gauge_status::Snapshot;};
 struct Fake {
  bool gauge=true;int fail=-1;
  constexpr uint64_t esp_timer_get_time(){return 1234;}
+ constexpr auto scale_unit_context_locked(){return mosaico_gauge_physical::UnitContext{1,2,3,mosaico_gauge_physical::Phase::Original,true};}
  constexpr bool gauge_word(uint8_t reg,uint16_t& out){
   if(reg==fail)return false;
   out=reg==0x0c?0xfffc:reg==0x14?0xffff:reg==0x0a?1:reg;return true;

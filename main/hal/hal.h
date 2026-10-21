@@ -7,6 +7,7 @@
 #include "mosaico/mosaico_sleep_io_model.h"
 #include "mosaico/mosaico_gauge_status_model.h"
 #include "mosaico/mosaico_gauge_engine_model.h"
+#include "mosaico/mosaico_gauge_physical_model.h"
 #include "utils/button/Button_Class.hpp"
 #include <system_config.h>
 #include <memory>
@@ -133,7 +134,13 @@ public:
         bool temperatureValid = false;
         uint16_t rawCoulombMah = 0;
         bool rawCoulombValid = false;
+        // Context captured with this native sample, never inferred by readers.
+        int64_t unitFactor = 0;
+        uint64_t unitEpoch = 0, unitGeneration = 0;
+        bool unitVerified = false;
+        bool knownSafetyCalibrationMismatch = false; // Detected anomaly, not a claim of absolute calibration.
     };
+    using PhysicalBatterySnapshot = mosaico_gauge_physical::Snapshot<BatteryTelemetry>;
 
     struct MosaicoClockDiagnostics {
         uint32_t cpuHz = 0;
@@ -163,6 +170,18 @@ public:
     // RAM-only copy; phase/validMask distinguish unavailable boot observations.
     void gaugeBootDiagnostic(GaugeDiagnosticSnapshot& before, GaugeDiagnosticSnapshot& after) const;
     BatteryTelemetry batteryTelemetry(bool refresh = false);
+    PhysicalBatterySnapshot physicalBatteryTelemetry(bool refresh = false);
+    // Dedicated UI/OTA copy. Raw telemetry/history are NEVER scaled in place.
+    BatteryTelemetry batteryPolicyTelemetry(bool refresh = false);
+    bool gaugeScalePrepare(char* details,size_t size);
+    bool gaugeScaleStatus(char* details,size_t size);
+    bool gaugeScaleRestorePlan(char* details,size_t size);
+    bool gaugeScaleObservedField(size_t index,char* details,size_t size);
+    bool gaugeScaleImages(const char* proof,char* details,size_t size);
+    bool gaugeScaleApply(char* details,size_t size);
+    bool gaugeScaleRestore(char* details,size_t size);
+    void gaugeScalePoll();
+    bool gaugeScaleTrialActive() const;
     // Nonblocking recorder sample. False means no sample (lock/OTA/gauge gate);
     // true may contain valid=false/temperatureValid=false for an I2C failure.
     bool gaugeTraceTrySample(BatteryTelemetry& sample);
@@ -216,6 +235,17 @@ public:
     }
     void gaugeBootDiagnostic(GaugeDiagnosticSnapshot& before, GaugeDiagnosticSnapshot& after) const { before={}; after={}; }
     BatteryTelemetry batteryTelemetry(bool = false) { return {}; }
+    PhysicalBatterySnapshot physicalBatteryTelemetry(bool = false) { return {}; }
+    BatteryTelemetry batteryPolicyTelemetry(bool = false) { return {}; }
+    bool gaugeScalePrepare(char*,size_t) { return false; }
+    bool gaugeScaleStatus(char*,size_t) { return false; }
+    bool gaugeScaleRestorePlan(char*,size_t) { return false; }
+    bool gaugeScaleObservedField(size_t,char*,size_t) { return false; }
+    bool gaugeScaleImages(const char*,char*,size_t) { return false; }
+    bool gaugeScaleApply(char*,size_t) { return false; }
+    bool gaugeScaleRestore(char*,size_t) { return false; }
+    void gaugeScalePoll() {}
+    bool gaugeScaleTrialActive() const { return false; }
     bool gaugeTraceTrySample(BatteryTelemetry&) { return false; }
     bool gaugeSetNominalCapacity(uint16_t, uint16_t, bool, char* reason, size_t reasonSize)
     {

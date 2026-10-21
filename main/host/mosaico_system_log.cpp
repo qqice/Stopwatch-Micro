@@ -46,6 +46,17 @@ vprintf_like_t originalPrint=nullptr;
 uint64_t nowMs(){return uint64_t(esp_timer_get_time())/1000;}
 Record record(Type type,uint64_t sampled=UINT64_MAX){Record r;r.type=type;r.monotonicMs=sampled==UINT64_MAX?nowMs():sampled;const auto c=MosaicoClock::snapshot();r.epoch=c.valid?uint64_t(c.epoch):0;r.flags=c.valid?1:0;return r;}
 bool enqueue(const Record& r,bool critical=false){if(!storage||queueLock.test_and_set(std::memory_order_acquire)){++drops;return false;}bool ok=storage->queue.push(r);queued=storage->queue.count;if(!ok)++drops;queueLock.clear(std::memory_order_release);if(critical)urgent=true;return ok;}
+bool enqueueWithUnits(const mosaico_gauge_unit_tag::Tag& units,const Record& r,bool critical){
+ auto context=record(Type::UnitContext,r.monotonicMs);
+ const auto factor=uint64_t(units.factor);
+ context.args={uint32_t(factor),uint32_t(factor>>32),uint32_t(units.epoch),uint32_t(units.epoch>>32),
+  uint32_t(units.generation),uint32_t(units.generation>>32),uint32_t(units.verified),units.phase,1,0,0};
+ if(!storage||queueLock.test_and_set(std::memory_order_acquire)){++drops;return false;}
+ // Both records or neither: never leave a misleading context without payload.
+ if(storage->queue.count>Capacity-2){++drops;queueLock.clear(std::memory_order_release);return false;}
+ const bool ok=storage->queue.push(context)&&storage->queue.push(r);
+ queued=storage->queue.count;queueLock.clear(std::memory_order_release);if(critical)urgent=true;return ok;
+}
 // Never inspect variadic arguments: they may contain credentials, tags or bodies.
 // A global try guard handles recursion AND concurrent callers without blocking.
 int logHook(const char* fmt,va_list ap){
@@ -66,17 +77,20 @@ bool admitted(){
  if(!running||esp_ota_get_state_partition(running,&state)!=ESP_OK||state!=ESP_OTA_IMG_VALID){gate=2;return false;}
  uint8_t p=0;nvs_handle_t h;const auto e=nvs_open("gauge_trace",NVS_READONLY,&h);if(e==ESP_OK){nvs_get_u8(h,"nand_v1",&p);nvs_close(h);}policy=p;
  if(p!=2){gate=3;return false;}
- Hal::BatteryTelemetry t{};if(!GetHAL().gaugeTraceTrySample(t)||!powerGate(otaIdle(),true,true,t.valid,t.temperatureValid,t.voltageMv,t.temperatureDeciK)){gate=4;return false;}
+ Hal::BatteryTelemetry t{};if(!GetHAL().gaugeTraceTrySample(t)||
+    t.knownSafetyCalibrationMismatch||
+    (t.operationStatus&0x0401)||!(t.operationStatus&0x20)||
+    !powerGate(otaIdle(),true,true,t.valid,t.temperatureValid,t.voltageMv,t.temperatureDeciK)){gate=4;return false;}
  gate=0;return true;
 }
 void failed(const MosaicoNandStore::Result& r,uint64_t now){storeFailureStage=uint32_t(r.stage);lastError=uint32_t(r.error!=ESP_OK?r.error:r.cleanupError);cleanupError=uint32_t(r.cleanupError);lastCode=uint32_t(r.logCode);++failures;const uint64_t delay=60000ULL<<(backoff<6?backoff++:6);nextAttempt=now+delay;}
-bool gauge(const Hal::GaugeDiagnosticSnapshot& s){auto r=record(s.phase==mosaico_gauge_status::Explicit?Type::Gauge:Type::GaugeBoot,s.sampledUs/1000);r.args={s.validMask,uint32_t(s.phase)|(uint32_t(s.outcome)<<8)|(uint32_t(s.mode)<<16),s.rawSoc,s.remainingMah,s.fullMah,s.designMah,s.voltageMv,uint32_t(uint16_t(s.currentMa))|(uint32_t(uint16_t(s.averageCurrentMa))<<16),uint32_t(s.rawCoulombMah)|(uint32_t(s.cycleCount)<<16),uint32_t(s.operationStatus)|(uint32_t(s.batteryStatus)<<16),uint32_t(s.gaugingStatus)|(uint32_t(s.rawEcho16)<<16)};if(s.phase!=mosaico_gauge_status::Explicit){r.epoch=0;r.flags&=~uint16_t(1);}return enqueue(r,s.phase!=mosaico_gauge_status::Explicit);}
+bool gauge(const Hal::GaugeDiagnosticSnapshot& s){auto r=record(s.phase==mosaico_gauge_status::Explicit?Type::Gauge:Type::GaugeBoot,s.sampledUs/1000);r.args={s.validMask,uint32_t(s.phase)|(uint32_t(s.outcome)<<8)|(uint32_t(s.mode)<<16),s.rawSoc,s.remainingMah,s.fullMah,s.designMah,s.voltageMv,uint32_t(uint16_t(s.currentMa))|(uint32_t(uint16_t(s.averageCurrentMa))<<16),uint32_t(s.rawCoulombMah)|(uint32_t(s.cycleCount)<<16),uint32_t(s.operationStatus)|(uint32_t(s.batteryStatus)<<16),uint32_t(s.gaugingStatus)|(uint32_t(s.rawEcho16)<<16)};if(s.phase!=mosaico_gauge_status::Explicit){r.epoch=0;r.flags&=~uint16_t(1);}return enqueueWithUnits(s.units,r,s.phase!=mosaico_gauge_status::Explicit);}
 bool engine(const Hal::GaugeEngineSnapshot& s){
  auto r=record(Type::GaugeEngine,s.sampledUs/1000);
  r.args[0]=uint32_t(s.validMask)|(uint32_t(s.phase)<<16)|(uint32_t(s.outcome)<<24);
  for(size_t i=0;i<40;++i){const uint8_t byte=i<23?s.rawCedv[i]:s.rawSmooth[i-23];r.args[1+i/4]|=uint32_t(byte)<<((i%4)*8);}
  if(s.phase!=mosaico_gauge_status::Explicit){r.epoch=0;r.flags&=~uint16_t(1);}
- return enqueue(r,s.phase!=mosaico_gauge_status::Explicit);
+ return enqueueWithUnits(s.units,r,s.phase!=mosaico_gauge_status::Explicit);
 }
 void changed(Record& prior,const Record& next,bool critical=false){if(prior.args!=next.args){enqueue(next,critical);prior=next;}}
 void collect(uint64_t now){

@@ -12,7 +12,8 @@ class ChargeSupplyUiTests(unittest.TestCase):
         self.assertIn('const bool chargeProfile = _chargeSupply.external;',profile)
         self.assertNotIn('tud_',profile)
         battery=CPP.split('void CodexMicroView::refreshBattery(',1)[1].split('void CodexMicroView::refreshClock',1)[0]
-        self.assertEqual(battery.count('batteryTelemetry(false)'),1)
+        self.assertEqual(battery.count('batteryPolicyTelemetry(false)'),1)
+        self.assertNotRegex(CPP,r'\bbatteryTelemetry\s*\(')
         self.assertNotIn('isBatteryCharging()',battery)
         self.assertIn('_chargeSupply.update(telemetry.valid, telemetry.currentMa, telemetry.reportedSoc)',battery)
         self.assertIn('PowerbankKeepalive::observeSupply(telemetry.valid, _chargeSupply.external)',battery)
@@ -57,7 +58,7 @@ constexpr bool boundaries() {
 }
 struct Telemetry { bool valid=true;int currentMa=0;uint8_t reportedSoc=99; };
 struct Hal { Telemetry sample;int reads=0;bool forced=false;
- constexpr Telemetry batteryTelemetry(bool refresh){++reads;forced=refresh;return sample;}
+ constexpr Telemetry batteryPolicyTelemetry(bool refresh){++reads;forced=refresh;return sample;}
 };
 namespace PowerbankKeepalive {
  constexpr void observeSupply(bool valid,bool external) { (void)valid;(void)external; }

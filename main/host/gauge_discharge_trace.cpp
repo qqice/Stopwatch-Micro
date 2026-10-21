@@ -213,6 +213,10 @@ void service(){
     Hal::BatteryTelemetry t;
     // Admission failure is not a gauge read failure and must not produce a false invalid row.
     if(!GetHAL().gaugeTraceTrySample(t))return;
+      if(GetHAL().gaugeScaleTrialActive())return;
+      // Legacy schema2 intentionally remains native-1 only. The independent
+      // NAND system journal records scaled native readings with unit context.
+      if(t.unitVerified&&t.unitFactor!=1)return;
     const Sample s=convert(t,now);
     if(model.due(now) && !corrupt)model.append(s);
     if(!writable(s) || otaBlocked())return;

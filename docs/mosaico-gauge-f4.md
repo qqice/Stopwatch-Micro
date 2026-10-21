@@ -48,9 +48,9 @@ Run the portable tests with the existing SDK Python:
 & C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe -m unittest discover -s tools -p test_mosaico_gauge_scaling_plan.py
 ```
 
-## Units preparation (not production-integrated)
+## Original pure units preparation (historical baseline)
 
-`main/hal/mosaico/mosaico_gauge_units_model.h` is an unused pure C++ header,
+The initial `main/hal/mosaico/mosaico_gauge_units_model.h` work was a pure C++ header,
 not a runtime switch or calibration writer. Its factor must explicitly be 1, 2,
 or 4. Current and capacity converters validate the signed-int16 / unsigned-int16
 register domains and return exact integer microamps / microamp-hours, respectively.
@@ -107,4 +107,5 @@ Full input and complete arithmetic do not make hardware ready.
 Counter samples now also carry a `unitEpoch` (default zero for existing four-item
 aggregate initializers). Any apply or restore must advance that epoch. Cross-epoch
 relative deltas are rejected even when boot and factor match again after a
-1 -> 2 -> 1 transition; production epoch lifecycle integration is not provided.
+1 -> 2 -> 1 transition; the initial helper alone did not provide a production epoch lifecycle. The later
+closed trial provides it through the durable recovery journal, not this helper.

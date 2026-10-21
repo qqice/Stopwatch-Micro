@@ -1367,6 +1367,42 @@ void SerialDebug::handleLine(char* line)
         result("display-test-frequency", "PASS", details);
         return;
     }
+    if (std::strcmp(command, "gauge-scale") == 0) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        const char* confirm=action?::strtok_r(nullptr," \t",&save):nullptr;
+        if(!action)action="status";
+        if(!std::strcmp(action,"observed")){
+            uint32_t index=0;
+            if(!parseUnsignedStrict(confirm,0,130,index)||::strtok_r(nullptr," \t",&save)){
+                result(command,"FAIL","expected=observed_index0..130 readonly_cached=1");return;
+            }
+            char details[320]{};
+            const bool ok=GetHAL().gaugeScaleObservedField(index,details,sizeof(details));
+            result(command,ok?"PASS":"FAIL",details);return;
+        }
+        if(!std::strcmp(action,"images")||!std::strcmp(action,"apply")||!std::strcmp(action,"restore")){
+            const bool images=!std::strcmp(action,"images"),apply=!std::strcmp(action,"apply");
+            if(!confirm||::strtok_r(nullptr," \t",&save)||
+               (!images&&std::strcmp(confirm,apply?"CONFIRM_EXTERNAL_POWER":"CONFIRM"))){
+                result(command,"FAIL","expected=images_signed_manifests_base64|apply_CONFIRM_EXTERNAL_POWER|restore_CONFIRM");return;
+            }
+            char details[1024]{};
+            const bool ok=images?GetHAL().gaugeScaleImages(confirm,details,sizeof(details)):
+                apply?GetHAL().gaugeScaleApply(details,sizeof(details)):GetHAL().gaugeScaleRestore(details,sizeof(details));
+            result(command,ok?"PASS":"FAIL",details);return;
+        }
+        const bool prepare=!std::strcmp(action,"prepare");
+        if((prepare?(!confirm||std::strcmp(confirm,"CONFIRM")):confirm!=nullptr)||
+           ::strtok_r(nullptr," \t",&save)||
+           (!prepare&&std::strcmp(action,"status")&&std::strcmp(action,"restore-plan"))){
+            result(command,"FAIL","expected=status|prepare_CONFIRM|restore-plan hardware_apply=0");return;
+        }
+        char details[1024]{};
+        const bool ok=prepare?GetHAL().gaugeScalePrepare(details,sizeof(details)):
+            !std::strcmp(action,"restore-plan")?GetHAL().gaugeScaleRestorePlan(details,sizeof(details)):
+            GetHAL().gaugeScaleStatus(details,sizeof(details));
+        result(command,ok?"PASS":"FAIL",details);return;
+    }
     if (std::strcmp(command, "nand-dma") == 0) {
         if (::strtok_r(nullptr," \t",&save)) {
             result(command,"FAIL","reason=readonly_query_no_arguments");return;
@@ -1427,7 +1463,7 @@ void SerialDebug::handleLine(char* line)
         if(MosaicoOta::busy()||MosaicoOta::healthPending()){result(command,"FAIL","reason=ota_not_idle readonly=1");return;}
         // Temporary PSRAM, not a new large handleLine stack frame or DMA DRAM
         // resident buffer. Parser is single-owner; scope frees on every exit.
-        struct Output {Hal::GaugeEngineSnapshot sample;char cedv[47],smooth[35],identity[23],details[640];};
+        struct Output {Hal::GaugeEngineSnapshot sample;char cedv[47],smooth[35],identity[23],details[896];};
         struct Buffer {Output* p;~Buffer(){heap_caps_free(p);}} buffer{
             static_cast<Output*>(heap_caps_calloc(1,sizeof(Output),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT))};
         if(!buffer.p){result(command,"FAIL","reason=diagnostic_psram_alloc readonly=1");return;}
@@ -1440,9 +1476,10 @@ void SerialDebug::handleLine(char* line)
         auto& details=buffer.p->details;
         const bool match=s.validMask&DefinitionMatch;
         int n=std::snprintf(details,sizeof(details),
-            "readonly=1 valid=%04x phase=%u echo73=%04x echo76=%04x echo02=%04x definition_match=%u raw73=%s raw76=%s raw02=%s device_be=%04x fw_be=%04x build_be=%04x units=raw_not_calibration",
+            "readonly=1 valid=%04x phase=%u echo73=%04x echo76=%04x echo02=%04x definition_match=%u raw73=%s raw76=%s raw02=%s device_be=%04x fw_be=%04x build_be=%04x units=raw_not_calibration unit_factor=%lld unit_epoch=%llu unit_generation=%llu unit_verified=%u",
             s.validMask,s.phase,s.echo73,s.echo76,s.echo02,unsigned(match),cedv,smooth,identity,
-            beWord(s.rawIdentity,0),beWord(s.rawIdentity,2),beWord(s.rawIdentity,4));
+            beWord(s.rawIdentity,0),beWord(s.rawIdentity,2),beWord(s.rawIdentity,4),
+            (long long)s.units.factor,(unsigned long long)s.units.epoch,(unsigned long long)s.units.generation,unsigned(s.units.verified));
         if(n>0&&static_cast<size_t>(n)<sizeof(details)&&match) {
             if(s.validMask&Cedv)n+=std::snprintf(details+n,sizeof(details)-n," CEDVRemCap=%u EDVThreshold=%u",leWord(s.rawCedv,0),leWord(s.rawCedv,16));
             if(n>0&&static_cast<size_t>(n)<sizeof(details)&&(s.validMask&Smooth))
@@ -1458,13 +1495,14 @@ void SerialDebug::handleLine(char* line)
     }
     if (std::strcmp(command, "gauge") == 0) {
         const auto battery = GetHAL().batteryTelemetry(true);
-        char details[300]{};
+        char details[448]{};
         std::snprintf(details, sizeof(details),
-            "valid=%d soc=%u mv=%u current_ma=%d avg_ma=%d rm_mah=%u fcc_mah=%u design_mah=%u capacity_valid=%d nominal_consistent=%d op_status=%04x battery_status=%04x soh=%u cycles=%u raw_cc=%u raw_cc_valid=%u",
+            "valid=%d soc=%u mv=%u current_ma=%d avg_ma=%d rm_mah=%u fcc_mah=%u design_mah=%u capacity_valid=%d nominal_consistent=%d op_status=%04x battery_status=%04x soh=%u cycles=%u raw_cc=%u raw_cc_valid=%u unit_factor=%lld unit_epoch=%llu unit_generation=%llu unit_verified=%u",
             battery.valid, battery.reportedSoc, battery.voltageMv, battery.currentMa,
             battery.averageCurrentMa, battery.remainingMah, battery.fullMah, battery.designMah,
             battery.capacityValid, battery.nominalConfigured, battery.operationStatus, battery.batteryStatus,
-            battery.stateOfHealth, battery.cycleCount, battery.rawCoulombMah, unsigned(battery.rawCoulombValid));
+            battery.stateOfHealth, battery.cycleCount, battery.rawCoulombMah, unsigned(battery.rawCoulombValid),
+            (long long)battery.unitFactor,(unsigned long long)battery.unitEpoch,(unsigned long long)battery.unitGeneration,unsigned(battery.unitVerified));
         result("gauge", battery.valid ? "PASS" : "FAIL", details);
         return;
     }
@@ -2101,6 +2139,7 @@ void SerialDebug::printHelp()
 #ifdef MOSAICO_BOARD
     debugPrintf("DBG HELP gauge-fcc-status no_arguments=1 readonly=1 journal_existence_explicit=1\r\n");
     debugPrintf("DBG HELP nand-dma no_arguments=1 readonly_ram=1 no_storage_io=1\r\n");
+    debugPrintf("DBG HELP gauge-scale status | prepare CONFIRM | restore-plan | observed <index0..130> | images <signed_manifests_base64> | apply CONFIRM_EXTERNAL_POWER | restore CONFIRM bounded_x2_trial=1 no_SOC_OCV_RESET=1\r\n");
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
     debugPrintf("DBG HELP gauge-trace status | arm CONFIRM | stop | export | clear CONFIRM | checkpoint CONFIRM queued_not_persisted=1 gauge_parameter_writes=0\r\n");
     debugPrintf("DBG HELP gauge-public-extra-field index_0..64 readonly_cached=1 raw_only=1\r\n");

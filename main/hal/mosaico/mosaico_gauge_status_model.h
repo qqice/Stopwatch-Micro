@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <type_traits>
+#include "mosaico_gauge_unit_tag.h"
 namespace mosaico_gauge_status {
 enum Valid : uint32_t {
     Soc=1U<<0, Remaining=1U<<1, Full=1U<<2, Design=1U<<3,
@@ -23,9 +24,10 @@ struct Snapshot {
     uint16_t rawCoulombMah, cycleCount, operationStatus, batteryStatus, gaugingStatus;
     uint16_t rawEcho16;
     uint8_t phase, outcome, mode, reserved;
+    mosaico_gauge_unit_tag::Tag units;
 };
 static_assert(std::is_trivial<Snapshot>::value && std::is_standard_layout<Snapshot>::value);
-static_assert(sizeof(Snapshot)==48);
+static_assert(sizeof(Snapshot)==80); // Native payload unchanged; appended RAM-only context.
 constexpr uint8_t decodeMode(uint16_t gauging, uint16_t battery) {
     const bool macDsg=(gauging & 0x0040)!=0; // low-byte MAC DSG: discharge OR relax
     const bool battDsg=(battery & 0x0001)!=0;

@@ -25,6 +25,36 @@ class ExportTests(unittest.TestCase):
         source=(Path(__file__).resolve().parents[1]/'main/debug/serial_debug.cpp').read_text(encoding='utf8')
         self.assertIn('static char encoded[173]',source)
         self.assertIn('sizeof(encoded),&length,bytes,metadata.bytes)',source)
+    def test_explicit_native_unit_context_unknown_is_not_one(self):
+        p=bytearray(page())
+        args=[2,0,9,0,4,0,1,3,1,0,0]
+        struct.pack_into('<HHQQ11I',p,60,14,0,123,0,*args)
+        struct.pack_into('<I',p,2044,m.crc(p[:2044]))
+        row=m.decode_page(p,5)[0]
+        self.assertEqual(row['type'],'gauge_unit_context')
+        self.assertEqual(row['unit_context'],{'factor':2,'unit_epoch':9,'generation':4,'verified':True,'phase':3,'next_record_only':True})
+        args[0]=args[6]=0
+        struct.pack_into('<HHQQ11I',p,60,14,0,123,0,*args)
+        struct.pack_into('<I',p,2044,m.crc(p[:2044]))
+        self.assertEqual(m.decode_page(p,5)[0]['unit_context']['factor'],0)
+
+    def test_unit_context_pair_cross_page_and_failclosed(self):
+        context={'factor':2,'unit_epoch':9,'generation':4,'verified':True,'phase':3,'next_record_only':True}
+        prefix={'type_id':14,'page_boot':7,'page_seq':100,'monotonic_ms':321,'unit_context':context}
+        payload={'type_id':2,'page_boot':7,'page_seq':101,'monotonic_ms':321,'args':[1,2,3]}
+        m.attach_unit_contexts([prefix,payload])
+        self.assertTrue(payload['physical_units_verified'])
+        self.assertEqual(payload['args'],[1,2,3])
+        for key,value in [('page_boot',8),('monotonic_ms',322)]:
+            bad=dict(payload);bad[key]=value;m.attach_unit_contexts([prefix,bad])
+            self.assertNotIn('unit_context',bad)
+        m.attach_unit_contexts([payload])
+        self.assertNotIn('unit_context',payload)
+        prefix['unit_context']=dict(context,factor=0,verified=False)
+        m.attach_unit_contexts([prefix,payload])
+        self.assertFalse(payload['physical_units_verified'])
+        self.assertEqual(payload['unit_context']['factor'],0)
+
     def test_roundtrip_and_fail_closed(self):
         p=page();r=m.decode_page(p,5)[0]
         self.assertEqual(r['gauge']['current_ma'],-27)

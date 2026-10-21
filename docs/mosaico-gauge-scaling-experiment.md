@@ -1,9 +1,9 @@
-# Scaling experiment admission (not an executable plan)
+# Scaling experiment admission and bounded trial
 
 The only proposed experimental variable is the reporting scale factor. It is
 not a one-register edit: current/capacity gains and dependent quantities must
-form a coherent unit conversion. No hardware writer exists in the current
-read-only audit firmware.
+form a coherent unit conversion. The original read-only audit firmware has no hardware writer; the new closed
+trial implementation described below is separately gated.
 
 TI's [BQ27220 product page](https://www.ti.com/product/BQ27220), checked on
 2026-10-21, lists a 100 mAh minimum battery capacity. Native DC65 being accepted
@@ -67,9 +67,9 @@ analog noise or sense-resistor accuracy.
   inconsistent scale, gauge transaction failure, excessive temperature or voltage
   outside the existing safe gate. Never force a low-voltage discharge.
 
-Current state: all 131 public fields have been double-read and backed up with
+Baseline state before writer integration: all 131 public fields were double-read and backed up with
 their raw bytes; offline F4 arithmetic and the pure recovery decision model have
-passed host tests. They are not a deployed scaling writer. The whole unit/recovery
+passed host tests. Those tests alone do not admit a scaling writer. The whole unit/recovery
 implementation and hardware admission are not complete. No SOC/OCV reset,
 hidden-register write, OTP programming,
 full-chip erase or TWT experiment is part of this protocol.
@@ -101,3 +101,61 @@ The new record's admission and recovery fence must run before both startup
 being rejected by an old fixed-65 guard is not a recovery implementation. Damaged
 scale state must not fall through to legacy 65 restoration or trusted physical
 telemetry. The retained recovery image must understand this fence too.
+
+## Restore-aware bounded writer (2026-10-21 integration)
+
+The new implementation is a CLOSED x2 trial, not a generic DM writer or a
+permanent calibration. Hardware admission still requires the actual signed,
+full-image SHA-256 of two restore-aware VALID slots (0.13.90 and 0.13.91), a
+fresh authenticated 131-field audit, and verified durable recovery storage.
+A version string alone is not sufficient. Do not use an old native-only slot
+while the gauge is scaled. The old native-only trace schema is suspended during
+this trial; raw NAND samples carry an adjacent explicit unit-context record.
+
+Only the reviewed 17 fields change. Every other field is preserved. In
+particular, documented autonomous CC Offset (9180) may change without a host
+write. Its ACTUAL bytes remain in the complete backup and digests; normalization
+is only for comparison with the reviewed template. A fresh changed offset needs
+a new immutable complete source/target backup before mutation. Never write a
+stale offset back to manufacture a matching CRC. Undocumented changes are not
+automatically treated as autonomous.
+
+Restore only writes owned fields whose freshly authenticated value is original
+or target. Unknown owned values stop without overwrite. Unknown untouched
+values are retained; known 17-field rollback may proceed only when the separate
+voltage/temperature calibration safety set remains unchanged, and unknown
+untouched state cannot be declared trusted Original. Do not Seal a gauge in
+CFG1, CAL1 or unknown configuration state. An interrupted necessary CFG exit is
+not permission for a blind reset. Original data, including prior failures,
+remain immutable.
+
+Trial stop rules include independent voltage/temperature bounds, read/security
+or profile failure, and a 300-second device deadline. The host's bounded V1
+battery observation is shorter (at most 180 seconds), with ON restoration in
+finally and fresh full settings readback. V1 control is not a hardware watchdog;
+PC power loss cannot be covered by Python finally. Turning V1 off removes only
+external 5 V, not the internal cell, and does not reproduce hours of real
+powered-off storage. Stable external power is explicitly HOST-attested at the
+local console, not inferred from a USB flag or the small lightning icon.
+
+First validate apply and exact rollback while V1 remains ON. Then compare a
+matched native and x2 short battery interval without changing radio policy,
+brightness, sleep policy or gauge thresholds independently. A SOC jump from the
+required documented 0091 config exit is NOT a fix or evidence of accuracy.
+Measure native-current scaling and capacity-counter behavior, physical-policy
+consistency, raw-context persistence, and the exact rollback. The original
+cold-start plateau remains open until the relevant cold-start condition is
+actually observed under an accepted candidate.
+
+### Supply evidence during the bounded trial
+
+The diagnostic field `host_external_power_attested` records the historical
+local-console attestation AT APPLY. It is not a sensor, an ongoing supply lease,
+or evidence that V1 remains on. The write begins only with freshly verified V1
+ON. If the subsequent separately logged battery test is admitted, the host must
+record `external_power_currently_attested=false`, the fresh exact V1 OFF
+readback, negative cell current and its monotonic interval. No current-supply
+claim may be inferred from that historical firmware field. Restore remains
+permitted without external power, subject to the independent voltage,
+temperature, current, identity and recovery gates. No OTA or further apply is
+admitted during the scaled interval.

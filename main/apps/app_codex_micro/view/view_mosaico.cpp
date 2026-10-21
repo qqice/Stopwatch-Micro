@@ -1377,7 +1377,7 @@ void CodexMicroView::modeEvent(lv_event_t* e) {
     if (!hit->owner->_rotationFault && !hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_swipeConsumed && !hit->owner->_settingsOpen && !hit->owner->_settingsAnimating && !hit->owner->_slideTo && hit->owner->_rotationPhase == RotationPhase::Idle && !hit->owner->otaBusy()) hit->owner->showHistory(hit->index == 1);
 }
 void CodexMicroView::refreshBattery(uint32_t now) {
-    const auto telemetry = GetHAL().batteryTelemetry(false);
+    const auto telemetry = GetHAL().batteryPolicyTelemetry(false);
     _batteryReadTick = now; _batterySeen = true; _batteryValid = telemetry.valid;
     _chargeSupply.update(telemetry.valid, telemetry.currentMa, telemetry.reportedSoc);
     PowerbankKeepalive::observeSupply(telemetry.valid, _chargeSupply.external);

@@ -145,9 +145,9 @@ constexpr bool counters(){
 static_assert(counters(),"modulo before signed interpretation and scaling; context fail closed");
 ''')
 
-    def test_not_integrated_into_production(self):
+    def test_only_physical_model_integration(self):
         for source in (ROOT / 'main').rglob('*'):
-            if source.suffix in ('.h', '.hpp', '.cpp', '.c') and source != HEADER:
+            if source.suffix in ('.h', '.hpp', '.cpp', '.c') and source not in (HEADER, ROOT/'main/hal/mosaico/mosaico_gauge_physical_model.h'):
                 self.assertNotIn('mosaico_gauge_units_model.h', source.read_text(encoding='utf-8'), str(source))
 
 

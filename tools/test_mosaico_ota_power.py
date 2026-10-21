@@ -11,6 +11,13 @@ CPP = (ROOT / 'main/ota/mosaico_ota.cpp').read_text()
 
 
 class OtaPowerTests(unittest.TestCase):
+    def test_only_physical_policy_accessors(self):
+        self.assertNotRegex(CPP, r'\bbatteryTelemetry\s*\(')
+        self.assertEqual(CPP.count('batteryPolicyTelemetry(true)'), 4)
+        for name in ('gaugeSafe', 'downloadPowerSafe', 'automaticPowerSafe', 'installPowerSafe'):
+            body = CPP.split('bool ' + name + '(', 1)[1].split('\n}', 1)[0]
+            self.assertIn('batteryPolicyTelemetry(true)', body)
+
     def test_actual_cpp_boundaries(self):
         automatic = CPP.split('bool automaticPowerSafe(', 1)[1].split('bool installPowerSafe(', 1)[0]
         expression = re.search(r'return (b.valid.*?);', automatic, re.S).group(1)
@@ -86,7 +93,7 @@ static_assert(test());
         self.assertLess(install.index('recordAttempt(power)'), install.index('esp_ota_set_boot_partition(target)'))
         self.assertIn('manual ? "install_power_required" : "install_external_power_required"', install)
         gate = CPP.split('bool installPowerSafe(', 1)[1].split('bool exactSlot(', 1)[0]
-        self.assertIn('batteryTelemetry(true)', gate)
+        self.assertIn('batteryPolicyTelemetry(true)', gate)
         self.assertIn('if (!manual) return automaticPowerSafe(evidence);', gate)
 
     def test_journal_evidence_same_commit_old_key_optional(self):
@@ -110,7 +117,7 @@ static_assert(test());
         self.assertNotIn('esp_restart()', process)
         self.assertIn('if ((usbBypass || automaticMode) && selected.load())', process)
         queued = CPP.split('bool requestReboot()', 1)[1].split('bool rebootWithFreshPower()', 1)[0]
-        self.assertNotIn('batteryTelemetry(', queued)
+        self.assertNotIn('batteryPolicyTelemetry(', queued)
 
 
 if __name__ == '__main__':

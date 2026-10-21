@@ -245,6 +245,13 @@ std::mutex battery_mutex;
 // All mutating transactions take this BEFORE battery_mutex. Recursive so the
 // boot wrapper can serialize its public Access/Nominal/Reconcile/Restore steps.
 std::recursive_mutex gauge_transaction_mutex;
+// Implemented in the narrowly scoped runtime include below. All calls own the
+// transaction lock; sample/context access also owns battery_mutex.
+bool scale_boot_fence_locked();
+mosaico_gauge_physical::UnitContext scale_unit_context_locked();
+bool scale_journal_missing_locked();
+void scale_invalidate_context_locked();
+bool scale_safety_mismatch_locked();
 // Private, transaction-mutex owned privilege: only a durable boot intent may
 // enable it. Public manual access/nominal/restore retains its strict policy.
 bool boot_factory_reload_scope = false;
@@ -501,6 +508,8 @@ bool gauge_word(uint8_t reg, uint16_t& value)
 void gauge_engine_locked(Hal::GaugeEngineSnapshot& out,uint8_t phase,uint8_t outcome)
 {
     out={};out.sampledUs=esp_timer_get_time();out.phase=phase;out.outcome=outcome;
+    const auto units=scale_unit_context_locked();
+    out.units={units.factor,units.unitEpoch,units.generation,units.verified,uint8_t(units.phase)};
     if(!gauge)return;
     struct EngineTransport {
         bool transmit(const uint8_t* p,size_t n){gauge_feed();return gauge&&i2c_master_transmit(gauge,p,n,20)==ESP_OK;}
@@ -534,6 +543,8 @@ void gauge_diagnostic_locked(Hal::GaugeDiagnosticSnapshot& out, uint8_t phase, u
 {
     using namespace mosaico_gauge_status;
     out={}; out.phase=phase; out.outcome=outcome; out.sampledUs=esp_timer_get_time();
+    const auto units=scale_unit_context_locked();
+    out.units={units.factor,units.unitEpoch,units.generation,units.verified,uint8_t(units.phase)};
     if(!gauge)return;
     const auto word=[&](uint8_t reg,uint16_t& value,uint32_t bit) {
         if(gauge_word(reg,value))out.validMask|=bit;
@@ -592,6 +603,18 @@ void sample_battery_locked(bool refresh = false)
                                sample.fullMah <= mosaico_gauge::MaxReasonableFcc &&
                                mosaico_gauge::configExitAccepted(sample.operationStatus) &&
                                ((sample.operationStatus >> 1) & 3) == 3;
+    auto units=scale_unit_context_locked();
+    // A RAM-loss/profile/security change revokes this boot's full131 proof.
+    // Transient unreadable samples are invalid, not evidence of a new profile.
+    if(units.verified&&core&&status&&capacities&&
+       (!sample.valid||!sample.capacityValid||sample.designMah!=65*units.factor||
+        sample.fullMah>mosaico_gauge::MaxReasonableFcc*units.factor||
+        !mosaico_gauge::configExitAccepted(sample.operationStatus)||((sample.operationStatus>>1)&3)!=3)){
+        scale_invalidate_context_locked();units=scale_unit_context_locked();
+    }
+    sample.unitFactor=units.factor;sample.unitEpoch=units.unitEpoch;
+    sample.unitGeneration=units.generation;sample.unitVerified=units.verified;
+    sample.knownSafetyCalibrationMismatch=scale_safety_mismatch_locked();
     battery_telemetry = sample;
     battery_valid = sample.valid;
     if (battery_valid) {
@@ -1435,6 +1458,7 @@ bool Hal::gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize)
 {
     using namespace mosaico_gauge;
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    if(action==GaugeAccessAction::Open&&!scale_boot_fence_locked()){if(reason&&reasonSize)std::snprintf(reason,reasonSize,"blocked_scale_recovery_required");return false;}
     std::lock_guard<std::mutex> lock(battery_mutex);
     gauge_access_cleanup_attempted = false;
     gauge_access_cleanup_succeeded = false;
@@ -1584,6 +1608,7 @@ void Hal::i2c_detect()
 
 void Hal::pmic_init()
 {
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     i2c_device_config_t config{};
     config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
     config.device_address = 0x55;
@@ -1609,7 +1634,7 @@ bool Hal::pmic_ready() const
 uint8_t Hal::getBatteryLevel()
 {
     std::lock_guard<std::mutex> lock(battery_mutex);
-    sample_battery_locked();
+    // UI/policy owns refresh. BLE must not wait behind a long gauge transaction.
     return battery_valid ? battery_soc : 0;
 }
 
@@ -1622,15 +1647,15 @@ bool Hal::isBatteryLevelValid() const
 bool Hal::isBatteryCharging(bool strict)
 {
     (void)strict;
-    std::lock_guard<std::mutex> lock(battery_mutex);
-    sample_battery_locked();
     // Only positive gauge current is observable here. This does NOT identify
     // external power (e.g. USB while full); no charger pins/config are touched.
-    return battery_valid && battery_raw_ma > 3;
+    const auto physical=batteryPolicyTelemetry();
+    return physical.valid && physical.currentMa > 3;
 }
 
 Hal::BatteryTelemetry Hal::batteryTelemetry(bool refresh)
 {
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     std::lock_guard<std::mutex> lock(battery_mutex);
     sample_battery_locked(refresh);
     return battery_telemetry;
@@ -1641,6 +1666,8 @@ bool Hal::gaugeTraceTrySample(BatteryTelemetry& sample)
     if(MosaicoOta::busy()||MosaicoOta::healthPending())return false;
     std::unique_lock<std::recursive_mutex> transaction(gauge_transaction_mutex,std::try_to_lock);
     if(!transaction.owns_lock())return false;
+    // Raw measurements, not physical-unit admission. NAND's independent
+    // voltage/temperature gate must remain observable during recovery.
     std::unique_lock<std::mutex> battery(battery_mutex,std::try_to_lock);
     if(!battery.owns_lock()||!gauge||MosaicoOta::busy()||MosaicoOta::healthPending())return false;
     sample_battery_locked(true);
@@ -1653,6 +1680,7 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
 {
     using namespace mosaico_gauge;
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    if(!scale_boot_fence_locked()){if(reason&&reasonSize)std::snprintf(reason,reasonSize,"blocked_scale_recovery_required");return false;}
     std::lock_guard<std::mutex> lock(battery_mutex);
     const auto report = [&](bool success, const char* why) {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
@@ -1882,6 +1910,7 @@ bool Hal::gaugeSafetySelfTest() const { return mosaico_gauge::selftest(); }
 bool Hal::gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize)
 {
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    if(privileged&&!scale_boot_fence_locked()){if(details&&detailsSize)std::snprintf(details,detailsSize,"blocked_scale_recovery_required");return false;}
     std::lock_guard<std::mutex> battery(battery_mutex);
     gauge_threshold_cached={};gauge_threshold_cached_generation=0;
     gauge_calibration_cached={};
@@ -2055,6 +2084,7 @@ bool Hal::gaugeOcvMeasure(char* details,size_t detailsSize)
     // This outer mutex excludes all gauge mutators, while the backend releases
     // battery_mutex for every one-second watchdog-fed wait so UI reads can run.
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    if(!scale_boot_fence_locked()){if(details&&detailsSize)std::snprintf(details,detailsSize,"blocked_scale_recovery_required");return false;}
     GaugeOcvBackend backend;
     mosaico_ocv::Coordinator<GaugeOcvBackend> coordinator(backend);
     const auto r=coordinator.run();
@@ -2157,6 +2187,7 @@ bool Hal::gaugeFccLimitStatus(char* details, size_t detailsSize)
 bool Hal::gaugeFccLimitRepair(char* details, size_t detailsSize)
 {
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    if(!scale_boot_fence_locked()){if(details&&detailsSize)std::snprintf(details,detailsSize,"blocked_scale_recovery_required");return false;}
     GaugeFccBackend backend;
     auto outcome=mosaico_fcc_limit::Result::Rejected;
     if(backend.prepareRuntimeQuietQualification()) {
@@ -2295,6 +2326,7 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
         return status;
     };
+    if(!scale_boot_fence_locked())return finish(Status::Critical,"boot_critical_scale_recovery_required");
     // Only Deferred readonly probes may be revisited by the caller's scheduler.
     if (gauge_boot_info.attempted || gauge_boot_info.status != Status::Deferred) {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", gauge_boot_info.reason);
@@ -3212,4 +3244,57 @@ bool Hal::setDisplayOrientation(uint16_t degrees)
         lv_obj_invalidate(lv_display_get_screen_active(display));
     }
     lvglUnlock(); return true;
+}
+
+// Unit/recovery ledger implementation shares the existing closed gauge transport.
+#include "mosaico_gauge_scale_runtime.inc"
+
+Hal::PhysicalBatterySnapshot Hal::physicalBatteryTelemetry(bool refresh)
+{
+    std::unique_lock<std::recursive_mutex> transaction(gauge_transaction_mutex,std::try_to_lock);
+    if(!transaction.owns_lock())return {}; // No UI wait behind quiet diagnostics.
+    const bool allowed=scale_boot_fence_locked();
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    auto context=scale_unit_context_locked();
+    const bool changed=battery_telemetry.unitFactor!=context.factor||
+        battery_telemetry.unitEpoch!=context.unitEpoch||battery_telemetry.unitGeneration!=context.generation;
+    sample_battery_locked(refresh||changed);
+    const auto& t=battery_telemetry;
+    if(!allowed&&!(context.verified&&context.phase==mosaico_gauge_physical::Phase::Applied))context.verified=false;
+    mosaico_gauge_physical::SampleMeta meta{t.unitFactor,t.unitEpoch,t.unitGeneration,
+        t.valid&&t.capacityValid&&t.unitVerified&&!t.knownSafetyCalibrationMismatch};
+    mosaico_gauge_physical::NativeQuantities quantities{t.currentMa,t.averageCurrentMa,
+        t.remainingMah,t.fullMah,t.designMah};
+    return mosaico_gauge_physical::makeSnapshot(t,quantities,meta,context);
+}
+
+Hal::BatteryTelemetry Hal::batteryPolicyTelemetry(bool refresh)
+{
+    std::unique_lock<std::recursive_mutex> transaction(gauge_transaction_mutex,std::try_to_lock);
+    if(!transaction.owns_lock())return {};
+    const auto physical=physicalBatteryTelemetry(refresh);
+    auto policy=physical.native;
+    if(!physical.valid){
+        // Explicit pre-experiment compatibility, NOT verified physical data.
+        // Missing/valid Original may use the same native-65 policy as older
+        // firmware. Corrupt, Pending, Applied-unverified and Restoring never do.
+        const bool legacy=scale_boot_fence_locked()&&!physical.context.verified&&policy.nominalConfigured&&!policy.knownSafetyCalibrationMismatch;
+        if(!legacy){policy.valid=false;policy.capacityValid=false;policy.nominalConfigured=false;}
+        return policy;
+    }
+    const auto away=[](int32_t ua)->int16_t {
+        return static_cast<int16_t>(ua>=0?(ua+999)/1000:(ua-999)/1000);
+    };
+    policy.currentMa=away(physical.currentMicroamp);
+    policy.averageCurrentMa=away(physical.averageCurrentMicroamp);
+    policy.remainingMah=static_cast<uint16_t>(physical.remainingCapacityMicroampHour/1000);
+    policy.fullMah=static_cast<uint16_t>((physical.fullChargeCapacityMicroampHour+999)/1000);
+    policy.designMah=static_cast<uint16_t>((physical.designCapacityMicroampHour+999)/1000);
+    policy.nominalConfigured=physical.designCapacityMicroampHour==65000&&
+        physical.fullChargeCapacityMicroampHour>0&&
+        physical.fullChargeCapacityMicroampHour<=mosaico_gauge::MaxReasonableFcc*1000U&&
+        physical.remainingCapacityMicroampHour<=physical.fullChargeCapacityMicroampHour&&
+        mosaico_gauge::configExitAccepted(policy.operationStatus)&&((policy.operationStatus>>1)&3)==3;
+    policy.valid=policy.valid&&policy.nominalConfigured&&!policy.knownSafetyCalibrationMismatch;
+    return policy;
 }

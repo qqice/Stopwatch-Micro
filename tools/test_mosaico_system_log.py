@@ -149,6 +149,17 @@ static_assert(bootRetry());
         self.assertEqual(SOURCE.count('storeFailureStage='),1)
         self.assertIn('store_failure_stage=%lu',SOURCE)
 
+    def test_units_are_atomic_per_record_not_a_global_history_scale(self):
+        pair=SOURCE.split('bool enqueueWithUnits(',1)[1].split('// Never inspect variadic arguments',1)[0]
+        self.assertIn('queueLock.test_and_set',pair)
+        self.assertLess(pair.index('queue.count>Capacity-2'),pair.index('queue.push(context)'))
+        self.assertIn('queue.push(context)&&storage->queue.push(r)',pair)
+        self.assertEqual(SOURCE.count('enqueueWithUnits(s.units,r,'),2)
+        self.assertIn('Type::UnitContext',pair)
+        self.assertIn('units.epoch',pair)
+        self.assertIn('units.generation',pair)
+        self.assertIn('units.verified',pair)
+
 if __name__=='__main__':unittest.main()
 
 

@@ -40,7 +40,7 @@ std::mutex healthLock;
 std::recursive_mutex storageLeaseMutex;
 struct StorageAdmission {
  std::unique_lock<std::recursive_mutex> held{storageLeaseMutex,std::try_to_lock};
- explicit operator bool() const { return held.owns_lock(); }
+ explicit operator bool() const { return held.owns_lock()&&!GetHAL().gaugeScaleTrialActive(); }
 };
 std::mutex snapshotLock; // Never held over flash, crypto, NVS, or telemetry calls.
 UiSnapshot ui{0, 0, 0, UiStage::Idle, "", "-", "", "", "", -1, -1, false, false, false, 0};
@@ -76,14 +76,16 @@ uint32_t healthyLoops = 0;
 
 bool gaugeSafe()
 {
+    if(GetHAL().gaugeScaleTrialActive())return false;
     if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical) return false;
-    const auto b = GetHAL().batteryTelemetry(true);
+    const auto b = GetHAL().batteryPolicyTelemetry(true);
     return b.valid && ((b.operationStatus >> 1) & 3) == 3 && !(b.operationStatus & 0x0401);
 }
 bool downloadPowerSafe()
 {
+    if(GetHAL().gaugeScaleTrialActive())return false;
     if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical) return false;
-    const auto b = GetHAL().batteryTelemetry(true);
+    const auto b = GetHAL().batteryPolicyTelemetry(true);
     return b.valid && ((b.operationStatus >> 1) & 3) == 3 && !(b.operationStatus & 0x0401) && b.voltageMv >= 3500;
 }
 struct InstallPowerEvidence { char text[96]{}; };
@@ -95,8 +97,9 @@ void captureInstallPower(InstallPowerEvidence* evidence, const Hal::BatteryTelem
 }
 bool automaticPowerSafe(InstallPowerEvidence* evidence = nullptr)
 {
+    if(GetHAL().gaugeScaleTrialActive())return false;
     if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical) return false;
-    const auto b = GetHAL().batteryTelemetry(true);
+    const auto b = GetHAL().batteryPolicyTelemetry(true);
     const bool external = tud_mounted() || b.currentMa > 3;
     captureInstallPower(evidence, b, external, false);
     // Conservative charging/enumerated USB policy, NOT a measured VBUS or SOC claim.
@@ -105,9 +108,10 @@ bool automaticPowerSafe(InstallPowerEvidence* evidence = nullptr)
 }
 bool installPowerSafe(bool manual, InstallPowerEvidence* evidence = nullptr)
 {
+    if(GetHAL().gaugeScaleTrialActive())return false;
     if (!manual) return automaticPowerSafe(evidence);
     const bool critical = GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical;
-    const auto b = GetHAL().batteryTelemetry(true);
+    const auto b = GetHAL().batteryPolicyTelemetry(true);
     const bool external = tud_mounted();
     captureInstallPower(evidence, b, external || b.currentMa > 3, true);
     return manualInstallPowerSafe(b, external, critical);
@@ -363,6 +367,13 @@ void healthTimeout(void*)
 }
 
 uint32_t imageCapacity() { return MosaicoOtaLayout::imageCap(currentLayout()); }
+bool verifySignedImageDescriptor(const char* json,VerifiedImageDescriptor& out)
+{
+    out={};Descriptor verified{};const char* error=nullptr;
+    if(!validateDescriptor(json,verified,error)||!verified.versionSigned)return false;
+    out.size=verified.size;std::memcpy(out.hash,verified.hash,sizeof(out.hash));
+    std::memcpy(out.version,verified.version,sizeof(out.version));return true;
+}
 bool busy() { return active.load() || approvedRequest.load() || checkQueued.load() || checking.load() || installQueued.load() || rebootQueued.load() || bootPending.load(); }
 bool healthPending() { return bootPending.load(); }
 bool tryStorageLease() {

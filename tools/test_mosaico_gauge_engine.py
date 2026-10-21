@@ -7,7 +7,7 @@ import struct
 ROOT=Path(__file__).resolve().parents[1]
 
 class EngineTests(GaugeStatusTests):
-    # Inherited old tests provide regressions for the untouched 48B snapshot.
+    # Inherited tests protect the unchanged 48B native prefix plus appended RAM context.
     def test_engine_faults(self):
         self.compile(r'''
 #include "mosaico_gauge_engine_model.h"
@@ -64,7 +64,7 @@ using namespace MosaicoSystemLog::Model;
 struct Harness {
  Record captured{};bool critical=false;
  constexpr Record record(Type type,uint64_t ms){Record r;r.type=type;r.monotonicMs=ms;r.epoch=123;r.flags=1;return r;}
- constexpr bool enqueue(const Record& r,bool urgent){captured=r;critical=urgent;return true;}
+ constexpr bool enqueueWithUnits(const mosaico_gauge_unit_tag::Tag&,const Record& r,bool urgent){captured=r;critical=urgent;return true;}
 '''+pack+r'''
 };
 constexpr bool cases(){
@@ -113,14 +113,14 @@ static_assert(cases());
         for ok in (True,False):
             # Even FAIL can carry complete raw blocks; exercise maximal numeric
             # formatting separately from the semantic match gate.
-            out=ctypes.create_string_buffer(640)
-            args=[U(65535),U(255),U(65535),U(65535),U(65535),U(1),P(b'f'*46),P(b'f'*34),P(b'f'*22),U(65535),U(65535),U(65535)]
-            n=sprintf(out,ctypes.c_size_t(640),formats[0].encode(),*args)
-            self.assertGreater(n,0);self.assertLess(n,640)
-            n+=sprintf(ctypes.byref(out,n),ctypes.c_size_t(640-n),formats[1].encode(),U(65535),U(65535))
-            self.assertLess(n,640)
-            n+=sprintf(ctypes.byref(out,n),ctypes.c_size_t(640-n),formats[2].encode(),*[U(65535)]*8,U(255))
-            self.assertLess(n,640);self.assertEqual(out.raw[n],0)
+            out=ctypes.create_string_buffer(896)
+            args=[U(65535),U(255),U(65535),U(65535),U(65535),U(1),P(b'f'*46),P(b'f'*34),P(b'f'*22),U(65535),U(65535),U(65535),ctypes.c_longlong(4),ctypes.c_ulonglong(2**64-1),ctypes.c_ulonglong(2**64-1),U(1)]
+            n=sprintf(out,ctypes.c_size_t(896),formats[0].encode(),*args)
+            self.assertGreater(n,0);self.assertLess(n,896)
+            n+=sprintf(ctypes.byref(out,n),ctypes.c_size_t(896-n),formats[1].encode(),U(65535),U(65535))
+            self.assertLess(n,896)
+            n+=sprintf(ctypes.byref(out,n),ctypes.c_size_t(896-n),formats[2].encode(),*[U(65535)]*8,U(255))
+            self.assertLess(n,896);self.assertEqual(out.raw[n],0)
             self.assertEqual(len(out.value),n);self.assertTrue(out.value.endswith(b'MaxDeltaSeconds=255'))
             line=ctypes.create_string_buffer(1536)
             length=sprintf(line,ctypes.c_size_t(1536),b'DBG RESULT command=%s status=%s%s%s\r\n',P(b'gauge-engine'),P(b'PASS' if ok else b'FAIL'),P(b' '),P(out.value))

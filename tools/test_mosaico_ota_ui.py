@@ -48,10 +48,10 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
 
     def test_cached_install_gate_matches_backend(self):
         battery=CPP.split('void CodexMicroView::refreshBattery(',1)[1].split('void CodexMicroView::refreshClock(',1)[0]
-        self.assertIn('batteryTelemetry(false)',battery)
+        self.assertIn('batteryPolicyTelemetry(false)',battery)
         self.assertIn('gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical',battery)
         self.assertIn('MosaicoOta::manualInstallPowerSafe(telemetry, tud_mounted(), critical)',battery)
-        self.assertNotIn('batteryTelemetry(true)',battery)
+        self.assertNotIn('batteryPolicyTelemetry(true)',battery)
 
     def test_panels_and_touch_regions(self):
         self.assertIn('panel(_otaPage, 20, 64, 440, 402, 0)', CPP)
@@ -78,7 +78,7 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         self.assertIn('if (!self->otaActionEnabled()) return;',callback)
         for api in ('requestCheck()', 'approveInstall(self->_ota.sha256)', 'requestReboot()'):
             self.assertIn('MosaicoOta::'+api, callback)
-        self.assertNotIn('batteryTelemetry',callback);self.assertNotIn('tud_mounted',callback)
+        self.assertNotIn('batteryPolicyTelemetry',callback);self.assertNotIn('tud_mounted',callback)
         self.assertIn('MosaicoOta::approveUpdate(self->_ota.sha256)',callback)
         self.assertIn('wakeForFirmwareUpdate()',callback)
         self.assertIn('_otaApproved = true',callback)
