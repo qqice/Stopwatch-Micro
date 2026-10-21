@@ -94,13 +94,18 @@ void cJSON_free(void*);void cJSON_Delete(cJSON*);
 #include <cstddef>
 int mbedtls_base64_decode(unsigned char*,size_t,size_t*,const unsigned char*,size_t);
 ''',
-'mbedtls/sha256.h':r'''#pragma once
+'psa/crypto.h':r'''#pragma once
 #include <cstddef>
-struct mbedtls_sha256_context {unsigned char opaque[112];};
-void mbedtls_sha256_init(mbedtls_sha256_context*);void mbedtls_sha256_free(mbedtls_sha256_context*);
-int mbedtls_sha256_starts(mbedtls_sha256_context*,int);
-int mbedtls_sha256_update(mbedtls_sha256_context*,const unsigned char*,size_t);
-int mbedtls_sha256_finish(mbedtls_sha256_context*,unsigned char*);
+using psa_status_t=int;using psa_algorithm_t=unsigned;
+constexpr psa_status_t PSA_SUCCESS=0;
+constexpr psa_algorithm_t PSA_ALG_SHA_256=0x02000009;
+struct psa_hash_operation_t {unsigned char opaque[112];};
+#define PSA_HASH_OPERATION_INIT {}
+psa_status_t psa_crypto_init();
+psa_status_t psa_hash_setup(psa_hash_operation_t*,psa_algorithm_t);
+psa_status_t psa_hash_update(psa_hash_operation_t*,const unsigned char*,size_t);
+psa_status_t psa_hash_finish(psa_hash_operation_t*,unsigned char*,size_t,size_t*);
+psa_status_t psa_hash_abort(psa_hash_operation_t*);
 '''}
 class TrialTests(unittest.TestCase):
  def compile(self,code,name,stubs=False):
@@ -193,9 +198,9 @@ bool gauge_public_extra_read(mosaico_public_extra::Selector s,uint8_t* b){return
   self.compile(fixture,'actual-backend',True)
  def test_closed_wire_and_signed_actual_images_source_contract(self):
   text=INC.read_text()
-  for forbidden in ['scale_trial->keyFailed=false','scale_trial->thirdValue=false','GaugeCommand::Reset','GaugeCommand::Ocv','nvs_erase','esp_partition_write','esp_ota_set_boot_partition']:
+  for forbidden in ['mbedtls/sha256.h','mbedtls_sha256_','scale_trial->keyFailed=false','scale_trial->thirdValue=false','GaugeCommand::Reset','GaugeCommand::Ocv','nvs_erase','esp_partition_write','esp_ota_set_boot_partition']:
    self.assertNotIn(forbidden,text)
-  for required in ['verifySignedImageDescriptor','ESP_OTA_IMG_VALID','esp_partition_read','mbedtls_sha256_update',
+  for required in ['verifySignedImageDescriptor','ESP_OTA_IMG_VALID','esp_partition_read','psa_crypto_init','psa_hash_setup','PSA_ALG_SHA_256','psa_hash_update','psa_hash_finish','digestLength==32','psa_hash_abort',
       '0.13.90-mosaico-ota','0.13.91-mosaico-ota','apply_explicit_prepare_and_two_audited_images_required',
       'trial_key_attempt_failed_no_retry','trial_unexpected_owned_third_value_no_overwrite','scale_trial->possibleDirty=true',
       '300000000','mv<=3600','scale_journal::saveNvs(record,{true,true,true}',

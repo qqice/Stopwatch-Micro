@@ -30,7 +30,7 @@ template<class Backend> constexpr Result apply(Backend& b){
 #include <esp_app_desc.h>
 #include <esp_partition.h>
 #include <mbedtls/base64.h>
-#include <mbedtls/sha256.h>
+#include <psa/crypto.h>
 #include <cJSON.h>
 #include <cstring>
 
@@ -101,13 +101,17 @@ bool scale_trial_verify_image(unsigned slot,const MosaicoOta::VerifiedImageDescr
        std::strncmp(desc.project_name,"Stopwatch-Mosaico",sizeof(desc.project_name)))return scale_trial_fail("images_exact_project_version");
     bool elfNonzero=false;for(unsigned i=0;i<32;++i){scale_trial->imageElf[slot][i]=desc.app_elf_sha256[i];elfNonzero|=desc.app_elf_sha256[i]!=0;}
     if(!elfNonzero)return scale_trial_fail("images_missing_elf_identity");
-    mbedtls_sha256_context context;mbedtls_sha256_init(&context);bool ok=mbedtls_sha256_starts(&context,0)==0;
+    if(psa_crypto_init()!=PSA_SUCCESS)return scale_trial_fail("images_psa_crypto_init");
+    psa_hash_operation_t operation=PSA_HASH_OPERATION_INIT;
+    bool ok=psa_hash_setup(&operation,PSA_ALG_SHA_256)==PSA_SUCCESS;
     for(size_t offset=0;ok&&offset<image.size;){
         const size_t count=std::min<size_t>(sizeof(scale_trial->buffer),image.size-offset);gauge_feed();
         ok=esp_partition_read(part,offset,scale_trial->buffer,count)==ESP_OK&&
-           mbedtls_sha256_update(&context,scale_trial->buffer,count)==0;offset+=count;
+           psa_hash_update(&operation,scale_trial->buffer,count)==PSA_SUCCESS;offset+=count;
     }
-    uint8_t digest[32]{};ok=ok&&mbedtls_sha256_finish(&context,digest)==0;mbedtls_sha256_free(&context);
+    uint8_t digest[32]{};size_t digestLength=0;
+    if(ok)ok=psa_hash_finish(&operation,digest,sizeof(digest),&digestLength)==PSA_SUCCESS&&digestLength==32;
+    (void)psa_hash_abort(&operation);
     return (ok&&!std::memcmp(digest,image.hash,32))||scale_trial_fail("images_full_signed_bin_sha256");
 }
 bool scale_trial_images_current(){

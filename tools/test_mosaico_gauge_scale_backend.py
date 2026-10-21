@@ -226,7 +226,11 @@ const esp_partition_t* esp_partition_find_first(int,int subtype,const char*){ret
 int esp_partition_read(const esp_partition_t*,size_t,void* p,size_t n){memset(p,0,n);return imageCryptoValid?0:1;}
 int esp_ota_get_state_partition(const esp_partition_t*,esp_ota_img_states_t* s){*s=ESP_OTA_IMG_VALID;return imageCryptoValid?0:1;}
 int esp_ota_get_partition_description(const esp_partition_t* p,esp_app_desc_t* d){*d={};std::snprintf(d->project_name,sizeof(d->project_name),"Stopwatch-Mosaico");std::snprintf(d->version,sizeof(d->version),p==&imageParts[0]?"0.13.90-mosaico-ota":"0.13.91-mosaico-ota");d->app_elf_sha256[0]=1;return imageCryptoValid?0:1;}
-void mbedtls_sha256_init(mbedtls_sha256_context*){}void mbedtls_sha256_free(mbedtls_sha256_context*){}int mbedtls_sha256_starts(mbedtls_sha256_context*,int){return imageCryptoValid?0:-1;}int mbedtls_sha256_update(mbedtls_sha256_context*,const unsigned char*,size_t){return imageCryptoValid?0:-1;}int mbedtls_sha256_finish(mbedtls_sha256_context*,unsigned char* out){for(unsigned i=0;i<32;++i)out[i]=0x42;return imageCryptoValid?0:-1;}
+psa_status_t psa_crypto_init(){return imageCryptoValid?PSA_SUCCESS:-1;}
+psa_status_t psa_hash_setup(psa_hash_operation_t*,psa_algorithm_t algorithm){return imageCryptoValid&&algorithm==PSA_ALG_SHA_256?PSA_SUCCESS:-1;}
+psa_status_t psa_hash_update(psa_hash_operation_t*,const unsigned char*,size_t){return imageCryptoValid?PSA_SUCCESS:-1;}
+psa_status_t psa_hash_finish(psa_hash_operation_t*,unsigned char* out,size_t capacity,size_t* length){if(capacity<32)return -1;for(unsigned i=0;i<32;++i)out[i]=0x42;*length=32;return imageCryptoValid?PSA_SUCCESS:-1;}
+psa_status_t psa_hash_abort(psa_hash_operation_t*){return PSA_SUCCESS;}
 int mbedtls_base64_decode(unsigned char*,size_t,size_t*,const unsigned char*,size_t){return -1;}
 cJSON* cJSON_ParseWithLength(const char*,size_t){return nullptr;}bool cJSON_IsArray(const cJSON*){return false;}int cJSON_GetArraySize(const cJSON*){return 0;}cJSON* cJSON_GetArrayItem(const cJSON*,int){return nullptr;}char* cJSON_PrintUnformatted(const cJSON*){return nullptr;}void cJSON_free(void*){}void cJSON_Delete(cJSON*){}
 extern "C" {volatile int test_results[22]={-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999,-999};}
