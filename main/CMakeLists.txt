@@ -113,3 +113,41 @@ if(MOSAICO_BOARD)
         target_sources(${nand_lib} PRIVATE "${nand_compat_dir}/${nand_tu}")
     endforeach()
 endif()
+
+# Keep the SPI component's includes, flags, dependencies and linker fragments.
+# Only Mosaico S31 replaces the pinned driver TU; the installed SDK stays intact.
+if(MOSAICO_BOARD AND CONFIG_IDF_TARGET_ESP32S31)
+    idf_component_get_property(spi_lib esp_driver_spi COMPONENT_LIB)
+    idf_component_get_property(spi_dir esp_driver_spi COMPONENT_DIR)
+    idf_build_get_property(spi_idf_path IDF_PATH)
+    set(spi_original "${spi_dir}/src/gpspi/spi_master.c")
+    set(spi_compat_script "${CMAKE_CURRENT_LIST_DIR}/../tools/mosaico_spi_master_compat.py")
+    set(spi_compat_dir "${CMAKE_CURRENT_BINARY_DIR}/spi-master-compat-idf61")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${spi_compat_script}" "${spi_original}")
+    execute_process(COMMAND "${PYTHON}" "${spi_compat_script}"
+        --idf "${spi_idf_path}" --output "${spi_compat_dir}"
+        RESULT_VARIABLE spi_compat_result)
+    if(NOT spi_compat_result EQUAL 0)
+        message(FATAL_ERROR "Refusing unverified SPI master source/patch anchors")
+    endif()
+    get_target_property(spi_sources ${spi_lib} SOURCES)
+    set(spi_master_matches 0)
+    set(spi_kept_sources)
+    foreach(spi_source IN LISTS spi_sources)
+        get_filename_component(spi_absolute "${spi_source}" ABSOLUTE BASE_DIR "${spi_dir}")
+        if(spi_absolute STREQUAL spi_original)
+            math(EXPR spi_master_matches "${spi_master_matches} + 1")
+        else()
+            list(APPEND spi_kept_sources "${spi_source}")
+        endif()
+    endforeach()
+    if(NOT spi_master_matches EQUAL 1)
+        message(FATAL_ERROR "Expected exactly one original SPI master TU")
+    endif()
+    set_property(TARGET ${spi_lib} PROPERTY SOURCES "${spi_kept_sources}")
+    target_sources(${spi_lib} PRIVATE "${spi_compat_dir}/spi_master.c")
+    # Preserve the original directory's quoted-include lookup for this TU.
+    set_source_files_properties("${spi_compat_dir}/spi_master.c"
+        TARGET_DIRECTORY ${spi_lib} PROPERTIES INCLUDE_DIRECTORIES "${spi_dir}/src/gpspi")
+endif()
