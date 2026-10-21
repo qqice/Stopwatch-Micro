@@ -43,7 +43,7 @@ Network& GetNetworkQuota();Bluetooth& GetCodexMicroBle();
 namespace MosaicoOta {bool busy();bool healthPending();bool tryStorageLease();void releaseStorageLease();}
 void* heap_caps_malloc(size_t,unsigned);
 constexpr unsigned MALLOC_CAP_SPIRAM=1,MALLOC_CAP_8BIT=2;
-void gauge_feed();
+void gauge_feed();int64_t esp_timer_get_time();
 bool mockGaugeWord(uint8_t,uint16_t&);bool mockGaugeIdentity();
 void mockEngine(Hal::GaugeEngineSnapshot&,uint8_t,uint8_t);
 namespace {
@@ -57,7 +57,7 @@ mosaico_public_extra::Values gauge_public_extra_cached{};uint32_t gauge_public_e
 }
 void* escaped_cache_addresses[]={&gauge,&gauge_threshold_cached,&gauge_calibration_cached,&gauge_public_extra_cached,&gauge_threshold_cached_generation,&gauge_public_extra_generation};
 #include "mosaico_gauge_scale_runtime.inc"
-namespace {bool scale_trial_boot_restore_locked(){return false;}bool scale_append_trial_diagnostics(char*,size_t){return true;}}
+namespace {void native_recovery_revoke_locked(){}bool scale_trial_boot_restore_locked(){return false;}bool scale_append_trial_diagnostics(char*,size_t){return true;}}
 // Exercise root-owned entry points at compile time for signature checking.
 void root_hooks(){std::lock_guard<std::recursive_mutex> t(gauge_transaction_mutex);
  (void)scale_boot_fence_locked();(void)scale_unit_context_locked();(void)scale_journal_missing_locked();scale_invalidate_context_locked();}

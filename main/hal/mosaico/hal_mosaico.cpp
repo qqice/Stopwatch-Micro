@@ -251,6 +251,8 @@ bool scale_boot_fence_locked();
 mosaico_gauge_physical::UnitContext scale_unit_context_locked();
 bool scale_journal_missing_locked();
 void scale_invalidate_context_locked();
+void native_recovery_revoke_locked();
+void native_recovery_check_sample_locked(uint16_t dc,uint16_t fcc,uint16_t op,bool valid);
 bool scale_safety_mismatch_locked();
 // Private, transaction-mutex owned privilege: only a durable boot intent may
 // enable it. Public manual access/nominal/restore retains its strict policy.
@@ -603,6 +605,9 @@ void sample_battery_locked(bool refresh = false)
                                sample.fullMah <= mosaico_gauge::MaxReasonableFcc &&
                                mosaico_gauge::configExitAccepted(sample.operationStatus) &&
                                ((sample.operationStatus >> 1) & 3) == 3;
+    if(core&&status&&capacities)
+        native_recovery_check_sample_locked(sample.designMah,sample.fullMah,sample.operationStatus,
+                                           sample.valid&&sample.capacityValid);
     auto units=scale_unit_context_locked();
     // A RAM-loss/profile/security change revokes this boot's full131 proof.
     // Transient unreadable samples are invalid, not evidence of a new profile.
@@ -610,6 +615,7 @@ void sample_battery_locked(bool refresh = false)
        (!sample.valid||!sample.capacityValid||sample.designMah!=65*units.factor||
         sample.fullMah>mosaico_gauge::MaxReasonableFcc*units.factor||
         !mosaico_gauge::configExitAccepted(sample.operationStatus)||((sample.operationStatus>>1)&3)!=3)){
+        native_recovery_revoke_locked();
         scale_invalidate_context_locked();units=scale_unit_context_locked();
     }
     sample.unitFactor=units.factor;sample.unitEpoch=units.unitEpoch;
@@ -3248,6 +3254,7 @@ bool Hal::setDisplayOrientation(uint16_t degrees)
 
 // Unit/recovery ledger implementation shares the existing closed gauge transport.
 #include "mosaico_gauge_scale_runtime.inc"
+#include "mosaico_native_recovery.inc"
 
 Hal::PhysicalBatterySnapshot Hal::physicalBatteryTelemetry(bool refresh)
 {

@@ -174,6 +174,8 @@ public:
     // Dedicated UI/OTA copy. Raw telemetry/history are NEVER scaled in place.
     BatteryTelemetry batteryPolicyTelemetry(bool refresh = false);
     bool gaugeScalePrepare(char* details,size_t size);
+    bool gaugeNativeRecoveryEvidence(char* details,size_t size);
+    bool gaugeNativeRecoveryResolve(uint32_t expectedEvidenceCrc,char* details,size_t size);
     bool gaugeScaleStatus(char* details,size_t size);
     bool gaugeScaleRestorePlan(char* details,size_t size);
     bool gaugeScaleObservedField(size_t index,char* details,size_t size);
@@ -238,6 +240,8 @@ public:
     PhysicalBatterySnapshot physicalBatteryTelemetry(bool = false) { return {}; }
     BatteryTelemetry batteryPolicyTelemetry(bool = false) { return {}; }
     bool gaugeScalePrepare(char*,size_t) { return false; }
+    bool gaugeNativeRecoveryEvidence(char*,size_t) { return false; }
+    bool gaugeNativeRecoveryResolve(uint32_t,char*,size_t) { return false; }
     bool gaugeScaleStatus(char*,size_t) { return false; }
     bool gaugeScaleRestorePlan(char*,size_t) { return false; }
     bool gaugeScaleObservedField(size_t,char*,size_t) { return false; }

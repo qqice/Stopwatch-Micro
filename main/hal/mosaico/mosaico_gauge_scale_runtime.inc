@@ -21,6 +21,7 @@ bool scale_safety_address(uint16_t address){
 }
 std::atomic<bool> scale_trial_protection{true}; // no I/O in OTA admission getter
 bool scale_trial_boot_restore_locked();
+void native_recovery_revoke_locked();
 bool scale_append_trial_diagnostics(char*,size_t);
 struct ScaleRuntime {
     scale_journal::Workspace journal{};
@@ -33,6 +34,9 @@ struct ScaleRuntime {
     char freshKey[10]{};
     bool freshBackupDurable=false,scaleBootCriticalRecovered=false;
     char recoveredCriticalSource[128]{};
+    int64_t nativePreparedUs=0;uint32_t nativePreparedAuditGeneration=0;
+    bool nativeResolvedThisBoot=false;uint32_t nativeEvidenceCrc=0,nativeProofGeneration=0;
+    char nativeOriginalReason[128]{};
     size_t nvsAvailable=0;bool nvsStatsValid=false;
 };
 ScaleRuntime* scale_runtime=nullptr; // exclusively gauge_transaction_mutex owned
@@ -152,16 +156,22 @@ scale_journal::Status scale_load_locked(bool refresh=false){
         if(scale_load_status==scale_journal::Status::Ready){
             const auto& r=rt.journal.loaded.records[size_t(rt.journal.loaded.selected)];
             if(!scale_reviewed_record(r)){scale_load_status=scale_journal::Status::Rejected;}
-            if(r.snapshot.generation!=rt.verifiedGeneration||r.snapshot.epoch!=rt.verifiedEpoch){rt.originalVerifiedThisBoot=false;rt.appliedVerifiedThisBoot=false;}
-            if(r.snapshot.phase!=scale_recovery::Phase::Original)rt.originalVerifiedThisBoot=false;
+            if(r.snapshot.generation!=rt.verifiedGeneration||r.snapshot.epoch!=rt.verifiedEpoch){native_recovery_revoke_locked();rt.originalVerifiedThisBoot=false;rt.appliedVerifiedThisBoot=false;}
+                        if(r.snapshot.phase!=scale_recovery::Phase::Original){
+                // A verified stable Applied context is the explicit trial, not
+                // an implicit native waiver. Unexpected phases still revoke.
+                if(r.snapshot.phase!=scale_recovery::Phase::Applied||!rt.appliedVerifiedThisBoot)native_recovery_revoke_locked();
+                rt.originalVerifiedThisBoot=false;
+            }
             if(r.snapshot.phase!=scale_recovery::Phase::Applied)rt.appliedVerifiedThisBoot=false;
         }
-        if(scale_load_status!=scale_journal::Status::Ready){rt.originalVerifiedThisBoot=false;rt.appliedVerifiedThisBoot=false;}
+        if(scale_load_status!=scale_journal::Status::Ready){native_recovery_revoke_locked();rt.originalVerifiedThisBoot=false;rt.appliedVerifiedThisBoot=false;}
     }
     scale_update_protection_locked();
     return scale_load_status;
 }
 void scale_invalidate_context_locked(){
+    native_recovery_revoke_locked();
     if(scale_runtime){scale_runtime->originalVerifiedThisBoot=false;scale_runtime->appliedVerifiedThisBoot=false;scale_runtime->verifiedGeneration=0;scale_runtime->verifiedEpoch=0;}
     scale_update_protection_locked();
 }
@@ -338,6 +348,7 @@ bool Hal::gaugeScalePrepare(char* details,size_t detailsSize){
         if(!scale_runtime_gate()||!scale_standard_original_locked()||!scale_fresh_backup_locked(rt.journal.scratch,saved))
             return scale_report(details,detailsSize,"blocked_fresh131_immutable_backup",false);
     }
+    rt.nativePreparedUs=esp_timer_get_time();rt.nativePreparedAuditGeneration=gauge_threshold_cached_generation;
     rt.originalVerifiedThisBoot=true;rt.appliedVerifiedThisBoot=false;rt.verifiedGeneration=saved.snapshot.generation;rt.verifiedEpoch=saved.snapshot.epoch;
     scale_trial_protection.store(false,std::memory_order_release);
     const bool spaceReady=scale_nvs_space_ready_locked();
