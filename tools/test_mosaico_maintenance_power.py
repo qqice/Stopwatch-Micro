@@ -21,7 +21,8 @@ struct Hal {
  using GaugeEngineSnapshot=mosaico_gauge_engine::Snapshot;
  SNAPSHOT_DECL
  std::array<uint8_t,6> getFactoryMac(){return {0x24,1,2,3,4,5};}
- bool tryMaintenancePowerSnapshot(MaintenancePowerSnapshot&);
+ enum class MaintenancePowerResult { Rejected, Busy, Safe };
+ bool tryMaintenancePowerSnapshot(MaintenancePowerSnapshot&, MaintenancePowerResult* = nullptr);
  bool maintenancePowerStatus(char*,size_t) const;
 };
 static Hal hal;Hal& GetHAL(){return hal;}
@@ -87,7 +88,8 @@ class MaintenancePowerTests(unittest.TestCase):
   for i,(label,setup,expected,noio) in enumerate(CASES):cases.append(f'case {i}:{{{setup}expected={str(expected).lower()};noio={str(noio).lower()};break;}}')
   runner=RESET+MODEL+'''\nstatic int run_case(int id){reset();bool expected=false,noio=false;switch(id){'''+''.join(cases)+'''}auto oldBoot=gauge_boot_info,oldHistorical=historical;auto oldEvidence=evidenceDisk;auto oldStorage=storage;
  char initial[192]{};if(!hal.maintenancePowerStatus(initial,sizeof(initial))||!contains(initial,"reason=not_sampled")||wordCalls||identityCalls||nvsReads||nvsOpens)return 6;
- Hal::MaintenancePowerSnapshot out{};out.valid=true;out.voltageMv=1;bool ok=hal.tryMaintenancePowerSnapshot(out);
+ Hal::MaintenancePowerSnapshot out{};out.valid=true;out.voltageMv=1;Hal::MaintenancePowerResult result=Hal::MaintenancePowerResult::Safe;bool ok=hal.tryMaintenancePowerSnapshot(out,&result);
+ if(result!=(expected?Hal::MaintenancePowerResult::Safe:((id==3||id==4)?Hal::MaintenancePowerResult::Busy:Hal::MaintenancePowerResult::Rejected)))return 13;
  const unsigned oldWords=wordCalls,oldIdentity=identityCalls,oldNvs=nvsReads,oldOpens=nvsOpens,oldTimer=timerCalls;
  const char* cached=maintenance_power_reason.load(std::memory_order_acquire);char diagnostic[192]{},small[4]{};
  if(!hal.maintenancePowerStatus(diagnostic,sizeof(diagnostic))||!contains(diagnostic,"cached_only=1")||!contains(diagnostic,"no_i2c=1")||!contains(diagnostic,"no_power_proof=1"))return 7;

@@ -16,12 +16,19 @@ bool Hal::maintenancePowerStatus(char* out,size_t size) const {
         maintenance_power_reason.load(std::memory_order_acquire));
     return count>=0&&size_t(count)<size;
 }
-bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out) {
+bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, MaintenancePowerResult* result) {
+    if (result) *result = MaintenancePowerResult::Rejected;
     out = {};
     std::unique_lock<std::recursive_mutex> transaction(gauge_transaction_mutex, std::try_to_lock);
-    if (!transaction.owns_lock()) return maintenance_power_reject("gauge_transaction_busy");
+    if (!transaction.owns_lock()) {
+        if (result) *result = MaintenancePowerResult::Busy;
+        return maintenance_power_reject("gauge_transaction_busy");
+    }
     std::unique_lock<std::mutex> battery(battery_mutex, std::try_to_lock);
-    if (!battery.owns_lock()) return maintenance_power_reject("battery_read_busy");
+    if (!battery.owns_lock()) {
+        if (result) *result = MaintenancePowerResult::Busy;
+        return maintenance_power_reject("battery_read_busy");
+    }
     if (!gauge) return maintenance_power_reject("no_gauge");
     if (scale_mutation_in_progress || scale_safety_mismatch_locked() || !scale_runtime ||
         !scale_runtime->loaded) return maintenance_power_reject("scale_or_calibration_not_safe");
@@ -91,6 +98,7 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out) {
         return maintenance_power_reject("raw_clock_or_read_latency");
     sample.valid = true;
     out = sample;
+    if (result) *result = MaintenancePowerResult::Safe;
     maintenance_power_reason.store("raw_verified_not_soc_calibration",std::memory_order_release);
     return true;
 }

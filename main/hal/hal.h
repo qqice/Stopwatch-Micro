@@ -143,6 +143,8 @@ public:
     using PhysicalBatterySnapshot = mosaico_gauge_physical::Snapshot<BatteryTelemetry>;
     // Raw-only power evidence for explicitly authorized USB maintenance OTA.
     // No SOC/capacity calibration claim; never clears a gauge failure latch.
+    // Per-call classification: only failed mutex acquisition is retryable.
+    enum class MaintenancePowerResult { Rejected, Busy, Safe };
     struct MaintenancePowerSnapshot {
         bool valid = false;
         uint16_t voltageMv = 0, temperatureDeciK = 0, operationStatus = 0;
@@ -188,7 +190,7 @@ public:
     bool gaugeFactoryAuditCapture(char* details,size_t size);
     bool gaugeFactoryAuditStatus(char* details,size_t size);
     bool gaugeFactoryAuditField(size_t index,char* details,size_t size);
-    bool tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out);
+    bool tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, MaintenancePowerResult* result = nullptr);
     bool maintenancePowerStatus(char* details,size_t size) const;
     bool gaugeScaleStatus(char* details,size_t size);
     bool gaugeScaleRestorePlan(char* details,size_t size);
@@ -259,7 +261,7 @@ public:
     bool gaugeFactoryAuditCapture(char*,size_t) { return false; }
     bool gaugeFactoryAuditStatus(char*,size_t) { return false; }
     bool gaugeFactoryAuditField(size_t,char*,size_t) { return false; }
-    bool tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out) { out={};return false; }
+    bool tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, MaintenancePowerResult* result = nullptr) { out={};if(result)*result=MaintenancePowerResult::Rejected;return false; }
     bool maintenancePowerStatus(char*,size_t) const { return false; }
     bool gaugeScaleStatus(char*,size_t) { return false; }
     bool gaugeScaleRestorePlan(char*,size_t) { return false; }

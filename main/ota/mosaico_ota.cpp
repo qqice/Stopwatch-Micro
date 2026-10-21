@@ -169,27 +169,45 @@ bool currentReady()
 }
 bool maintenancePowerSafe(bool fresh = false, uint32_t endBytes = 0)
 {
-    if (!maintenanceMode || GetHAL().gaugeScaleTrialActive()) { maintenanceGrant.clear(); return false; }
-    const auto* running = esp_ota_get_running_partition();
-    const auto* boot = esp_ota_get_boot_partition();
-    const uint32_t expectedBoot = selected.load() && target ? target->address : maintenanceGrant.bootAddress;
-    int64_t now = esp_timer_get_time();
-    auto usbState = mosaico_console_usb_snapshot();
-    // Sticky unmount epoch catches detach/reconnect between polls. The 32-bit
-    // counter is boot-local; a full 2^32 unmount wrap is outside this <=600s lease.
-    if (!running || !boot || !maintenanceGrant.check(now,
-        tud_mounted() && usbState.mounted && usbState.connected && !usbState.suspended,
-        running->address, boot->address, expectedBoot, usbState.unmounts)) return false;
-    if (MosaicoOtaMaintenance::refreshDue(fresh, now, maintenanceRawUs, endBytes, maintenanceRawBytes)) {
-        Hal::MaintenancePowerSnapshot sample;
-        if (!currentReady() || !GetHAL().tryMaintenancePowerSnapshot(sample)) { maintenanceGrant.clear(); return false; }
+    int64_t now = 0;
+    // Re-read partitions and sticky USB state on every attempt, after every
+    // scheduling yield and after raw I/O. Never renew the original lease.
+    const auto grantSafe = [&]() {
         now = esp_timer_get_time();
-        // Snapshot I/O consumes lease time too; check again before accepting it.
-        usbState = mosaico_console_usb_snapshot();
-        if (!maintenanceGrant.check(now,
+        const auto* running = esp_ota_get_running_partition();
+        const auto* boot = esp_ota_get_boot_partition();
+        const uint32_t expectedBoot = selected.load() && target ? target->address : maintenanceGrant.bootAddress;
+        const auto usbState = mosaico_console_usb_snapshot();
+        if (!maintenanceMode || GetHAL().gaugeScaleTrialActive() || !running || !boot) {
+            maintenanceGrant.clear(); return false;
+        }
+        return maintenanceGrant.check(now,
             tud_mounted() && usbState.mounted && usbState.connected && !usbState.suspended,
-            running->address, boot->address, expectedBoot, usbState.unmounts) ||
-            !MosaicoOtaMaintenance::powerSafe(sample, now)) { maintenanceGrant.clear(); return false; }
+            running->address, boot->address, expectedBoot, usbState.unmounts);
+    };
+    if (!grantSafe()) return false;
+    if (MosaicoOtaMaintenance::refreshDue(fresh, now, maintenanceRawUs, endBytes, maintenanceRawBytes)) {
+        const int64_t retryStartedUs = now;
+        Hal::MaintenancePowerSnapshot sample;
+        for (;;) {
+            if (!grantSafe() || now - retryStartedUs >= 250000 || !currentReady()) { maintenanceGrant.clear(); return false; }
+            Hal::MaintenancePowerResult result = Hal::MaintenancePowerResult::Rejected;
+            const bool sampled = GetHAL().tryMaintenancePowerSnapshot(sample, &result);
+            // Snapshot I/O and contention both consume lease time. No cached
+            // fallback and no retries for actual read, state, voltage or temperature failures.
+            if (!grantSafe() || !currentReady()) { maintenanceGrant.clear(); return false; }
+            if (sampled) {
+                if (!MosaicoOtaMaintenance::powerSafe(sample, now)) { maintenanceGrant.clear(); return false; }
+                break;
+            }
+            // The per-call result, not shared diagnostics, proves mutex contention.
+            // Do not schedule a tick that would extend the <=250ms retry window.
+            if (result != Hal::MaintenancePowerResult::Busy ||
+                now - retryStartedUs >= 250000 - int64_t(portTICK_PERIOD_MS) * 1000) {
+                maintenanceGrant.clear(); return false;
+            }
+            vTaskDelay(1); // Release CPU, never wait while owning either HAL mutex.
+        }
         maintenancePower = sample; maintenanceRawUs = now; maintenanceRawBytes = endBytes;
     }
     if (!MosaicoOtaMaintenance::powerSafe(maintenancePower, now)) { maintenanceGrant.clear(); return false; }

@@ -33,7 +33,7 @@ struct esp_app_desc_t {char version[32]="new";};
 static bool storageBusy=false;static uint32_t usbUnmounts=0;static bool usbSuspended=false,usbConnected=true,reconnectInRaw=false;
 struct mosaico_usb_snapshot_t {uint32_t mounted,connected,suspended,unmounts;};
 static int64_t clockUs=1000000;static bool usb=true,rawOk=true,validSdk=true,scale=false,critical=true,signatureOk=true;
-static int erases=0,writes=0,aborts=0,ends=0,selectors=0,restarts=0,rawReads=0,journals=0;static int rawFault=0;static bool detachAtSelector=false,failRawAtEnd=false,expireAtEnd=false,expireAtJournal=false,detachBeforeFinish=false;
+static int erases=0,writes=0,aborts=0,ends=0,selectors=0,restarts=0,rawReads=0,journals=0;static int rawFault=0,busyReads=0,waitFault=0,delays=0,rawHook=0;static bool detachAtSelector=false,failRawAtEnd=false,expireAtEnd=false,expireAtJournal=false,detachBeforeFinish=false;
 static esp_partition_t parts[2]={{0x20000,0x7d0000},{0x800000,0x7d0000}};static const esp_partition_t* boot=&parts[0];
 int64_t esp_timer_get_time(){return clockUs;}bool tud_mounted(){return usb;}
 mosaico_usb_snapshot_t mosaico_console_usb_snapshot(){return {usb,usbConnected,usbSuspended,usbUnmounts};}
@@ -51,11 +51,13 @@ struct Hal {
  struct Boot {GaugeBootReloadStatus status;};
  bool gaugeScaleTrialActive(){return scale;}Boot gaugeBootReloadInfo(){return {critical?GaugeBootReloadStatus::Critical:GaugeBootReloadStatus::Applied};}
  BatteryTelemetry batteryPolicyTelemetry(bool){return {};}
- bool tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& s){++rawReads;s={true,4200,3000,0x26,3000,3000,0,0,clockUs};
+ enum class MaintenancePowerResult { Rejected, Busy, Safe };
+ bool tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& s,MaintenancePowerResult* result=nullptr){++rawReads;s={};if(result)*result=MaintenancePowerResult::Rejected;if(busyReads){--busyReads;if(result)*result=MaintenancePowerResult::Busy;return false;}s={true,4200,3000,0x26,3000,3000,0,0,clockUs};
   if(rawFault==1)s.operationStatus=6;if(rawFault==2)s.operationStatus=0x426;if(rawFault==3)s.operationStatus=0x27;if(rawFault==4)s.operationStatus=0x24;
   if(rawFault==5)s.voltageMv=3899;if(rawFault==6)s.temperatureDeciK=3132;if(rawFault==7)s.fullMah=65;if(rawFault==8)s.currentMa=131;
   if(rawFault==9)s.averageCurrentMa=-131;if(rawFault==10)s.sampledUs=clockUs-2000001;if(rawFault==11)s.valid=false;
-  if(reconnectInRaw)++usbUnmounts;return rawOk;}
+  if(rawHook==1)clockUs+=30000000;if(rawHook==2)boot=&parts[1];if(rawHook==3)validSdk=false;if(rawHook==4)scale=true;
+  if(reconnectInRaw)++usbUnmounts;if(result&&rawOk)*result=MaintenancePowerResult::Safe;return rawOk;}
 } hal;Hal& GetHAL(){return hal;}
 namespace TouchSleep {struct OtaAdmission {explicit operator bool()const{return true;}};}
 namespace StandbySleep {void otaActivity(){}}
@@ -63,7 +65,8 @@ namespace mosaico_rx_ingress {void request(bool){}void service(bool){}}
 namespace mosaico_rx_observer {void request(bool){}void service(bool){}}
 namespace mosaico_wifi_rx_observer {void request(bool){}void service(bool){}struct Snapshot{bool cleanupPending=false;};Snapshot snapshot(){return {};}}
 #define pdMS_TO_TICKS(x) (x)
-void vTaskDelay(int ms){clockUs+=int64_t(ms)*1000;}
+#define portTICK_PERIOD_MS 1
+void vTaskDelay(int ms){++delays;clockUs+=int64_t(ms)*1000;if(waitFault==1)++usbUnmounts;if(waitFault==2)clockUs+=30000000;if(waitFault==3)boot=&parts[1];if(waitFault==4)validSdk=false;if(waitFault==5)usb=false;if(waitFault==6)clockUs-=2000;if(waitFault==7)clockUs+=250000;}
 namespace MosaicoOtaLayout {bool imageFits(int,int,uint32_t s){return s<=0x7d0000;}}
 namespace MosaicoOta {
 std::mutex lock,snapshotLock;
@@ -88,7 +91,7 @@ CASES=r'''
 static const char* A="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static const char* B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 using namespace MosaicoOta;
-static void reset(){storageBusy=false;usbUnmounts=0;usbSuspended=reconnectInRaw=false;usbConnected=true;clockUs=1000000;usb=rawOk=validSdk=signatureOk=true;scale=false;critical=true;rawFault=0;detachAtSelector=failRawAtEnd=expireAtEnd=expireAtJournal=detachBeforeFinish=false;boot=&parts[0];
+static void reset(){storageBusy=false;usbUnmounts=0;usbSuspended=reconnectInRaw=false;usbConnected=true;clockUs=1000000;usb=rawOk=validSdk=signatureOk=true;scale=false;critical=true;rawFault=busyReads=waitFault=delays=rawHook=0;detachAtSelector=failRawAtEnd=expireAtEnd=expireAtJournal=detachBeforeFinish=false;boot=&parts[0];
  erases=writes=aborts=ends=selectors=restarts=rawReads=journals=0;active=pending=approvedRequest=imageReady=selected=verified=checkQueued=checking=installQueued=rebootQueued=false;
  maintenanceMode=writing=hashLive=automaticMode=usbBypass=false;maintenanceGrant={};maintenancePower={};maintenanceRawUs=readySince=installSince=0;maintenanceRawBytes=0;expectedSize=received=requestedAtMs=0;handle=0;target=nullptr;approvedHash[0]=0;statusStage=UiStage::Idle;}
 static int stageImage(){if(!requestMaintenanceUpdate(A,600)||!takeRequest()||!beginManifest("a"))return 1;uint8_t data[4096]{};
@@ -148,6 +151,14 @@ static int run_case(int c){reset();
   usb=true;++usbUnmounts;if(!maintenanceStatus(status,sizeof(status))||!std::strstr(status,"grant=0")||!maintenanceGrant.enabled)return 4;return 0;}
  if(c==53){if(!requestMaintenanceUpdate(A,30))return 1;char status[256];usbSuspended=true;if(!maintenanceStatus(status,sizeof(status))||!std::strstr(status,"grant=0"))return 2;
   usbSuspended=false;usbConnected=false;if(!maintenanceStatus(status,sizeof(status))||!std::strstr(status,"grant=0")||!maintenanceGrant.enabled)return 3;return 0;}
+ if(c==54){busyReads=2;if(!requestMaintenanceUpdate(A,30)||rawReads!=4||delays!=2||maintenanceGrant.deadlineUs!=31000000)return 1;return 0;}
+ if(c==55){for(int f=1;f<=11;++f){reset();busyReads=2;rawFault=f;if(requestMaintenanceUpdate(A,30)||rawReads!=3||delays!=2||maintenanceGrant.enabled||erases)return f;}return 0;}
+ if(c==56){busyReads=1000;if(requestMaintenanceUpdate(A,30)||rawReads!=250||delays!=249||clockUs>1250000||maintenanceGrant.enabled)return 1;return 0;}
+ if(c>=57&&c<=63){busyReads=2;waitFault=c-56;if(requestMaintenanceUpdate(A,30)||rawReads!=1||delays!=1||maintenanceGrant.enabled||erases)return 1;return 0;}
+ if(c==64){if(!requestMaintenanceUpdate(A,30))return 1;int n=rawReads;busyReads=1000;if(maintenancePowerSafe(true)||rawReads!=n+250||maintenanceGrant.enabled)return 2;return 0;}
+ if(c==65){busyReads=2;rawOk=false;if(requestMaintenanceUpdate(A,30)||rawReads!=3||delays!=2)return 1;return 0;}
+ if(c==66){if(!requestMaintenanceUpdate(A,30))return 1;clockUs=maintenanceGrant.deadlineUs-500;busyReads=2;int n=rawReads;if(maintenancePowerSafe(true)||rawReads!=n+1||maintenanceGrant.enabled)return 2;return 0;}
+ if(c>=67&&c<=70){busyReads=2;rawHook=c-66;if(requestMaintenanceUpdate(A,30)||rawReads!=3||delays!=2||maintenanceGrant.enabled||erases)return 1;return 0;}
  return 999;
 }
 static int model(){using namespace MosaicoOtaMaintenance;Grant g;if(g.enabled||g.check(0,true,1,1,1))return 1;
@@ -162,9 +173,9 @@ static int model(){using namespace MosaicoOtaMaintenance;Grant g;if(g.enabled||g
  s.temperatureDeciK=3000;s.sampledUs=0;if(powerSafe(s,1))return 13;
  if(!refreshDue(false,0,0,66022,0)||refreshDue(false,0,0,63021,0)||!refreshDue(false,1000000,0,1,0))return 12;
  return 0;}
-extern "C" volatile int test_results[55];volatile int test_results[55];
+extern "C" volatile int test_results[72];volatile int test_results[72];
 extern "C" __attribute__((noinline,used)) void test_done(){for(;;){asm volatile("");}}
-extern "C" void _start(){for(int i=0;i<54;++i)test_results[i]=run_case(i);test_results[54]=model();test_done();}
+extern "C" void _start(){for(int i=0;i<71;++i)test_results[i]=run_case(i);test_results[71]=model();test_done();}
 '''
 class MaintenanceTests(unittest.TestCase):
  def test_actual_chain(self):
@@ -197,9 +208,9 @@ class MaintenanceTests(unittest.TestCase):
    for pos in range(sh[4],sh[4]+sh[5],sh[9]):
     name,value,_,_,_,_=struct.unpack_from('<IIIBBH',raw,pos);symbols[text[name:].split(b'\0',1)[0].decode()]=value
   uc.reg_write(UC_RISCV_REG_SP,0x1fffff0);uc.emu_start(entry,symbols['test_done'],timeout=20000000,count=100000000)
-  values=struct.unpack('<55i',bytes(uc.mem_read(symbols['test_results'],220)))
+  values=struct.unpack('<72i',bytes(uc.mem_read(symbols['test_results'],288)))
   (RUN/'execution.log').write_text('Actual extracted OTA functions; mocked SDK/PSA/signature result/locks/raw provider. Not firmware or hardware validation.\n'+f'ELF_SHA256={hashlib.sha256(raw).hexdigest()}\n'+repr(values)+'\n')
-  self.assertEqual(uc.reg_read(UC_RISCV_REG_PC),symbols['test_done']);self.assertEqual(values,(0,)*55)
+  self.assertEqual(uc.reg_read(UC_RISCV_REG_PC),symbols['test_done']);self.assertEqual(values,(0,)*72)
  def test_preserved_security_boundaries(self):
   manifest=function('bool beginManifest(')
   self.assertLess(manifest.index('validateDescriptor('),manifest.index('maintenanceGrant.matches'))
@@ -208,5 +219,9 @@ class MaintenanceTests(unittest.TestCase):
    body=function('bool '+name+'(');self.assertIn('GaugeBootReloadStatus::Critical',body);self.assertNotIn('maintenance',body)
   self.assertNotIn('nvs_', (ROOT/'main/ota/mosaico_ota_maintenance_model.h').read_text())
   self.assertIn('90000000',CPP);self.assertIn('20000000',CPP)
+  power=function('bool maintenancePowerSafe(')
+  self.assertIn('MaintenancePowerResult::Busy',power);self.assertIn('vTaskDelay(1)',power)
+  self.assertNotIn('maintenancePowerStatus',power);self.assertNotIn('maintenanceGrant.start',power)
+  self.assertIn('now - retryStartedUs >= 250000',power)
 if __name__=='__main__':unittest.main()
 
