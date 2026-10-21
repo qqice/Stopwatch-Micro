@@ -1174,6 +1174,18 @@ void SerialDebug::handleLine(char* line)
                       static_cast<unsigned long>(network.historyAccepted()),
                       static_cast<unsigned long>(network.historyFailures()));
 #ifdef MOSAICO_BOARD
+        microlink_derp_stack_diag_t derpStack{};
+        microlink_derp_stack_get_diagnostics(&derpStack);
+        debugPrintf("DBG DERP_STACK version=%lu requested_bytes=%lu selected_pool=%lu marker=0x%lx marker_rtc=%lu marker_internal=%lu marker_dma=%lu create_failures=%lu external_joins=%lu cumulative_boot=1 cached_only=1\r\n",
+            static_cast<unsigned long>(derpStack.version),
+            static_cast<unsigned long>(derpStack.requested_stack_bytes),
+            static_cast<unsigned long>(derpStack.selected_pool),
+            static_cast<unsigned long>(derpStack.marker_address),
+            static_cast<unsigned long>(derpStack.marker_rtc),
+            static_cast<unsigned long>(derpStack.marker_internal),
+            static_cast<unsigned long>(derpStack.marker_dma),
+            static_cast<unsigned long>(derpStack.create_failures),
+            static_cast<unsigned long>(derpStack.external_joins));
         microlink_peer_path_diag_t peerPath{};
         microlink_peer_path_get_diagnostics(&peerPath);
         debugPrintf("DBG PEER_PATH version=%lu probe_stale=%lu foreign_sender=%lu probe_cancelled=%lu pending_deferred=%lu endpoint_promoted=%lu oneshot_requested=%lu key_mismatch=%lu invalid_state=%lu connect_error=%lu owner_error=%lu cumulative_boot=1 cached_only=1\r\n",
