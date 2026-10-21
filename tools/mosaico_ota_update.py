@@ -27,6 +27,7 @@ def main():
  p.add_argument('--log',type=Path,help='Optional local serial evidence file; keep private because runtime logs may contain sensitive data')
  p.add_argument('--keep-locked',action='store_true',help='Require an already locked display; do not wake it before requesting OTA')
  p.add_argument('--uart',action='store_true',help='Use CRC-framed JLink/FT4232 UART instead of board CDC; requires explicit --port')
+ p.add_argument('--boot-status-probe',action='store_true',help='One read-only status snapshot during boot health verification; never changes health gates')
  args=p.parse_args()
  if not args.confirm_external_power:raise SystemExit('Confirm USB/external power with --confirm-external-power; not inferred from SOC')
  if not 60<=args.timeout<=1800:raise SystemExit('timeout must be60..1800 seconds')
@@ -34,7 +35,7 @@ def main():
  entries=[x for x in list_ports.comports() if x.device.upper()==args.port.upper() and transport_matches(x,args.uart)]
  if len(entries)!=1:raise SystemExit('Explicit port does not match the selected CDC/UART transport')
  serial_number=entries[0].serial_number
- client=None;captured=io.StringIO()
+ client=None;captured=io.StringIO();boot_status_probed=False
  try:
   client=open_client(args.port,args.uart)
   with contextlib.redirect_stdout(captured):
@@ -73,6 +74,11 @@ def main():
    except (OSError,TimeoutError):
     client.close();client=None;time.sleep(5);continue
    d=fields(stat)
+   if args.boot_status_probe and not boot_status_probed and d.get('stage')=='boot_checking':
+    boot_status_probed=True  # One observation only, never a retry or control command.
+    with contextlib.redirect_stdout(captured):
+     try:client.command('debug status','status',10)
+     except (OSError,TimeoutError) as exc:print('BOOT_STATUS_PROBE_UNAVAILABLE '+type(exc).__name__,flush=True)
    if d.get('busy')=='0':
     if d.get('running')==target:
      if d.get('state')=='2':print('NETWORK_OTA_ACCEPTED running='+target+' state=VALID',flush=True);return
@@ -83,7 +89,7 @@ def main():
     if d.get('stage')=='ready_reboot' and d.get('selected')=='1':
      time.sleep(2);continue
     raise SystemExit('OTA rejected/aborted or rolled back: running='+d.get('running','unknown')+' reason='+d.get('reason','unknown'))
-   print('OTA_PROGRESS received='+d.get('received','0')+' size='+d.get('size','0'),flush=True)
+   print('OTA_PROGRESS received='+d.get('received','0')+' size='+d.get('size','0')+' running='+d.get('running','unknown')+' state='+d.get('state','?')+' stage='+d.get('stage','unknown'),flush=True)
    time.sleep(10)
   raise SystemExit('OTA observation timed out; completion NOT accepted')
  finally:
