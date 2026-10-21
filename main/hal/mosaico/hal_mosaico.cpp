@@ -3256,6 +3256,7 @@ bool Hal::setDisplayOrientation(uint16_t degrees)
 #include "mosaico_gauge_scale_runtime.inc"
 #include "mosaico_native_recovery.inc"
 #include "mosaico_factory_audit.inc"
+#include "mosaico_maintenance_power.inc"
 
 Hal::PhysicalBatterySnapshot Hal::physicalBatteryTelemetry(bool refresh)
 {

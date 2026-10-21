@@ -1,5 +1,5 @@
 """Offline OTA UI source/geometry checks; no display, device or network claims."""
-import json, re, subprocess, tempfile, unittest
+import json, os, re, subprocess, tempfile, unittest
 from pathlib import Path
 R = Path(__file__).resolve().parents[1]
 V = R / 'main/apps/app_codex_micro/view'
@@ -326,8 +326,14 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
             # this adapter parameter is typed; all function bodies stay intact.
             body=body.replace('void* owner','CodexMicroView* owner')
             methods.append('constexpr '+body)
+        # Reuse only the production pure touch model (no chart/host dependencies).
+        trend=(V/'quota_trend_selection.h').read_text(encoding='utf8')
+        trend_model=('namespace mosaico_trend {\n'+re.search(r'constexpr bool inPlot[^\n]+',trend)[0]+
+                     '\nstruct TouchSelection {'+trend.split('struct TouchSelection {',1)[1].split('\n};',1)[0]+'\n};\n}\n')
         harness=r'''
+#define UINT32_MAX 0xffffffffU
 using int32_t = int; using uint32_t = unsigned;
+'''+trend_model+r'''
 namespace std {
 constexpr int abs(int n) { return n < 0 ? -n : n; }
 template<class T> class initializer_list {
@@ -338,6 +344,7 @@ template<class T> class initializer_list {
 }; }
 struct CodexMicroView;
 struct lv_point_t { int x=0,y=0; };
+struct lv_area_t { int x1=0,y1=0,x2=0,y2=0; };
 struct lv_obj_t { int x=20; bool hidden=false; lv_obj_t* parent=nullptr; };
 struct lv_indev_t { lv_point_t point; };
 enum { LV_EVENT_PRESSED,LV_EVENT_PRESSING,LV_EVENT_RELEASED,LV_EVENT_PRESS_LOST,
@@ -349,6 +356,9 @@ constexpr CodexMicroView* lv_event_get_user_data(lv_event_t* e) { return e->owne
 constexpr lv_indev_t* lv_event_get_indev(lv_event_t* e) { return e->input; }
 constexpr lv_obj_t* lv_event_get_target(lv_event_t* e) { return e->target; }
 constexpr lv_obj_t* lv_obj_get_parent(lv_obj_t* o) { return o->parent; }
+// Existing page-swipe cases deliberately start outside the chart. Chart touch
+// behavior has separate trend-model tests; retain the actual touchEvent body.
+constexpr void lv_obj_get_content_coords(lv_obj_t*,lv_area_t* a) { *a={0,3000,460,3058}; }
 constexpr int lv_indev_get_type(lv_indev_t*) { return LV_INDEV_TYPE_POINTER; }
 constexpr void lv_indev_get_point(lv_indev_t* i,lv_point_t* p) { *p=i->point; }
 constexpr unsigned lv_tick_get() { return 1; }
@@ -382,6 +392,10 @@ struct CodexMicroView {
  lv_obj_t* _quotaPage=&panels[0]; lv_obj_t* _historyPage=&panels[1]; lv_obj_t* _otaPage=&panels[2]; lv_obj_t* _settingsPage=&panels[3]; lv_obj_t* _sessionsPage=&panels[4];
  lv_obj_t* _slideFrom=nullptr; lv_obj_t* _slideTo=nullptr;
  int _slideDirection=1; bool _suppressed=false,_locked=false,busy=false;
+ mosaico_trend::TouchSelection _trendTouch;
+ lv_obj_t historyChart; lv_obj_t* _historyChart=&historyChart;
+ int trendSelections=0;
+ constexpr void selectTrendAt(int) { ++trendSelections; }
  bool _touchTracking=false,_swipeConsumed=false; lv_point_t _touchStart{};
  unsigned _activity=0;
  constexpr bool ready() { return true; }
@@ -484,7 +498,9 @@ static_assert(edgeCases(),"release fallback, press-lost, guards and Function");
             out.parent.mkdir(parents=True,exist_ok=True);out.write_text(result.stdout+result.stderr,encoding='utf8')
             self.assertEqual(result.returncode,0,'actual source harness failed: '+str(out))
     def test_actual_target_syntax_when_configured(self):
-        db=R/'.artifacts/mosaico/ota-build/compile_commands.json'
+        # Use the current configured source/font set, or an explicit read-only
+        # compilation database override. Never regenerate/change SDK settings.
+        db=Path(os.environ.get('MOSAICO_OTA_UI_COMPILE_COMMANDS', str(R/'.artifacts/mosaico/auto-ls-probe-build/compile_commands.json')))
         if not db.exists(): self.skipTest('target configuration unavailable')
         entries=json.loads(db.read_text())
         log=[]

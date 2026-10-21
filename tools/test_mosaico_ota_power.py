@@ -115,9 +115,10 @@ static_assert(test());
         process = CPP.split('void processLocalRequests()', 1)[1].split('bool finish()', 1)[0]
         self.assertEqual(process.count('rebootWithFreshPower()'), 2)
         self.assertNotIn('esp_restart()', process)
-        self.assertIn('if ((usbBypass || automaticMode) && selected.load())', process)
+        self.assertIn('if ((usbBypass || automaticMode || maintenanceMode) && selected.load())', process)
         queued = CPP.split('bool requestReboot()', 1)[1].split('bool rebootWithFreshPower()', 1)[0]
         self.assertNotIn('batteryPolicyTelemetry(', queued)
+        self.assertIn('revokeForNormalRequest();', queued)
 
 
 if __name__ == '__main__':

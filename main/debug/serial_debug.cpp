@@ -791,6 +791,45 @@ void SerialDebug::handleLine(char* line)
         result("ota-status", "PASS", details);
         return;
     }
+    if (command && !std::strcmp(command, "ota-maintenance")) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        if(!action)action="status";
+        if(!std::strcmp(action,"status")||!std::strcmp(action,"power")){
+            if(::strtok_r(nullptr," \t",&save)){
+                result(command,"FAIL","expected=status_no_arguments no_changes=1");return;
+            }
+            char details[1024]{};
+            const bool ok=!std::strcmp(action,"power")?GetHAL().maintenancePowerStatus(details,sizeof(details)):
+                MosaicoOta::maintenanceStatus(details,sizeof(details));
+            result(command,ok?"PASS":"FAIL",details);return;
+        }
+        const bool update=!std::strcmp(action,"update"),reboot=!std::strcmp(action,"reboot");
+        const char* confirm=::strtok_r(nullptr," \t",&save);
+        const char* hash=::strtok_r(nullptr," \t",&save);
+        const char* ttl=::strtok_r(nullptr," \t",&save);
+        uint32_t seconds=0;char expected[65]{};
+        bool valid=(update||reboot)&&confirm&&!std::strcmp(confirm,"CONFIRM_USB_POWER")&&
+            hash&&std::strlen(hash)==64&&parseUnsignedStrict(ttl,30,600,seconds);
+        for(size_t i=0;valid&&i<64;++i){
+            const char c=hash[i];
+            if(c>='0'&&c<='9')expected[i]=c;
+            else if(c>='a'&&c<='f')expected[i]=c;
+            else if(c>='A'&&c<='F')expected[i]=char(c-'A'+'a');
+            else valid=false;
+        }
+        if(!valid||::strtok_r(nullptr," \t",&save)){
+            result(command,"FAIL","expected=update_or_reboot_CONFIRM_USB_POWER_64hexSHA_ttl30..600 no_changes=1");return;
+        }
+        if(_async_test!=AsyncTest::None){
+            result(command,"FAIL","reason=async_diagnostic_active no_changes=1");return;
+        }
+        const bool accepted=update?MosaicoOta::requestMaintenanceUpdate(expected,seconds):
+            MosaicoOta::requestMaintenanceReboot(expected,seconds);
+        if(accepted)GetNetworkQuota().wakeForFirmwareUpdate();
+        char details[1024]{};
+        (void)MosaicoOta::maintenanceStatus(details,sizeof(details));
+        result(command,accepted?"PASS":"FAIL",details);return;
+    }
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
     if (command && std::strcmp(command, "panic") == 0) {
         char details[768];
@@ -2189,6 +2228,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP nand-dma no_arguments=1 readonly_ram=1 no_storage_io=1\r\n");
     debugPrintf("DBG HELP gauge-native-recovery evidence | resolve CONFIRM <8hexCRC> explicit_ram_only=1 failed_records_preserved=1\r\n");
     debugPrintf("DBG HELP gauge-factory-audit status | capture CONFIRM (CDC_only) | field <0..130> read_only_parameters=1 separate_backup=1\r\n");
+    debugPrintf("DBG HELP ota-maintenance status|power | update_or_reboot CONFIRM_USB_POWER <64hexSHA> <ttl30..600s> local_attestation_only=1 no_persistent_waiver=1\r\n");
     debugPrintf("DBG HELP gauge-scale status | prepare CONFIRM | restore-plan | observed <index0..130> | images <signed_manifests_base64> | apply CONFIRM_EXTERNAL_POWER | restore CONFIRM bounded_x2_trial=1 no_SOC_OCV_RESET=1\r\n");
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
     debugPrintf("DBG HELP gauge-trace status | arm CONFIRM | stop | export | clear CONFIRM | checkpoint CONFIRM queued_not_persisted=1 gauge_parameter_writes=0\r\n");

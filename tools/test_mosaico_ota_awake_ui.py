@@ -44,6 +44,10 @@ struct CodexMicroView {
  Quota* _quota=&quota;
  Page _page=Page::Command,_otaReturn=Page::Command;
  bool _locked=false,_rotationFault=false,_otaApproved=false,_chargeProfile=false;
+ // Minimal cancellation fixture; chart selection itself is tested separately.
+ struct TrendTouch { bool dragging=false; constexpr void cancel() { dragging=false; } } _trendTouch;
+ // The real first-quota readiness is sampled before the extracted idle block.
+ bool _firstQuotaReady=true;
  bool _touchTracking=false,_swipeConsumed=false,_settingsOpen=false;
  constexpr void openSettings() { _settingsOpen=true; }
  constexpr void closeSettings(bool=true) { _settingsOpen=false; }
@@ -67,6 +71,7 @@ struct CodexMicroView {
  constexpr bool setPageForDebug(Page page);
  constexpr void lockDisplay();
  constexpr void compare(bool interacting=false) {
+  const bool firstQuotaReady=_firstQuotaReady;
   uint32_t tick=_now-3;
 '''+idle+r'''
  }
@@ -92,6 +97,10 @@ constexpr bool cases() {
   queue.compare();queue.lockDisplay();
   return !queue._locked && !queue.lockCount && queue._activity==queue._now;
  }
+ // Before first quota readiness, even an elapsed ordinary timeout cannot lock.
+ CodexMicroView initial;initial._firstQuotaReady=false;initial._now=1000000;initial.compare();
+ if(initial._locked || initial.lockCount)return false;
+ initial._firstQuotaReady=true;initial.compare();if(!initial._locked || initial.lockCount!=1)return false;
  // Local busy protects a stale non-OTA page independently of backend busy.
  CodexMicroView local;local._ota.stage=S::Downloading;local._now=1000000;local.compare();
  if(local._locked || local._activity!=local._now)return false;

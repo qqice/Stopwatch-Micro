@@ -1046,3 +1046,43 @@ SDK, managed component, gauge or stored settings are changed.
 Mock/source tests do not prove physical IRQ timing. Require real UART recovery,
 Function short/held/release and rollback checks before retaining the feature.
 Power A/B uses OFF/ON on the same image after charging is complete.
+
+## Explicit USB maintenance OTA (default OFF)
+
+This local-console-only mode is for the inspected historical gauge-failure case,
+not a replacement for ordinary battery/automatic OTA admission. It never clears
+`Critical`, changes gauge parameters or trusts an uncalibrated SOC display.
+The operator must confirm that USB is the sole stable 5V source. Enumeration is
+only a connection veto, **not proof of external voltage or current**.
+
+```
+debug ota-maintenance status
+debug ota-maintenance power
+debug ota-maintenance update CONFIRM_USB_POWER <64-hex-image-SHA256> <30..600-seconds>
+debug ota-maintenance reboot CONFIRM_USB_POWER <same-verified-image-SHA256> <30..600-seconds>
+```
+
+UART commands require the existing CRC framing; CDC is also a local physical
+console. `power` reports only the last cached raw-admission reason and performs
+no I2C, granting or power measurement. Successful update/reboot requests wake the
+network owner; status/power and rejected requests do not wake it.
+
+The single-transaction RAM grant is fixed to the hash before manifest fetch and
+to the running VALID slot. It expires without automatic renewal and is revoked
+by USB disconnect (including detach/reconnect between checks), suspension,
+clock rollback, cancellation or a different ordinary request. Fresh raw BQ
+voltage/temperature/security checks remain mandatory: 3900..4350mV, 10..40C,
+SEALED/CFG0/CAL0/INITCOMP; unknown histories, unsafe calibration or an active
+scaling/recovery transaction reject maintenance. Capacity is restricted to the
+inspected 65/65 or 3000/3000 standard pairs, without asserting calibration.
+Private signature, version, layout, image hash, heap/integrity, healthy-current
+slot and SDK boot-health/rollback checks remain unchanged.
+
+A lost ACK is **unknown**, not permission to resend. Query status first. If the
+selector has already been committed, loss/expiry of the grant keeps the verified
+candidate at ReadyReboot; it never blindly rewrites the old selector. Only a new
+explicit local same-hash reboot authorization can continue that step. Ordinary,
+automatic and battery OTA cannot inherit this maintenance authority.
+
+Deployment and a real network-OTA round trip are required before treating this
+source implementation as an available unattended recovery facility.

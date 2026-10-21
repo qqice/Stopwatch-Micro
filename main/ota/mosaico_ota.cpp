@@ -3,9 +3,11 @@
 #include <debug/mosaico_rx_ingress.h>
 #include "mosaico_ota.h"
 #include "mosaico_ota_power.h"
+#include "mosaico_ota_maintenance_model.h"
 #include "mosaico_ota_layout.h"
 #include "ota_public_key.h"
 #include <hal/hal.h>
+#include <hal/mosaico/usb_console.h>
 #include <host/standby_sleep.h>
 #include <host/touch_sleep.h>
 #ifdef MOSAICO_NAND_STORE
@@ -59,6 +61,12 @@ std::atomic<uint32_t> requestedAtMs{0};
 std::atomic<bool> pending{false};
 bool writing = false, hashLive = false, automaticMode = false, usbBypass = false;
 std::atomic<const char*> autoState{"idle"};
+// Separate from usbBypass/automaticMode: ordinary UI requests never inherit this grant.
+std::atomic<bool> maintenanceMode{false};
+MosaicoOtaMaintenance::Grant maintenanceGrant;
+Hal::MaintenancePowerSnapshot maintenancePower;
+int64_t maintenanceRawUs = 0;
+uint32_t maintenanceRawBytes = 0;
 bool currentHashChecked = false, currentHashValid = false;
 char currentHash[65]{};
 esp_ota_handle_t handle = 0;
@@ -159,8 +167,45 @@ bool currentReady()
     return exactSlot(running) && layoutSafe() &&
         esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_VALID;
 }
+bool maintenancePowerSafe(bool fresh = false, uint32_t endBytes = 0)
+{
+    if (!maintenanceMode || GetHAL().gaugeScaleTrialActive()) { maintenanceGrant.clear(); return false; }
+    const auto* running = esp_ota_get_running_partition();
+    const auto* boot = esp_ota_get_boot_partition();
+    const uint32_t expectedBoot = selected.load() && target ? target->address : maintenanceGrant.bootAddress;
+    int64_t now = esp_timer_get_time();
+    auto usbState = mosaico_console_usb_snapshot();
+    // Sticky unmount epoch catches detach/reconnect between polls. The 32-bit
+    // counter is boot-local; a full 2^32 unmount wrap is outside this <=600s lease.
+    if (!running || !boot || !maintenanceGrant.check(now,
+        tud_mounted() && usbState.mounted && usbState.connected && !usbState.suspended,
+        running->address, boot->address, expectedBoot, usbState.unmounts)) return false;
+    if (MosaicoOtaMaintenance::refreshDue(fresh, now, maintenanceRawUs, endBytes, maintenanceRawBytes)) {
+        Hal::MaintenancePowerSnapshot sample;
+        if (!currentReady() || !GetHAL().tryMaintenancePowerSnapshot(sample)) { maintenanceGrant.clear(); return false; }
+        now = esp_timer_get_time();
+        // Snapshot I/O consumes lease time too; check again before accepting it.
+        usbState = mosaico_console_usb_snapshot();
+        if (!maintenanceGrant.check(now,
+            tud_mounted() && usbState.mounted && usbState.connected && !usbState.suspended,
+            running->address, boot->address, expectedBoot, usbState.unmounts) ||
+            !MosaicoOtaMaintenance::powerSafe(sample, now)) { maintenanceGrant.clear(); return false; }
+        maintenancePower = sample; maintenanceRawUs = now; maintenanceRawBytes = endBytes;
+    }
+    if (!MosaicoOtaMaintenance::powerSafe(maintenancePower, now)) { maintenanceGrant.clear(); return false; }
+    return true;
+}
 void failLocked(const char* message)
 {
+    maintenanceGrant.clear();
+    if (selected.load()) {
+        // Selector commit is irreversible here: retain candidate, never pretend rollback.
+        active.store(false); pending=false; approvedRequest=false;
+        checkQueued=checking=installQueued=rebootQueued=false;
+        std::snprintf(reason,sizeof(reason),"%s",message ? message : "selected_waiting");
+        publish(UiStage::ReadyReboot,reason); return;
+    }
+    maintenanceMode = false;
     if (writing) esp_ota_abort(handle);
     writing = false;
     handle = 0;
@@ -258,7 +303,18 @@ bool recordAttempt(const InstallPowerEvidence& power)
     nvs_close(handle);
     return ok;
 }
-bool requestLocked(bool automatic, bool preserveAge = false)
+void revokeForNormalRequest()
+{
+    if (maintenanceMode && !selected.load()) failLocked("maintenance_cancelled_by_normal_request");
+    else {
+        maintenanceGrant.clear();
+        if (maintenanceMode && selected.load()) {
+            std::snprintf(reason,sizeof(reason),"maintenance_selected_requires_local_reboot_grant");
+            publish(UiStage::ReadyReboot,reason);
+        }
+    }
+}
+bool requestLocked(bool automatic, bool preserveAge = false, bool maintenance = false)
 {
     StorageAdmission storageAdmission; if(!storageAdmission)return false;
 #ifdef MOSAICO_NAND_STORE
@@ -267,7 +323,7 @@ bool requestLocked(bool automatic, bool preserveAge = false)
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (active.load() || approvedRequest.load() || imageReady || selected.load()) return false;
     if (!currentReady()) return reject("running_or_layout_not_ready");
-    if (!downloadPowerSafe()) return reject("gauge_not_valid_sealed_cfg0_cal0");
+    if (!(maintenance ? maintenancePowerSafe(true) : downloadPowerSafe())) return reject("gauge_not_valid_sealed_cfg0_cal0");
     automaticMode = automatic;
     received = expectedSize = 0;
     pending = true;
@@ -400,6 +456,7 @@ bool request()
 #endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     std::lock_guard<std::mutex> guard(lock);
+    revokeForNormalRequest();
     { std::lock_guard<std::mutex> uiGuard(snapshotLock);
       if (busy() || imageReady || selected.load()) return false;
       if (ui.signatureVerified && ui.sha256[0] &&
@@ -415,6 +472,67 @@ bool request()
     usbBypass = accepted;
     return accepted; // Explicit USB bypass skips screen approvals, never safety gates.
 }
+namespace {
+bool maintenanceDenied(const char* message)
+{
+    maintenanceGrant.clear();
+    std::snprintf(reason,sizeof(reason),"%s",message);
+    return false;
+}
+}
+bool requestMaintenanceUpdate(const char* expectedSha, uint32_t ttlSeconds)
+{
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy())return false;
+#endif
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
+    std::lock_guard<std::mutex> guard(lock);
+    if (busy() || imageReady || selected.load()) return maintenanceDenied("maintenance_not_idle");
+    const auto* running=esp_ota_get_running_partition();
+    const auto* boot=esp_ota_get_boot_partition();
+    const auto usbState=mosaico_console_usb_snapshot();
+    if (!currentReady() || !running || !boot || running->address!=boot->address ||
+        !maintenanceGrant.start(expectedSha,ttlSeconds,esp_timer_get_time(),running->address,boot->address,usbState.unmounts)) return maintenanceDenied("maintenance_grant_invalid");
+    maintenanceMode=true; maintenanceRawUs=0; maintenanceRawBytes=0;
+    automaticMode=usbBypass=false; approvedHash[0]=0;
+    if (!maintenancePowerSafe(true)) return reject("maintenance_admission_power");
+    // Grant exists before requestLocked wakes/queues any owner work.
+    if (requestLocked(false,false,true)) return true;
+    maintenanceGrant.clear(); maintenanceMode=false; return false;
+}
+bool requestMaintenanceReboot(const char* expectedSha, uint32_t ttlSeconds)
+{
+    StorageAdmission storageAdmission; if(!storageAdmission)return false;
+    TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
+    std::lock_guard<std::mutex> guard(lock);
+    char sha[65]; hashHex(expectedHash,sha);
+    const auto* running=esp_ota_get_running_partition();
+    const auto* boot=esp_ota_get_boot_partition();
+    const auto usbState=mosaico_console_usb_snapshot();
+    if (!maintenanceMode || !selected.load() || !imageReady || !verified.load() || busy() ||
+        !target || !running || !boot || running->address!=maintenanceGrant.runningAddress || boot->address!=target->address || !currentReady() ||
+        !MosaicoOtaMaintenance::shaValid(expectedSha) || std::strcmp(expectedSha,sha)) return maintenanceDenied("maintenance_reboot_not_same_candidate");
+    if (!maintenanceGrant.start(expectedSha,ttlSeconds,esp_timer_get_time(),running->address,boot->address,usbState.unmounts)) return maintenanceDenied("maintenance_grant_invalid");
+    if (!maintenancePowerSafe(true)) return reject("maintenance_reboot_power");
+    rebootQueued=true; mosaico_rx_ingress::request(false); StandbySleep::otaActivity(); return true;
+}
+bool maintenanceStatus(char* out,size_t length)
+{
+    if (!out || !length) return false;
+    std::unique_lock<std::mutex> guard(lock,std::try_to_lock);
+    if (!guard.owns_lock()) { std::snprintf(out,length,"maintenance=busy"); return false; }
+    const int64_t now=esp_timer_get_time();
+    const auto usbState=mosaico_console_usb_snapshot();
+    // Diagnostic only: never renew/revoke a grant from a status read.
+    const bool live=maintenanceGrant.enabled && now>=maintenanceGrant.lastUs && now<maintenanceGrant.deadlineUs &&
+        tud_mounted() && usbState.mounted && usbState.connected && !usbState.suspended &&
+        usbState.unmounts==maintenanceGrant.unmountEpoch;
+    std::snprintf(out,length,"maintenance=%d grant=%d selected=%d ttl_ms=%lu sha=%s usb_connection_only=1 reason=%s",
+        maintenanceMode.load(),live,selected.load(),static_cast<unsigned long>(live ? (maintenanceGrant.deadlineUs-now)/1000 : 0),
+        maintenanceMode ? maintenanceGrant.sha : "-",reason);
+    return true;
+}
 bool automaticCheckDue()
 {
     // Permanent user opt-out: discovery is manual-only, not a timed trial pause.
@@ -425,7 +543,8 @@ bool discoverManifest(const char* json)
 {
     StorageAdmission storageAdmission; if(!storageAdmission)return false;
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
-    std::lock_guard<std::mutex> guard(lock);
+    std::unique_lock<std::mutex> guard(lock);
+    revokeForNormalRequest();
     if (active.load() || approvedRequest.load() || imageReady || selected.load()) return false;
     Descriptor d{}; const char* error = "manifest_invalid";
     if (!validateDescriptor(json, d, error)) { publish(UiStage::Failed, error); return false; }
@@ -443,6 +562,7 @@ bool discoverManifest(const char* json)
       ui.targetSlot = nextSlot; }
     publish(UiStage::Available);
     checking.store(false);
+    guard.unlock();
     if (autoInstall.load()) approveUpdate(d.sha);
     return true;
 }
@@ -460,6 +580,9 @@ bool approveUpdate(const char* expectedSha)
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
+    std::unique_lock<std::mutex> ownerGuard(lock,std::try_to_lock);
+    if (!ownerGuard.owns_lock()) return false;
+    revokeForNormalRequest();
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || !lowerHex(expectedSha) ||
         std::strcmp(expectedSha, ui.sha256) || !ui.signatureVerified || ui.imageVerified ||
@@ -472,6 +595,10 @@ bool approveUpdate(const char* expectedSha)
 }
 void deferUpdate()
 {
+    StorageAdmission storageAdmission; if(!storageAdmission)return;
+    std::unique_lock<std::mutex> ownerGuard(lock,std::try_to_lock);
+    if (!ownerGuard.owns_lock()) return;
+    revokeForNormalRequest();
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || ui.imageVerified || selected.load()) return;
     approvedRequest.store(false); statusStage.store(UiStage::Idle); ui.stage = UiStage::Idle; ++ui.revision;
@@ -481,6 +608,7 @@ bool setAutomaticInstall(bool enabled)
 {
     StorageAdmission storageAdmission; if(!storageAdmission)return false;
     std::lock_guard<std::mutex> guard(lock);
+    revokeForNormalRequest();
     nvs_handle_t h;
     if (nvs_open("mosaico_ota", NVS_READWRITE, &h) != ESP_OK) return false;
     bool ok = nvs_set_u8(h, "autoinstall", enabled ? 1 : 0) == ESP_OK && nvs_commit(h) == ESP_OK;
@@ -502,6 +630,7 @@ bool takeRequest()
         usbBypass = false;
         if (!requestLocked(autoInstall.load(), true)) return false;
     }
+    if (maintenanceMode && pending && !maintenancePowerSafe(true)) return reject("maintenance_request_expired");
     const bool result = pending && active.load();
     pending = false;
     return result;
@@ -522,13 +651,14 @@ bool beginManifest(const char* json)
     if (!active.load() || pending || writing || imageReady) return reject("manifest_out_of_sequence");
     Descriptor d{}; const char* error = "manifest_invalid";
     if (!validateDescriptor(json, d, error)) return reject(error);
+    if (maintenanceMode && (!d.versionSigned || !maintenanceGrant.matches(d.sha))) return reject("maintenance_manifest_pin");
     if (approvedHash[0] && std::strcmp(d.sha, approvedHash)) return reject("approved_manifest_changed");
     expectedSize = d.size; signedVersion = d.versionSigned; std::memcpy(expectedHash, d.hash, 32);
     { std::lock_guard<std::mutex> uiGuard(snapshotLock);
       std::snprintf(ui.targetVersion, sizeof(ui.targetVersion), "%s", d.version);
       std::memcpy(ui.sha256, d.sha, 65); std::memcpy(ui.signatureShort, d.fingerprint, 17);
       ui.signatureVerified = true; ui.imageVerified = false; verified.store(false); }
-    if (!currentReady() || !downloadPowerSafe()) return reject("prewrite_safety");
+    if (!currentReady() || !(maintenanceMode ? maintenancePowerSafe(true) : downloadPowerSafe())) return reject("prewrite_safety");
     const auto* running = esp_ota_get_running_partition();
     target = esp_ota_get_next_update_partition(nullptr);
     if (!target || !MosaicoOtaLayout::imageFits(currentLayout(), partitionGeometry(target), expectedSize.load()) ||
@@ -553,7 +683,8 @@ bool writeChunk(uint32_t offset, const uint8_t* data, size_t length)
         length > expectedSize - received) return reject("chunk_offset_or_length");
     if (length > 4096 || !esp_ptr_in_dram(data) || !esp_ptr_in_dram(data + length - 1))
         return reject("chunk_not_internal");
-    if (offset % 65536U == 0 && !downloadPowerSafe()) return reject("download_power_lost");
+    if (maintenanceMode && !maintenancePowerSafe(false, offset + static_cast<uint32_t>(length))) return reject("maintenance_chunk_power");
+    if (!maintenanceMode && offset % 65536U == 0 && !downloadPowerSafe()) return reject("download_power_lost");
     if (esp_ota_write(handle, data, length) != ESP_OK) return reject("ota_write");
     if (psa_hash_update(&hash, data, length)) return reject("hash_update");
     received += length;
@@ -565,6 +696,7 @@ bool finishDownload()
     StorageAdmission storageAdmission; if(!storageAdmission)return false;
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !writing || received != expectedSize) return reject("incomplete_image");
+    if (maintenanceMode && !maintenancePowerSafe(true,received.load())) return reject("maintenance_final_power");
     publish(UiStage::Verifying);
     uint8_t digest[32];
     size_t digestSize = 0;
@@ -575,6 +707,7 @@ bool finishDownload()
     writing = false;
     handle = 0;
     if (endResult != ESP_OK) return reject("image_validation");
+    if (maintenanceMode && !maintenancePowerSafe(true,received.load())) return reject("maintenance_end_power");
     esp_app_desc_t downloaded{};
     char verifiedVersion[32];
     { std::lock_guard<std::mutex> uiGuard(snapshotLock); std::memcpy(verifiedVersion, ui.targetVersion, 32); }
@@ -583,7 +716,7 @@ bool finishDownload()
     imageReady = true; verified.store(true); readySince = esp_timer_get_time(); installSince = 0;
     { std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.imageVerified = true; }
     publish(UiStage::ReadyInstall);
-    active.store(usbBypass || automaticMode);
+    active.store(usbBypass || automaticMode || maintenanceMode);
     return true;
 }
 bool installVerified()
@@ -592,13 +725,14 @@ bool installVerified()
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !imageReady || selected.load()) return false;
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
-    if ((usbBypass || automaticMode) && esp_timer_get_time() - readySince < 1500000) return false;
+    if ((usbBypass || automaticMode || maintenanceMode) && esp_timer_get_time() - readySince < 1500000) return false;
     // The physical bypass is explicitly confirmed by a local human/operator.
     // Use the existing manual battery-floor safety policy even when a full
     // V1-fed cell has zero charging current. Unconfirmed automatic runs retain
     // the charging/enumerated-USB policy.
     const bool manual = useManualInstallPolicy(usbBypass, automaticMode);
-    if (!currentReady() || !installPowerSafe(manual)) {
+    if (maintenanceMode && !maintenancePowerSafe(true,received.load())) return reject("maintenance_install_power");
+    if (!currentReady() || (!maintenanceMode && !installPowerSafe(manual))) {
         active.store(false); installSince = 0;
         publish(UiStage::WaitingPower, manual ? "install_power_required" : "install_external_power_required"); return false;
     }
@@ -608,11 +742,16 @@ bool installVerified()
     if (esp_timer_get_time() - installSince < 500000) return false;
     // Fresh power evidence immediately before persistent journal/selector writes.
     InstallPowerEvidence power;
-    if (!currentReady() || !installPowerSafe(manual, &power)) {
+    if (maintenanceMode) {
+        if (!maintenancePowerSafe(true,received.load())) return reject("maintenance_preselector_power");
+        std::snprintf(power.text,sizeof(power.text),"maintenance_usb_attested,mv:%u,temp:%u",maintenancePower.voltageMv,maintenancePower.temperatureDeciK);
+    }
+    if (!currentReady() || (!maintenanceMode && !installPowerSafe(manual, &power))) {
         active.store(false); installSince = 0;
         publish(UiStage::WaitingPower, manual ? "install_power_required" : "install_power_lost"); return false;
     }
     if (!recordAttempt(power)) return reject("attempt_commit_failed");
+    if (maintenanceMode && !maintenancePowerSafe(true,received.load())) return reject("maintenance_selector_power");
     if (esp_ota_set_boot_partition(target) != ESP_OK) return reject("set_boot_partition");
     selected.store(true); publish(UiStage::ReadyReboot);
     std::snprintf(reason, sizeof(reason), "verified_selected");
@@ -626,6 +765,9 @@ bool requestCheck()
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
+    std::unique_lock<std::mutex> ownerGuard(lock,std::try_to_lock);
+    if (!ownerGuard.owns_lock()) return false;
+    revokeForNormalRequest();
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || selected.load() ||
         ui.stage == UiStage::ReadyInstall || ui.stage == UiStage::ReadyReboot ||
@@ -655,6 +797,9 @@ bool approveInstall(const char* expectedSha)
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
+    std::unique_lock<std::mutex> ownerGuard(lock,std::try_to_lock);
+    if (!ownerGuard.owns_lock()) return false;
+    revokeForNormalRequest();
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || !lowerHex(expectedSha) || std::strcmp(expectedSha, ui.sha256) ||
         !ui.signatureVerified || !ui.imageVerified || !imageReady.load() || selected.load() ||
@@ -670,6 +815,9 @@ bool requestReboot()
     if(GaugeDischargeTrace::NandBackend::busy())return false;
 #endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
+    std::unique_lock<std::mutex> ownerGuard(lock,std::try_to_lock);
+    if (!ownerGuard.owns_lock()) return false;
+    revokeForNormalRequest();
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || ui.stage != UiStage::ReadyReboot || !selected.load()) return false;
     rebootQueued.store(true); mosaico_rx_ingress::request(false);
@@ -679,10 +827,12 @@ bool rebootWithFreshPower()
 {
     StorageAdmission storageAdmission; if(!storageAdmission)return false;
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
-    if (!installPowerSafe(useManualInstallPolicy(usbBypass, automaticMode))) {
+    std::lock_guard<std::mutex> guard(lock);
+    if (maintenanceMode ? !maintenancePowerSafe(true,received.load()) : !installPowerSafe(useManualInstallPolicy(usbBypass, automaticMode))) {
         active.store(false);
         // Boot selection is already committed; never erase the retained image
         // or selector just because power changed while waiting for reboot.
+        if (maintenanceMode) std::snprintf(reason,sizeof(reason),"maintenance_reboot_grant_or_power_required");
         publish(UiStage::ReadyReboot, "reboot_power_required");
         return false;
     }
@@ -717,7 +867,7 @@ void processLocalRequests()
             installVerified(); vTaskDelay(pdMS_TO_TICKS(100));
         }
         if (active.load()) fail("install_stage_timeout");
-        if ((usbBypass || automaticMode) && selected.load()) {
+        if ((usbBypass || automaticMode || maintenanceMode) && selected.load()) {
             vTaskDelay(pdMS_TO_TICKS(500)); rebootWithFreshPower();
         }
     }

@@ -20,6 +20,13 @@ bool takeCheckRequest(); // Network owner only.
 void finishCheck(bool transportOk);
 bool approveInstall(const char* expectedSha);
 bool requestReboot();
+// LOCAL UART/USB CONFIRM only: caller attests stable USB-only external 5V.
+// tud_mounted is connection evidence, NOT a physical 5V measurement.
+// USB polling cannot guarantee detection of physical power loss.
+// SHA is immutable for this RAM-only transaction; TTL must be 30..600 seconds.
+bool requestMaintenanceUpdate(const char* expectedSha, uint32_t ttlSeconds);
+bool requestMaintenanceReboot(const char* expectedSha, uint32_t ttlSeconds);
+bool maintenanceStatus(char* out, size_t length);
 void processLocalRequests(); // Owner only, before radio/network readiness gates.
 bool approveUpdate(const char* expectedSha); // DOWNLOAD only; must match the hash displayed in the caller snapshot.
 void deferUpdate();
