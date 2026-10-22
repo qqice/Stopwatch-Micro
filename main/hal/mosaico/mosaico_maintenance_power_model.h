@@ -1,6 +1,12 @@
 #pragma once
 #include <cstdint>
 namespace mosaico_maintenance_power {
+// Only the very first standard-read bus-lock timeout is retryable. The caller
+// compares the installed synchronous IDF transport error to ESP_ERR_TIMEOUT.
+constexpr bool firstReadBusLockBusy(bool timeout, uint8_t firstReg,
+                                    uint8_t firstStage, uint16_t standardFailed) {
+    return timeout && firstReg == 0x3a && firstStage == 1 && standardFailed == 1;
+}
 // SLUUBD4A OperationStatus: INITCOMP bit5, CFGUPMODE bit10, CALMD bit0.
 // Bit7 is NOT the initialization-complete bit.
 constexpr bool safeOperation(uint16_t op) {

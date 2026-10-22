@@ -13,6 +13,7 @@ struct MaintenancePowerDiagnostic {
 };
 portMUX_TYPE maintenance_power_cache_lock = portMUX_INITIALIZER_UNLOCKED;
 MaintenancePowerDiagnostic maintenance_power_cache{};
+uint32_t maintenance_power_bus_lock_busy = 0; // Monotonic RAM diagnostic, never power proof.
 void maintenance_power_publish(const char* reason, const MaintenancePowerDiagnostic& diagnostic) {
     portENTER_CRITICAL(&maintenance_power_cache_lock);
     maintenance_power_cache = diagnostic;
@@ -27,12 +28,14 @@ bool maintenance_power_reject(const char* reason, const MaintenancePowerDiagnost
 bool Hal::maintenancePowerStatus(char* out,size_t size) const {
     if(!out||!size)return false;
     MaintenancePowerDiagnostic diagnostic;
+    uint32_t busLockBusy = 0;
     portENTER_CRITICAL(&maintenance_power_cache_lock);
     diagnostic = maintenance_power_cache;
+    busLockBusy = maintenance_power_bus_lock_busy;
     portEXIT_CRITICAL(&maintenance_power_cache_lock);
     const int count=std::snprintf(out,size,
-        "reason=%s cached_only=1 no_i2c=1 no_power_proof=1 diag_valid=%u std_fail=0x%03x first_err=%d first_reg=0x%02x first_stage=%u identity_mask=0x%04x echo02=0x%04x device=0x%04x fw=0x%04x build=0x%04x elapsed_us=%lld",
-        diagnostic.reason,unsigned(diagnostic.sampled),unsigned(diagnostic.standardFailed),int(diagnostic.transport.firstError),
+        "reason=%s cached_only=1 no_i2c=1 no_power_proof=1 bus_lock_busy=%lu diag_valid=%u std_fail=0x%03x first_err=%d first_reg=0x%02x first_stage=%u identity_mask=0x%04x echo02=0x%04x device=0x%04x fw=0x%04x build=0x%04x elapsed_us=%lld",
+        diagnostic.reason,static_cast<unsigned long>(busLockBusy),unsigned(diagnostic.sampled),unsigned(diagnostic.standardFailed),int(diagnostic.transport.firstError),
         unsigned(diagnostic.transport.firstReg),unsigned(diagnostic.transport.firstStage),
         unsigned(diagnostic.identityMask),unsigned(diagnostic.echo02),unsigned(diagnostic.device),
         unsigned(diagnostic.firmware),unsigned(diagnostic.build),static_cast<long long>(diagnostic.elapsedUs));
@@ -93,7 +96,8 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, Maintenance
     MaintenancePowerSnapshot sample{};
     MaintenancePowerDiagnostic diagnostic{};
     // Bit ordinal: op, voltage, temperature, design, FCC, current, average,
-    // final op, final design, final FCC. Never short-circuit the existing reads.
+    // final op, final design, final FCC. Except for a proven first bus-lock busy,
+    // never short-circuit the existing reads.
     auto word = [&](uint8_t reg, uint16_t& value, unsigned ordinal) {
         const bool read = gauge_word_diagnostic(reg,value,&diagnostic.transport,ordinal<7?1:4);
         if (!read) diagnostic.standardFailed |= uint16_t(1u<<ordinal);
@@ -101,6 +105,24 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, Maintenance
     };
     uint16_t current = 0, average = 0, finalOp = 0, finalDc = 0, finalFcc = 0;
     bool ok = word(0x3a, sample.operationStatus,0);
+    // Installed synchronous IDF 6.1 transport: ESP_ERR_TIMEOUT here uniquely
+    // means bus_lock acquisition failed before this call issued a transaction.
+    // Transfer timeout/NACK is INVALID_RESPONSE, not a retryable power sample.
+    // Return through both lock destructors; the existing OTA contention loop
+    // may yield and request a complete fresh sample, never cached proof.
+    if (!ok && mosaico_maintenance_power::firstReadBusLockBusy(
+            diagnostic.transport.firstError == ESP_ERR_TIMEOUT,
+            diagnostic.transport.firstReg, diagnostic.transport.firstStage,
+            diagnostic.standardFailed)) {
+        const int64_t ended = esp_timer_get_time();
+        diagnostic.elapsedUs = ended > 0 ? ended - started : -1;
+        diagnostic.sampled = true;
+        portENTER_CRITICAL(&maintenance_power_cache_lock);
+        if (maintenance_power_bus_lock_busy != UINT32_MAX) ++maintenance_power_bus_lock_busy;
+        portEXIT_CRITICAL(&maintenance_power_cache_lock);
+        if (result) *result = MaintenancePowerResult::Busy;
+        return maintenance_power_reject("raw_bus_lock_busy",diagnostic);
+    }
     ok &= word(0x08, sample.voltageMv,1);
     ok &= word(0x06, sample.temperatureDeciK,2);
     ok &= word(0x3c, sample.designMah,3);
