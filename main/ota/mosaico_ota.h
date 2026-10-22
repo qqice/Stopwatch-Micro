@@ -39,6 +39,21 @@ uint32_t imageCapacity(); // Exact current-layout cap; unknown layout returns ze
 bool busy();
 bool blocksTwt(); // Atomic control state, independent of UI snapshot lock contention.
 bool healthPending();
+// RAM-only coherent copy. evaluated/passed bits: app=1,gap=2,HAL=4,frame=8,
+// internal=16,PSRAM=32,integrity=64. Low two bits are current poll observations;
+// other bits/values retain the last real 1Hz probe, timestamped by probeUs.
+// Unevaluated probe values are zero, not a fresh failure. sdkState is the last
+// actual startup SDK read, never synthetic VALID; markSucceeded reports only
+// the original SDK mark-VALID call result.
+struct HealthDiagnostic {
+    uint32_t version=1, polls=0, evaluated=0, passed=0, halMask=0;
+    uint32_t frames=0, internalFree=0, psramFree=0, healthyLoops=0, markAttempts=0;
+    int64_t sampledUs=0, probeUs=0, loopGapUs=0, maxLoopGapUs=0, healthySinceUs=0;
+    int32_t sdkState=-1, sdkError=0, markError=0;
+    int8_t sdkSlot=-1;
+    bool sdkRead=false, pending=false, appReady=false, markSucceeded=false, timedOut=false;
+};
+void copyHealthDiagnostic(HealthDiagnostic& out);
 // Same-task, nonblocking lease; successful caller must release after NAND I/O.
 bool tryStorageLease();
 void releaseStorageLease();

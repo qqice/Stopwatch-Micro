@@ -2313,6 +2313,16 @@ void SerialDebug::printStatus()
                 static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                 static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                 static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    MosaicoOta::HealthDiagnostic health;
+    MosaicoOta::copyHealthDiagnostic(health);
+    debugPrintf("DBG OTA_HEALTH version=%lu cached_only=1 polls=%lu us=%lld probe_us=%lld app=%d evaluated=0x%lx passed=0x%lx hal=0x%lx frames=%lu internal=%lu psram=%lu gap_us=%lld max_gap_us=%lld since_us=%lld loops=%lu sdk_read=%d sdk_state=%ld sdk_errno=%ld slot=%d pending=%d mark_attempts=%lu mark_errno=%ld mark_ok=%d timeout=%d\r\n",
+        static_cast<unsigned long>(health.version),static_cast<unsigned long>(health.polls),static_cast<long long>(health.sampledUs),static_cast<long long>(health.probeUs),health.appReady,
+        static_cast<unsigned long>(health.evaluated),static_cast<unsigned long>(health.passed),static_cast<unsigned long>(health.halMask),
+        static_cast<unsigned long>(health.frames),static_cast<unsigned long>(health.internalFree),static_cast<unsigned long>(health.psramFree),
+        static_cast<long long>(health.loopGapUs),static_cast<long long>(health.maxLoopGapUs),static_cast<long long>(health.healthySinceUs),
+        static_cast<unsigned long>(health.healthyLoops),health.sdkRead,static_cast<long>(health.sdkState),static_cast<long>(health.sdkError),
+        static_cast<int>(health.sdkSlot),health.pending,static_cast<unsigned long>(health.markAttempts),static_cast<long>(health.markError),
+        health.markSucceeded,health.timedOut);
 #endif
     debugPrintf(
         "DBG STATUS perf_lvgl_core=%d perf_tx_core=%d lvgl_calls=%lu lvgl_max_us=%lu touch_reads=%lu "

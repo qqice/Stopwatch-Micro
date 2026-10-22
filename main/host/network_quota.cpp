@@ -1494,6 +1494,19 @@ void NetworkQuota::task(void* arg)
 }
 void NetworkQuota::run()
 {
+#ifdef MOSAICO_BOARD
+    // app_main sampled SDK pending before begin(). Only a pending boot is held;
+    // its existing health loop/timer must run independently of network startup.
+    if (MosaicoOta::healthPending()) {
+        for (;;) {
+            MosaicoOta::HealthDiagnostic health;
+            MosaicoOta::copyHealthDiagnostic(health);
+            if (health.markSucceeded) break;
+            // Timeout clears bootPending before rollback; that is NOT VALID.
+            ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(20));
+        }
+    }
+#endif
     setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
     if (esp_netif_init() != ESP_OK) {
         ++_failures;

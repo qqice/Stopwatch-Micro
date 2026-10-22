@@ -81,6 +81,19 @@ esp_timer_handle_t deadlineTimer = nullptr;
 bool healthInitialized = false;
 int64_t healthySince = 0, lastLoop = 0, lastCheck = 0;
 uint32_t healthyLoops = 0;
+HealthDiagnostic healthWorking{}, healthCache{};
+portMUX_TYPE healthCacheLock = portMUX_INITIALIZER_UNLOCKED;
+// Caller owns healthLock; the short cache lock never covers probes or SDK I/O.
+void publishHealthDiagnostic()
+{
+    healthWorking.pending=bootPending.load();
+    healthWorking.healthySinceUs=healthySince;
+    healthWorking.healthyLoops=healthyLoops;
+    portENTER_CRITICAL(&healthCacheLock);
+    healthCache=healthWorking;
+    portEXIT_CRITICAL(&healthCacheLock);
+}
+struct HealthDiagnosticPublication { ~HealthDiagnosticPublication(){publishHealthDiagnostic();} };
 
 bool gaugeSafe()
 {
@@ -434,6 +447,8 @@ void healthTimeout(void*)
 {
     std::lock_guard<std::mutex> guard(healthLock);
     if (bootPending.exchange(false)) {
+        healthWorking.timedOut=true;
+        publishHealthDiagnostic();
         // Bootloader rolls back if normal execution never reaches the health gate.
         if (esp_ota_mark_app_invalid_rollback_and_reboot() != ESP_OK) esp_restart();
     }
@@ -450,6 +465,12 @@ bool verifySignedImageDescriptor(const char* json,VerifiedImageDescriptor& out)
 }
 bool busy() { return active.load() || approvedRequest.load() || checkQueued.load() || checking.load() || installQueued.load() || rebootQueued.load() || bootPending.load(); }
 bool healthPending() { return bootPending.load(); }
+void copyHealthDiagnostic(HealthDiagnostic& out)
+{
+    portENTER_CRITICAL(&healthCacheLock);
+    out=healthCache;
+    portEXIT_CRITICAL(&healthCacheLock);
+}
 bool tryStorageLease() {
     if(!storageLeaseMutex.try_lock())return false;
     if(busy()){storageLeaseMutex.unlock();return false;}
@@ -941,14 +962,19 @@ void status(char* out, size_t length)
 void healthPoll(bool appLoopReady)
 {
     std::lock_guard<std::mutex> guard(healthLock);
+    HealthDiagnosticPublication diagnosticPublication;
     const int64_t now = esp_timer_get_time();
+    auto& diagnostic=healthWorking;
+    ++diagnostic.polls;diagnostic.sampledUs=now;diagnostic.appReady=appLoopReady;
+    diagnostic.evaluated&=~3u;diagnostic.passed&=~3u;
+    diagnostic.loopGapUs=0;
     if (!healthInitialized) {
         healthInitialized = true;
         const auto* descriptor = esp_app_get_description();
         const auto* current = esp_ota_get_running_partition();
         { std::lock_guard<std::mutex> uiGuard(snapshotLock);
           std::snprintf(ui.currentVersion, sizeof(ui.currentVersion), "%s", descriptor->version);
-          ui.currentSlot = slot(current); ++ui.revision; }
+          ui.currentSlot = slot(current); diagnostic.sdkSlot=ui.currentSlot; ++ui.revision; }
         nvs_handle_t h;
         if (nvs_open("mosaico_ota", NVS_READONLY, &h) == ESP_OK) {
             uint8_t mode = 0;
@@ -959,7 +985,11 @@ void healthPoll(bool appLoopReady)
         { std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.automaticInstall = autoInstall.load(); ++ui.revision; }
         esp_ota_img_states_t state;
         const auto* running = esp_ota_get_running_partition();
-        if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) return;
+        if (!running) return;
+        const esp_err_t stateError=esp_ota_get_state_partition(running,&state);
+        diagnostic.sdkRead=true;diagnostic.sdkError=stateError;
+        if(stateError==ESP_OK)diagnostic.sdkState=static_cast<int32_t>(state);
+        if (stateError != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) return;
         bootPending.store(true); StandbySleep::otaActivity();
         char ver[32] = "-", sha[65]{}, fingerprint[17]{}; int8_t candidate = -1;
         if (nvs_open("mosaico_ota", NVS_READONLY, &h) == ESP_OK) {
@@ -1004,6 +1034,13 @@ void healthPoll(bool appLoopReady)
         esp_restart(); // Leave PENDING_VERIFY; loader must reject on next boot.
     }
 #endif
+    diagnostic.evaluated|=1;
+    if(appLoopReady)diagnostic.passed|=1;
+    if(appLoopReady&&lastLoop){
+        diagnostic.evaluated|=2;diagnostic.loopGapUs=now-lastLoop;
+        if(diagnostic.loopGapUs<=1500000)diagnostic.passed|=2;
+        if(diagnostic.loopGapUs>diagnostic.maxLoopGapUs)diagnostic.maxLoopGapUs=diagnostic.loopGapUs;
+    }
     if (!appLoopReady || (lastLoop && now - lastLoop > 1500000)) { healthySince = 0; healthyLoops = 0;
         std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.progressBasisPoints = 0; ++ui.revision; }
     if (!appLoopReady) return;
@@ -1011,17 +1048,36 @@ void healthPoll(bool appLoopReady)
     ++healthyLoops;
     if (now - lastCheck < 1000000) return;
     lastCheck = now;
+    diagnostic.probeUs=now;
+    diagnostic.evaluated&=3u;diagnostic.passed&=3u;
+    diagnostic.halMask=diagnostic.frames=diagnostic.internalFree=diagnostic.psramFree=0;
     const auto d = GetHAL().diagnostics();
-    const bool healthy = d.i2c && d.display && d.buttons && d.touch && GetDisplayFrameCount() > 0 &&
-        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) > 32768 &&
-        heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 && heap_caps_check_integrity_all(false);
+    diagnostic.evaluated|=4;
+    diagnostic.halMask=(d.i2c?1u:0u)|(d.display?2u:0u)|(d.buttons?4u:0u)|(d.touch?8u:0u);
+    if(d.i2c&&d.display&&d.buttons&&d.touch)diagnostic.passed|=4;
+    // Keep the original left-to-right short circuit and every probe count.
+    const auto frameHealthy=[&](){diagnostic.evaluated|=8;diagnostic.frames=GetDisplayFrameCount();
+        const bool ok=diagnostic.frames>0;if(ok)diagnostic.passed|=8;return ok;};
+    const auto internalHealthy=[&](){diagnostic.evaluated|=16;
+        diagnostic.internalFree=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+        const bool ok=diagnostic.internalFree>32768;if(ok)diagnostic.passed|=16;return ok;};
+    const auto psramHealthy=[&](){diagnostic.evaluated|=32;
+        diagnostic.psramFree=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        const bool ok=diagnostic.psramFree>0;if(ok)diagnostic.passed|=32;return ok;};
+    const auto integrityHealthy=[&](){diagnostic.evaluated|=64;const bool ok=heap_caps_check_integrity_all(false);
+        if(ok)diagnostic.passed|=64;return ok;};
+    const bool healthy = d.i2c && d.display && d.buttons && d.touch && frameHealthy() &&
+        internalHealthy() && psramHealthy() && integrityHealthy();
     if (!healthy) { healthySince = 0; healthyLoops = 0;
         std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.progressBasisPoints = 0; ++ui.revision; return; }
     if (!healthySince) healthySince = now;
     { std::lock_guard<std::mutex> uiGuard(snapshotLock);
       ui.progressBasisPoints = static_cast<uint16_t>((now - healthySince >= 20000000) ? 10000 : (now - healthySince) / 2000); ++ui.revision; }
     if (now - healthySince >= 20000000 && healthyLoops >= 20) {
-        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+        const esp_err_t markError=esp_ota_mark_app_valid_cancel_rollback();
+        ++diagnostic.markAttempts;diagnostic.markError=markError;
+        if (markError == ESP_OK) {
+            diagnostic.markSucceeded=true;
             bootPending.store(false);
             esp_timer_stop(deadlineTimer);
             publish(UiStage::Complete);
