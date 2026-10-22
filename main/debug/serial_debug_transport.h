@@ -86,6 +86,7 @@ constexpr bool settingsInteger(const char* text, uint32_t maximum, uint32_t& val
 inline bool uartAllowed(const char* command) {
     if (!command) return true;
 #ifdef MOSAICO_BOARD
+    if (!std::strcmp(command, "ota-health")) return true;
     // Bounded, default-OFF RAM lease; parser retains duty/OTA safety checks.
     if (!std::strcmp(command, "bankpulse")) return true;
 #endif

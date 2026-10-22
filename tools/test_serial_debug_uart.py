@@ -82,6 +82,7 @@ struct SerialDebug {
         if(line[6]=='c') _async_test=AsyncTest::None;
         result("stub","PASS","");
     }
+    constexpr bool handleCachedRead(const char*) { return false; }
 };
 """
         for text in ("debug ping", "debug display-test-frequency 160", "debug display-lock", "dbg help"):

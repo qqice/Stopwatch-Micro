@@ -478,7 +478,9 @@ void SerialDebug::consume(char value)
         } else {
             line[length] = '\0';
             char* command = _reply_uart ? serial_debug_transport::decodeUartLine(line, length) : line;
-            if (command) handleLine(command);
+            if (command) {
+                if (!handleCachedRead(command)) handleLine(command);
+            }
             else result("parse", "FAIL", "reason=uart_crc_frame_required no_changes=1");
         }
         std::fill_n(line, capacity, 0); // Scrub credentials and completed command text.
@@ -504,6 +506,52 @@ void SerialDebug::consume(char value)
         return;
     }
     line[length++] = value;
+}
+
+bool __attribute__((noinline)) SerialDebug::handleCachedRead(const char* line)
+{
+#ifdef MOSAICO_BOARD
+    // Exact non-destructive token scan. CRC framing was already checked by
+    // consume(); leave every unrecognized line untouched for the full parser.
+    if (!line) return false;
+    const char* p=line;
+    while (*p==' '||*p=='\t') ++p;
+    const char* root=p;
+    while (*p&&*p!=' '&&*p!='\t') ++p;
+    const size_t rootSize=static_cast<size_t>(p-root);
+    if (!((rootSize==5&&!std::strncmp(root,"debug",5))||
+          (rootSize==3&&!std::strncmp(root,"dbg",3)))) return false;
+    while (*p==' '||*p=='\t') ++p;
+    const char* command=p;
+    while (*p&&*p!=' '&&*p!='\t') ++p;
+    if (p-command!=10||std::strncmp(command,"ota-health",10)) return false;
+    if (_reply_uart&&!serial_debug_transport::uartAllowed("ota-health")) {
+        result("ota-health","FAIL","reason=uart_requires_extended_authorization no_changes=1");return true;
+    }
+#ifdef MOSAICO_NAND_STORE
+    if (GaugeDischargeTrace::NandBackend::busy()) {
+        result("ota-health","FAIL","reason=nand_format_maintenance no_changes=1");return true;
+    }
+#endif
+    while (*p==' '||*p=='\t') ++p;
+    if (*p) {result("ota-health","FAIL","reason=expected_no_arguments no_changes=1");return true;}
+    MosaicoOta::HealthDiagnostic health;
+    MosaicoOta::copyHealthDiagnostic(health);
+    debugPrintf("DBG OTA_HEALTH version=%lu firmware=%s cached_only=1 polls=%lu us=%lld probe_us=%lld app=%d evaluated=0x%lx passed=0x%lx hal=0x%lx frames=%lu internal=%lu psram=%lu gap_us=%lld max_gap_us=%lld since_us=%lld loops=%lu sdk_read=%d sdk_state=%ld sdk_errno=%ld slot=%d pending=%d mark_attempts=%lu mark_errno=%ld mark_ok=%d timeout=%d\r\n",
+        static_cast<unsigned long>(health.version),system_config::FirmwareVersion,
+        static_cast<unsigned long>(health.polls),static_cast<long long>(health.sampledUs),static_cast<long long>(health.probeUs),health.appReady,
+        static_cast<unsigned long>(health.evaluated),static_cast<unsigned long>(health.passed),static_cast<unsigned long>(health.halMask),
+        static_cast<unsigned long>(health.frames),static_cast<unsigned long>(health.internalFree),static_cast<unsigned long>(health.psramFree),
+        static_cast<long long>(health.loopGapUs),static_cast<long long>(health.maxLoopGapUs),static_cast<long long>(health.healthySinceUs),
+        static_cast<unsigned long>(health.healthyLoops),health.sdkRead,static_cast<long>(health.sdkState),static_cast<long>(health.sdkError),
+        static_cast<int>(health.sdkSlot),health.pending,static_cast<unsigned long>(health.markAttempts),static_cast<long>(health.markError),
+        health.markSucceeded,health.timedOut);
+    result("ota-health","PASS");
+    return true;
+#else
+    (void)line;
+    return false;
+#endif
 }
 
 void SerialDebug::handleLine(char* line)
@@ -2313,16 +2361,6 @@ void SerialDebug::printStatus()
                 static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                 static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                 static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
-    MosaicoOta::HealthDiagnostic health;
-    MosaicoOta::copyHealthDiagnostic(health);
-    debugPrintf("DBG OTA_HEALTH version=%lu cached_only=1 polls=%lu us=%lld probe_us=%lld app=%d evaluated=0x%lx passed=0x%lx hal=0x%lx frames=%lu internal=%lu psram=%lu gap_us=%lld max_gap_us=%lld since_us=%lld loops=%lu sdk_read=%d sdk_state=%ld sdk_errno=%ld slot=%d pending=%d mark_attempts=%lu mark_errno=%ld mark_ok=%d timeout=%d\r\n",
-        static_cast<unsigned long>(health.version),static_cast<unsigned long>(health.polls),static_cast<long long>(health.sampledUs),static_cast<long long>(health.probeUs),health.appReady,
-        static_cast<unsigned long>(health.evaluated),static_cast<unsigned long>(health.passed),static_cast<unsigned long>(health.halMask),
-        static_cast<unsigned long>(health.frames),static_cast<unsigned long>(health.internalFree),static_cast<unsigned long>(health.psramFree),
-        static_cast<long long>(health.loopGapUs),static_cast<long long>(health.maxLoopGapUs),static_cast<long long>(health.healthySinceUs),
-        static_cast<unsigned long>(health.healthyLoops),health.sdkRead,static_cast<long>(health.sdkState),static_cast<long>(health.sdkError),
-        static_cast<int>(health.sdkSlot),health.pending,static_cast<unsigned long>(health.markAttempts),static_cast<long>(health.markError),
-        health.markSucceeded,health.timedOut);
 #endif
     debugPrintf(
         "DBG STATUS perf_lvgl_core=%d perf_tx_core=%d lvgl_calls=%lu lvgl_max_us=%lu touch_reads=%lu "
