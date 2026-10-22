@@ -7,7 +7,7 @@ class RegisterCaptureTests(unittest.TestCase):
   s=(R/'main/ota/panic_capture.cpp').read_text(encoding='utf8')
   self.assertIn('LegacyCaptureMagic = 0x504e4332',s);self.assertIn('CaptureMagic = 0x504e4333',s)
   self.assertIn('capture.magic != CaptureMagic && capture.magic != LegacyCaptureMagic',s)
-  self.assertIn('capture.magic == CaptureMagic && capture.registerMagic == RegisterMagic',s)
+  self.assertIn('(capture.magic == CaptureMagic || capture.magic == ProbeCaptureMagic) && capture.registerMagic == RegisterMagic',s)
   self.assertIn('regs_valid=0 legacy_record=1',s)
   # A 14/15 writer overwrites only old prefix: stale extension can never qualify.
   for magic in (0x504e4332,0x504e4333):
@@ -20,5 +20,5 @@ class RegisterCaptureTests(unittest.TestCase):
   for i in range(8):self.assertIn('capture.a'+str(i)+' = frame ? frame->a'+str(i),h)
   self.assertIn('__real_esp_panic_handler(info)',h)
   self.assertLess(h.index('capture.registerMagic = 0'),h.index('capture.registerMagic = RegisterMagic'))
-  self.assertLess(h.index('capture.registerMagic = RegisterMagic'),h.index('capture.magic = CaptureMagic'))
+  self.assertLess(h.index('capture.registerMagic = RegisterMagic'),h.index('capture.magic = ProbeCaptureMagic'))
 if __name__=='__main__':unittest.main()

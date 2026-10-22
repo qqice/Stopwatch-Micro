@@ -2,6 +2,7 @@
 #include <debug/mosaico_wifi_rx_observer.h>
 #include <debug/mosaico_rx_ingress.h>
 #include "mosaico_ota.h"
+#include "panic_capture.h"
 #include "mosaico_ota_power.h"
 #include "mosaico_ota_maintenance_model.h"
 #include "mosaico_ota_layout.h"
@@ -1104,7 +1105,9 @@ void healthPoll(bool appLoopReady)
     const auto psramHealthy=[&](){diagnostic.evaluated|=32;
         diagnostic.psramFree=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         const bool ok=diagnostic.psramFree>0;if(ok)diagnostic.passed|=32;return ok;};
-    const auto integrityHealthy=[&](){diagnostic.evaluated|=64;const bool ok=heap_caps_check_integrity_all(false);
+    const auto integrityHealthy=[&](){diagnostic.evaluated|=64;
+        const bool ok=[&](){MosaicoHeapProbeScope probe(MosaicoHeapProbeStage::OtaHealth);
+            return heap_caps_check_integrity_all(false);}();
         if(ok) { diagnostic.passed|=64; }
         return ok;
     };

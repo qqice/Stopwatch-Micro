@@ -81,10 +81,11 @@ struct OtaBufferAllocator {
 };
 OtaBufferAllocator otaBufferAllocator;
 MosaicoOtaBuffer::Reservation otaBuffers;
-void sampleNetworkHeap(const char* stage, unsigned& budget) {
+void sampleNetworkHeap(const char* stage, MosaicoHeapProbeStage probeStage, unsigned& budget) {
     if (budget >= 2) return;
     ++budget;
-    const bool ok = heap_caps_check_integrity_all(false);
+    const bool ok = [&]() { MosaicoHeapProbeScope probe(probeStage);
+        return heap_caps_check_integrity_all(false); }();
     ESP_LOGI("QuotaHeapDiag", "stage=%s heap_ok=%d stack_hwm=%u sample=%u/2",
         stage, ok, static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)), budget);
 }
@@ -1851,9 +1852,9 @@ void NetworkQuota::run()
             const uint32_t remaining = wifiRetry.remainingMs(retryNow);
             if (remaining) { wait(std::min<uint32_t>(remaining, 5000)); continue; }
             const bool scanReady = _wifi_scan_started && !_wifi_scan_cancelled && _wifi_scan_done && !_wifi_scan_status;
-            if (scanReady) sampleNetworkHeap("scan_ready_before", scanHeapBefore);
+            if (scanReady) sampleNetworkHeap("scan_ready_before", MosaicoHeapProbeStage::ScanBefore, scanHeapBefore);
             const bool selectedCandidate = selectWifiCandidate(locked,retryNow);
-            if (scanReady) sampleNetworkHeap("scan_ready_after", scanHeapAfter);
+            if (scanReady) sampleNetworkHeap("scan_ready_after", MosaicoHeapProbeStage::ScanAfter, scanHeapAfter);
             if(!selectedCandidate) {
                 if(_wifi_scan_complete) {
                     if(locked) closeWindow(MosaicoTwt::CycleReason::NoCandidate);
@@ -1891,11 +1892,11 @@ void NetworkQuota::run()
                 continue;
             }
 #ifdef MOSAICO_BOARD
-            sampleNetworkHeap("tailnet_start_before", tailnetHeapBefore);
+            sampleNetworkHeap("tailnet_start_before", MosaicoHeapProbeStage::TailnetBefore, tailnetHeapBefore);
 #endif
             GetTailnetQuota().start();
 #ifdef MOSAICO_BOARD
-            sampleNetworkHeap("tailnet_start_after", tailnetHeapAfter);
+            sampleNetworkHeap("tailnet_start_after", MosaicoHeapProbeStage::TailnetAfter, tailnetHeapAfter);
 #endif
             // start() resumes a paused context; rebind is only for live link loss.
             if (!hadConnection && GetTailnetQuota().ready()) GetTailnetQuota().rebind();
@@ -2157,7 +2158,7 @@ void NetworkQuota::updateFirmware()
     struct TraceScope { ~TraceScope() { MosaicoOtaBreadcrumb(0, 0); } } traceScope;
     MosaicoOtaBreadcrumb(1, 0); // reserved-buffer check and initial heap probe
     // Probe only during OTA, not normal/locked operation or every GUI frame.
-    if (!heap_caps_check_integrity_all(true)) { MosaicoOta::fail("heap_before_ota"); return; }
+    if (![&]() { MosaicoHeapProbeScope probe(MosaicoHeapProbeStage::DownloadBefore); return heap_caps_check_integrity_all(true); }()) { MosaicoOta::fail("heap_before_ota"); return; }
     // Only the network owner runs this path: no parallel quota HTTP, tailnet
     // pause, idle downclock or deferred gauge reload can race the transfer.
     constexpr size_t BodyCapacity=MosaicoOtaBuffer::BodyCapacity, ChunkCapacity=MosaicoOtaBuffer::ChunkCapacity;
@@ -2202,7 +2203,7 @@ void NetworkQuota::updateFirmware()
     const int64_t deadline = esp_timer_get_time() + 600LL * 1000000;
     for (uint32_t offset = 0; offset < size;) {
         MosaicoOtaBreadcrumb(4, offset); // probe before allocating HTTP/JSON
-        if ((offset % 65536U) == 0 && !heap_caps_check_integrity_all(true)) {
+        if ((offset % 65536U) == 0 && ![&]() { MosaicoHeapProbeScope probe(MosaicoHeapProbeStage::DownloadChunkBoundary); return heap_caps_check_integrity_all(true); }()) {
             MosaicoOta::fail("heap_during_ota"); return;
         }
         if (esp_timer_get_time() >= deadline) { MosaicoOta::fail("download_timeout"); return; }
@@ -2240,7 +2241,7 @@ void NetworkQuota::updateFirmware()
         vTaskDelay(pdMS_TO_TICKS(1));
     }
     MosaicoOtaBreadcrumb(8, size); // final hash/SDK verification
-    if (!heap_caps_check_integrity_all(true)) { MosaicoOta::fail("heap_after_download"); return; }
+    if (![&]() { MosaicoHeapProbeScope probe(MosaicoHeapProbeStage::DownloadComplete); return heap_caps_check_integrity_all(true); }()) { MosaicoOta::fail("heap_after_download"); return; }
     if (!MosaicoOta::finishDownload()) return;
     MosaicoOta::processLocalRequests(); // Full pipeline only when explicitly enabled/bypassed.
 
