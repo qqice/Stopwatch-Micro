@@ -171,13 +171,26 @@ scale_journal::Status scale_load_locked(bool refresh=false){
     return scale_load_status;
 }
 void scale_invalidate_context_locked(){
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    factory_scale_invalidate_locked();
+#endif
     native_recovery_revoke_locked();
     if(scale_runtime){scale_runtime->originalVerifiedThisBoot=false;scale_runtime->appliedVerifiedThisBoot=false;scale_runtime->verifiedGeneration=0;scale_runtime->verifiedEpoch=0;}
     scale_update_protection_locked();
 }
-bool scale_journal_missing_locked(){return scale_load_locked()==scale_journal::Status::Missing;}
+bool scale_journal_missing_locked(){
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(factory_scale_present_locked())return false;
+#endif
+    return scale_load_locked()==scale_journal::Status::Missing;
+}
 bool scale_boot_fence_locked(){
+    // Populate the old ledger's READ-ONLY cache even when GSJ3 owns the gauge;
+    // maintenance OTA must never initialize/recover it from its admission path.
     const auto s=scale_load_locked();
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(!factory_scale_boot_fence_locked())return false;
+#endif
     if(s==scale_journal::Status::Missing)return true; // permits legacy, NOT physical scale1
     if(s!=scale_journal::Status::Ready)return false;
     const auto& r=scale_runtime->journal.loaded.records[size_t(scale_runtime->journal.loaded.selected)];
@@ -188,6 +201,9 @@ bool scale_boot_fence_locked(){
     return scale_trial_boot_restore_locked();
 }
 mosaico_gauge_physical::UnitContext scale_unit_context_locked(){
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(factory_scale_present_locked())return factory_scale_context_locked();
+#endif
     mosaico_gauge_physical::UnitContext c{};
     if(scale_load_locked()!=scale_journal::Status::Ready)return c;
     const auto& rt=*scale_runtime;
@@ -310,6 +326,11 @@ bool Hal::gaugeScalePrepare(char* details,size_t detailsSize){
     if(!scale_details_preflight(details,detailsSize))return false;
     ScaleStorageLease lease;
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(factory_scale_present_locked()){
+        std::snprintf(details,detailsSize,"reason=GSJ3_owned_use_gauge_factory_scale no_changes=1");return false;
+    }
+#endif
     if(!lease.held)return scale_report(details,detailsSize,"blocked_ota_storage_lease",false);
     if(!scale_storage_locked())return scale_report(details,detailsSize,"blocked_psram_workspace",false);
     const auto initial=scale_load_locked(true);

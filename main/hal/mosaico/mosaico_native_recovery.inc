@@ -32,6 +32,9 @@ void native_recovery_revoke_locked(){
  std::snprintf(gauge_boot_info.reason,sizeof(gauge_boot_info.reason),"%s",r.nativeOriginalReason);
 }
 void native_recovery_check_sample_locked(uint16_t dc,uint16_t fcc,uint16_t op,bool valid){
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+ if(factory_scale_present_locked()){native_recovery_revoke_locked();return;}
+#endif
  if(scale_mutation_in_progress)return;
   uint16_t expected=65;
  if(scale_runtime&&scale_load_status==scale_journal::Status::Ready&&scale_runtime->journal.loaded.selected>=0){
@@ -76,6 +79,9 @@ bool Hal::gaugeNativeRecoveryEvidence(char* out,size_t size){
 bool Hal::gaugeNativeRecoveryResolve(uint32_t expectedEvidenceCrc,char* out,size_t size){
  if(!native_capacity(out,size))return false;
  ScaleStorageLease lease;std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+ if(factory_scale_present_locked())return native_report(out,size,"blocked_GSJ3_owned_no_native_waiver",false);
+#endif
  if(!lease.held)return native_report(out,size,"blocked_storage_lease",false);
  const auto* running=esp_ota_get_running_partition();esp_ota_img_states_t state{};
  if(!running||esp_ota_get_state_partition(running,&state)!=ESP_OK||state!=ESP_OTA_IMG_VALID||!scale_runtime_gate()||scale_mutation_in_progress)

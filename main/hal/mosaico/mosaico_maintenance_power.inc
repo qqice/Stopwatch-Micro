@@ -52,6 +52,12 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, Maintenance
         return maintenance_power_reject("battery_read_busy");
     }
     if (!gauge) return maintenance_power_reject("no_gauge");
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    // Cached only: even an unchanged historical reason cannot admit a live
+    // Pending/Applied/Restoring/corrupt factory transaction to maintenance OTA.
+    if (!factory_scale_maintenance_cached_safe_locked())
+        return maintenance_power_reject("factory_scale_not_cached_stable_original_or_missing");
+#endif
     if (scale_mutation_in_progress || scale_safety_mismatch_locked() || !scale_runtime ||
         !scale_runtime->loaded) return maintenance_power_reject("scale_or_calibration_not_safe");
     // The boot fence already populated this cache. Never initiate/replay a
@@ -67,8 +73,13 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, Maintenance
         return maintenance_power_reject("boot_gauge_not_checked");
     if (gauge_boot_info.status == GaugeBootReloadStatus::Critical) {
         constexpr char allowed[] = "boot_critical_failed_no_retry";
-        if (gauge_boot_info.attempted ||
-            std::strncmp(gauge_boot_info.reason, allowed, sizeof(allowed) - 1))
+        bool knownHistoricalReason = !std::strncmp(gauge_boot_info.reason, allowed, sizeof(allowed) - 1);
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+        knownHistoricalReason = knownHistoricalReason ||
+            (!std::strcmp(gauge_boot_info.reason,"boot_critical_scale_recovery_required") &&
+             factory_scale_maintenance_original_cached_locked());
+#endif
+        if (gauge_boot_info.attempted || !knownHistoricalReason)
             return maintenance_power_reject("critical_not_known_historical_failure");
         // Allow only the already-inspected historical failure, not unknown key
         // failures, pending/corrupt journals or scaling recovery errors.

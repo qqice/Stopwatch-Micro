@@ -449,6 +449,9 @@ bool scale_trial_report(char* out,size_t size,bool ok){
 bool Hal::gaugeScaleImages(const char* proof,char* details,size_t size){
     if(!scale_details_preflight(details,size))return false;
     ScaleStorageLease lease;std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(factory_scale_present_locked()){std::snprintf(details,size,"reason=GSJ3_owned_use_gauge_factory_scale no_changes=1");return false;}
+#endif
     scale_both_images_verified=false;
     if(!lease.held||MosaicoOta::busy()||MosaicoOta::healthPending()||!scale_trial_storage_locked())return scale_trial_report(details,size,false);
     auto& trial=*scale_trial;trial.imagesSet=false;
@@ -475,6 +478,9 @@ bool Hal::gaugeScaleApply(char* details,size_t size){
     // Root's ONLY parser route requires CONFIRM_EXTERNAL_POWER after actual V1
     // 5V/500mA host checks and single-source topology. This API does not infer V1.
     ScaleStorageLease lease;std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(factory_scale_present_locked()){std::snprintf(details,size,"reason=GSJ3_owned_use_gauge_factory_scale no_changes=1");return false;}
+#endif
     if(!lease.held||!scale_trial_begin_locked())return scale_trial_report(details,size,false);
     scale_trial->hostPowerAttested=true; // root's confirmed local-console call, never an inferred V1 read
     if(scale_trial->record.snapshot.phase!=scale_recovery::Phase::Original){scale_trial->reason="apply_requires_original_phase";scale_trial->operation=false;scale_mutation_in_progress=false;scale_update_protection_locked();return scale_trial_report(details,size,false);}
@@ -485,6 +491,9 @@ bool Hal::gaugeScaleApply(char* details,size_t size){
 bool Hal::gaugeScaleRestore(char* details,size_t size){
     if(!scale_details_preflight(details,size))return false;
     ScaleStorageLease lease;std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(factory_scale_present_locked()){std::snprintf(details,size,"reason=GSJ3_owned_use_gauge_factory_scale no_changes=1");return false;}
+#endif
     if(!lease.held||!scale_trial_storage_locked())return scale_trial_report(details,size,false);
     if(scale_load_locked(true)!=scale_journal::Status::Ready)return scale_trial_report(details,size,false);
     const auto& saved=scale_runtime->journal.loaded.records[size_t(scale_runtime->journal.loaded.selected)];
@@ -510,10 +519,19 @@ bool Hal::gaugeScaleObservedField(size_t index,char* out,size_t size){
         f.address==0x9180?"autonomous9180_neverwrite":scale_trial_owned(f.address)?"owned17":scale_trial_safety_field(f.address)?"untouched_safety":"untouched_stable");
     if(count<0||static_cast<size_t>(count)>=size){std::snprintf(out,size,"error=scale_observed_details_truncated");return false;}return true;
 }
-bool Hal::gaugeScaleTrialActive() const {return scale_trial_protection.load(std::memory_order_acquire);}
+bool Hal::gaugeScaleTrialActive() const {
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(factory_scale_protected())return true;
+#endif
+    return scale_trial_protection.load(std::memory_order_acquire);
+}
 void Hal::gaugeScalePoll(){
     std::unique_lock<std::recursive_mutex> transaction(gauge_transaction_mutex,std::try_to_lock);
-    if(!transaction.owns_lock()||!scale_runtime||scale_load_locked()!=scale_journal::Status::Ready||
+    if(!transaction.owns_lock())return;
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(factory_scale_poll_locked())return;
+#endif
+    if(!scale_runtime||scale_load_locked()!=scale_journal::Status::Ready||
        MosaicoOta::busy()||MosaicoOta::healthPending())return;
     const auto& current=scale_runtime->journal.loaded.records[size_t(scale_runtime->journal.loaded.selected)].snapshot;
     if(current.phase==scale_recovery::Phase::Original)return;

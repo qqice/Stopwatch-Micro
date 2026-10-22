@@ -248,6 +248,16 @@ std::recursive_mutex gauge_transaction_mutex;
 // Implemented in the narrowly scoped runtime include below. All calls own the
 // transaction lock; sample/context access also owns battery_mutex.
 bool scale_boot_fence_locked();
+#define MOSAICO_FACTORY_SCALE_RUNTIME 1
+bool factory_scale_present_locked();
+bool factory_scale_boot_fence_locked();
+mosaico_gauge_physical::UnitContext factory_scale_context_locked();
+void factory_scale_invalidate_locked();
+bool factory_scale_poll_locked();
+bool factory_scale_protected();
+bool factory_scale_audit_allowed_locked();
+bool factory_scale_maintenance_cached_safe_locked();
+bool factory_scale_maintenance_original_cached_locked();
 mosaico_gauge_physical::UnitContext scale_unit_context_locked();
 bool scale_journal_missing_locked();
 void scale_invalidate_context_locked();
@@ -2253,6 +2263,12 @@ bool Hal::gaugeReconcileNominal(char* reason, size_t reasonSize)
 {
     using namespace mosaico_gauge;
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(factory_scale_present_locked()){
+        if(reason&&reasonSize)std::snprintf(reason,reasonSize,"blocked_GSJ3_owned_no_legacy_journal_reconcile");
+        return false;
+    }
+#endif
     std::lock_guard<std::mutex> lock(battery_mutex);
     const auto report = [&](bool ok, const char* why) {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
@@ -3294,6 +3310,7 @@ bool Hal::setDisplayOrientation(uint16_t degrees)
 #include "mosaico_gauge_scale_runtime.inc"
 #include "mosaico_native_recovery.inc"
 #include "mosaico_factory_audit.inc"
+#include "mosaico_factory_scale_runtime.inc"
 #include "mosaico_maintenance_power.inc"
 
 Hal::PhysicalBatterySnapshot Hal::physicalBatteryTelemetry(bool refresh)

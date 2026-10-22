@@ -479,7 +479,7 @@ void SerialDebug::consume(char value)
             line[length] = '\0';
             char* command = _reply_uart ? serial_debug_transport::decodeUartLine(line, length) : line;
             if (command) {
-                if (!handleCachedRead(command)) handleLine(command);
+                if (!handleCachedRead(command)&&!handleFactoryScale(command)) handleLine(command);
             }
             else result("parse", "FAIL", "reason=uart_crc_frame_required no_changes=1");
         }
@@ -551,6 +551,54 @@ bool __attribute__((noinline)) SerialDebug::handleCachedRead(const char* line)
 #else
     (void)line;
     return false;
+#endif
+}
+
+bool __attribute__((noinline)) SerialDebug::handleFactoryScale(char* line)
+{
+#ifdef MOSAICO_BOARD
+    // Recognize without touching an unrelated line. CRC was checked by consume.
+    if(!line)return false;
+    const char* p=line;while(*p==' '||*p=='\t')++p;
+    const char* root=p;while(*p&&*p!=' '&&*p!='\t')++p;
+    const size_t size=static_cast<size_t>(p-root);
+    if(!((size==5&&!std::strncmp(root,"debug",5))||(size==3&&!std::strncmp(root,"dbg",3))))return false;
+    while(*p==' '||*p=='\t')++p;
+    const char* command=p;while(*p&&*p!=' '&&*p!='\t')++p;
+    if(p-command!=19||std::strncmp(command,"gauge-factory-scale",19))return false;
+    if(_reply_uart&&!serial_debug_transport::uartAllowed("gauge-factory-scale")){
+        result("gauge-factory-scale","FAIL","reason=uart_requires_extended_authorization no_changes=1");return true;
+    }
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy()){
+        result("gauge-factory-scale","FAIL","reason=nand_format_maintenance no_changes=1");return true;
+    }
+#endif
+    char* save=nullptr;::strtok_r(line," \t",&save);::strtok_r(nullptr," \t",&save);
+    const char* action=::strtok_r(nullptr," \t",&save);
+    if(!action)action="status";
+    const char* argument=::strtok_r(nullptr," \t",&save);
+    const bool status=!std::strcmp(action,"status"),prepare=!std::strcmp(action,"prepare"),
+        images=!std::strcmp(action,"images"),apply=!std::strcmp(action,"apply"),
+        restore=!std::strcmp(action,"restore"),observed=!std::strcmp(action,"observed");
+    uint32_t index=0;
+    const bool valid=status?!argument:(prepare||restore)?argument&&!std::strcmp(argument,"CONFIRM"):
+        apply?argument&&!std::strcmp(argument,"CONFIRM_EXTERNAL_POWER"):
+        images?argument&&*argument&&std::strlen(argument)<=1400:
+        observed&&parseUnsignedStrict(argument,0,130,index);
+    if(!valid||::strtok_r(nullptr," \t",&save)){
+        result("gauge-factory-scale","FAIL","reason=expected_status_prepare_CONFIRM_images_base64_apply_CONFIRM_EXTERNAL_POWER_restore_CONFIRM_observed_0..130");return true;
+    }
+    char details[1024]{};
+    const bool ok=status?GetHAL().gaugeFactoryScaleStatus(details,sizeof(details)):
+        prepare?GetHAL().gaugeFactoryScalePrepare(details,sizeof(details)):
+        images?GetHAL().gaugeFactoryScaleImages(argument,details,sizeof(details)):
+        apply?GetHAL().gaugeFactoryScaleApply(details,sizeof(details)):
+        restore?GetHAL().gaugeFactoryScaleRestore(details,sizeof(details)):
+        GetHAL().gaugeFactoryScaleObservedField(index,details,sizeof(details));
+    result("gauge-factory-scale",ok?"PASS":"FAIL",details);return true;
+#else
+    (void)line;return false;
 #endif
 }
 
@@ -2312,6 +2360,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP gauge-factory-audit status | revalidate-status | revalidate-field <0..130> | revalidate CONFIRM (CDC_only) | capture CONFIRM (CDC_only) | field <0..130> read_only_parameters=1 separate_backup=1\r\n");
     debugPrintf("DBG HELP ota-maintenance status|power | update_or_reboot CONFIRM_USB_POWER <64hexSHA> <ttl30..600s> local_attestation_only=1 no_persistent_waiver=1\r\n");
     debugPrintf("DBG HELP gauge-scale status | prepare CONFIRM | restore-plan | observed <index0..130> | images <signed_manifests_base64> | apply CONFIRM_EXTERNAL_POWER | restore CONFIRM bounded_x2_trial=1 no_SOC_OCV_RESET=1\r\n");
+    debugPrintf("DBG HELP gauge-factory-scale status | prepare CONFIRM | images <signed_images_and_capabilities_base64> | apply CONFIRM_EXTERNAL_POWER | restore CONFIRM | observed <0..130> factory_rollback_untrusted=1 no_SOC_reset=1\r\n");
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
     debugPrintf("DBG HELP gauge-trace status | arm CONFIRM | stop | export | clear CONFIRM | checkpoint CONFIRM queued_not_persisted=1 gauge_parameter_writes=0\r\n");
     debugPrintf("DBG HELP gauge-public-extra-field index_0..64 readonly_cached=1 raw_only=1\r\n");

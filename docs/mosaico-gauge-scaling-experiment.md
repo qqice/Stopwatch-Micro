@@ -123,6 +123,40 @@ verification, but real discharge behavior still needs a separately recorded
 battery interval. V1 enables unattended supply switching, not independent
 measurement of cell current when its external output is off.
 
+### Separately gated runtime implementation (0.13.95 candidates)
+
+The new GSJ3 runtime and separate `gscale_f3_v1/recover0,recover1` NVS backend
+implement the closed profile above without migrating native GSJ2 or historical
+Failed records. The portable codec/model remain pure abstractions; their flags
+are not runtime privileges. Initial storage admission requires 74 **available**
+entries (excluding the SDK's GC reserve). Valid transition updates do not repeat
+that initial threshold: after Original and Pending use space, refusing Applied
+or Restoring solely for being below74 would strand the gauge after mutation.
+Runtime checks74 before Pending, then54 remaining entries immediately before
+keys. All actual storage errors remain fail-closed; nothing reserves NVS space.
+
+Every legacy parameter/key/journal-reconcile path and audit is fenced while GSJ3
+owns the gauge. Stable factory Original remains untrusted, but may use the
+existing explicitly hash-bound maintenance OTA only with cached stable-state
+checks, exact old Failed evidence and unchanged fresh raw power/identity checks.
+Pending/Applied/Restoring/corrupt states never receive that exception. Startup
+only schedules a bounded recovery after actual SDKVALID; it never sends keys
+from a battery getter or early boot fence. Active mapping expires after300s.
+
+Before apply, both actual OTA slots must be SDKVALID and their full BINs match
+normal signed manifests **and independent release-signer capability endorsements**.
+The latter binds contract `e13f6e771556ad0a507112532f3a2e63139ff6c7433a2ebc1cea022cf8df30fa`
+to exact version/size/hash. It is an explicit audit attestation, not a dynamic
+proof that implementation is correct. A changed version string alone cannot
+provide it. `tools/mosaico_factory_scale_capability.py` checks the ELF, descriptor,
+frozen audited inputs, embedded P256 key and both signatures. Compact proof fits
+the existing UART limit; the new parser is isolated from the large legacy frame.
+
+Native build and isolated fault tests are prerequisites, not evidence of real
+power-cut safety or accurate discharge. Actual releases, prepare, apply and
+exact restore must still be recorded separately. Reinitialization can move SOC;
+such a jump must never be counted as fixing the plateau.
+
 ## Bounded hardware protocol once admission is complete
 
 - Use isolated UART TX/RX/GND for logging. V1 is the sole external 5 V source

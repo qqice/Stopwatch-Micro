@@ -185,6 +185,12 @@ public:
     // Dedicated UI/OTA copy. Raw telemetry/history are NEVER scaled in place.
     BatteryTelemetry batteryPolicyTelemetry(bool refresh = false);
     bool gaugeScalePrepare(char* details,size_t size);
+    bool gaugeFactoryScaleStatus(char* details,size_t size);
+    bool gaugeFactoryScalePrepare(char* details,size_t size);
+    bool gaugeFactoryScaleImages(const char* proof,char* details,size_t size);
+    bool gaugeFactoryScaleApply(char* details,size_t size);
+    bool gaugeFactoryScaleRestore(char* details,size_t size);
+    bool gaugeFactoryScaleObservedField(size_t index,char* details,size_t size);
     bool gaugeNativeRecoveryEvidence(char* details,size_t size);
     bool gaugeNativeRecoveryResolve(uint32_t expectedEvidenceCrc,char* details,size_t size);
     bool gaugeFactoryAuditRevalidate(char* details,size_t size);
@@ -265,6 +271,12 @@ public:
     bool gaugeFactoryAuditRevalidationStatus(char*,size_t) { return false; }
     bool gaugeFactoryAuditRevalidationField(size_t,char*,size_t) { return false; }
     bool gaugeFactoryAuditCapture(char*,size_t) { return false; }
+    bool gaugeFactoryScaleStatus(char*,size_t) { return false; }
+    bool gaugeFactoryScalePrepare(char*,size_t) { return false; }
+    bool gaugeFactoryScaleImages(const char*,char*,size_t) { return false; }
+    bool gaugeFactoryScaleApply(char*,size_t) { return false; }
+    bool gaugeFactoryScaleRestore(char*,size_t) { return false; }
+    bool gaugeFactoryScaleObservedField(size_t,char*,size_t) { return false; }
     bool gaugeFactoryAuditStatus(char*,size_t) { return false; }
     bool gaugeFactoryAuditField(size_t,char*,size_t) { return false; }
     bool tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, MaintenancePowerResult* result = nullptr) { out={};if(result)*result=MaintenancePowerResult::Rejected;return false; }
