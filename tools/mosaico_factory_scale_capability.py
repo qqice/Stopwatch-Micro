@@ -18,7 +18,7 @@ CONTRACT=('GSJ3|Factory3000RollbackToNominal65Virtual130|source=70a767be|target=
           'rollback3000=UNKNOWN_UNTRUSTED|applied_units=2|boot_restore_after_SDK_VALID|'
           'deadline_seconds=300|no_Failed_waiver')
 DIGEST=hashlib.sha256(CONTRACT.encode('ascii')).hexdigest()
-VERSIONS={'0.13.95-r1-mosaico-ota','0.13.95-r2-mosaico-ota'}
+VERSIONS={'0.13.95-r2-mosaico-ota','0.13.95-r3-mosaico-ota'}
 AUDITED_INPUTS=(
     'main/CMakeLists.txt','main/hal/hal.h','main/hal/mosaico/hal_mosaico.cpp',
     'main/hal/mosaico/mosaico_factory_scale_runtime.inc',
