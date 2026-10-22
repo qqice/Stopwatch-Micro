@@ -51,6 +51,36 @@ analog noise or sense-resistor accuracy.
    The display and OTA power policy must not consume it as physical data while
    recovery is incomplete.
 
+### Current factory-model baseline (2026-10-22)
+
+The deployed r9 small read-only commands report DC/FCC3000 and SEALED/CFG0/CAL0;
+the historical failure remains latched. This is **not** the native65 baseline
+accepted by the existing x2 writer. Do not change a version whitelist or relabel
+3000 as physical65 to pass admission.
+
+`tools/mosaico_gauge_consistency.py` compares both preserved public131 exports
+against all 131 official bqStudio type/width/range rows. It checks the historical
+factory export's ordered raw-payload CRC, generations and complete/closed flags,
+decodes Xemics F4 exactly, and writes only a new exclusive host JSON report.
+It does not connect to hardware or promote historical freshness to this boot.
+The preserved images differ at three addresses: 929b `112a -> 102a` (FCC_LIMIT
+bit8), 929d FCC `65 -> 3000`, and 929f DC `65 -> 3000`; the other 128 fields
+are byte-identical. Both images pass their numeric metadata ranges. This is
+not proof of a correct cell model, an active profile, hidden/OTP completeness,
+or the cause of the observed SOC plateau. Near Full remains 200mAh, greater
+than the physical65 capacity; no threshold is automatically retuned.
+
+The existing factory capture reserves 113 NVS **entries**, not bytes (84 peak,
+113 final including the next scale transaction). Available100 cannot admit
+another full capture. Preserve this gate and the old recovery records; do not
+delete old backups or put rollback data into the evictable syslog ring. A
+separate small durable access receipt can revalidate an existing immutable
+backup only if every freshly authenticated byte is equal. It must preserve
+the original generation and raw backup, record its own attempt state, reseal,
+and leave a pending/failed attempt blocked after reboot. A mismatch including
+autonomous CC Offset remains evidence, not permission to overwrite it. This
+revalidation never grants a scale/native-recovery waiver.
+
 ## Bounded hardware protocol once admission is complete
 
 - Use isolated UART TX/RX/GND for logging. V1 is the sole external 5 V source
