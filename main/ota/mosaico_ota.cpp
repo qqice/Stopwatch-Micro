@@ -1065,7 +1065,9 @@ void healthPoll(bool appLoopReady)
         diagnostic.psramFree=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         const bool ok=diagnostic.psramFree>0;if(ok)diagnostic.passed|=32;return ok;};
     const auto integrityHealthy=[&](){diagnostic.evaluated|=64;const bool ok=heap_caps_check_integrity_all(false);
-        if(ok)diagnostic.passed|=64;return ok;};
+        if(ok) { diagnostic.passed|=64; }
+        return ok;
+    };
     const bool healthy = d.i2c && d.display && d.buttons && d.touch && frameHealthy() &&
         internalHealthy() && psramHealthy() && integrityHealthy();
     if (!healthy) { healthySince = 0; healthyLoops = 0;
