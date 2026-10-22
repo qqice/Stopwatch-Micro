@@ -81,6 +81,48 @@ and leave a pending/failed attempt blocked after reboot. A mismatch including
 autonomous CC Offset remains evidence, not permission to overwrite it. This
 revalidation never grants a scale/native-recovery waiver.
 
+### Factory rollback / virtual130 candidate: offline only
+
+The r10 network update and current-boot full131 revalidation passed. The exact
+factory image is now retained on host and board; this still does not calibrate
+its 3000mAh values. `tools/mosaico_gauge_factory_scale_plan.py` freezes a separate
+candidate with factory payload CRC `70a767be` and target `b5b0f0d6`: only the
+closed17 dimensional fields change, CFG102a, CCOffsetfff0 and all other114
+fields remain unchanged. Native65 reference and factory must differ at exactly
+929b/929d/929f; a plausible but different reference threshold is rejected.
+The nominal65-to-virtual130 current/capacity mapping is x2; **3000-to-130 is not
+x2**. Factory3000 is the exact untrusted rollback image, not a physical factor1
+baseline. R0 inverse quantization changes the current-dependent compensation
+term by `1/867` at unchanged FTZ; no absolute EDV-voltage error bound or complete
+algorithm invariance has been demonstrated.
+
+`mosaico_factory_scale_model.h` is an **unintegrated offline prototype**, not
+included by HAL. It wraps recovery planning with a distinct factory profile,
+keeps factory restoration units UNKNOWN, never publishes physical telemetry,
+never authorizes writes, never grants a native waiver, and never clears Failed.
+Tests cover the 18 original/partial/target write prefixes, missing durability
+attestations, unknown CFG/security observations and third values. They are not
+actual flash power-cut, CFG-exit, cryptographic-verification or hardware safety
+tests. CAL/INIT, fresh temperature/voltage/current, access ownership, durable
+typed storage and two actual recovery-capable signed images remain runtime
+implementation requirements; external booleans in this model do not prove them.
+
+The separate offline `mosaico_factory_scale_journal_model.h` uses a strong
+factory-profile record and GSJ3/version3, retaining the lossless512-byte raw
+image format. Native GSJ2 and factory GSJ3 reject one another. It supplies a
+codec and structural generation/epoch chain check, **not** an NVS backend,
+commit/readback transaction, boot fence or actual recovery capability. CRC is
+not authentication; callers must independently verify signed images. Decoding
+rejects input aliased with its translation scratch so immutable input evidence
+cannot be silently rewritten. It does not read or migrate existing ledgers.
+
+Neither the new worksheet nor this prototype changes the deployed r10 writer
+whitelist or makes the old native65 trial applicable. No virtual capacity has
+been written to the gauge. USB can support future bounded apply/byte-restore
+verification, but real discharge behavior still needs a separately recorded
+battery interval. V1 enables unattended supply switching, not independent
+measurement of cell current when its external output is off.
+
 ## Bounded hardware protocol once admission is complete
 
 - Use isolated UART TX/RX/GND for logging. V1 is the sole external 5 V source
