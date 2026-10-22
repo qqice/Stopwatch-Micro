@@ -13,8 +13,8 @@ class FactoryParserTests(unittest.TestCase):
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
-static int statusCalls,captureCalls,fieldCalls,pass;static uint32_t seen;static int errno;struct Writer{bool _reply_uart=false;};static Writer writer;static Writer* _writer=&writer;
-struct Hal {bool gaugeFactoryAuditStatus(char*,size_t){++statusCalls;return true;}bool gaugeFactoryAuditCapture(char*,size_t){++captureCalls;return true;}bool gaugeFactoryAuditField(size_t index,char*,size_t){++fieldCalls;seen=index;return true;}};
+static int statusCalls,captureCalls,fieldCalls,revalidateCalls,receiptCalls,revalidateFieldCalls,pass;static uint32_t seen;static int errno;struct Writer{bool _reply_uart=false;};static Writer writer;static Writer* _writer=&writer;
+struct Hal {bool gaugeFactoryAuditRevalidate(char*,size_t){++revalidateCalls;return true;}bool gaugeFactoryAuditRevalidationStatus(char*,size_t){++receiptCalls;return true;}bool gaugeFactoryAuditRevalidationField(size_t index,char*,size_t){++revalidateFieldCalls;seen=index;return true;}bool gaugeFactoryAuditStatus(char*,size_t){++statusCalls;return true;}bool gaugeFactoryAuditCapture(char*,size_t){++captureCalls;return true;}bool gaugeFactoryAuditField(size_t index,char*,size_t){++fieldCalls;seen=index;return true;}};
 namespace std {unsigned long strtoul(const char* s,char** end,int){unsigned long v=0;const char* p=s;for(;*p>='0'&&*p<='9';++p){unsigned d=unsigned(*p-'0');if(v>(0xffffffffU-d)/10)errno=1;v=v*10+d;}*end=const_cast<char*>(p);return v;}}
 static Hal hal;Hal& GetHAL(){return hal;}
 void result(const char*,const char* status,const char*){pass=!std::strcmp(status,"PASS");}
@@ -22,12 +22,12 @@ char* strtok_r(char* value,const char*,char** save){char* p=value?value:*save;if
 '''+unsigned+r'''
 void parse(char* save){const char* command="gauge-factory-audit";
 '''+parser+r'''}
-extern "C" volatile int test_results[16];volatile int test_results[16];
+extern "C" volatile int test_results[28];volatile int test_results[28];
 extern "C" __attribute__((noinline,used)) void test_done(){for(;;){asm volatile("");}}
 extern "C" void _start(){
- const char* cases[]={"status","","capture CONFIRM","capture CONFIRM","field 0","field 130","field 131","field -1","field 1x","status extra","capture","field","capture CONFIRM extra","bogus","field 999999999999999999","field 1 extra"};
- for(int i=0;i<16;++i){char buf[96];size_t n=std::strlen(cases[i]);std::memcpy(buf,cases[i],n+1);statusCalls=captureCalls=fieldCalls=pass=0;seen=0;writer._reply_uart=i==3;parse(buf);
- bool ok=i<2?(statusCalls==1&&!captureCalls&&!fieldCalls&&pass):i==2?(captureCalls==1&&!statusCalls&&!fieldCalls&&pass):i==4||i==5?(fieldCalls==1&&!statusCalls&&!captureCalls&&pass&&seen==(i==4?0U:130U)):(!statusCalls&&!captureCalls&&!fieldCalls&&!pass);test_results[i]=ok?0:1;
+ const char* cases[]={"status","","capture CONFIRM","capture CONFIRM","field 0","field 130","field 131","field -1","field 1x","status extra","capture","field","capture CONFIRM extra","bogus","field 999999999999999999","field 1 extra","revalidate CONFIRM","revalidate CONFIRM","revalidate-status","revalidate-field 0","revalidate-field 130","revalidate-field 131","revalidate","revalidate CONFIRM extra","revalidate-status extra","revalidate-field -1","revalidate-field 1 extra","revalidate-field 1x"};
+ for(int i=0;i<28;++i){char buf[96];size_t n=std::strlen(cases[i]);std::memcpy(buf,cases[i],n+1);statusCalls=captureCalls=fieldCalls=revalidateCalls=receiptCalls=revalidateFieldCalls=pass=0;seen=0;writer._reply_uart=i==3||i==17;parse(buf);
+ bool ok=i==16?(revalidateCalls==1&&pass):i==18?(receiptCalls==1&&pass):i==19||i==20?(revalidateFieldCalls==1&&pass&&seen==(i==19?0U:130U)):i<2?(statusCalls==1&&!captureCalls&&!fieldCalls&&pass):i==2?(captureCalls==1&&!statusCalls&&!fieldCalls&&pass):i==4||i==5?(fieldCalls==1&&!statusCalls&&!captureCalls&&pass&&seen==(i==4?0U:130U)):(!statusCalls&&!captureCalls&&!fieldCalls&&!revalidateCalls&&!receiptCalls&&!revalidateFieldCalls&&!pass);test_results[i]=ok?0:1;
  }test_done();}
 '''
   code+=base.MOCKS.split('static Hal hal;',1)[0]
@@ -55,5 +55,5 @@ extern "C" void _start(){
    for p in range(sec[4],sec[4]+sec[5],sec[9]):
     name,value,_,_,_,_=struct.unpack_from('<IIIBBH',raw,p);symbols[text[name:].split(b'\0',1)[0].decode()]=value
   uc.reg_write(UC_RISCV_REG_SP,0x1fffff0);uc.emu_start(entry,symbols['test_done'],timeout=10000000,count=1000000)
-  self.assertEqual(uc.reg_read(UC_RISCV_REG_PC),symbols['test_done']);self.assertEqual(struct.unpack('<16i',bytes(uc.mem_read(symbols['test_results'],64))),(0,)*16)
+  self.assertEqual(uc.reg_read(UC_RISCV_REG_PC),symbols['test_done']);self.assertEqual(struct.unpack('<28i',bytes(uc.mem_read(symbols['test_results'],112))),(0,)*28)
 if __name__=='__main__':unittest.main()

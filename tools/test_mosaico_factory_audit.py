@@ -18,13 +18,14 @@ FIXTURE=r'''
 #include "esp_ota_ops.h"
 namespace scale_recovery=mosaico_gauge_recovery;namespace native_recovery=mosaico_native_recovery;
 static native_recovery::Evidence legacyEvidence;
-struct Hal{using GaugeEngineSnapshot=mosaico_gauge_engine::Snapshot;std::array<uint8_t,6> getFactoryMac(){return {0x24,1,2,3,4,5};}bool gaugeFactoryAuditCapture(char*,size_t);bool gaugeFactoryAuditStatus(char*,size_t);bool gaugeFactoryAuditField(size_t,char*,size_t);};
+struct Hal{using GaugeEngineSnapshot=mosaico_gauge_engine::Snapshot;std::array<uint8_t,6> getFactoryMac(){return {0x24,1,2,3,4,5};}bool gaugeFactoryAuditRevalidate(char*,size_t);bool gaugeFactoryAuditRevalidationStatus(char*,size_t);bool gaugeFactoryAuditRevalidationField(size_t,char*,size_t);bool gaugeFactoryAuditCapture(char*,size_t);bool gaugeFactoryAuditStatus(char*,size_t);bool gaugeFactoryAuditField(size_t,char*,size_t);};
 static Hal hal;Hal& GetHAL(){return hal;}
 static std::recursive_mutex gauge_transaction_mutex;static std::mutex battery_mutex;
 static int fault=0,available=139,commits=0,sets=0,reads=0,unsealWords=0,fullWords=0,seals=0,dmReads=0,legacyWrites=0,allocs=0;
 static bool gate=true,validApp=true,lease=true,gauge=true,fw=true;
 static uint16_t op=0x26,dc=3000,fcc=3000,rm=3000,soc=100,mv=4200,temp=3000;static int16_t current=0,average=0;
-static bool journalExists=false,backupExists=false;
+static bool journalExists=false,backupExists=false,receiptExists=false;
+static mosaico_factory_audit::ReceiptBytes savedReceipt;
 static mosaico_factory_audit::JournalBytes savedJournal;
 static mosaico_factory_audit::BackupBytes savedBackup;
 static unsigned char heap[16384];
@@ -47,8 +48,8 @@ int nvs_get_stats(const char*,nvs_stats_t* s){s->available_entries=unsigned(avai
 int nvs_open(const char* ns,int mode,unsigned* h){if(!std::strcmp(ns,"gaugecal")&&mode==NVS_READONLY){*h=3;return 0;}if(std::strcmp(ns,"gauge3kaudit")){++legacyWrites;return 2;}*h=mode+1;return fault==22?2:0;}
 int nvs_get_blob(unsigned h,const char* key,void* p,size_t* n){++reads;
  if(h==3){if(fault==34)return ESP_ERR_NVS_NOT_FOUND;const uint8_t* bytes=nullptr;size_t length=0;if(!std::strcmp(key,"reload_v1")){bytes=legacyEvidence.reload.data();length=28;}else if(!std::strcmp(key,"fcc_boot_v1")){bytes=legacyEvidence.cold;length=48;}else if(!std::strcmp(key,"fcc_fix_v1")){bytes=legacyEvidence.runtime;length=48;}else{++legacyWrites;return 2;}if(*n<length)return 2;std::memcpy(p,bytes,length);*n=length;if(fault==35)static_cast<uint8_t*>(p)[0]^=1;return 0;}
-if(!std::strcmp(key,"f3_aud_v1")){if(!journalExists)return ESP_ERR_NVS_NOT_FOUND;if(*n<64)return 2;std::memcpy(p,savedJournal.data(),64);*n=fault==23?63:64;if(fault==24)static_cast<uint8_t*>(p)[60]^=1;return 0;}if(!std::strncmp(key,"f3b",3)){if(!backupExists)return ESP_ERR_NVS_NOT_FOUND;if(*n<985)return 2;std::memcpy(p,savedBackup.data(),985);*n=fault==25?984:985;if(fault==26)static_cast<uint8_t*>(p)[100]^=1;return 0;}++legacyWrites;return 2;}
-int nvs_set_blob(unsigned,const char* key,const void* p,size_t n){++sets;if(fault==27)return 2;if(!std::strcmp(key,"f3_aud_v1")&&n==64){if(static_cast<const uint8_t*>(p)[5]==2&&!backupExists){++legacyWrites;return 2;}std::memcpy(savedJournal.data(),p,n);journalExists=true;return 0;}if(!std::strncmp(key,"f3b",3)&&n==985){if(backupExists){++legacyWrites;return 2;}std::memcpy(savedBackup.data(),p,n);backupExists=true;return fault==28?2:0;}++legacyWrites;return 2;}
+if(!std::strcmp(key,"f3_rev_v1")){if(!receiptExists)return ESP_ERR_NVS_NOT_FOUND;if(*n<80)return 2;std::memcpy(p,savedReceipt.data(),80);*n=80;return 0;}if(!std::strcmp(key,"f3_aud_v1")){if(!journalExists)return ESP_ERR_NVS_NOT_FOUND;if(*n<64)return 2;std::memcpy(p,savedJournal.data(),64);*n=fault==23?63:64;if(fault==24)static_cast<uint8_t*>(p)[60]^=1;return 0;}if(!std::strncmp(key,"f3b",3)){if(!backupExists)return ESP_ERR_NVS_NOT_FOUND;if(*n<985)return 2;std::memcpy(p,savedBackup.data(),985);*n=fault==25?984:985;if(fault==26)static_cast<uint8_t*>(p)[100]^=1;return 0;}++legacyWrites;return 2;}
+int nvs_set_blob(unsigned,const char* key,const void* p,size_t n){++sets;if(fault==27)return 2;if(!std::strcmp(key,"f3_rev_v1")&&n==80){std::memcpy(savedReceipt.data(),p,n);receiptExists=true;return 0;}if(!std::strcmp(key,"f3_aud_v1")&&n==64){if(static_cast<const uint8_t*>(p)[5]==2&&!backupExists){++legacyWrites;return 2;}std::memcpy(savedJournal.data(),p,n);journalExists=true;return 0;}if(!std::strncmp(key,"f3b",3)&&n==985){if(backupExists){++legacyWrites;return 2;}std::memcpy(savedBackup.data(),p,n);backupExists=true;return fault==28?2:0;}++legacyWrites;return 2;}
 int nvs_commit(unsigned){++commits;if(fault==29)return 2;if(fault==30&&commits>=7)available=72;return 0;}void nvs_close(unsigned){}
 static bool dm(uint16_t a,uint8_t b[36]){++dmReads;for(unsigned i=0;i<36;++i)b[i]=0;b[0]=uint8_t(a);b[1]=uint8_t(a>>8);b[2]=uint8_t(a>>8);b[3]=uint8_t(a);if(a==0x929d||a==0x929f){b[2]=0x0b;b[3]=0xb8;}if(fault==14&&dmReads==2)b[2]^=1;if(fault==15&&dmReads==4)return false;if(fault==16&&dmReads==4){op=0x422;return false;}if(fault==17&&dmReads==4){op=0x23;return false;}if(fault==18&&dmReads==4){op=0x20;return false;}if(fault==31&&a==0x929d){b[2]=0;b[3]=65;}if(fault==31&&a==0x9180){b[2]=0x80;b[3]=0;}if(fault==32&&dmReads==262)dc=65;if(fault==33&&dmReads==262)op=0x422;b[35]=36;b[34]=mosaico_gauge::macChecksum(b,34);if(fault==19&&dmReads==1)b[34]^=1;return true;}
 bool gauge_threshold_read(mosaico_threshold::Selector s,uint8_t b[36]){return dm(uint16_t(s),b);}bool gauge_calibration_read(mosaico_calibration::Selector s,uint8_t b[36]){return dm(uint16_t(s),b);}bool gauge_public_extra_read(mosaico_public_extra::Selector s,uint8_t b[36]){return dm(uint16_t(s),b);}
@@ -56,7 +57,7 @@ NATIVE_EVIDENCE_FUNCTIONS
 #include "mosaico_factory_audit.inc"
 '''
 CASES=r'''
-static void reset(){factory_workspace=nullptr;fault=0;available=139;commits=sets=reads=unsealWords=fullWords=seals=dmReads=legacyWrites=allocs=0;gate=validApp=lease=gauge=fw=true;op=0x26;dc=fcc=rm=3000;soc=100;mv=4200;temp=3000;current=average=0;journalExists=backupExists=false;savedJournal={};savedBackup={};
+static void reset(){factory_workspace=nullptr;fault=0;available=139;commits=sets=reads=unsealWords=fullWords=seals=dmReads=legacyWrites=allocs=0;gate=validApp=lease=gauge=fw=true;op=0x26;dc=fcc=rm=3000;soc=100;mv=4200;temp=3000;current=average=0;journalExists=backupExists=receiptExists=false;savedReceipt={};savedJournal={};savedBackup={};
  auto mac=hal.getFactoryMac();mosaico_gauge::ReloadJournal reload{};reload.magic=0x47423635;reload.version=1;reload.deviceType=0x220;reload.unitMah=1;reload.state=2;std::memcpy(reload.mac,mac.data(),6);reload.targetDesign=reload.targetFcc=65;mosaico_gauge::seal(reload);std::memcpy(legacyEvidence.reload.data(),&reload,28);
  mosaico_fcc_limit::Journal j{};std::memcpy(j.mac,mac.data(),6);j.state=mosaico_fcc_limit::State::Failed;j.backupValid=j.fullAccessVerified=true;j.intents=1951;j.before={0x102a,3000,3000};j.target={0x112a,65,65};mosaico_fcc_limit::encode(j,legacyEvidence.cold,mosaico_fcc_limit::Mode::ColdFactory);j.state=mosaico_fcc_limit::State::Verified;j.intents=927;j.before={0x102a,65,100};mosaico_fcc_limit::encode(j,legacyEvidence.runtime);
 }
@@ -95,13 +96,15 @@ extern "C" void _start(){for(int i=0;i<50;++i)test_results[i]=run_case(i);test_d
 '''
 class FactoryTests(unittest.TestCase):
  def test_actual_inc_rv32(self):
+  RUN=getattr(self,"run_directory",globals()["RUN"])
+  count=getattr(self,"case_count",50)
   RUN.mkdir(parents=True,exist_ok=True)
   support=base.MOCKS.split('static Hal hal;',1)[0]+base.RV_SUPPORT.split('static esp_partition_t imageParts',1)[0]
   with tempfile.TemporaryDirectory(prefix='.factory-audit-',dir=ROOT) as td:
    td=Path(td);headers={**base.STUBS,**base.HEADERS};headers['nvs.h']=headers['nvs.h'].replace('NVS_READWRITE=1','NVS_READWRITE=1,NVS_READONLY=0');headers['esp_ota_ops.h']+='\nconst esp_partition_t* esp_ota_get_running_partition();\n';headers['esp_ota_ops.h']=headers['esp_ota_ops.h'].replace('{ESP_OTA_IMG_VALID}','{ESP_OTA_IMG_VALID,ESP_OTA_IMG_PENDING_VERIFY}')
    for n,s in headers.items():p=td/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(s)
    native=(ROOT/'main/hal/mosaico/mosaico_native_recovery.inc').read_text();evidence='bool native_read_once('+native.split('bool native_read_once(',1)[1].split('bool native_report(',1)[0]
-   src=td/'factory.cpp';src.write_text(FIXTURE.replace('NATIVE_EVIDENCE_FUNCTIONS',evidence)+support+CASES);elf=RUN/'factory.elf'
+   src=td/'factory.cpp';src.write_text(getattr(self,'fixture',FIXTURE).replace('NATIVE_EVIDENCE_FUNCTIONS',evidence)+support+getattr(self,'cases',CASES));elf=RUN/'factory.elf'
    args=[str(base.CLANG),'--target=riscv32-unknown-elf','-march=rv32im','-mabi=ilp32','-std=c++20','-O1','-Wall','-Wextra','-Werror','-Wno-missing-multilib','-Wno-unused-function','-ffunction-sections','-fdata-sections','-fno-builtin','-fno-exceptions','-fno-rtti','-nostdinc++','-nostdlib','-I'+str(td),'-I'+str(ROOT/'main/hal/mosaico'),str(src),'--ld-path='+str(base.CLANG.parent/'ld.lld.exe'),'-Wl,--gc-sections','-Wl,-e,_start','-Wl,-Ttext=0x10000','-o',str(elf)]
    result=subprocess.run(args,capture_output=True,text=True,env={**os.environ,'TEMP':str(td),'TMP':str(td)});(RUN/'compile.log').write_text(result.stdout+result.stderr);self.assertEqual(result.returncode,0,str(RUN/'compile.log'))
   sys.path.insert(0,str(ROOT/'.artifacts/tools/unicorn-2.1.4-private-001/package'))
@@ -118,10 +121,10 @@ class FactoryTests(unittest.TestCase):
    strings=struct.unpack_from('<10I',raw,shoff+sh[6]*shsize);text=raw[strings[4]:strings[4]+strings[5]]
    for pos in range(sh[4],sh[4]+sh[5],sh[9]):
     name,value,_,_,_,_=struct.unpack_from('<IIIBBH',raw,pos);symbols[text[name:].split(b'\0',1)[0].decode()]=value
-  uc.reg_write(UC_RISCV_REG_SP,0x1fffff0);uc.emu_start(entry,symbols['test_done'],timeout=20000000,count=150000000)
-  values=struct.unpack('<50i',bytes(uc.mem_read(symbols['test_results'],200)))
+  uc.reg_write(UC_RISCV_REG_SP,0x1fffff0);uc.emu_start(entry,symbols['test_done'],timeout=120000000,count=1500000000)
+  values=struct.unpack('<'+str(count)+'i',bytes(uc.mem_read(symbols['test_results'],4*count)))
   (RUN/'execution.log').write_text(f'Production factory inc/model; official Unicorn RV32; mocked external transport,NVS,identity,locks,OTA; ELF_SHA256={hashlib.sha256(raw).hexdigest()}\n'+repr(values)+'\n')
-  self.assertEqual(uc.reg_read(UC_RISCV_REG_PC),symbols['test_done']);self.assertEqual(values,(0,)*50)
+  self.assertEqual(uc.reg_read(UC_RISCV_REG_PC),symbols['test_done']);self.assertEqual(values,(0,)*count)
  def test_scope(self):
   src=(ROOT/'main/hal/mosaico/mosaico_factory_audit.inc').read_text()
   for token in ('gauge_control(', 'gauge_write','nvs_erase','gauge_boot_info','scale_runtime->','gauge_threshold_cached','thresh_aud_v1','nvs_open("gaugecal"'):

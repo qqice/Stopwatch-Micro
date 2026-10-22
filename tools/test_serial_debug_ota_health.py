@@ -124,7 +124,18 @@ class CachedCommandTests(unittest.TestCase):
         for field in ('version','firmware','cached_only','polls','us','probe_us','app','evaluated','passed','hal','frames','internal','psram',
                       'gap_us','max_gap_us','since_us','loops','sdk_read','sdk_state','sdk_errno','slot','pending','mark_attempts','mark_errno','mark_ok','timeout'):
             self.assertIn(field+'=',helper)
-        def dispatcher(text):return text.split('void SerialDebug::handleLine(',1)[1].split('\nvoid SerialDebug::printHelp(',1)[0]
+        def dispatcher(text):
+            body=text.split('void SerialDebug::handleLine(',1)[1].split('\nvoid SerialDebug::printHelp(',1)[0]
+            # The independently tested public131 revalidation command expands
+            # only this existing parser block. Preserve the complete remaining
+            # dispatcher comparison; do not relax the health fast path, status,
+            # formatter or native target ELF frame checks.
+            start='    if (std::strcmp(command, "gauge-factory-audit") == 0) {'
+            end='    if (std::strcmp(command, "gauge-native-recovery") == 0)'
+            before, block=body.split(start,1)
+            audit, after=block.split(end,1)
+            self.assertIn('char details[1024]{};',audit)
+            return before+start+'/* separately tested fixed-capacity factory parser */'+end+after
         self.assertEqual(dispatcher(source),dispatcher(baseline))
         self.assertIn('char bytes[1536]',source_method(source,'int SerialDebug::debugPrintf('))
         self.assertEqual(source_method(source,'int SerialDebug::debugPrintf('),source_method(baseline,'int SerialDebug::debugPrintf('))

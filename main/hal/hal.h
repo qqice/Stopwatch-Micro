@@ -187,6 +187,9 @@ public:
     bool gaugeScalePrepare(char* details,size_t size);
     bool gaugeNativeRecoveryEvidence(char* details,size_t size);
     bool gaugeNativeRecoveryResolve(uint32_t expectedEvidenceCrc,char* details,size_t size);
+    bool gaugeFactoryAuditRevalidate(char* details,size_t size);
+    bool gaugeFactoryAuditRevalidationStatus(char* details,size_t size);
+    bool gaugeFactoryAuditRevalidationField(size_t index,char* details,size_t size);
     bool gaugeFactoryAuditCapture(char* details,size_t size);
     bool gaugeFactoryAuditStatus(char* details,size_t size);
     bool gaugeFactoryAuditField(size_t index,char* details,size_t size);
@@ -258,6 +261,9 @@ public:
     bool gaugeScalePrepare(char*,size_t) { return false; }
     bool gaugeNativeRecoveryEvidence(char*,size_t) { return false; }
     bool gaugeNativeRecoveryResolve(uint32_t,char*,size_t) { return false; }
+    bool gaugeFactoryAuditRevalidate(char*,size_t) { return false; }
+    bool gaugeFactoryAuditRevalidationStatus(char*,size_t) { return false; }
+    bool gaugeFactoryAuditRevalidationField(size_t,char*,size_t) { return false; }
     bool gaugeFactoryAuditCapture(char*,size_t) { return false; }
     bool gaugeFactoryAuditStatus(char*,size_t) { return false; }
     bool gaugeFactoryAuditField(size_t,char*,size_t) { return false; }

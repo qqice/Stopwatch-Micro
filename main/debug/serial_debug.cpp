@@ -1488,14 +1488,19 @@ void SerialDebug::handleLine(char* line)
         const char* value=action?::strtok_r(nullptr," \t",&save):nullptr;
         if(!action)action="status";
         const bool status=!std::strcmp(action,"status"),capture=!std::strcmp(action,"capture");
+        const bool revalidate=!std::strcmp(action,"revalidate"),receipt=!std::strcmp(action,"revalidate-status");
+        const bool revalidateField=!std::strcmp(action,"revalidate-field");
         const bool field=!std::strcmp(action,"field");uint32_t index=0;
-        const bool valid=status?!value:capture?(value&&!std::strcmp(value,"CONFIRM")&&
-            !(_writer&&_writer->_reply_uart)):field&&parseUnsignedStrict(value,0,130,index);
+        const bool valid=(status||receipt)?!value:(capture||revalidate)?(value&&!std::strcmp(value,"CONFIRM")&&
+            !(_writer&&_writer->_reply_uart)):(field||revalidateField)&&parseUnsignedStrict(value,0,130,index);
         if(!valid||::strtok_r(nullptr," \t",&save)){
-            result(command,"FAIL","expected=status|capture_CONFIRM_CDC_only|field_0..130 readonly_parameters=1");return;
+            result(command,"FAIL","expected=status|revalidate-status|revalidate-field_0..130|capture_CONFIRM_CDC_only|revalidate_CONFIRM_CDC_only|field_0..130 readonly_parameters=1");return;
         }
         char details[1024]{};
-        const bool ok=status?GetHAL().gaugeFactoryAuditStatus(details,sizeof(details)):
+        const bool ok=revalidateField?GetHAL().gaugeFactoryAuditRevalidationField(index,details,sizeof(details)):
+            receipt?GetHAL().gaugeFactoryAuditRevalidationStatus(details,sizeof(details)):
+            revalidate?GetHAL().gaugeFactoryAuditRevalidate(details,sizeof(details)):
+            status?GetHAL().gaugeFactoryAuditStatus(details,sizeof(details)):
             capture?GetHAL().gaugeFactoryAuditCapture(details,sizeof(details)):
                 GetHAL().gaugeFactoryAuditField(index,details,sizeof(details));
         result(command,ok?"PASS":"FAIL",details);return;
@@ -2304,7 +2309,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP gauge-fcc-status no_arguments=1 readonly=1 journal_existence_explicit=1\r\n");
     debugPrintf("DBG HELP nand-dma no_arguments=1 readonly_ram=1 no_storage_io=1\r\n");
     debugPrintf("DBG HELP gauge-native-recovery evidence | resolve CONFIRM <8hexCRC> explicit_ram_only=1 failed_records_preserved=1\r\n");
-    debugPrintf("DBG HELP gauge-factory-audit status | capture CONFIRM (CDC_only) | field <0..130> read_only_parameters=1 separate_backup=1\r\n");
+    debugPrintf("DBG HELP gauge-factory-audit status | revalidate-status | revalidate-field <0..130> | revalidate CONFIRM (CDC_only) | capture CONFIRM (CDC_only) | field <0..130> read_only_parameters=1 separate_backup=1\r\n");
     debugPrintf("DBG HELP ota-maintenance status|power | update_or_reboot CONFIRM_USB_POWER <64hexSHA> <ttl30..600s> local_attestation_only=1 no_persistent_waiver=1\r\n");
     debugPrintf("DBG HELP gauge-scale status | prepare CONFIRM | restore-plan | observed <index0..130> | images <signed_manifests_base64> | apply CONFIRM_EXTERNAL_POWER | restore CONFIRM bounded_x2_trial=1 no_SOC_OCV_RESET=1\r\n");
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");

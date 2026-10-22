@@ -61,4 +61,36 @@ template<class B> bool capture(B& b){
  if(ok)b.mark(BackupVerified);
  return b.finish(ok)&&ok;
 }
+// Independent access receipt, never a replacement backup/capture generation.
+constexpr char receiptKey[]="f3_rev_v1";
+using ReceiptBytes=std::array<uint8_t,80>;
+constexpr size_t receiptEntries=(80+31)/32+3,revalidateRequired=3*receiptEntries+1+nextScaleEntries;
+static_assert(revalidateRequired==92); // three transient versions + namespace + future73
+struct Receipt {Journal access{};uint32_t sourceGeneration=0;};
+constexpr bool encodeReceipt(const Receipt& r,ReceiptBytes& out){
+ JournalBytes j{};if(!r.sourceGeneration||!encode(r.access,j))return false;
+ out={};out[0]='F';out[1]='3';out[2]='R';out[3]='1';put32(out.data()+4,r.sourceGeneration);
+ for(size_t i=0;i<64;++i){out[8+i]=j[i];}
+ put32(out.data()+76,crc(out.data(),76));return true;
+}
+constexpr bool decodeReceipt(const ReceiptBytes& in,const std::array<uint8_t,6>& mac,Receipt& out){
+ if(in[0]!='F'||in[1]!='3'||in[2]!='R'||in[3]!='1'||in[72]||in[73]||in[74]||in[75]||get32(in.data()+76)!=crc(in.data(),76))return false;
+ JournalBytes j{};for(size_t i=0;i<64;++i)j[i]=in[8+i];Receipt r{};r.sourceGeneration=get32(in.data()+4);
+ if(!r.sourceGeneration||!decode(j,mac,r.access)){return false;}
+ out=r;return true;
+}
+template<class B> bool revalidate(B& b){
+ if(!b.admit())return false;
+ if(!b.intent(UnsealIntent))return b.finish(false);
+ bool ok=b.unseal();if(ok)ok=b.intent(UnsealVerified|FullIntent)&&b.full();
+ if(ok)ok=b.intent(FullVerified)&&b.read131();
+ if(ok)ok=b.intent(ReadVerified);
+ // Cleanup remains mandatory after owned access even when receipt storage fails.
+ // close() independently checks actual SEC/CFG/CAL/INIT and enforces one Seal.
+ const bool sealIntent=b.intent(SealIntent);const bool closed=b.close();
+ if(closed)b.mark(CloseVerified);
+ ok=ok&&sealIntent&&closed&&b.final()&&b.matches();if(ok)b.mark(BackupVerified);
+ return b.finish(ok)&&ok;
+}
+
 }
