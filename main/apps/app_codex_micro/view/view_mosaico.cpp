@@ -1958,6 +1958,7 @@ void CodexMicroView::togglePage() {
     navigatePage(1);
 }
 void CodexMicroView::wakeDisplay() {
+    if (GetHAL().gaugeScaleTrialActive()) return; // Cached atomic only; no gauge I2C or cross-lock.
     StandbySleep::cancelForActivity();
     clearStandbyDim();
     if (_rotationFault) return;

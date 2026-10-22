@@ -362,13 +362,15 @@ void motion_task(void* bus)
     mosaico_orientation::Model model;
     bool enabled = false;
     for (;;) {
-        const bool idle = motion_idle.load();
-        snapshot.idle = idle;
+        const bool requestedIdle = motion_idle.load();
+        const bool trialIdle = GetHAL().gaugeScaleTrialActive(); // Cached atomic; never gauge I2C.
+        const bool idle = requestedIdle || trialIdle;
         if (enabled == idle) {
             snapshot.error = motion_write(imu, 0x7d, idle ? 0x00 : 0x04); // Only accelerometer.
             if (snapshot.error == ESP_OK) { enabled = !idle; if (enabled) vTaskDelay(pdMS_TO_TICKS(80) + 2); }
             model.resetPending(); snapshot.valid = false;
         }
+        snapshot.idle = !enabled; // Report actual enabled state, not a second policy read.
         if (!idle && enabled && snapshot.error == ESP_OK) {
             snapshot.error = bmi270_get_acce_data(imu, &snapshot.ax, &snapshot.ay, &snapshot.az);
             snapshot.valid = snapshot.error == ESP_OK;
@@ -379,10 +381,11 @@ void motion_task(void* bus)
             } else { snapshot.readErrors++; model.resetPending(); }
         }
         portENTER_CRITICAL(&motion_mux); motion_snapshot = snapshot; portEXIT_CRITICAL(&motion_mux);
-        // Notifications wake on policy changes; locked task blocks indefinitely.
-        ulTaskNotifyTake(pdTRUE, idle && !enabled ? portMAX_DELAY : pdMS_TO_TICKS(80) + 1);
+        // Explicit idle wakes by notification; protection-only idle must recheck
+        // because clearing the cached trial fence does not notify this task.
+        ulTaskNotifyTake(pdTRUE, idle && !enabled ? (requestedIdle ? portMAX_DELAY : pdMS_TO_TICKS(250) + 1) : pdMS_TO_TICKS(80) + 1);
         // A read failure is retried only on the next bounded sample, not a spin.
-        if (enabled && !motion_idle.load()) snapshot.error = ESP_OK;
+        if (enabled && !idle) snapshot.error = ESP_OK;
     }
 }
 
@@ -438,6 +441,12 @@ void observe_flush(lv_event_t* event)
 
 void read_touch(lv_indev_t*, lv_indev_data_t* data)
 {
+    if (GetHAL().gaugeScaleTrialActive()) {
+        touch_wait_for_release = true;
+        portENTER_CRITICAL(&touch_mux); cached_touch = {}; portEXIT_CRITICAL(&touch_mux);
+        data->state = LV_INDEV_STATE_RELEASED;
+        return; // Boot-awake recovery: no touch I2C, no stale cached contact.
+    }
     if (touch_idle_polling.load(std::memory_order_relaxed) || TouchSleep::blocksTouch() || !orientation_healthy.load()) {
         // Also protects against a forced/event-driven indev read while its
         // timer is paused. Software RELEASE only: no driver I2C or read count.
@@ -3079,6 +3088,7 @@ void Hal::stopLvglUpdate()
 
 Hal::TouchPoint Hal::getTouchPoint()
 {
+    if (gaugeScaleTrialActive()) return {}; // Cached consumer fence; no I2C or gauge mutex.
     portENTER_CRITICAL(&touch_mux);
     const TouchPoint point = cached_touch;
     portEXIT_CRITICAL(&touch_mux);
@@ -3249,8 +3259,7 @@ int Hal::getSpeakerVolume(bool loadFromSettings)
 Hal::MotionOrientation Hal::motionOrientation() const
 {
     portENTER_CRITICAL(&motion_mux); auto snapshot = motion_snapshot; portEXIT_CRITICAL(&motion_mux);
-    snapshot.idle = motion_idle.load();
-    if (snapshot.idle) snapshot.valid = false;
+    if (snapshot.idle || motion_idle.load() || gaugeScaleTrialActive()) snapshot.valid = false;
     return snapshot;
 }
 void Hal::setMotionIdle(bool idle)

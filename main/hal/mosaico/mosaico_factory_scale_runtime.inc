@@ -31,7 +31,7 @@ struct FactoryScaleRuntime {
  size_t unexpectedCount=0;uint16_t firstUnexpected=0;uint8_t firstRaw[4]{},firstOriginal[4]{};
  uint32_t observedGeneration=0;uint64_t observedEpoch=0;
  scale_recovery::Phase observedPhase=scale_recovery::Phase::Original;
- int64_t observedReadMs=0,appliedUs=0,nextPollUs=0;
+ int64_t observedReadMs=0,appliedUs=0,nextPollUs=0,lastPollUs=0;
  const char* observedStage="none";const char* nextReadStage="unknown";const char* reason="not_prepared";
 };
 FactoryScaleRuntime* factory_scale_rt=nullptr;
@@ -70,6 +70,10 @@ factory_scale_journal::Status factory_scale_load_locked(bool refresh=false){
 // RO ownership hooks. No old scale/native functions, keys or control commands.
 bool factory_scale_present_locked(){return factory_scale_load_locked()!=factory_scale_journal::Status::Missing;}
 bool factory_scale_boot_fence_locked(){return factory_scale_load_locked()==factory_scale_journal::Status::Missing;}
+// No I2C/locks: readers must revoke units even if automatic poll is deferred.
+bool factory_scale_time_valid(const FactoryScaleRuntime& t,int64_t now){
+ return t.appliedUs>0&&now>=t.appliedUs&&now>=t.lastPollUs&&now-t.appliedUs<300000000;
+}
 mosaico_gauge_physical::UnitContext factory_scale_context_locked(){
  mosaico_gauge_physical::UnitContext c{};
  if(factory_scale_load_locked()!=factory_scale_journal::Status::Ready)return c;
@@ -79,7 +83,7 @@ mosaico_gauge_physical::UnitContext factory_scale_context_locked(){
  else if(s.phase==scale_recovery::Phase::Pending)c.phase=mosaico_gauge_physical::Phase::Pending;
  else if(s.phase==scale_recovery::Phase::Restoring)c.phase=mosaico_gauge_physical::Phase::Restoring;
  else{c.phase=mosaico_gauge_physical::Phase::Applied;
-  if(t.appliedVerifiedThisBoot&&t.active&&s.generation==t.verifiedGeneration&&s.epoch==t.verifiedEpoch){c.factor=2;c.verified=true;}}
+  if(t.appliedVerifiedThisBoot&&t.active&&factory_scale_time_valid(t,esp_timer_get_time())&&s.generation==t.verifiedGeneration&&s.epoch==t.verifiedEpoch){c.factor=2;c.verified=true;}}
  return c;
 }
 bool factory_scale_audit_allowed_locked(){
@@ -103,8 +107,16 @@ bool factory_scale_prepared_fresh(){
  const auto now=esp_timer_get_time();return now>=factory_scale_rt->preparedUs&&now-factory_scale_rt->preparedUs<=120000000;
 }
 bool factory_scale_safety_address(uint16_t a){return (a>=0x91b5&&a<=0x91db)||a==0x91b4||a==0x91dd||a==0x91df||a==0x9206||a==0x9180;}
+// Recovery is allowed after UI unlock, but never before actual SDK VALID or
+// while OTA, radios or power phase are unsafe. Forward admission stays strict.
+bool factory_scale_recovery_runtime(){
+ const auto p=GetNetworkQuota().powerStats();const auto b=GetCodexMicroBle().diagnostics();
+ const auto* part=esp_ota_get_running_partition();esp_ota_img_states_t state{};
+ return part&&esp_ota_get_state_partition(part,&state)==ESP_OK&&state==ESP_OTA_IMG_VALID&&
+ !MosaicoOta::busy()&&!MosaicoOta::healthPending()&&p.phase==2&&!p.wifiRunning&&!b.advertising&&!b.connected;
+}
 bool factory_scale_rt_physical(bool restore){
- if(!gauge||!factory_runtime())return factory_scale_rt_fail("actual_SDK_VALID_quiet_radios_phase2_required");
+ if(!gauge||!(restore?factory_scale_recovery_runtime():factory_runtime()))return factory_scale_rt_fail("actual_SDK_VALID_quiet_radios_phase2_required");
  uint16_t op=0,mv=0,temp=0,current=0,average=0;
  if(!gauge_word(0x3a,op)||!gauge_word(8,mv)||!gauge_word(6,temp)||!gauge_word(0x0c,current)||!gauge_word(0x14,average))return factory_scale_rt_fail("fresh_safety_read");
  const int bound=restore?260:30;
@@ -123,7 +135,7 @@ bool factory_scale_owned_intent(){
  return p==scale_recovery::Phase::Pending||p==scale_recovery::Phase::Restoring;
 }
 const esp_partition_t* factory_scale_rt_partition(unsigned slot){return slot<2?esp_partition_find_first(ESP_PARTITION_TYPE_APP,slot?ESP_PARTITION_SUBTYPE_APP_OTA_1:ESP_PARTITION_SUBTYPE_APP_OTA_0,nullptr):nullptr;}
-bool factory_scale_rt_version(const char* v){return !std::strcmp(v,"0.13.95-r2-mosaico-ota")||!std::strcmp(v,"0.13.95-r3-mosaico-ota");}
+bool factory_scale_rt_version(const char* v){return !std::strcmp(v,"0.13.95-r4-mosaico-ota")||!std::strcmp(v,"0.13.95-r5-mosaico-ota");}
 bool factory_scale_rt_verify_image(unsigned slot,const MosaicoOta::VerifiedImageDescriptor& image){
     const auto* part=factory_scale_rt_partition(slot);esp_ota_img_states_t state{};
     if(!part||!image.size||image.size>part->size||!factory_scale_rt_version(image.version)||
@@ -444,8 +456,17 @@ bool factory_scale_capability(const cJSON* signature,const MosaicoOta::VerifiedI
 bool factory_scale_poll_locked(){
  if(factory_scale_load_locked()!=factory_scale_journal::Status::Ready)return factory_scale_status!=factory_scale_journal::Status::Missing;
  auto& t=*factory_scale_rt;const auto& s=t.journal.loaded.records[size_t(t.journal.loaded.selected)].snapshot;
- if(s.phase==scale_recovery::Phase::Original||t.operation||!factory_runtime())return true;
- const int64_t now=esp_timer_get_time();if(now>=0&&now<t.nextPollUs)return true;t.nextPollUs=now+1000000;
+ if(s.phase==scale_recovery::Phase::Original||t.operation)return true;
+ const int64_t now=esp_timer_get_time();
+ // Revoke volatile units BEFORE eligibility, throttle, storage lease or I2C.
+ // Durable Applied remains protected until safe authenticated restoration.
+ const bool revoked=t.active&&!factory_scale_time_valid(t,now);
+ if(revoked){t.active=false;t.nextPollUs=0;factory_scale_invalidate_locked();}
+ if(now<=0)return true; // Invalid clock: no automatic keys; retry on valid time.
+ t.lastPollUs=now;
+ if(!factory_scale_recovery_runtime())return true;
+ if(!revoked&&now<t.nextPollUs)return true;
+ t.nextPollUs=now<=INT64_MAX-1000000?now+1000000:INT64_MAX;
  if(!t.active){
   if(t.bootRestoreAttempted||t.restoreAttempted)return true;
   FactoryScaleStorageLease lease;if(!lease.held)return true;
@@ -455,9 +476,9 @@ bool factory_scale_poll_locked(){
  {std::unique_lock<std::mutex> battery(battery_mutex,std::try_to_lock);if(!battery.owns_lock())return true;
   uint16_t mv=0,temp=0,op=0,dc=0,fcc=0;
   const bool read=gauge_word(8,mv)&&gauge_word(6,temp)&&gauge_word(0x3a,op)&&gauge_word(0x3c,dc)&&gauge_word(0x12,fcc);
-  due=!read||mv<=3600||mv>4350||temp<2832||temp>3131||!mosaico_gauge::configExitAccepted(op)||((op>>1)&3)!=3||dc!=130||fcc!=130||now<t.appliedUs||now-t.appliedUs>=300000000;
+  due=!read||mv<=3600||mv>4350||temp<2832||temp>3131||!mosaico_gauge::configExitAccepted(op)||((op>>1)&3)!=3||dc!=130||fcc!=130;
  }
- if(due){FactoryScaleStorageLease lease;if(lease.held){t.active=false;factory_scale_invalidate_locked();(void)factory_scale_restore_locked();}}
+ if(due){t.active=false;factory_scale_invalidate_locked();FactoryScaleStorageLease lease;if(lease.held)(void)factory_scale_restore_locked();}
  return true;
 }
 } // anonymous namespace
