@@ -1,6 +1,7 @@
 // CLOSED factory3000 rollback / nominal65 virtual130 trial. Not a calibration.
 // This separate GSJ3 runtime NEVER interprets Original as physical/native65.
 #include "mosaico_factory_scale_journal.h"
+#include "mosaico_factory_scale_observed_page.h"
 #include <ota/ota_public_key.h>
 #include <mbedtls/pk.h>
 #include <new>
@@ -9,6 +10,7 @@
 namespace {
 namespace factory_scale_journal=mosaico_factory_scale_journal;
 namespace factory_scale_model=mosaico_factory_scale;
+namespace factory_scale_budget=mosaico_factory_scale_budget;
 // Capability contract UTF-8 literal, no terminating newline in contract hash:
 // GSJ3|Factory3000RollbackToNominal65Virtual130|source=70a767be|target=b5b0f0d6|owned17|rollback3000=UNKNOWN_UNTRUSTED|applied_units=2|boot_restore_after_SDK_VALID|deadline_seconds=300|no_Failed_waiver
 constexpr const char* factory_scale_contract_digest="e13f6e771556ad0a507112532f3a2e63139ff6c7433a2ebc1cea022cf8df30fa";
@@ -28,6 +30,7 @@ struct FactoryScaleRuntime {
  bool applyAttempted=false,restoreAttempted=false,postExitFull131=false,sealedStandardFallback=false,protectionSealed=false;
  bool preKeySpaceRejected=false,keysStarted=false,thirdValue=false,possibleDirty=false,ownedDirty=false;
  bool noOpRestore=false,inheritedCfgExitRequired=false,untouchedMismatch=false,unsafeCalibration=false,invalidOffset=false;
+ size_t budgetBase=74,budgetReuse=0,budgetRequired=74; // Diagnostic only, never a grant.
  size_t unexpectedCount=0;uint16_t firstUnexpected=0;uint8_t firstRaw[4]{},firstOriginal[4]{};
  uint32_t observedGeneration=0;uint64_t observedEpoch=0;
  scale_recovery::Phase observedPhase=scale_recovery::Phase::Original;
@@ -101,7 +104,36 @@ bool factory_scale_maintenance_cached_safe_locked(){
  return (factory_scale_status==factory_scale_journal::Status::Missing&&!t.everSeen&&!t.operation&&!t.active)||factory_scale_maintenance_original_cached_locked();
 }
 bool factory_scale_protected(){return factory_scale_protection.load(std::memory_order_acquire);}
-bool factory_scale_space_locked(){nvs_stats_t stats{};return nvs_get_stats(nullptr,&stats)==ESP_OK&&stats.available_entries>=factory_scale_journal::nvsRequiredAvailableEntries;}
+bool factory_scale_budget_clean_locked(bool ownedOperation=false){
+ if(!factory_scale_rt||factory_scale_safety_fault)return false;
+ const auto& t=*factory_scale_rt;
+ return (!t.operation||ownedOperation)&&!t.active&&!t.thirdValue&&!t.possibleDirty&&!t.ownedDirty&&
+  !t.unsafeCalibration&&!t.invalidOffset&&!t.untouchedMismatch&&!t.unexpectedCount&&!t.keyFailed;
+}
+size_t factory_scale_reuse_credit_locked(){
+ if(factory_scale_load_locked(true)!=factory_scale_journal::Status::Ready)return 0;
+ const auto& l=factory_scale_rt->journal.loaded;
+ const auto usage=factory_scale_journal::reuseUsageNvs(l);
+ return factory_scale_budget::credit(l,usage,factory_scale_budget_clean_locked());
+}
+factory_scale_budget::Proof factory_scale_budget_proof_locked(){
+ factory_scale_budget::Proof empty{};
+ if(factory_scale_load_locked(true)!=factory_scale_journal::Status::Ready||!factory_scale_budget_clean_locked())return empty;
+ auto& t=*factory_scale_rt;const auto& l=t.journal.loaded;
+ if(!factory_scale_budget::pair(l))return empty;
+ t.record=l.records[size_t(l.selected)]; // Existing stable caller-owned storage.
+ return factory_scale_budget::proof(l,factory_scale_journal::reuseUsageNvs(l),t.record,true);
+}
+bool factory_scale_space_locked(const factory_scale_budget::Proof* owned=nullptr){
+ static_assert(factory_scale_journal::nvsRequiredAvailableEntries==factory_scale_budget::prepareBase);
+ const auto status=factory_scale_load_locked(true);if(status!=factory_scale_journal::Status::Missing&&status!=factory_scale_journal::Status::Ready)return false;
+ auto& t=*factory_scale_rt;const auto& l=t.journal.loaded;const auto usage=factory_scale_journal::reuseUsageNvs(l);
+ const bool ownedOperation=owned&&owned->image==&t.record&&t.operation;
+ auto b=factory_scale_budget::budget(factory_scale_budget::prepareBase,l,usage,factory_scale_budget_clean_locked());
+ if(ownedOperation&&factory_scale_budget::matches(*owned,l,usage,factory_scale_budget_clean_locked(true)))b={factory_scale_budget::prepareBase,factory_scale_budget::persistedCreditMaximum,factory_scale_budget::prepareBase-factory_scale_budget::persistedCreditMaximum};
+ t.budgetBase=b.base;t.budgetReuse=b.reuse;t.budgetRequired=b.required;
+ nvs_stats_t stats{};return nvs_get_stats(nullptr,&stats)==ESP_OK&&stats.available_entries>=b.required;
+}
 bool factory_scale_prepared_fresh(){
  if(!factory_scale_rt||!factory_scale_rt->preparedThisBoot)return false;
  const auto now=esp_timer_get_time();return now>=factory_scale_rt->preparedUs&&now-factory_scale_rt->preparedUs<=120000000;
@@ -135,7 +167,7 @@ bool factory_scale_owned_intent(){
  return p==scale_recovery::Phase::Pending||p==scale_recovery::Phase::Restoring;
 }
 const esp_partition_t* factory_scale_rt_partition(unsigned slot){return slot<2?esp_partition_find_first(ESP_PARTITION_TYPE_APP,slot?ESP_PARTITION_SUBTYPE_APP_OTA_1:ESP_PARTITION_SUBTYPE_APP_OTA_0,nullptr):nullptr;}
-bool factory_scale_rt_version(const char* v){return !std::strcmp(v,"0.13.95-r9-mosaico-ota")||!std::strcmp(v,"0.13.95-r10-mosaico-ota");}
+bool factory_scale_rt_version(const char* v){return !std::strcmp(v,"0.13.95-r11-mosaico-ota")||!std::strcmp(v,"0.13.95-r12-mosaico-ota");}
 bool factory_scale_rt_verify_image(unsigned slot,const MosaicoOta::VerifiedImageDescriptor& image){
     const auto* part=factory_scale_rt_partition(slot);esp_ota_img_states_t state{};
     if(!part||!image.size||image.size>part->size||!factory_scale_rt_version(image.version)||
@@ -245,6 +277,8 @@ bool factory_scale_rt_intent(scale_recovery::Phase phase){
  return (saved.snapshot.generation==t.record.snapshot.generation&&saved.snapshot.epoch==t.record.snapshot.epoch&&saved.snapshot.phase==phase&&factory_scale_journal::sameRecoveryImage(saved,t.record))||factory_scale_rt_fail("intent_readback_mismatch");
 }
 struct FactoryScaleBackend {
+    const factory_scale_budget::Proof* budgetProof=nullptr;
+    explicit FactoryScaleBackend(const factory_scale_budget::Proof* proof=nullptr):budgetProof(proof){}
     bool restoring=false;
     void revoke(){factory_scale_invalidate_locked();}
     bool admit(bool restore){
@@ -256,7 +290,7 @@ struct FactoryScaleBackend {
             if(factory_scale_rt->restoreAttempted)return factory_scale_rt_fail("restore_once_per_boot_no_key_retry");
             return !factory_scale_rt->thirdValue||factory_scale_rt_fail("restore_third_value_no_overwrite");
         }
-        if(!factory_scale_space_locked())return factory_scale_rt_fail("apply_nvs_available_entries_headroom");
+        if(!factory_scale_space_locked(budgetProof))return factory_scale_rt_fail("apply_nvs_available_entries_headroom");
         if(factory_scale_rt->applyAttempted)return factory_scale_rt_fail("apply_once_per_boot");
         if(!factory_scale_prepared_fresh()||!factory_scale_rt_images_current())return factory_scale_rt_fail("apply_explicit_prepare_and_two_audited_images_required");
         // Method entry is only wired by root to local UART CONFIRM_EXTERNAL_POWER.
@@ -406,9 +440,11 @@ struct FactoryScaleBackend {
     }
 };
 
-bool factory_scale_begin_locked(){
+bool factory_scale_begin_locked(const factory_scale_budget::Proof* proof=nullptr){
  if(!factory_scale_storage_locked()||factory_scale_load_locked(true)!=factory_scale_journal::Status::Ready)return false;
- auto& t=*factory_scale_rt;t.record=t.journal.loaded.records[size_t(t.journal.loaded.selected)];
+ auto& t=*factory_scale_rt;
+ if(proof&&proof->image&&(!factory_scale_budget::identityMatches(*proof,t.journal.loaded)||!factory_scale_budget_clean_locked()))return factory_scale_rt_fail("apply_reuse_proof_changed_before_operation");
+ t.record=t.journal.loaded.records[size_t(t.journal.loaded.selected)];
  if(!factory_scale_journal::shape(t.record))return factory_scale_rt_fail("closed_GSJ3_profile_required");
  t.operation=true;t.accessTouched=false;t.sealAttempted=false;t.possibleDirty=false;
  t.noOpRestore=false;t.inheritedCfgExitRequired=false;t.ownedDirty=false;t.untouchedMismatch=false;t.unsafeCalibration=false;
@@ -427,8 +463,8 @@ bool factory_scale_capacity(char* out,size_t n,size_t required=1024){if(out&&n>=
 bool factory_scale_report(char* out,size_t n,bool ok){
  const auto* t=factory_scale_rt;const auto* s=t&&factory_scale_status==factory_scale_journal::Status::Ready&&t->journal.loaded.selected>=0?&t->journal.loaded.records[size_t(t->journal.loaded.selected)].snapshot:nullptr;
  const auto c=factory_scale_context_locked();
- const int k=std::snprintf(out,n,"reason=%s success=%d schema=3 namespace=gscale_f3_v1 profile=Factory3000RollbackToNominal65Virtual130 phase=%u generation=%lu epoch=%llu factor=%lld verified=%d capacity_calibrated=0 original3000_UNTRUSTED=1 legacy_Failed_preserved=1 prepared_fresh=%d images_capability_verified=%d protection=%d observed131=%u authenticated=%d third_value=%d unexpected_count=%u first_unexpected=%04x post_exit_full131=%d sealed_standard_fallback=%d deadline_seconds=300 source_crc=70a767be target_crc=b5b0f0d6 contract=%s",
- t?t->reason:"psram_unavailable",ok,unsigned(s?uint8_t(s->phase):255),static_cast<unsigned long>(s?s->generation:0),static_cast<unsigned long long>(s?s->epoch:0),static_cast<long long>(c.factor),c.verified,factory_scale_prepared_fresh(),t&&t->imagesSet,factory_scale_protected(),unsigned(t?t->observed.count:0),t&&t->observed.authenticated,t&&t->thirdValue,unsigned(t?t->unexpectedCount:0),t?t->firstUnexpected:0,t&&t->postExitFull131,t&&t->sealedStandardFallback,factory_scale_contract_digest);
+ const int k=std::snprintf(out,n,"reason=%s success=%d schema=3 namespace=gscale_f3_v1 profile=Factory3000RollbackToNominal65Virtual130 phase=%u generation=%lu epoch=%llu factor=%lld verified=%d capacity_calibrated=0 original3000_UNTRUSTED=1 legacy_Failed_preserved=1 prepared_fresh=%d images_capability_verified=%d protection=%d observed131=%u authenticated=%d third_value=%d unexpected_count=%u first_unexpected=%04x post_exit_full131=%d sealed_standard_fallback=%d deadline_seconds=300 source_crc=70a767be target_crc=b5b0f0d6 contract=%s base_required=%u reuse_credit=%u dynamic_required=%u",
+ t?t->reason:"psram_unavailable",ok,unsigned(s?uint8_t(s->phase):255),static_cast<unsigned long>(s?s->generation:0),static_cast<unsigned long long>(s?s->epoch:0),static_cast<long long>(c.factor),c.verified,factory_scale_prepared_fresh(),t&&t->imagesSet,factory_scale_protected(),unsigned(t?t->observed.count:0),t&&t->observed.authenticated,t&&t->thirdValue,unsigned(t?t->unexpectedCount:0),t?t->firstUnexpected:0,t&&t->postExitFull131,t&&t->sealedStandardFallback,factory_scale_contract_digest,unsigned(t?t->budgetBase:74),unsigned(t?t->budgetReuse:0),unsigned(t?t->budgetRequired:74));
  if(k<0||size_t(k)>=n){std::snprintf(out,n,"error=factory_scale_details_truncated");return false;}return ok;
 }
 bool factory_scale_two_fields(const cJSON* object,const char* a,const char* b){
@@ -553,11 +589,13 @@ FactoryScaleStorageLease lease;std::lock_guard<std::recursive_mutex> transaction
 bool Hal::gaugeFactoryScaleApply(char* out,size_t n){
  if(!factory_scale_capacity(out,n)){return false;}
 FactoryScaleStorageLease lease;std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
- if(!lease.held||!factory_scale_begin_locked()){return factory_scale_report(out,n,false);}
+ if(!lease.held){return factory_scale_report(out,n,false);}
+ const auto proof=factory_scale_budget_proof_locked(); // Stack-local; before operation.
+ if(!factory_scale_begin_locked(&proof)){return factory_scale_report(out,n,false);}
  auto& t=*factory_scale_rt;
  t.hostPowerAttested=true; // ONLY root local-console CONFIRM_EXTERNAL_POWER route.
  if(t.record.snapshot.phase!=scale_recovery::Phase::Original){t.reason="apply_requires_Original";t.operation=false;factory_scale_update_protection_locked();return factory_scale_report(out,n,false);}
- std::lock_guard<std::mutex> battery(battery_mutex);FactoryScaleBackend backend;
+ std::lock_guard<std::mutex> battery(battery_mutex);FactoryScaleBackend backend(&proof);
  const auto result=mosaico_scale_trial::apply(backend);t.operation=false;factory_scale_update_protection_locked();return factory_scale_report(out,n,result==mosaico_scale_trial::Result::Applied);
 }
 bool Hal::gaugeFactoryScaleRestore(char* out,size_t n){
@@ -574,4 +612,23 @@ std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
  const auto& t=*factory_scale_rt;const auto& f=t.record.snapshot.fields[index];uint32_t raw=0,original=0,target=0;
  for(unsigned j=0;j<f.width;++j){raw=(raw<<8)|t.observed.raw[index][j];original=(original<<8)|f.original[j];target=(target<<8)|f.target[j];}
  const int k=std::snprintf(out,n,"cached=1 index=%u count=%u authenticated=%d address=%04x width=%u rawBE=%08lx originalBE=%08lx targetBE=%08lx generation=%lu epoch=%llu read_ms=%lld stage=%s role=%s",unsigned(index),unsigned(t.observed.count),t.observed.authenticated,f.address,f.width,static_cast<unsigned long>(raw),static_cast<unsigned long>(original),static_cast<unsigned long>(target),static_cast<unsigned long>(t.observedGeneration),static_cast<unsigned long long>(t.observedEpoch),static_cast<long long>(t.observedReadMs),t.observedStage,factory_scale_rt_owned(f.address)?"owned17":"untouched114_neverwrite");return k>=0&&size_t(k)<n;
+}
+bool Hal::gaugeFactoryScaleObservedPage(size_t index,char* out,size_t n){
+ // Fixed cached observation only: no loadNvs, keys, FA, I2C or allocation.
+ if(!factory_scale_capacity(out,n,768))return false;
+ std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+ mosaico_factory_observed_page::Page page{};
+ if(!factory_scale_rt||!factory_scale_rt->observedGeneration||!factory_scale_rt->observedEpoch||factory_scale_rt->observedReadMs<=0||
+    !scale_recovery::validPhase(factory_scale_rt->observedPhase)||!factory_scale_rt->observedStage||std::strlen(factory_scale_rt->observedStage)>80||
+    !mosaico_factory_observed_page::encode(factory_scale_rt->record.snapshot,factory_scale_rt->observed,index,page)){
+  std::snprintf(out,n,"cached=0 reason=page_not_observed_this_boot");return false;
+ }
+ const auto& t=*factory_scale_rt;
+ const int used=std::snprintf(out,n,"version=1 cached=1 cached_only=1 no_i2c=1 no_nvs=1 page=%u first=%u count=%u total=131 authenticated=1 generation=%lu epoch=%llu read_ms=%lld cache_phase=%u stage=%s observed_crc=%08lx page_crc=%08lx encoding=le_addr2_width1_raw4_be_pad0_v1 data=",
+  unsigned(index),unsigned(page.first),unsigned(page.count),static_cast<unsigned long>(t.observedGeneration),static_cast<unsigned long long>(t.observedEpoch),static_cast<long long>(t.observedReadMs),unsigned(t.observedPhase),t.observedStage,static_cast<unsigned long>(page.observedCrc),static_cast<unsigned long>(page.pageCrc));
+ size_t encoded=0;
+ if(used<0||size_t(used)>=n||mbedtls_base64_encode(reinterpret_cast<unsigned char*>(out+used),n-size_t(used),&encoded,page.bytes.data(),page.size)||encoded>300||size_t(used)+encoded>=n){
+  std::snprintf(out,n,"cached=0 reason=page_output_capacity");return false;
+ }
+ out[size_t(used)+encoded]=0;return true;
 }

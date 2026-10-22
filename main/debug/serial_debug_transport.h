@@ -89,6 +89,8 @@ inline bool uartAllowed(const char* command) {
     if (!std::strcmp(command, "ota-health")) return true;
     if (!std::strcmp(command, "heap-policy")) return true;
     if (!std::strcmp(command, "gauge-factory-scale")) return true;
+    // Its observed-page subcommand remains readonly and in the same CRC-framed
+    // early factory parser; no new top-level or mutation authorization.
     // Bounded, default-OFF RAM lease; parser retains duty/OTA safety checks.
     if (!std::strcmp(command, "bankpulse")) return true;
 #endif

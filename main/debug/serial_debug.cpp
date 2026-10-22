@@ -653,14 +653,14 @@ bool __attribute__((noinline)) SerialDebug::handleFactoryScale(char* line)
     const char* argument=::strtok_r(nullptr," \t",&save);
     const bool status=!std::strcmp(action,"status"),prepare=!std::strcmp(action,"prepare"),
         images=!std::strcmp(action,"images"),apply=!std::strcmp(action,"apply"),
-        restore=!std::strcmp(action,"restore"),observed=!std::strcmp(action,"observed");
+        restore=!std::strcmp(action,"restore"),observed=!std::strcmp(action,"observed"),page=!std::strcmp(action,"observed-page");
     uint32_t index=0;
     const bool valid=status?!argument:(prepare||restore)?argument&&!std::strcmp(argument,"CONFIRM"):
         apply?argument&&!std::strcmp(argument,"CONFIRM_EXTERNAL_POWER"):
         images?argument&&*argument&&std::strlen(argument)<=1400:
-        observed&&parseUnsignedStrict(argument,0,130,index);
+        page?parseUnsignedStrict(argument,0,4,index):observed&&parseUnsignedStrict(argument,0,130,index);
     if(!valid||::strtok_r(nullptr," \t",&save)){
-        result("gauge-factory-scale","FAIL","reason=expected_status_prepare_CONFIRM_images_base64_apply_CONFIRM_EXTERNAL_POWER_restore_CONFIRM_observed_0..130");return true;
+        result("gauge-factory-scale","FAIL","reason=expected_status_prepare_CONFIRM_images_base64_apply_CONFIRM_EXTERNAL_POWER_restore_CONFIRM_observed_0..130_or_observed-page_0..4");return true;
     }
     char details[1024]{};
     const bool ok=status?GetHAL().gaugeFactoryScaleStatus(details,sizeof(details)):
@@ -668,6 +668,7 @@ bool __attribute__((noinline)) SerialDebug::handleFactoryScale(char* line)
         images?GetHAL().gaugeFactoryScaleImages(argument,details,sizeof(details)):
         apply?GetHAL().gaugeFactoryScaleApply(details,sizeof(details)):
         restore?GetHAL().gaugeFactoryScaleRestore(details,sizeof(details)):
+        page?GetHAL().gaugeFactoryScaleObservedPage(index,details,sizeof(details)):
         GetHAL().gaugeFactoryScaleObservedField(index,details,sizeof(details));
     result("gauge-factory-scale",ok?"PASS":"FAIL",details);return true;
 #else
@@ -2433,7 +2434,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP gauge-factory-audit status | revalidate-status | revalidate-field <0..130> | revalidate CONFIRM (CDC_only) | capture CONFIRM (CDC_only) | field <0..130> read_only_parameters=1 separate_backup=1\r\n");
     debugPrintf("DBG HELP ota-maintenance status|power | update_or_reboot CONFIRM_USB_POWER <64hexSHA> <ttl30..600s> local_attestation_only=1 no_persistent_waiver=1\r\n");
     debugPrintf("DBG HELP gauge-scale status | prepare CONFIRM | restore-plan | observed <index0..130> | images <signed_manifests_base64> | apply CONFIRM_EXTERNAL_POWER | restore CONFIRM bounded_x2_trial=1 no_SOC_OCV_RESET=1\r\n");
-    debugPrintf("DBG HELP gauge-factory-scale status | prepare CONFIRM | images <signed_images_and_capabilities_base64> | apply CONFIRM_EXTERNAL_POWER | restore CONFIRM | observed <0..130> factory_rollback_untrusted=1 no_SOC_reset=1\r\n");
+    debugPrintf("DBG HELP gauge-factory-scale status | prepare CONFIRM | images <signed_images_and_capabilities_base64> | apply CONFIRM_EXTERNAL_POWER | restore CONFIRM | observed <0..130> | observed-page <0..4> factory_rollback_untrusted=1 no_SOC_reset=1\r\n");
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
     debugPrintf("DBG HELP gauge-trace status | arm CONFIRM | stop | export | clear CONFIRM | checkpoint CONFIRM queued_not_persisted=1 gauge_parameter_writes=0\r\n");
     debugPrintf("DBG HELP gauge-public-extra-field index_0..64 readonly_cached=1 raw_only=1\r\n");

@@ -21,6 +21,7 @@ void native_recovery_revoke_locked(){}
 scale_journal::Status scale_load_locked(bool){return scale_journal::Status::Missing;}
 struct FactoryWorkspace {bool attempted=false,revalidation=false,complete=false,live=false;factory::Journal record{};factory::BackupBytes raw{};};
 FactoryWorkspace* factory_workspace=nullptr;
+static mosaico_factory_scale_budget::Usage reuseUsageFixture{};
 const esp_partition_t* esp_ota_get_running_partition();
 bool factory_runtime();bool factory_identity(){return gauge_identity();}
 bool factory_physical(unsigned,factory::Standard* =nullptr){return factory_runtime();}
@@ -32,14 +33,14 @@ static FactoryScaleRuntime runtimeStorage;
 static factory_scale_journal::Record baseline(){factory_scale_journal::Record r{};r.profile=mosaico_factory_scale::Profile::Factory3000RollbackToNominal65Virtual130;r.mac=GetHAL().getFactoryMac();auto&s=r.snapshot;s.identity={0x220,3,4};s.binding=scale_journal::binding(r.mac);s.layoutId=scale_recovery::Layout::Public131V1;s.count=131;s.generation=1;s.epoch=1;s.scale=scale_recovery::Scale::Two;
  for(size_t i=0;i<131;++i){auto&f=s.fields[i];f.address=fixture[i].address;f.width=fixture[i].width;for(unsigned j=0;j<4;++j){f.original[j]=fixture[i].original[j];f.target[j]=fixture[i].target[j];}}
  return r;}
-static void reset(bool target=false){gauge=true;runtimeStorage=FactoryScaleRuntime{};factory_scale_rt=&runtimeStorage;factory_scale_status=factory_scale_journal::Status::IoError;factory_scale_safety_fault=false;memoryStore=MemoryStore{};
+static void reset(bool target=false){reuseUsageFixture={};gauge=true;runtimeStorage=FactoryScaleRuntime{};factory_scale_rt=&runtimeStorage;factory_scale_status=factory_scale_journal::Status::IoError;factory_scale_safety_fault=false;memoryStore=MemoryStore{};
  auto r=baseline();factory_scale_journal::saveInto(memoryStore,r,{true,true,true},runtimeStorage.journal);
  if(target){++r.snapshot.generation;++r.snapshot.epoch;r.snapshot.phase=scale_recovery::Phase::Pending;factory_scale_journal::saveInto(memoryStore,r,{true,true,true},runtimeStorage.journal);++r.snapshot.generation;++r.snapshot.epoch;r.snapshot.phase=scale_recovery::Phase::Applied;factory_scale_journal::saveInto(memoryStore,r,{true,true,true},runtimeStorage.journal);}
  for(size_t i=0;i<131;++i)for(unsigned j=0;j<4;++j)gaugeRaw[i][j]=target?fixture[i].target[j]:fixture[i].original[j];
  operation=0xa6;unknownOp=false;defaultKeyCalls=0;exitAutoSeal=true;commitAckLossOnce=false;availableEntries=95;statsError=false;imageCryptoValid=true;sdkValid=true;uiLocked=true;wifiRunning=bleAdvertising=bleConnected=otaBusy=otaHealth=false;powerPhase=2;nowUs=1000000;failPacketNoCommit=false;failReadAddress=0;readCalls=0;writes=enters=exits=seals=offsetWrites=unsafeSeals=0;freshExists=false;freshWrites=0;intentBeforeKeys=true;durableReject=false;dropPrekey=false;rejectPhaseOnce=-1;factory_workspace=nullptr;leaseDepth=0;leaseViolation=false;revalidationUnderLease=false;revalidationCalls=0;leaseAllowed=true;
  for(unsigned i=0;i<131;++i){forwardPackets[i]=reversePackets[i]=0;}
  factory_scale_load_locked(true);runtimeStorage.verifiedGeneration=r.snapshot.generation;runtimeStorage.verifiedEpoch=r.snapshot.epoch;runtimeStorage.preparedThisBoot=!target;runtimeStorage.preparedUs=nowUs;runtimeStorage.imagesSet=true;
- for(unsigned i=0;i<2;++i){runtimeStorage.images[i].size=512;for(unsigned j=0;j<32;++j)runtimeStorage.images[i].hash[j]=0x42;std::snprintf(runtimeStorage.images[i].version,sizeof(runtimeStorage.images[i].version),i?"0.13.95-r10-mosaico-ota":"0.13.95-r9-mosaico-ota");}}
+ for(unsigned i=0;i<2;++i){runtimeStorage.images[i].size=512;for(unsigned j=0;j<32;++j)runtimeStorage.images[i].hash[j]=0x42;std::snprintf(runtimeStorage.images[i].version,sizeof(runtimeStorage.images[i].version),i?"0.13.95-r12-mosaico-ota":"0.13.95-r11-mosaico-ota");}}
 static mosaico_scale_trial::Result apply(){if(!factory_scale_begin_locked())return mosaico_scale_trial::Result::Blocked;FactoryScaleBackend b;auto r=mosaico_scale_trial::apply(b);runtimeStorage.operation=false;factory_scale_update_protection_locked();return r;}
 static mosaico_scale_trial::Result restore(){if(!factory_scale_begin_locked())return mosaico_scale_trial::Result::Blocked;FactoryScaleBackend b;auto r=mosaico_scale_trial::restore(b);runtimeStorage.operation=false;factory_scale_update_protection_locked();return r;}
 extern "C" int run_case(int id){
@@ -73,13 +74,13 @@ extern "C" int run_case(int id){
  if(id==26){runtimeStorage.imagesSet=true;char out[1024];if(GetHAL().gaugeFactoryScaleImages("invalid_base64",out,sizeof(out))||runtimeStorage.imagesSet)return 36;if(apply()!=mosaico_scale_trial::Result::Blocked||defaultKeyCalls||writes)return 37;return 0;}
  if(id==27){runtimeStorage.imagesSet=true;imageCryptoValid=false;if(apply()!=mosaico_scale_trial::Result::Blocked||runtimeStorage.imagesSet||defaultKeyCalls||writes)return 38;return 0;}
  if(id>=28&&id<=33){capMode=true;capReject=false;capVerified=0;cJSON signature{};signature.valuestring=const_cast<char*>("cap");auto image=runtimeStorage.images[0];
-  std::snprintf(expectedCanonical,sizeof(expectedCanonical),"MOSAICO-FACTORY-SCALE-CAP-v1\ne13f6e771556ad0a507112532f3a2e63139ff6c7433a2ebc1cea022cf8df30fa\n0.13.95-r9-mosaico-ota\n512\n4242424242424242424242424242424242424242424242424242424242424242\n");
+  std::snprintf(expectedCanonical,sizeof(expectedCanonical),"MOSAICO-FACTORY-SCALE-CAP-v1\ne13f6e771556ad0a507112532f3a2e63139ff6c7433a2ebc1cea022cf8df30fa\n0.13.95-r11-mosaico-ota\n512\n4242424242424242424242424242424242424242424242424242424242424242\n");
   if(id==29)image.version[0]='1';if(id==30)++image.size;if(id==31)image.hash[0]^=1;if(id==32)capReject=true;if(id==33)signature.valuestring=nullptr;
   bool ok=factory_scale_capability(&signature,image);if(id==28?(!ok||capVerified!=1):ok)return 39;return 0;}
  if(id>=34&&id<=38){cJSON object{},image{},signature{},extra{};object.child=&image;image.next=&signature;image.string=const_cast<char*>("image");signature.string=const_cast<char*>("signature");
   if(id==35){signature.next=&extra;extra.string=const_cast<char*>("contract");}if(id==36)signature.string=const_cast<char*>("capability");if(id==37)signature.string=image.string;if(id==38)image.next=nullptr;
   bool ok=factory_scale_two_fields(&object,"image","signature");if(id==34?!ok:ok)return 40;return 0;}
- if(id==39){const char* rejected[]={"0.13.95-r1-mosaico-ota","0.13.95-r2-mosaico-ota","0.13.95-r3-mosaico-ota","0.13.95-r4-mosaico-ota","0.13.95-r5-mosaico-ota","0.13.95-r20-mosaico-ota","0.13.95-r10-mosaico-ota-extra",""};for(const char* v:rejected)if(factory_scale_rt_version(v))return 41;if(!factory_scale_rt_version("0.13.95-r9-mosaico-ota")||!factory_scale_rt_version("0.13.95-r10-mosaico-ota"))return 42;return 0;}
+ if(id==39){const char* rejected[]={"0.13.95-r1-mosaico-ota","0.13.95-r2-mosaico-ota","0.13.95-r3-mosaico-ota","0.13.95-r4-mosaico-ota","0.13.95-r5-mosaico-ota","0.13.95-r6-mosaico-ota","0.13.95-r7-mosaico-ota","0.13.95-r8-mosaico-ota","0.13.95-r9-mosaico-ota","0.13.95-r10-mosaico-ota","0.13.95-r20-mosaico-ota","0.13.95-r12-mosaico-ota-extra",""};for(const char* v:rejected)if(factory_scale_rt_version(v))return 41;if(!factory_scale_rt_version("0.13.95-r11-mosaico-ota")||!factory_scale_rt_version("0.13.95-r12-mosaico-ota"))return 42;return 0;}
  if(id==40){reset(true);runtimeStorage.imagesSet=false;imageCryptoValid=false;if(restore()!=mosaico_scale_trial::Result::Restored||writes!=17||factory_scale_context_locked().factor||factory_scale_protected())return 43;return 0;}
  if(id==41){reset(true);runtimeStorage.imagesSet=false;imageCryptoValid=false;factory_scale_poll_locked();if(writes!=17||factory_scale_protected()||!runtimeStorage.bootRestoreAttempted)return 44;return 0;}
  if(id==42){std::snprintf(runtimeStorage.images[0].version,sizeof(runtimeStorage.images[0].version),"0.13.95-r1-mosaico-ota");if(apply()!=mosaico_scale_trial::Result::Blocked||runtimeStorage.imagesSet||writes||defaultKeyCalls)return 45;return 0;}
@@ -115,7 +116,7 @@ class FactoryRuntimeTests(unittest.TestCase):
   self.assertIn('factory_scale_time_valid(t,esp_timer_get_time())',s)
   self.assertIn('restore?factory_scale_recovery_runtime():factory_runtime()',s)
   admit=s.split('    bool admit(bool restore){',1)[1].split('    bool intent(',1)[0]
-  restoring=admit.split('        if(restore){',1)[1].split('        if(!factory_scale_space_locked())',1)[0]
+  restoring=admit.split('        if(restore){',1)[1].split('        if(!factory_scale_space_locked(',1)[0]
   self.assertNotIn('images_current',restoring)
   self.assertIn('return !factory_scale_rt->thirdValue',restoring)
   journal=(ROOT/'main/hal/mosaico/mosaico_factory_scale_journal_model.h').read_text()
@@ -133,7 +134,7 @@ class FactoryRuntimeTests(unittest.TestCase):
   code=code[:code.index('#include "mosaico_gauge_scale_runtime.inc"')]
   code=code.replace('bool gauge_access_word(AccessWord){return mockGaugeIdentity();}','bool realAccess(AccessWord);bool gauge_access_word(AccessWord w){return realAccess(w);}')
   code=code.replace('bool gauge_control(GaugeCommand){return mockGaugeIdentity();}','bool enterModel();bool gauge_control(GaugeCommand){return enterModel();}')
-  code=code.replace(' bool gaugeThresholdAudit(bool,char*,size_t);',' bool gaugeThresholdAudit(bool,char*,size_t);bool gaugeFactoryAuditRevalidate(char*,size_t);bool gaugeFactoryScaleStatus(char*,size_t);bool gaugeFactoryScalePrepare(char*,size_t);bool gaugeFactoryScaleImages(const char*,char*,size_t);bool gaugeFactoryScaleApply(char*,size_t);bool gaugeFactoryScaleRestore(char*,size_t);bool gaugeFactoryScaleObservedField(size_t,char*,size_t);')
+  code=code.replace(' bool gaugeThresholdAudit(bool,char*,size_t);',' bool gaugeThresholdAudit(bool,char*,size_t);bool gaugeFactoryAuditRevalidate(char*,size_t);bool gaugeFactoryScaleStatus(char*,size_t);bool gaugeFactoryScalePrepare(char*,size_t);bool gaugeFactoryScaleImages(const char*,char*,size_t);bool gaugeFactoryScaleApply(char*,size_t);bool gaugeFactoryScaleRestore(char*,size_t);bool gaugeFactoryScaleObservedField(size_t,char*,size_t);bool gaugeFactoryScaleObservedPage(size_t,char*,size_t);')
   code+='\n#include <esp_ota_ops.h>\n#include <mbedtls/base64.h>\n#include <psa/crypto.h>\n#include <cJSON.h>\n'+SUPPORT+'\n#include "mosaico_gauge_scale_trial.inc"\n#include "mosaico_factory_scale_runtime.inc"\n'
   # Only portable coordinator from legacy include; no old runtime/backend.
   code=code.replace('#include "mosaico_gauge_scale_trial.inc"','#define MOSAICO_SCALE_TRIAL_MODEL_ONLY\n#include "mosaico_gauge_scale_trial.inc"')
@@ -142,7 +143,7 @@ class FactoryRuntimeTests(unittest.TestCase):
   mocks=mocks.replace('scale_trial_owned','factory_scale_rt_owned').replace('scale_journal::Blob','factory_scale_journal::Blob').replace('scale_journal::ReadResult','factory_scale_journal::ReadResult')
   a=mocks.index('namespace mosaico_gauge_scale_journal {Status loadNvs');b=mocks.index('static factory_scale_journal::Blob freshBlob',a)
   mocks=mocks[:a]+'''static unsigned leaseDepth=0,revalidationCalls=0;static bool leaseViolation=false,revalidationUnderLease=false;static bool uiLocked=true,wifiRunning=false,bleAdvertising=false,bleConnected=false,otaBusy=false,otaHealth=false;static int powerPhase=2;static bool sdkValid=true,intentBeforeKeys=true,durableReject=false,dropPrekey=false;static int64_t nowUs=1000000;static int rejectPhaseOnce=-1;
-namespace mosaico_factory_scale_journal {Status loadNvs(const std::array<uint8_t,6>& m,StorageWorkspace& w){return loadInto(memoryStore,m,w);}Status saveNvs(const Record&r,const WriteAdmission&a,StorageWorkspace&w){if(durableReject)return fail(w,Status::CommitFailed);if(rejectPhaseOnce==int(r.snapshot.phase)){rejectPhaseOnce=-1;return fail(w,Status::CommitFailed);}auto s=saveInto(memoryStore,r,a,w);return s;}}
+namespace mosaico_factory_scale_journal {mosaico_factory_scale_budget::Usage reuseUsageNvs(const Loaded&){return reuseUsageFixture;}Status loadNvs(const std::array<uint8_t,6>& m,StorageWorkspace& w){return loadInto(memoryStore,m,w);}Status saveNvs(const Record&r,const WriteAdmission&a,StorageWorkspace&w){if(durableReject)return fail(w,Status::CommitFailed);if(rejectPhaseOnce==int(r.snapshot.phase)){rejectPhaseOnce=-1;return fail(w,Status::CommitFailed);}auto s=saveInto(memoryStore,r,a,w);return s;}}
 '''+mocks[b:]
   mocks=mocks.replace('a.priorSecurity=3;a.unsealVerified=1;a.fullVerified=1;', 'a.magic=0x47414331U;a.version=1;a.deviceType=0x220;a.unitMah=1;for(unsigned i=0;i<6;++i)a.mac[i]=GetHAL().getFactoryMac()[i];a.priorSecurity=3;a.lastSecurity=3;a.baseDesign=3000;a.baseFcc=3000;a.operationBefore=0xa6;a.unsealAttempted=1;a.fullAttempted=1;a.unsealVerified=1;a.fullVerified=1;').replace('a.state=uint8_t(mosaico_gauge::AccessState::Restored);return 0;', 'a.state=uint8_t(mosaico_gauge::AccessState::Restored);mosaico_gauge::seal(a);return 0;')
   mocks=mocks.replace('int64_t esp_timer_get_time(){return 1000000;}','int64_t esp_timer_get_time(){return nowUs;}')
@@ -154,7 +155,7 @@ namespace mosaico_factory_scale_journal {Status loadNvs(const std::array<uint8_t
   mocks=mocks.replace('bool Hal::gaugeThresholdAudit(bool,char*,size_t){return false;}','bool Hal::gaugeThresholdAudit(bool,char*,size_t){return false;}bool Hal::gaugeFactoryAuditRevalidate(char*,size_t){++revalidationCalls;revalidationUnderLease|=leaseDepth!=0;static FactoryWorkspace audit;factory_workspace=&audit;audit={};audit.attempted=audit.revalidation=audit.complete=audit.live=true;audit.record.count=131;audit.record.sourceCrc=mosaico_factory_scale::factorySourceCrc;for(unsigned i=0;i<131;++i)for(unsigned k=0;k<fixture[i].width;++k)audit.raw[67+i*7+k]=fixture[i].original[k];return true;}')
   mocks=mocks.replace('bool tryStorageLease(){return true;}void releaseStorageLease(){}','bool tryStorageLease(){if(!leaseAllowed)return false;if(leaseDepth){leaseViolation=true;return false;}++leaseDepth;return true;}void releaseStorageLease(){if(leaseDepth)--leaseDepth;else leaseViolation=true;}')
   support=old.RV_SUPPORT[:old.RV_SUPPORT.index('extern "C" {volatile int test_results')]
-  support=support.replace('0.13.90-mosaico-ota','0.13.95-r9-mosaico-ota').replace('0.13.91-mosaico-ota','0.13.95-r10-mosaico-ota')
+  support=support.replace('0.13.90-mosaico-ota','0.13.95-r11-mosaico-ota').replace('0.13.91-mosaico-ota','0.13.95-r12-mosaico-ota')
   support=support.replace('int mbedtls_base64_decode(unsigned char*,size_t,size_t*,const unsigned char*,size_t){return -1;}', 'int mbedtls_base64_decode(unsigned char* out,size_t cap,size_t* n,const unsigned char* input,size_t size){if(!capMode||size!=3||std::strncmp(reinterpret_cast<const char*>(input),"cap",3)||cap<8)return -1;for(unsigned i=0;i<8;++i)out[i]=0x55;*n=8;return 0;}')
   actual_runtime=(ROOT/'main/hal/mosaico/mosaico_factory_audit.inc').read_text().split('bool factory_runtime(){',1)[1].split('\n',1)[0]
   support+='''\nnamespace {bool factory_runtime(){'''+actual_runtime+'''\nbool factory_read(uint16_t a,uint8_t (&b)[36]){return readModel(a,b);}bool enterModel(){++enters;operation=0x4a2;return true;}}\n'''
@@ -166,6 +167,7 @@ namespace mosaico_factory_scale_journal {Status loadNvs(const std::array<uint8_t
   code+='\nextern "C" int64_t __divdi3(int64_t a,int64_t b){bool n=(a<0)!=(b<0);uint64_t q=__udivdi3(a<0?uint64_t(-a):uint64_t(a),b<0?uint64_t(-b):uint64_t(b));return n?-int64_t(q):int64_t(q);}'
   code+='''\nextern "C" {volatile int test_results[61]={};}extern "C" __attribute__((noinline,used)) void test_done(){for(;;){asm volatile("");}}extern "C" void _start(){for(int i=0;i<61;++i)test_results[i]=run_case(i);test_done();}\n'''
   headers={**trial.STUBS,**old.HEADERS}
+  headers['mbedtls/base64.h']+='\nint mbedtls_base64_encode(unsigned char*,size_t,size_t*,const unsigned char*,size_t);\n'
   headers['cstdint']+='\n#define INT64_MAX 0x7fffffffffffffffLL\n'
   headers['cJSON.h']='''#pragma once
 #include <cstddef>

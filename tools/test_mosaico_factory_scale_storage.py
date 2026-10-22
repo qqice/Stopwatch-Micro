@@ -42,6 +42,14 @@ esp_err_t nvs_get_blob(nvs_handle_t,const char*,void*,size_t*);
 esp_err_t nvs_set_blob(nvs_handle_t,const char*,const void*,size_t);
 esp_err_t nvs_commit(nvs_handle_t);
 esp_err_t nvs_get_stats(const char*,nvs_stats_t*);
+using nvs_iterator_t=void*;enum nvs_type_t {NVS_TYPE_ANY,NVS_TYPE_BLOB};
+struct nvs_entry_info_t {char namespace_name[16],key[16];nvs_type_t type;};
+esp_err_t nvs_get_used_entry_count(nvs_handle_t,size_t*);
+esp_err_t nvs_entry_find_in_handle(nvs_handle_t,nvs_type_t,nvs_iterator_t*);
+esp_err_t nvs_entry_info(nvs_iterator_t,nvs_entry_info_t*);
+esp_err_t nvs_entry_next(nvs_iterator_t*);
+void nvs_release_iterator(nvs_iterator_t);
+
 '''
 HARNESS=r'''
 #include "mosaico_factory_scale_journal.h"

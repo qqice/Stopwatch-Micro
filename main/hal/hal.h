@@ -194,6 +194,7 @@ public:
     bool gaugeFactoryScaleApply(char* details,size_t size);
     bool gaugeFactoryScaleRestore(char* details,size_t size);
     bool gaugeFactoryScaleObservedField(size_t index,char* details,size_t size);
+    bool gaugeFactoryScaleObservedPage(size_t page,char* details,size_t size);
     bool gaugeNativeRecoveryEvidence(char* details,size_t size);
     bool gaugeNativeRecoveryResolve(uint32_t expectedEvidenceCrc,char* details,size_t size);
     bool gaugeFactoryAuditRevalidate(char* details,size_t size);
@@ -280,6 +281,7 @@ public:
     bool gaugeFactoryScaleApply(char*,size_t) { return false; }
     bool gaugeFactoryScaleRestore(char*,size_t) { return false; }
     bool gaugeFactoryScaleObservedField(size_t,char*,size_t) { return false; }
+    bool gaugeFactoryScaleObservedPage(size_t,char*,size_t) { return false; }
     bool gaugeFactoryAuditStatus(char*,size_t) { return false; }
     bool gaugeFactoryAuditField(size_t,char*,size_t) { return false; }
     bool tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, MaintenancePowerResult* result = nullptr) { out={};if(result)*result=MaintenancePowerResult::Rejected;return false; }

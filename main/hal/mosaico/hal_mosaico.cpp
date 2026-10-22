@@ -256,6 +256,7 @@ void factory_scale_invalidate_locked();
 bool factory_scale_poll_locked();
 bool factory_scale_protected();
 bool factory_scale_audit_allowed_locked();
+size_t factory_scale_reuse_credit_locked();
 bool factory_scale_maintenance_cached_safe_locked();
 bool factory_scale_maintenance_original_cached_locked();
 mosaico_gauge_physical::UnitContext scale_unit_context_locked();
