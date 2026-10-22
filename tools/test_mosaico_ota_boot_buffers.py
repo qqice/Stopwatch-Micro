@@ -1,5 +1,6 @@
 """Host-only compile/extraction tests of OTA boot reservation and ownership."""
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -109,6 +110,33 @@ void updatePrefix(){
   self.assertLess(write.index('chunk_not_internal'),write.index('esp_ota_write('))
   manifest=ota.split('bool beginManifest(',1)[1].split('bool writeChunk(',1)[0]
   self.assertIn('validateDescriptor(json, d, error)',manifest)
-  self.assertIn('!currentReady() || !downloadPowerSafe()',manifest)
+  gate='!currentReady() || !(maintenanceMode ? maintenancePowerSafe(true) : downloadPowerSafe())'
+  self.assertIn('if ('+gate+') return reject("prewrite_safety");',manifest)
+  self.assertLess(manifest.index(gate),manifest.index('esp_ota_begin('))
+
+ def test_actual_prewrite_gate_both_power_branches(self):
+  ota=(R/'main/ota/mosaico_ota.cpp').read_text()
+  manifest=ota.split('bool beginManifest(',1)[1].split('bool writeChunk(',1)[0]
+  gate=re.search(r'if \((!currentReady\(\).*?)\) return reject\("prewrite_safety"\);',manifest).group(1)
+  self.compile(r'''
+struct Gate {
+ bool ready,maintenanceMode,maintenanceSafe,ordinarySafe;
+ int readyCalls=0,maintenanceCalls=0,ordinaryCalls=0;bool wrong=false;
+ constexpr bool currentReady(){++readyCalls;return ready;}
+ constexpr bool maintenancePowerSafe(bool fresh){++maintenanceCalls;if(!fresh)wrong=true;return maintenanceSafe;}
+ constexpr bool downloadPowerSafe(){++ordinaryCalls;return ordinarySafe;}
+ constexpr bool rejected(){return '''+gate+r''';}
+};
+constexpr bool allCases(){
+ for(unsigned bits=0;bits<16;++bits){Gate g{bool(bits&1),bool(bits&2),bool(bits&4),bool(bits&8)};
+  const bool expected=!g.ready||!(g.maintenanceMode?g.maintenanceSafe:g.ordinarySafe);
+  if(g.rejected()!=expected||g.readyCalls!=1||g.wrong)return false;
+  if(!g.ready&&(g.maintenanceCalls||g.ordinaryCalls))return false;
+  if(g.ready&&(g.maintenanceCalls!=(g.maintenanceMode?1:0)||g.ordinaryCalls!=(g.maintenanceMode?0:1)))return false;
+ }
+ return true;
+}
+static_assert(allCases(),"SDK readiness cannot be bypassed; each mode selects its own fresh power guard before writing");
+''')
 
 if __name__=='__main__':unittest.main()

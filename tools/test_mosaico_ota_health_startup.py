@@ -41,6 +41,10 @@ static int64_t clockUs=100000;static esp_partition_t partition{0};static esp_app
 static bool noPartition;static int actualState=1,stateError,markError,createError,startError;
 static int timerCalls,sdkReads,runningReads,nvsCalls,markCalls,timerStarts,timerStops,rollbackCalls,restarts,activityCalls;
 static int halCalls,frameCalls,internalCalls,psramCalls,integrityCalls,probeOrder;
+static int heapProbeDepth,heapProbeEnters,heapProbeExits;static bool heapProbeExpected=true;
+/* REAL_HEAP_PROBE_SCOPE */
+MosaicoHeapProbeToken MosaicoHeapProbeEnter(MosaicoHeapProbeStage stage){++heapProbeEnters;if(heapProbeDepth||stage!=MosaicoHeapProbeStage::OtaHealth)++bad;++heapProbeDepth;return {0,static_cast<uint32_t>(stage)};}
+void MosaicoHeapProbeExit(MosaicoHeapProbeToken token){++heapProbeExits;if(heapProbeDepth!=1||token.core||token.value!=8)++bad;--heapProbeDepth;}
 static bool halI2c=true,halDisplay=true,halButtons=true,halTouch=true,integrity=true;
 static unsigned frameValue=1,internalValue=40000,psramValue=1000000;static int64_t integrityLatency;
 static int64_t esp_timer_get_time(){++timerCalls;return clockUs;}
@@ -65,16 +69,17 @@ struct Hal{struct Diagnostics{bool i2c,display,buttons,touch;};Diagnostics diagn
 static Hal hal;static Hal& GetHAL(){return hal;}
 static unsigned GetDisplayFrameCount(){++frameCalls;probeOrder=probeOrder*10+2;return frameValue;}
 static unsigned heap_caps_get_free_size(unsigned caps){if(caps==3){++internalCalls;probeOrder=probeOrder*10+3;return internalValue;}if(caps!=4)++bad;++psramCalls;probeOrder=probeOrder*10+4;return psramValue;}
-static bool heap_caps_check_integrity_all(bool noisy){if(noisy)++bad;++integrityCalls;probeOrder=probeOrder*10+5;clockUs+=integrityLatency;return integrity;}
+static bool heap_caps_check_integrity_all(bool noisy){if(noisy||heapProbeDepth!=(heapProbeExpected?1:0))++bad;++integrityCalls;probeOrder=probeOrder*10+5;clockUs+=integrityLatency;return integrity;}
 '''
 
 CASES=r'''
 static void reset(){bad=cacheLocks=timerCalls=sdkReads=runningReads=nvsCalls=markCalls=timerStarts=timerStops=rollbackCalls=restarts=activityCalls=0;
+ heapProbeDepth=heapProbeEnters=heapProbeExits=0;heapProbeExpected=true;
  halCalls=frameCalls=internalCalls=psramCalls=integrityCalls=probeOrder=0;clockUs=100000;actualState=1;stateError=markError=createError=startError=0;noPartition=false;
  halI2c=halDisplay=halButtons=halTouch=integrity=true;frameValue=1;internalValue=40000;psramValue=1000000;integrityLatency=0;
  using namespace MosaicoOta;ui={};autoInstall.store(false);verified.store(false);healthInitialized=false;healthySince=lastLoop=lastCheck=0;healthyLoops=0;healthWorking={};healthCache={};bootPending.store(false);preferenceLoaded=false;deadlineTimer=0;}
 static void poll(int64_t now,bool ready){clockUs=now;MosaicoOta::healthPoll(ready);}
-static int run_case(int id){reset();using namespace MosaicoOta;
+static int health_case(int id){reset();using namespace MosaicoOta;
  if(id==0){healthPoll(false);auto h=healthCache;return bootPending.load()&&h.pending&&h.sdkRead&&h.sdkState==1&&h.sdkSlot==0&&h.evaluated==1&&!h.passed&&!halCalls&&timerStarts==1?0:1;}
  if(id==1){healthPoll(false);poll(2000000,false);return !healthyLoops&&!halCalls&&healthCache.evaluated==1&&!healthCache.passed?0:2;}
  if(id>=2&&id<=9){healthPoll(false);if(id==2)halI2c=false;if(id==3)halDisplay=false;if(id==4)halButtons=false;if(id==5)halTouch=false;if(id==6)frameValue=0;if(id==7)internalValue=32768;if(id==8)psramValue=0;if(id==9)integrity=false;
@@ -100,6 +105,7 @@ static int run_case(int id){reset();using namespace MosaicoOta;
  if(id==22){healthPoll(false);internalValue=32768;poll(2000000,true);poll(2010000,true);if(healthCache.probeUs!=2000000||healthCache.internalFree!=32768||internalCalls!=1||(healthCache.passed&16)||!(healthCache.evaluated&16)||healthCache.psramFree||integrityCalls)return 24;return 0;}
  if(id==23){healthPoll(false);poll(2000000,true);poll(3500000,true);if(healthySince!=2000000||healthyLoops!=2||healthCache.loopGapUs!=1500000||!(healthCache.passed&2))return 25;return 0;}
  return 99;}
+static int run_case(int id){int result=health_case(id);if(!result&&(bad||heapProbeDepth||heapProbeEnters!=heapProbeExits||heapProbeEnters!=integrityCalls))return 26;return result;}
 extern "C" {volatile int test_results[24]={};}
 extern "C" __attribute__((noinline,used)) void test_done(){for(;;){asm volatile("");}}
 extern "C" void _start(){for(int i=0;i<24;++i)test_results[i]=run_case(i);test_done();}
@@ -120,7 +126,9 @@ int64_t healthySince=0,lastLoop=0,lastCheck=0;uint32_t healthyLoops=0;
 struct UI{char currentVersion[32],signatureShort[17],targetVersion[32],sha256[65];int8_t currentSlot,targetSlot;unsigned revision,progressBasisPoints;bool automaticInstall,signatureVerified,imageVerified;} ui;
 enum class UiStage{BootChecking,Complete};static void publish(UiStage){}
 '''
-    return PREFIX+setup+decl+state+rv32.function(source,'void healthTimeout(')+rv32.function(source,'void copyHealthDiagnostic(')+rv32.function(source,'void healthPoll(')+'}\n'+CASES
+    probe_header=(ROOT/'main/ota/panic_capture.h').read_text()
+    probe_scope='enum class MosaicoHeapProbeStage'+probe_header.split('enum class MosaicoHeapProbeStage',1)[1].split('// Numeric phase/offset',1)[0]
+    return PREFIX.replace('/* REAL_HEAP_PROBE_SCOPE */',probe_scope)+setup+decl+state+rv32.function(source,'void healthTimeout(')+rv32.function(source,'void copyHealthDiagnostic(')+rv32.function(source,'void healthPoll(')+'}\n'+CASES
 
 
 def barrier_fixture(mode):
@@ -164,7 +172,7 @@ def equivalence_fixture():
     reset=rv32.function(CASES,'static void reset(')
     return prefix+'namespace MosaicoOta{\n'+reference+'}\n'+reset+r'''
 struct Result{int64_t values[25];};
-static Result sequence(int scenario,bool reference){reset();using namespace MosaicoOta;
+static Result sequence(int scenario,bool reference){reset();heapProbeExpected=!reference;using namespace MosaicoOta;
  if(scenario==1)halI2c=false;if(scenario==2)halDisplay=false;if(scenario==3)halButtons=false;if(scenario==4)halTouch=false;
  if(scenario==5)frameValue=0;if(scenario==6)internalValue=32768;if(scenario==7)psramValue=0;if(scenario==8)integrity=false;
  if(scenario==9)markError=277;if(scenario==10)integrityLatency=1600000;if(scenario==11)createError=278;if(scenario==12)startError=279;
