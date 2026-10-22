@@ -147,6 +147,9 @@ public:
     enum class MaintenancePowerResult { Rejected, Busy, Safe };
     struct MaintenancePowerSnapshot {
         bool valid = false;
+        // Exact MAC-bound Failed evidence; never a persistent waiver.
+        bool historicalCritical = false;
+        uint32_t historicalFailedCrc = 0;
         uint16_t voltageMv = 0, temperatureDeciK = 0, operationStatus = 0;
         uint16_t designMah = 0, fullMah = 0;
         int16_t currentMa = 0, averageCurrentMa = 0;

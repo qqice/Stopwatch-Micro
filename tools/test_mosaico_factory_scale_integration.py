@@ -56,6 +56,7 @@ namespace GaugeDischargeTrace{struct NandBackend{static bool busy(){++nandCalls;
 struct SerialDebug{
  bool _reply_uart=false;std::array<char,1536> _line{},_uart_line{};size_t _line_length=0,_uart_line_length=0;bool _line_overflow=false,_uart_line_overflow=false;
  bool handleFactoryScale(char*);void consume(char);
+ bool handleMaintenanceRestart(const char*){return false;}
  bool handleCachedRead(const char* line){++cachedCalls;return !std::strcmp(line,"debug ota-health");}
  void handleLine(char*){++legacyCalls;}
  void result(const char*,const char* status,const char* =nullptr){++results;pass=!std::strcmp(status,"PASS");}

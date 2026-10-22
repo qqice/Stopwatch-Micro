@@ -77,7 +77,7 @@ for name,status in [('io','IoError'),('corrupt','Corrupt'),('ambiguous','Ambiguo
 CASES += [('missing_seen','scale_load_status=scale_journal::Status::Missing;storage.journalEverSeen=true;',False,True),('missing_valid','scale_load_status=scale_journal::Status::Missing;',True,False)]
 for phase in ['Pending','Applied','Restoring']:CASES.append(('phase_'+phase,f'storage.journal.loaded.records[0].snapshot.phase=scale_recovery::Phase::{phase};',False,True))
 for selected in [-1,2]:CASES.append(('selected_'+str(selected),f'storage.journal.loaded.selected={selected};',False,True))
-CASES += [('original_slot1','storage.journal.loaded.selected=1;',True,False),('boot_deferred','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Deferred;',False,True),('critical_attempted','gauge_boot_info.attempted=true;',False,True),('critical_wrong_reason','std::snprintf(gauge_boot_info.reason,128,"boot_critical_scale_recovery_required");',False,True),('normal_skipped','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Skipped;',True,False),('normal_applied','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Applied;',True,False)]
+CASES += [('original_slot1','storage.journal.loaded.selected=1;',True,False),('boot_deferred','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Deferred;',False,True),('critical_attempted','gauge_boot_info.attempted=true;',False,True),('critical_wrong_reason','std::snprintf(gauge_boot_info.reason,128,"boot_critical_scale_recovery_required");',False,True),('critical_prefix_spoof','std::snprintf(gauge_boot_info.reason,128,"boot_critical_failed_no_retry_unknown");',False,True),('normal_skipped','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Skipped;',True,False),('normal_applied','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Applied;',True,False)]
 for i in range(1,6):CASES.append(('evidence_fault_'+str(i),f'evidenceFault={i};',False,True))
 for i in range(3):CASES.append(('cold_invalid_'+str(i),f'alterCold({i});',False,True))
 CASES.append(('new_reload_pending','alterReload();',False,True))
@@ -170,6 +170,7 @@ extern "C" void _start(){for(int i=0;i<6;++i)test_results[i]=run_case(i);test_do
  char initial[512]{};if(!hal.maintenancePowerStatus(initial,sizeof(initial))||!contains(initial,"reason=not_sampled")||!contains(initial,"diag_valid=0")||wordCalls||identityCalls||nvsReads||nvsOpens)return 6;
  if(noio){MaintenancePowerDiagnostic stale{};stale.sampled=true;stale.standardFailed=0x3ff;stale.identityMask=0xffff;stale.elapsedUs=999;maintenance_power_publish("old_sample",stale);}
  Hal::MaintenancePowerSnapshot out{};out.valid=true;out.voltageMv=1;Hal::MaintenancePowerResult result=Hal::MaintenancePowerResult::Safe;bool ok=hal.tryMaintenancePowerSnapshot(out,&result);
+ if(ok && gauge_boot_info.status==Hal::GaugeBootReloadStatus::Critical && (!out.historicalCritical || out.historicalFailedCrc!=native_recovery::digest(evidenceDisk)))return 99;
  const bool firstBusBusy=(readFault==1||(readFaultMask&1))&&readError==263;
  if(std::locksHeld||maintenance_power_bus_lock_busy!=unsigned(firstBusBusy))return 21;
  if(result!=(expected?Hal::MaintenancePowerResult::Safe:((id==3||id==4||firstBusBusy)?Hal::MaintenancePowerResult::Busy:Hal::MaintenancePowerResult::Rejected)))return 13;
@@ -247,7 +248,7 @@ namespace std{inline unsigned locksHeld=0;struct mutex{bool available=true;};str
   self.assertIn('i2c_master_transmit_receive(gauge, &reg, 1, bytes, size, 20)',source)
   src=INC.read_text();model=(INC.parent/'mosaico_maintenance_power_model.h').read_text();ota=(ROOT/'main/ota/mosaico_ota.cpp').read_text()
   sections=[src[src.index('    if (!gauge)'):src.index('    const int64_t started')],src[src.index('    ok &= word(0x08'):],model[model.index('// SLUUBD4A'):],ota[ota.index('bool maintenancePowerSafe('):ota.index('\nbool ',ota.index('bool maintenancePowerSafe(')+5)]]
-  self.assertEqual([hashlib.sha256(s.encode()).hexdigest() for s in sections],['45c9a7e944b9e9d9f6a4c49cbefbb1ba11813e184700a2d391dede3dc1b5d9cb', '2d458d59db7efc545feeef4a59af7e4f5ab13f60ff6b3217ada9648b41a6382a', 'bfba4e2367e9f90fdce84af933337e734a8feb746cc2b3a1f1b74e3c819b21a8', 'f4acc3a4e99103f900dd4289a0991b178150450c26aaf5d2b904d8e865711831'])
+  self.assertEqual([hashlib.sha256(s.encode()).hexdigest() for s in sections],['00c19f0000a6010ad6a0885d150b8e0ec69f63ba1d13d737064a0a68a6a2a63d', '9a3010a5aa968237178ae2ba77c2d54dd466723cb984ad87a956083b6e595b2b', 'bfba4e2367e9f90fdce84af933337e734a8feb746cc2b3a1f1b74e3c819b21a8', 'f4acc3a4e99103f900dd4289a0991b178150450c26aaf5d2b904d8e865711831'])
   branch=src[src.index('    bool ok = word(0x3a'):src.index('    ok &= word(0x08')]
   self.assertIn('firstError == ESP_ERR_TIMEOUT',branch)
   self.assertIn('MaintenancePowerResult::Busy',branch)

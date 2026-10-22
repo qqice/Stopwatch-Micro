@@ -479,7 +479,7 @@ void SerialDebug::consume(char value)
             line[length] = '\0';
             char* command = _reply_uart ? serial_debug_transport::decodeUartLine(line, length) : line;
             if (command) {
-                if (!handleCachedRead(command)&&!handleFactoryScale(command)) handleLine(command);
+                if (!handleCachedRead(command)&&!handleMaintenanceRestart(command)&&!handleFactoryScale(command)) handleLine(command);
             }
             else result("parse", "FAIL", "reason=uart_crc_frame_required no_changes=1");
         }
@@ -551,6 +551,54 @@ bool __attribute__((noinline)) SerialDebug::handleCachedRead(const char* line)
 #else
     (void)line;
     return false;
+#endif
+}
+
+bool __attribute__((noinline)) SerialDebug::handleMaintenanceRestart(const char* line)
+{
+#ifdef MOSAICO_BOARD
+    if (!line) return false;
+    const char* p=line;
+    auto token=[&](const char* text) {
+        while (*p==' '||*p=='\t') ++p;
+        const size_t n=std::strlen(text);
+        if (std::strncmp(p,text,n)|| (p[n] && p[n]!=' ' && p[n]!='\t')) return false;
+        p+=n;return true;
+    };
+    if (!token("debug") && !token("dbg")) return false;
+    if (!token("runtime-restart")) return false;
+    const char* args=p;
+    if (token("CONFIRM")) {while(*p==' '||*p=='\t')++p;if(!*p)return false;}
+    p=args;
+    if (_reply_uart&&!serial_debug_transport::uartAllowed("runtime-restart")) {
+        result("runtime-restart","FAIL","reason=uart_requires_extended_authorization no_changes=1");return true;
+    }
+#ifdef MOSAICO_NAND_STORE
+    if (GaugeDischargeTrace::NandBackend::busy()) {
+        result("runtime-restart","FAIL","reason=nand_format_maintenance no_changes=1");return true;
+    }
+#endif
+    bool valid=token("CONFIRM_EXTERNAL_POWER");
+    while (*p==' '||*p=='\t') ++p;
+    uint32_t crc=0;
+    for(unsigned i=0;valid&&i<8;++i) {
+        const char c=*p;
+        const unsigned digit=c>='0'&&c<='9'?unsigned(c-'0'):c>='a'&&c<='f'?unsigned(c-'a'+10):c>='A'&&c<='F'?unsigned(c-'A'+10):16;
+        if(digit>15){valid=false;break;}
+        crc=(crc<<4)|digit;++p;
+    }
+    while (*p==' '||*p=='\t') ++p;
+    if (!valid||*p||_async_test!=AsyncTest::None) {
+        result("runtime-restart","FAIL","reason=requires_CONFIRM_EXTERNAL_POWER_8hex_and_no_async no_changes=1");return true;
+    }
+    const bool ok=MosaicoOta::maintenanceRuntimeRestart(crc, []() {
+        result("runtime-restart","PASS","action=normal_application_restart dispatch_pending=1 host_attested_not_electricalproof=1 sole_stable_external_5V=1 Failed_preserved=1 Critical_retained=1 keys=0 parameter_writes=0 nvs_writes=0 ACK_unknown_do_not_resend=1");
+        if (!_writer||!_writer->_reply_uart) std::fflush(stdout);
+    });
+    if (!ok) result("runtime-restart","FAIL","reason=maintenance_restart_guard_or_recheck no_restart=1 Failed_preserved=1");
+    return true;
+#else
+    (void)line;return false;
 #endif
 }
 

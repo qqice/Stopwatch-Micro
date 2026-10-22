@@ -18,7 +18,7 @@ CONTRACT=('GSJ3|Factory3000RollbackToNominal65Virtual130|source=70a767be|target=
           'rollback3000=UNKNOWN_UNTRUSTED|applied_units=2|boot_restore_after_SDK_VALID|'
           'deadline_seconds=300|no_Failed_waiver')
 DIGEST=hashlib.sha256(CONTRACT.encode('ascii')).hexdigest()
-VERSIONS={'0.13.95-r4-mosaico-ota','0.13.95-r5-mosaico-ota'}
+VERSIONS={'0.13.95-r6-mosaico-ota','0.13.95-r7-mosaico-ota'}
 AUDITED_INPUTS=(
     'main/CMakeLists.txt','main/hal/hal.h','main/hal/mosaico/hal_mosaico.cpp',
     'main/hal/mosaico/mosaico_factory_scale_runtime.inc',
@@ -33,6 +33,10 @@ AUDITED_INPUTS=(
     'main/hal/mosaico/mosaico_native_recovery.inc',
     'main/hal/mosaico/mosaico_factory_audit.inc',
     'main/hal/mosaico/mosaico_maintenance_power.inc',
+    'main/hal/mosaico/mosaico_maintenance_power_model.h',
+    'main/hal/mosaico/mosaico_native_recovery_model.h',
+    'main/ota/mosaico_ota.cpp','main/ota/mosaico_ota.h',
+    'main/ota/mosaico_ota_maintenance_model.h',
     'main/hal/mosaico/mosaico_gauge_physical_model.h',
     'main/debug/serial_debug.cpp','main/debug/serial_debug.h',
     'main/debug/serial_debug_transport.h','main/main.cpp',

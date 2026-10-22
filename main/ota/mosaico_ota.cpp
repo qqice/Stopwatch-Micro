@@ -556,6 +556,46 @@ bool requestMaintenanceReboot(const char* expectedSha, uint32_t ttlSeconds)
     if (!maintenancePowerSafe(true)) return reject("maintenance_reboot_power");
     rebootQueued=true; mosaico_rx_ingress::request(false); StandbySleep::otaActivity(); return true;
 }
+// Lease excludes OTA/NAND transitions; never hold the OTA mutex over HAL I2C.
+bool maintenanceRuntimeRestart(uint32_t expectedFailedCrc, void (*acceptedReply)())
+{
+    if (!acceptedReply || GetHAL().gaugeScaleTrialActive()) return false;
+    StorageAdmission storageAdmission; if (!storageAdmission) return false;
+    TouchSleep::OtaAdmission touchGuard; if (!touchGuard) return false;
+    auto idleSdk = [&]() {
+#ifdef MOSAICO_NAND_STORE
+        if (GaugeDischargeTrace::NandBackend::busy()) return false;
+#endif
+        std::unique_lock<std::mutex> guard(lock, std::try_to_lock);
+        if (!guard.owns_lock() || busy() || imageReady.load() || selected.load() ||
+            maintenanceMode.load()) return false;
+        const auto* running = esp_ota_get_running_partition();
+        const auto* boot = esp_ota_get_boot_partition();
+        return currentReady() && running && boot && running->address == boot->address;
+    };
+    auto freshPower = [&]() {
+        const int64_t start = esp_timer_get_time();
+        for (;;) {
+            if (!idleSdk() || GetHAL().gaugeScaleTrialActive()) return false;
+            Hal::MaintenancePowerSnapshot sample{};
+            Hal::MaintenancePowerResult result = Hal::MaintenancePowerResult::Rejected;
+            const bool ok = GetHAL().tryMaintenancePowerSnapshot(sample, &result);
+            const int64_t now = esp_timer_get_time();
+            if (ok) return sample.historicalCritical && sample.historicalFailedCrc == expectedFailedCrc &&
+                MosaicoOtaMaintenance::powerSafe(sample, now) && idleSdk();
+            if (result != Hal::MaintenancePowerResult::Busy || start <= 0 || now < start ||
+                now - start >= 250000) return false;
+            vTaskDelay(1); // Only pretransaction contention; no read-failure retries/cache.
+        }
+    };
+    if (!freshPower()) return false;
+    acceptedReply(); // Exactly once. Unknown ACK does not authorize retransmission.
+    GetHAL().delay(250);
+    // Lease and touch reservation remain held through flush and dispatch recheck.
+    if (!freshPower() || !idleSdk()) return false;
+    GetHAL().reboot(); // Normal application restart only, no gauge mutation.
+    return true;
+}
 bool maintenanceStatus(char* out,size_t length)
 {
     if (!out || !length) return false;

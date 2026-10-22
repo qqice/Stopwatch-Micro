@@ -23,7 +23,7 @@ class CapabilityTests(unittest.TestCase):
         return image,m,c.endorse(m,image,self.key,self.pub,audited=True)
 
     def test_real_p256_positive_and_compact_crc_wire_size(self):
-        a=self.pair('0.13.95-r4-mosaico-ota');b=self.pair('0.13.95-r5-mosaico-ota')
+        a=self.pair('0.13.95-r6-mosaico-ota');b=self.pair('0.13.95-r7-mosaico-ota')
         proof=c.pack([(a[1],a[2]),(b[1],b[2])],self.pub)
         self.assertLessEqual(len(proof),1400)
         self.assertLess(len('uart 12345678 debug gauge-factory-scale images '+proof+'\n'),1536)
@@ -34,8 +34,8 @@ class CapabilityTests(unittest.TestCase):
             self.pub.verify(base64.b64decode(cap['signature']),c.canonical(m),ec.ECDSA(hashes.SHA256()))
 
     def test_wrong_key_tamper_replay_or_no_audit_rejected(self):
-        image,m,cap=self.pair('0.13.95-r4-mosaico-ota')
-        changes=[{'contract':'0'*64},{'version':'0.13.95-r5-mosaico-ota'},{'size':m['size']+1},
+        image,m,cap=self.pair('0.13.95-r6-mosaico-ota')
+        changes=[{'contract':'0'*64},{'version':'0.13.95-r7-mosaico-ota'},{'size':m['size']+1},
                  {'size':True},{'sha256':'0'*64},{'signature':'AA=='},{'signature':'!bad'},
                  {'signature':base64.b64encode(bytes(70)).decode()},{'extra':True}]
         for patch in changes:
@@ -47,20 +47,20 @@ class CapabilityTests(unittest.TestCase):
         with self.assertRaises(ValueError):c.endorse(m,image+b'X',self.key,self.pub,audited=True)
         wrong=bytearray(image);wrong[48]^=1
         with self.assertRaisesRegex(ValueError,'descriptor version'):c.descriptor_version(bytes(wrong),m['version'])
-        with self.assertRaisesRegex(ValueError,'descriptor version'):c.descriptor_version(image,'0.13.95-r5-mosaico-ota')
+        with self.assertRaisesRegex(ValueError,'descriptor version'):c.descriptor_version(image,'0.13.95-r7-mosaico-ota')
         with self.assertRaises(ValueError):c.endorse(m,image,ec.generate_private_key(ec.SECP256R1()),self.pub,audited=True)
         with self.assertRaises(ValueError):c.pack([(m,cap),(m,cap)],self.pub)
         bad=copy.deepcopy(m);bad['sha256']='0'*64
         with self.assertRaises(InvalidSignature):c.verify_endorsement(bad,cap,self.pub)
 
     def test_explicit_rollover_pair_rejects_old_unsafe_images(self):
-        self.assertEqual(c.VERSIONS,{'0.13.95-r4-mosaico-ota','0.13.95-r5-mosaico-ota'})
-        for version in ('0.13.95-r1-mosaico-ota','0.13.95-r2-mosaico-ota','0.13.95-r3-mosaico-ota','0.13.95-r20-mosaico-ota','0.13.95-r5-mosaico-ota-extra'):
+        self.assertEqual(c.VERSIONS,{'0.13.95-r6-mosaico-ota','0.13.95-r7-mosaico-ota'})
+        for version in ('0.13.95-r1-mosaico-ota','0.13.95-r2-mosaico-ota','0.13.95-r3-mosaico-ota','0.13.95-r4-mosaico-ota','0.13.95-r5-mosaico-ota','0.13.95-r20-mosaico-ota','0.13.95-r7-mosaico-ota-extra'):
             with self.subTest(version=version),self.assertRaises(ValueError):self.pair(version)
         self.assertIn('main/apps/app_codex_micro/view/view_mosaico.cpp',c.AUDITED_INPUTS)
 
     def test_normal_manifest_signature_and_current_contract_binding(self):
-        image,m,cap=self.pair('0.13.95-r4-mosaico-ota')
+        image,m,cap=self.pair('0.13.95-r6-mosaico-ota')
         tampered=copy.deepcopy(m);tampered['size']+=1
         with self.assertRaises(InvalidSignature):c.verify_image_manifest(tampered,self.pub)
         old=copy.deepcopy(m);old['version']='0.13.94-r10-mosaico-ota'

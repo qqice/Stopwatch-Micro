@@ -74,9 +74,12 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, Maintenance
                scale_runtime->journalEverSeen) return maintenance_power_reject("scale_ledger_not_safe");
     if (gauge_boot_info.status == GaugeBootReloadStatus::Deferred)
         return maintenance_power_reject("boot_gauge_not_checked");
+    bool historicalCritical = false;
+    uint32_t historicalFailedCrc = 0;
     if (gauge_boot_info.status == GaugeBootReloadStatus::Critical) {
         constexpr char allowed[] = "boot_critical_failed_no_retry";
-        bool knownHistoricalReason = !std::strncmp(gauge_boot_info.reason, allowed, sizeof(allowed) - 1);
+        bool knownHistoricalReason = !std::strncmp(gauge_boot_info.reason, allowed, sizeof(allowed) - 1) &&
+            (gauge_boot_info.reason[sizeof(allowed)-1] == 0 || gauge_boot_info.reason[sizeof(allowed)-1] == ' ');
 #ifdef MOSAICO_FACTORY_SCALE_RUNTIME
         knownHistoricalReason = knownHistoricalReason ||
             (!std::strcmp(gauge_boot_info.reason,"boot_critical_scale_recovery_required") &&
@@ -90,6 +93,8 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, Maintenance
         const auto mac = getFactoryMac();
         if (!native_evidence_locked(evidence) || !native_recovery::exact(evidence, mac.data()))
             return maintenance_power_reject("historical_failure_evidence_mismatch");
+        historicalCritical = true;
+        historicalFailedCrc = native_recovery::digest(evidence);
     }
     const int64_t started = esp_timer_get_time();
     if (started <= 0) return maintenance_power_reject("clock_not_positive");
@@ -166,6 +171,8 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, Maintenance
         return maintenance_power_reject("raw_safety_or_pair_changed",diagnostic);
     if (sample.sampledUs <= 0 || sample.sampledUs < started || sample.sampledUs-started>750000)
         return maintenance_power_reject("raw_clock_or_read_latency",diagnostic);
+    sample.historicalCritical = historicalCritical;
+    sample.historicalFailedCrc = historicalFailedCrc;
     sample.valid = true;
     out = sample;
     if (result) *result = MaintenancePowerResult::Safe;

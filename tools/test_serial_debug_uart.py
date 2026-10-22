@@ -83,6 +83,8 @@ struct SerialDebug {
         result("stub","PASS","");
     }
     constexpr bool handleCachedRead(const char*) { return false; }
+    constexpr bool handleMaintenanceRestart(const char*) { return false; }
+    constexpr bool handleFactoryScale(char*) { return false; }
 };
 """
         for text in ("debug ping", "debug display-test-frequency 160", "debug display-lock", "dbg help"):
@@ -199,7 +201,7 @@ static_assert(partialAndBoundedTx());
         self.assertIn('MosaicoOta::request()',bypass)
         self.assertIn('_async_test != AsyncTest::None',bypass)
         self.assertNotIn('esp_ota_set_boot_partition',bypass)
-        gate=SOURCE.split('char* command =',1)[1].split('#ifdef MOSAICO_BOARD',1)[0]
+        gate=SOURCE.split('void SerialDebug::handleLine(',1)[1].split('#ifdef MOSAICO_BOARD',1)[0]
         self.assertIn('uartAllowed(command)',gate)
         self.assertIn('std::strcmp(value, "160") && std::strcmp(value, "320")',gate)
         self.assertIn('cancel_first=1',gate)

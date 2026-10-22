@@ -43,6 +43,7 @@ struct SerialDebug{
  std::array<char,1536> _line{},_uart_line{};size_t _line_length=0,_uart_line_length=0;
  bool _line_overflow=false,_uart_line_overflow=false,_reply_uart=false;
  void consume(char);bool __attribute__((noinline)) handleCachedRead(const char*);
+ bool handleMaintenanceRestart(const char*){return false;}
  bool handleFactoryScale(char*){return false;} // New isolated mutating parser tested separately.
  __attribute__((noinline)) void handleLine(char*){++fullCalls;}
  static void result(const char* command,const char* status,const char* details=nullptr){

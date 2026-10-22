@@ -26,6 +26,10 @@ bool requestReboot();
 // SHA is immutable for this RAM-only transaction; TTL must be 30..600 seconds.
 bool requestMaintenanceUpdate(const char* expectedSha, uint32_t ttlSeconds);
 bool requestMaintenanceReboot(const char* expectedSha, uint32_t ttlSeconds);
+// Host attests SOLE stable external 5V (USB or separately verified V1).
+// Not electrical detection. Synchronous lease covers reply, flush and restart.
+// Never resend on unknown ACK. Historical Failed/Critical remain unchanged.
+bool maintenanceRuntimeRestart(uint32_t expectedFailedCrc, void (*acceptedReply)());
 bool maintenanceStatus(char* out, size_t length);
 void processLocalRequests(); // Owner only, before radio/network readiness gates.
 bool approveUpdate(const char* expectedSha); // DOWNLOAD only; must match the hash displayed in the caller snapshot.
