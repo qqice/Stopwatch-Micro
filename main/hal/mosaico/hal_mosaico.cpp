@@ -488,34 +488,71 @@ void gauge_delay_ms(uint32_t ms)
     gauge_feed();
 }
 
-bool gauge_read(uint8_t reg, uint8_t* bytes, size_t size)
+// Optional stack-owned capture, passed only by the locked maintenance provider.
+// Stages: 1=initial standard reads, 2=engine transmit, 3=engine read,
+// 4=final standard reads. Identity validation is represented by its validMask,
+// independently of the first real transport error (never fabricate an errno).
+struct MaintenanceGaugeTransportDiagnostic {
+    esp_err_t firstError = ESP_OK;
+    uint8_t firstReg = 0, firstStage = 0;
+    void record(esp_err_t error, uint8_t reg, uint8_t stage) {
+        if (error != ESP_OK && firstError == ESP_OK) {
+            firstError = error; firstReg = reg; firstStage = stage;
+        }
+    }
+};
+
+bool gauge_read_diagnostic(uint8_t reg, uint8_t* bytes, size_t size,
+                           MaintenanceGaugeTransportDiagnostic* diagnostic, uint8_t stage)
 {
     gauge_feed();
     const esp_err_t result = i2c_master_transmit_receive(gauge, &reg, 1, bytes, size, 20);
     esp_rom_delay_us(100); // TI bus-free timing, inherited from board reference.
     gauge_feed();
+    if (diagnostic) diagnostic->record(result, reg, stage);
     return result == ESP_OK;
 }
 
-bool gauge_word(uint8_t reg, uint16_t& value)
+bool gauge_read(uint8_t reg, uint8_t* bytes, size_t size)
+{
+    return gauge_read_diagnostic(reg, bytes, size, nullptr, 1);
+}
+
+bool gauge_word_diagnostic(uint8_t reg, uint16_t& value,
+                          MaintenanceGaugeTransportDiagnostic* diagnostic, uint8_t stage)
 {
     uint8_t bytes[2];
-    const bool result = gauge_read(reg, bytes, sizeof(bytes));
+    const bool result = gauge_read_diagnostic(reg, bytes, sizeof(bytes), diagnostic, stage);
     if (!result) return false;
     value = bytes[0] | (static_cast<uint16_t>(bytes[1]) << 8);
     return true;
 }
 
+// Keep the exact two-argument Reader/function-pointer contract for all callers.
+bool gauge_word(uint8_t reg, uint16_t& value)
+{
+    return gauge_word_diagnostic(reg, value, nullptr, 1);
+}
+
 // Requires the same transaction -> battery lock order as standard diagnostics.
-void gauge_engine_locked(Hal::GaugeEngineSnapshot& out,uint8_t phase,uint8_t outcome)
+void gauge_engine_locked(Hal::GaugeEngineSnapshot& out,uint8_t phase,uint8_t outcome,
+                         MaintenanceGaugeTransportDiagnostic* diagnostic = nullptr)
 {
     out={};out.sampledUs=esp_timer_get_time();out.phase=phase;out.outcome=outcome;
     const auto units=scale_unit_context_locked();
     out.units={units.factor,units.unitEpoch,units.generation,units.verified,uint8_t(units.phase)};
     if(!gauge)return;
     struct EngineTransport {
-        bool transmit(const uint8_t* p,size_t n){gauge_feed();return gauge&&i2c_master_transmit(gauge,p,n,20)==ESP_OK;}
+        MaintenanceGaugeTransportDiagnostic* diagnostic = nullptr;
+        bool transmit(const uint8_t* p,size_t n){
+            gauge_feed();
+            if(!gauge)return false;
+            const esp_err_t result=i2c_master_transmit(gauge,p,n,20);
+            if(diagnostic)diagnostic->record(result,n?p[0]:0,2);
+            return result==ESP_OK;
+        }
         void delayMs(uint32_t ms){gauge_delay_ms(ms);}
+        bool gauge_read(uint8_t reg,uint8_t* p,size_t n){return gauge_read_diagnostic(reg,p,n,diagnostic,3);}
         bool read(uint8_t reg,uint8_t* p,size_t n){
             if(reg==0x3e&&n==2)return gauge_read(reg,p,n);
             if(reg!=0x40||(n!=11&&n!=23&&n!=17))return false;
@@ -527,6 +564,7 @@ void gauge_engine_locked(Hal::GaugeEngineSnapshot& out,uint8_t phase,uint8_t out
             return true;
         }
     } transport;
+    transport.diagnostic=diagnostic;
     mosaico_gauge_engine::read(transport,out);
 }
 

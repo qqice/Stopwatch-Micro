@@ -2,6 +2,8 @@
 from pathlib import Path
 import hashlib,os,struct,subprocess,sys,tempfile,unittest
 import test_mosaico_gauge_scale_backend as base
+import test_microlink_peer_probe as rv32
+import re
 ROOT=base.ROOT
 RUN=ROOT/'.artifacts/private/mosaico/maintenance-power-tests'
 INC=ROOT/'main/hal/mosaico/mosaico_maintenance_power.inc'
@@ -14,6 +16,12 @@ FIXTURE=r'''
 #include "mosaico_gauge_status_model.h"
 #include "mosaico_native_recovery_model.h"
 #include "nvs.h"
+static int cacheLocks=0;
+using portMUX_TYPE=int;
+#define portMUX_INITIALIZER_UNLOCKED 0
+#define portENTER_CRITICAL(p) (++cacheLocks)
+#define portEXIT_CRITICAL(p) (--cacheLocks)
+TRANSPORT_DIAGNOSTIC
 namespace scale_journal=mosaico_gauge_scale_journal;namespace scale_recovery=mosaico_gauge_recovery;namespace native_recovery=mosaico_native_recovery;
 struct Hal {
  enum class GaugeBootReloadStatus{Deferred,Skipped,Applied,Critical};
@@ -34,14 +42,17 @@ static bool scale_mutation_in_progress=false,calFault=false,gauge=true;
 bool scale_safety_mismatch_locked(){return calFault;}
 static native_recovery::Evidence evidenceDisk;
 static unsigned wordCalls=0,identityCalls=0,nvsReads=0,nvsOpens=0;
-static int readFault=0,evidenceFault=0,identityFault=0;
+static int readFault=0,evidenceFault=0,identityFault=0;static unsigned readFaultMask=0;
 static uint16_t op=0x26,dc=3000,fcc=3000,mv=4200,temp=3000,finalOp=0x26,finalDc=3000,finalFcc=3000;
 static int16_t current=0,average=0;static int64_t startedUs=1000000,endedUs=1000100;static unsigned timerCalls=0;
 static unsigned uiSentinel=0x31415926,batteryTelemetrySentinel=0x16180339;
 int64_t esp_timer_get_time(){return timerCalls++?endedUs:startedUs;}
-bool gauge_word(uint8_t reg,uint16_t& v){++wordCalls;if(int(wordCalls)==readFault)return false;
+bool gauge_word_diagnostic(uint8_t reg,uint16_t& v,MaintenanceGaugeTransportDiagnostic* diagnostic,uint8_t stage){++wordCalls;if(int(wordCalls)==readFault||(readFaultMask&(1u<<(wordCalls-1)))){if(diagnostic)diagnostic->record(263,reg,stage);return false;}
  switch(wordCalls){case 1:if(reg!=0x3a)return false;v=op;break;case 2:if(reg!=8)return false;v=mv;break;case 3:if(reg!=6)return false;v=temp;break;case 4:if(reg!=0x3c)return false;v=dc;break;case 5:if(reg!=0x12)return false;v=fcc;break;case 6:if(reg!=0xc)return false;v=uint16_t(current);break;case 7:if(reg!=0x14)return false;v=uint16_t(average);break;case 8:if(reg!=0x3a)return false;v=finalOp;break;case 9:if(reg!=0x3c)return false;v=finalDc;break;case 10:if(reg!=0x12)return false;v=finalFcc;break;default:return false;}return true;}
-void gauge_engine_locked(Hal::GaugeEngineSnapshot& s,uint8_t,uint8_t){++identityCalls;s={};s.validMask=identityFault?mosaico_gauge_engine::Identity:mosaico_gauge_engine::Identity|mosaico_gauge_engine::DefinitionMatch;s.rawIdentity[0]=2;s.rawIdentity[1]=0x20;s.rawIdentity[3]=3;s.rawIdentity[5]=4;if(identityFault==1)s.rawIdentity[1]^=1;if(identityFault==2)s.rawIdentity[3]^=1;if(identityFault==3)s.rawIdentity[5]^=1;}
+void gauge_engine_locked(Hal::GaugeEngineSnapshot& s,uint8_t,uint8_t,MaintenanceGaugeTransportDiagnostic* diagnostic=nullptr){++identityCalls;s={};s.echo02=2;s.validMask=(identityFault&&identityFault<7)?mosaico_gauge_engine::Identity:mosaico_gauge_engine::Identity|mosaico_gauge_engine::DefinitionMatch;s.rawIdentity[0]=2;s.rawIdentity[1]=0x20;s.rawIdentity[3]=3;s.rawIdentity[5]=4;if(identityFault==1)s.rawIdentity[1]^=1;if(identityFault==2)s.rawIdentity[3]^=1;if(identityFault==3)s.rawIdentity[5]^=1;
+ if(identityFault>=4&&diagnostic)diagnostic->record(260+identityFault,identityFault==4?0:identityFault==5?0x3e:0x40,identityFault==4?2:3);
+ if(identityFault==4){s.validMask=0;s.echo02=0;}if(identityFault==5){s.validMask=mosaico_gauge_engine::IdentityTx;s.echo02=0;}if(identityFault==6)s.validMask=mosaico_gauge_engine::IdentityTx|mosaico_gauge_engine::IdentityEcho;
+}
 int nvs_open(const char* ns,int access,unsigned* h){++nvsOpens;if(std::strcmp(ns,"gaugecal")||access!=NVS_READONLY)return 2;*h=1;return evidenceFault==1?1:0;}
 int nvs_get_blob(unsigned,const char* key,void* p,size_t* n){++nvsReads;if(evidenceFault==2)return 1;const uint8_t* bytes=nullptr;size_t length=0;
  if(!std::strcmp(key,"reload_v1")){bytes=evidenceDisk.reload.data();length=28;}else if(!std::strcmp(key,"fcc_boot_v1")){bytes=evidenceDisk.cold;length=48;}else if(!std::strcmp(key,"fcc_fix_v1")){bytes=evidenceDisk.runtime;length=48;}else return 2;
@@ -51,7 +62,7 @@ NATIVE_FUNCTIONS
 #include "mosaico_maintenance_power.inc"
 '''
 RESET=r'''
-static void reset(){maintenance_power_reason.store("not_sampled",std::memory_order_release);storage={};scale_runtime=&storage;scale_load_status=scale_journal::Status::Ready;scale_mutation_in_progress=calFault=false;gauge=true;gauge_transaction_mutex.available=battery_mutex.available=true;
+static void reset(){maintenance_power_cache={};cacheLocks=0;readFaultMask=0;storage={};scale_runtime=&storage;scale_load_status=scale_journal::Status::Ready;scale_mutation_in_progress=calFault=false;gauge=true;gauge_transaction_mutex.available=battery_mutex.available=true;
  wordCalls=identityCalls=nvsReads=nvsOpens=timerCalls=0;readFault=evidenceFault=identityFault=0;op=finalOp=0x26;dc=fcc=finalDc=finalFcc=3000;mv=4200;temp=3000;current=average=0;startedUs=1000000;endedUs=1000100;gauge_boot_info={};std::snprintf(gauge_boot_info.reason,128,"boot_critical_failed_no_retry observed_sec=3 cfg=0 cal=0");historical=gauge_boot_info;
  auto mac=hal.getFactoryMac();mosaico_gauge::ReloadJournal reload{};reload.magic=0x47423635;reload.version=1;reload.deviceType=0x220;reload.unitMah=1;reload.state=2;std::memcpy(reload.mac,mac.data(),6);reload.targetDesign=reload.targetFcc=65;mosaico_gauge::seal(reload);std::memcpy(evidenceDisk.reload.data(),&reload,28);
  mosaico_fcc_limit::Journal j{};std::memcpy(j.mac,mac.data(),6);j.state=mosaico_fcc_limit::State::Failed;j.backupValid=j.fullAccessVerified=true;j.intents=1951;j.before={0x102a,3000,3000};j.target={0x112a,65,65};mosaico_fcc_limit::encode(j,evidenceDisk.cold,mosaico_fcc_limit::Mode::ColdFactory);j.state=mosaico_fcc_limit::State::Verified;j.intents=927;j.before={0x102a,65,100};mosaico_fcc_limit::encode(j,evidenceDisk.runtime);
@@ -72,6 +83,9 @@ CASES.append(('new_reload_pending','alterReload();',False,True))
 CASES += [('reload_completed','evidenceDisk.reload[9]=3;mosaico_gauge::ReloadJournal r{};std::memcpy(&r,evidenceDisk.reload.data(),28);mosaico_gauge::seal(r);std::memcpy(evidenceDisk.reload.data(),&r,28);',False,True),('wrong_mac','evidenceDisk.cold[12]^=1;mosaico_fcc_limit::put16(evidenceDisk.cold+18,1951);uint32_t c=mosaico_fcc_limit::recordCrc(evidenceDisk.cold,44);for(unsigned k=0;k<4;++k)evidenceDisk.cold[44+k]=uint8_t(c>>(8*k));',False,True),('runtime_pending','auto mac=hal.getFactoryMac();mosaico_fcc_limit::Journal j{};mosaico_fcc_limit::decode(evidenceDisk.runtime,mac.data(),j);j.state=mosaico_fcc_limit::State::Pending;mosaico_fcc_limit::encode(j,evidenceDisk.runtime);',False,True)]
 for i in range(1,11):CASES.append(('word_read_failure_'+str(i),f'readFault={i};',False,False))
 for i in range(1,4):CASES.append(('identity_bad_'+str(i),f'identityFault={i};',False,False))
+for i in range(4,7):CASES.append(('identity_transport_'+str(i),f'identityFault={i};',False,False))
+for i in range(7,9):CASES.append(('unrelated_engine_transport_'+str(i),f'identityFault={i};',True,False))
+CASES += [('multiple_standard_failures','readFaultMask=0x205;',False,False),('standard_then_identity_failure','readFault=2;identityFault=4;',False,False),('identity_mismatch_then_final_transport','readFault=8;identityFault=1;',False,False)]
 for name,setup in [('op_noinit_0006','op=6;'),('op_noinit_0086','op=0x86;'),('sec2','op=0x24;'),('sec1','op=0x22;'),('cfg','op|=0x400;'),('cal','op|=1;'),('mix_dc','dc=65;'),('mix_fcc','fcc=65;'),('scale130','dc=fcc=finalDc=finalFcc=130;'),('v_low','mv=3899;'),('v_high','mv=4351;'),('temp_low','temp=2831;'),('temp_high','temp=3132;'),('current_low','current=-131;'),('current_high','current=131;'),('average_low','average=-131;'),('average_high','average=131;'),('final_cfg','finalOp|=0x400;'),('final_cal','finalOp|=1;'),('final_noinit','finalOp=0x86;'),('final_dc','finalDc=65;'),('final_fcc','finalFcc=65;'),('time_backward','endedUs=999999;'),('time_too_long','endedUs=1750001;'),('negative_start','startedUs=-1;endedUs=100;'),('negative_both','startedUs=-100;endedUs=-50;'),('zero_start','startedUs=0;endedUs=100;'),('zero_end','startedUs=100;endedUs=0;')]:CASES.append((name,setup,False,False))
 for name,setup in [('v_min','mv=3900;'),('v_max','mv=4350;'),('temp_min','temp=2832;'),('temp_max','temp=3131;'),('current_min','current=-130;'),('current_max','current=130;'),('average_min','average=-130;'),('average_max','average=130;'),('time_max','endedUs=1750000;'),('unrelated_op_bit7','op=0xa6;finalOp=0x26;')]:CASES.append((name,setup,True,False))
 MODEL=r'''
@@ -80,6 +94,65 @@ constexpr bool modelCases(){using namespace mosaico_maintenance_power;Hal::Maint
 static_assert(modelCases(),"INITCOMP is bit5, never bit7; paired raw capacity only");
 '''
 class MaintenancePowerTests(unittest.TestCase):
+ def test_actual_transport_hooks_rv32(self):
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
+  transport='struct MaintenanceGaugeTransportDiagnostic {'+source.split('struct MaintenanceGaugeTransportDiagnostic {',1)[1].split('\nbool gauge_read_diagnostic(',1)[0]
+  strip=lambda s: re.sub(r'^\s*#(?:include|pragma)[^\n]*','',s,flags=re.M)
+  prefix='\n'.join(strip(base.HEADERS[name]) for name in ('cstdint','cstddef','type_traits'))
+  prefix+='\n'+strip((INC.parent/'mosaico_gauge_unit_tag.h').read_text())
+  prefix+='\n'+strip((INC.parent/'mosaico_gauge_engine_model.h').read_text())
+  prefix+=r'''
+using esp_err_t=int;constexpr int ESP_OK=0;
+struct Hal{using GaugeEngineSnapshot=mosaico_gauge_engine::Snapshot;};
+static bool gauge=true;static int feedCalls,delayCalls,txCalls,rxCalls,bad,failTx,failRx,selector;
+static unsigned lastTimeout,lastReg,lastSize,delayMsCalls;static unsigned char rxRegs[64],rxSizes[64],selectors[4];
+static int64_t esp_timer_get_time(){return 100;}
+struct Units {int64_t factor;uint64_t unitEpoch,generation;bool verified;uint8_t phase;};
+static Units scale_unit_context_locked(){return {1,2,3,true,0};}
+static void gauge_feed(){++feedCalls;}
+static void gauge_delay_ms(unsigned ms){if(ms!=20)++bad;++delayMsCalls;}
+static void esp_rom_delay_us(unsigned us){if(us!=100)++bad;++delayCalls;}
+static int i2c_master_transmit(bool,const uint8_t* p,size_t n,unsigned timeout){
+ if(n!=3||p[0]!=0||p[2]!=0||timeout!=20)++bad;selector=p[1];selectors[txCalls]=selector;
+ return ++txCalls==failTx?271:0;}
+static int i2c_master_transmit_receive(bool,const uint8_t* reg,size_t rn,uint8_t* out,size_t n,unsigned timeout){
+ if(rn!=1||timeout!=20)++bad;lastTimeout=timeout;lastReg=*reg;lastSize=n;rxRegs[rxCalls]=*reg;rxSizes[rxCalls]=n;
+ if(++rxCalls==failRx)return 272;for(unsigned i=0;i<n;++i)out[i]=0;
+ if(*reg==0x3e)out[0]=selector;
+ else if(selector==2){const uint8_t identity[11]={2,0x20,0,3,0,4,0,0,0,0,0};for(unsigned i=0;i<n;++i)out[i]=identity[*reg-0x40+i];}
+ else if(*reg==8){out[0]=0x34;out[1]=0x12;}
+ return 0;}
+'''+transport
+  for signature in ('bool gauge_read_diagnostic(', 'bool gauge_read(', 'bool gauge_word_diagnostic(', 'bool gauge_word(', 'void gauge_engine_locked('):
+   prefix+='\n'+rv32.function(source,signature)
+  cases=r'''
+static int run_case(int id){feedCalls=delayCalls=txCalls=rxCalls=bad=failTx=failRx=selector=0;delayMsCalls=0;
+ MaintenanceGaugeTransportDiagnostic diagnostic{};uint16_t v=99;
+ if(id==0){bool(*reader)(uint8_t,uint16_t&)=gauge_word;if(!reader(8,v)||v!=0x1234||rxCalls!=1||feedCalls!=2||delayCalls!=1)return 1;return bad;}
+ if(id==1){failRx=1;if(gauge_word_diagnostic(8,v,&diagnostic,4)||v!=99||diagnostic.firstError!=272||diagnostic.firstReg!=8||diagnostic.firstStage!=4)return 2;
+  diagnostic.record(999,9,1);if(diagnostic.firstError!=272)return 3;return bad;}
+ if(id==2)failTx=1; if(id==3)failRx=1;if(id==4)failRx=3;
+ Hal::GaugeEngineSnapshot snap{};gauge_engine_locked(snap,3,0,&diagnostic);
+ if(txCalls!=3||selectors[0]!=2||selectors[1]!=0x73||selectors[2]!=0x76||bad)return 4;
+ if(id==2){if(diagnostic.firstError!=271||diagnostic.firstReg!=0||diagnostic.firstStage!=2||delayMsCalls!=2)return 5;}
+ else if(id==3||id==4){if(diagnostic.firstError!=272||diagnostic.firstReg!=(id==3?0x3e:0x42)||diagnostic.firstStage!=3||delayMsCalls!=3)return 6;}
+ else {if(diagnostic.firstError||diagnostic.firstStage||rxCalls!=30||delayMsCalls!=3)return 7;
+  if((snap.validMask&15)!=15||snap.echo02!=2||snap.rawIdentity[1]!=0x20||snap.rawIdentity[3]!=3||snap.rawIdentity[5]!=4)return 8;
+  if(rxRegs[0]!=0x3e||rxRegs[6]!=0x4a||rxSizes[6]!=1||rxRegs[7]!=0x3e||rxSizes[19]!=1||rxRegs[20]!=0x3e||rxSizes[29]!=1)return 9;
+ }
+ if(delayCalls!=rxCalls||feedCalls!=2*rxCalls+txCalls)return 10;return 0;}
+extern "C" {volatile int test_results[6]={};}
+extern "C" void* memset(void* d,int v,size_t n){for(unsigned i=0;i<n;++i)((uint8_t*)d)[i]=v;return d;}
+extern "C" __attribute__((noinline,used)) void test_done(){for(;;){asm volatile("");}}
+extern "C" void _start(){for(int i=0;i<6;++i)test_results[i]=run_case(i);test_done();}
+'''
+  old_fixture,old_run=rv32.fixture,rv32.RUN
+  try:
+   rv32.fixture,rv32.RUN=lambda _:prefix+cases,RUN
+   values=rv32.execute(source,'transport-hooks',6)
+   (RUN/'transport-hooks-execution.log').write_text('Actual gauge_read/gauge_word wrapper/diagnostic helper/engine+model; mocked I2C. No timing/scheduler/hardware claim.\n'+f'results={values}\n')
+   self.assertEqual(values,(0,)*6)
+  finally:rv32.fixture,rv32.RUN=old_fixture,old_run
  def test_actual_provider_rv32(self):
   RUN.mkdir(parents=True,exist_ok=True)
   hal=(ROOT/'main/hal/hal.h').read_text();snapshot='struct MaintenancePowerSnapshot {'+hal.split('struct MaintenancePowerSnapshot {',1)[1].split('\n    };',1)[0]+'\n};'
@@ -87,17 +160,24 @@ class MaintenancePowerTests(unittest.TestCase):
   cases=[]
   for i,(label,setup,expected,noio) in enumerate(CASES):cases.append(f'case {i}:{{{setup}expected={str(expected).lower()};noio={str(noio).lower()};break;}}')
   runner=RESET+MODEL+'''\nstatic int run_case(int id){reset();bool expected=false,noio=false;switch(id){'''+''.join(cases)+'''}auto oldBoot=gauge_boot_info,oldHistorical=historical;auto oldEvidence=evidenceDisk;auto oldStorage=storage;
- char initial[192]{};if(!hal.maintenancePowerStatus(initial,sizeof(initial))||!contains(initial,"reason=not_sampled")||wordCalls||identityCalls||nvsReads||nvsOpens)return 6;
+ char initial[512]{};if(!hal.maintenancePowerStatus(initial,sizeof(initial))||!contains(initial,"reason=not_sampled")||!contains(initial,"diag_valid=0")||wordCalls||identityCalls||nvsReads||nvsOpens)return 6;
+ if(noio){MaintenancePowerDiagnostic stale{};stale.sampled=true;stale.standardFailed=0x3ff;stale.identityMask=0xffff;stale.elapsedUs=999;maintenance_power_publish("old_sample",stale);}
  Hal::MaintenancePowerSnapshot out{};out.valid=true;out.voltageMv=1;Hal::MaintenancePowerResult result=Hal::MaintenancePowerResult::Safe;bool ok=hal.tryMaintenancePowerSnapshot(out,&result);
  if(result!=(expected?Hal::MaintenancePowerResult::Safe:((id==3||id==4)?Hal::MaintenancePowerResult::Busy:Hal::MaintenancePowerResult::Rejected)))return 13;
  const unsigned oldWords=wordCalls,oldIdentity=identityCalls,oldNvs=nvsReads,oldOpens=nvsOpens,oldTimer=timerCalls;
- const char* cached=maintenance_power_reason.load(std::memory_order_acquire);char diagnostic[192]{},small[4]{};
+ const auto cached=maintenance_power_cache;char diagnostic[512]{},small[4]{};
  if(!hal.maintenancePowerStatus(diagnostic,sizeof(diagnostic))||!contains(diagnostic,"cached_only=1")||!contains(diagnostic,"no_i2c=1")||!contains(diagnostic,"no_power_proof=1"))return 7;
  if(expected&&!contains(diagnostic,"reason=raw_verified_not_soc_calibration"))return 8;
  if(id==3&&!contains(diagnostic,"reason=gauge_transaction_busy"))return 9;
  if(id==4&&!contains(diagnostic,"reason=battery_read_busy"))return 10;
- if(hal.maintenancePowerStatus(nullptr,192)||hal.maintenancePowerStatus(diagnostic,0)||hal.maintenancePowerStatus(small,sizeof(small)))return 11;
- if(wordCalls!=oldWords||identityCalls!=oldIdentity||nvsReads!=oldNvs||nvsOpens!=oldOpens||timerCalls!=oldTimer||maintenance_power_reason.load(std::memory_order_acquire)!=cached)return 12;
+ if(hal.maintenancePowerStatus(nullptr,512)||hal.maintenancePowerStatus(diagnostic,0)||hal.maintenancePowerStatus(small,sizeof(small)))return 11;
+ if(wordCalls!=oldWords||identityCalls!=oldIdentity||nvsReads!=oldNvs||nvsOpens!=oldOpens||timerCalls!=oldTimer||std::memcmp(&cached,&maintenance_power_cache,sizeof(cached))||cacheLocks)return 12;
+ if(noio&&(cached.sampled||cached.standardFailed||cached.identityMask||cached.elapsedUs))return 14;
+ if(wordCalls){unsigned expectedMask=readFaultMask|(readFault?1u<<(readFault-1):0);if(cached.standardFailed!=expectedMask||!cached.sampled||cached.elapsedUs!=(endedUs>0?endedUs-startedUs:-1))return 15;
+  if(expectedMask){unsigned first=0;while(!(expectedMask&(1u<<first)))++first;const uint8_t registers[]={0x3a,8,6,0x3c,0x12,0xc,0x14,0x3a,0x3c,0x12};if(cached.transport.firstError!=263||cached.transport.firstReg!=registers[first]||cached.transport.firstStage!=(first<7?1:4))return 16;}
+  else if(identityFault){if(cached.transport.firstStage!=(identityFault<4?0:identityFault==4?2:3)||cached.transport.firstError!=(identityFault<4?0:260+identityFault))return 17;}
+  if(!contains(diagnostic,"diag_valid=1")||!contains(diagnostic,"identity_mask=")||!contains(diagnostic,"elapsed_us="))return 18;
+ }
  if(ok!=expected)return 1;if(out.valid!=expected)return 2;if(noio&&(wordCalls||identityCalls))return 3;
  if(std::memcmp(&oldBoot,&gauge_boot_info,sizeof(oldBoot))||std::memcmp(&oldHistorical,&historical,sizeof(historical))||std::memcmp(&oldEvidence,&evidenceDisk,sizeof(evidenceDisk))||std::memcmp(&oldStorage,&storage,sizeof(storage))||uiSentinel!=0x31415926||batteryTelemetrySentinel!=0x16180339)return 4;
  if(expected&&(wordCalls!=10||identityCalls!=1||out.designMah!=dc||out.fullMah!=fcc||out.sampledUs!=endedUs))return 5;return 0;}
@@ -111,7 +191,8 @@ class MaintenancePowerTests(unittest.TestCase):
 namespace std{struct mutex{bool available=true;};struct recursive_mutex{bool available=true;};struct try_to_lock_t{};inline constexpr try_to_lock_t try_to_lock{};template<class T>struct unique_lock{bool held;unique_lock(T& m,try_to_lock_t):held(m.available){}bool owns_lock()const{return held;}};}
 '''
    for name,s in headers.items():(td/name).write_text(s)
-   src=td/'power.cpp';src.write_text(FIXTURE.replace('SNAPSHOT_DECL',snapshot).replace('NATIVE_FUNCTIONS',evidence)+support+runner);elf=RUN/'power.elf'
+   transport=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text();transport='struct MaintenanceGaugeTransportDiagnostic {'+transport.split('struct MaintenanceGaugeTransportDiagnostic {',1)[1].split('\nbool gauge_read_diagnostic(',1)[0]
+   src=td/'power.cpp';src.write_text(FIXTURE.replace('TRANSPORT_DIAGNOSTIC',transport).replace('SNAPSHOT_DECL',snapshot).replace('NATIVE_FUNCTIONS',evidence)+support+runner);elf=RUN/'power.elf'
    args=[str(base.CLANG),'--target=riscv32-unknown-elf','-march=rv32im','-mabi=ilp32','-std=c++20','-O1','-Wall','-Wextra','-Werror','-Wno-missing-multilib','-Wno-unused-function','-ffunction-sections','-fdata-sections','-fno-builtin','-fno-exceptions','-fno-rtti','-fstack-usage','-nostdinc++','-nostdlib','-I'+str(td),'-I'+str(INC.parent),str(src),'--ld-path='+str(base.CLANG.parent/'ld.lld.exe'),'-Wl,--gc-sections','-Wl,-e,_start','-Wl,-Ttext=0x10000','-o',str(elf)]
    result=subprocess.run(args,capture_output=True,text=True,env={**os.environ,'TEMP':str(td),'TMP':str(td)});(RUN/'compile.log').write_text(result.stdout+result.stderr);self.assertEqual(result.returncode,0,str(RUN/'compile.log'))
    stack=elf.with_suffix('.su').read_text();(RUN/'stack.log').write_text(stack)
@@ -140,4 +221,11 @@ namespace std{struct mutex{bool available=true;};struct recursive_mutex{bool ava
   src=INC.read_text();body=src[src.index('bool Hal::'):]
   for token in ['nvs_set','nvs_commit','nvs_erase','gauge_access_word','gauge_control(','scale_boot_fence_locked(','scale_load_locked(','batteryPolicyTelemetry(','batteryTelemetry(','MosaicoOta::busy(','gaugeNativeRecoveryResolve(','gaugeFactoryAuditCapture(']:self.assertNotIn(token,body)
   self.assertIn('std::try_to_lock',body);self.assertIn('native_recovery::exact',body)
+  self.assertNotIn('i2c_',body.split('bool Hal::tryMaintenancePowerSnapshot(',1)[0])
+  serial=(ROOT/'main/debug/serial_debug.cpp').read_text()
+  self.assertIn('char details[1024]{};',serial.split('maintenancePowerStatus(',1)[0][-150:])
+  worst=('reason='+'x'*80+' cached_only=1 no_i2c=1 no_power_proof=1 diag_valid=1 std_fail=0x3ff '
+         'first_err=-2147483648 first_reg=0xff first_stage=255 identity_mask=0xffff echo02=0xffff '
+         'device=0xffff fw=0xffff build=0xffff elapsed_us=-9223372036854775808')
+  self.assertLess(len(worst)+1,512)
 if __name__=='__main__':unittest.main()
