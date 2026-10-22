@@ -14,7 +14,7 @@ set(APP_SRCS
 if(MOSAICO_BOARD)
     list(REMOVE_ITEM APP_SRCS "apps/app_codex_micro/view/view.cpp")
     if(CONFIG_IDF_TARGET_ESP32S31 AND CONFIG_IDF_TARGET_ARCH_RISCV)
-        list(APPEND APP_SRCS "host/mosaico_lan_tcp_probe.cpp" "ota/panic_capture.cpp" "hal/mosaico/vfs_internal_ops.c")
+        list(APPEND APP_SRCS "host/mosaico_lan_tcp_probe.cpp" "ota/panic_capture.cpp" "hal/mosaico/vfs_internal_ops.c" "hal/mosaico/mosaico_psram_heap_policy.cpp")
     endif()
     list(APPEND APP_SRCS "apps/app_codex_micro/view/view_mosaico.cpp"
         "apps/app_codex_micro/view/dot_widgets.cpp" "host/quota_monitor.cpp" "ota/mosaico_ota.cpp"
@@ -69,7 +69,7 @@ if(MOSAICO_BOARD)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC MOSAICO_BOARD=1 MOSAICO_NAND_STORE=1)
     if(CONFIG_IDF_TARGET_ESP32S31 AND CONFIG_IDF_TARGET_ARCH_RISCV)
         target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler"
-            "-Wl,--wrap=esp_vfs_register_fs")
+            "-Wl,--wrap=esp_vfs_register_fs" "-Wl,--wrap=heap_caps_add_region_with_caps")
     endif()
     if(MOSAICO_OTA_HEALTH_TEST_FAIL)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE MOSAICO_OTA_HEALTH_TEST_FAIL=1)

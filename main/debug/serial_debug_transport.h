@@ -87,6 +87,7 @@ inline bool uartAllowed(const char* command) {
     if (!command) return true;
 #ifdef MOSAICO_BOARD
     if (!std::strcmp(command, "ota-health")) return true;
+    if (!std::strcmp(command, "heap-policy")) return true;
     if (!std::strcmp(command, "gauge-factory-scale")) return true;
     // Bounded, default-OFF RAM lease; parser retains duty/OTA safety checks.
     if (!std::strcmp(command, "bankpulse")) return true;

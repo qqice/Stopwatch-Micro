@@ -3,6 +3,7 @@
 #include <debug/mosaico_rx_ingress.h>
 #include "mosaico_ota.h"
 #include "panic_capture.h"
+#include <hal/mosaico/mosaico_psram_heap_policy.h>
 #include "mosaico_ota_power.h"
 #include "mosaico_ota_maintenance_model.h"
 #include "mosaico_ota_layout.h"
@@ -1112,7 +1113,7 @@ void healthPoll(bool appLoopReady)
         return ok;
     };
     const bool healthy = d.i2c && d.display && d.buttons && d.touch && frameHealthy() &&
-        internalHealthy() && psramHealthy() && integrityHealthy();
+        internalHealthy() && psramHealthy() && integrityHealthy() && MosaicoPsramHeapPolicyHealthy();
     if (!healthy) { healthySince = 0; healthyLoops = 0;
         std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.progressBasisPoints = 0; ++ui.revision; return; }
     if (!healthySince) healthySince = now;

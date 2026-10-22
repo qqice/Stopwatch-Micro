@@ -45,6 +45,8 @@ static int heapProbeDepth,heapProbeEnters,heapProbeExits;static bool heapProbeEx
 /* REAL_HEAP_PROBE_SCOPE */
 MosaicoHeapProbeToken MosaicoHeapProbeEnter(MosaicoHeapProbeStage stage){++heapProbeEnters;if(heapProbeDepth||stage!=MosaicoHeapProbeStage::OtaHealth)++bad;++heapProbeDepth;return {0,static_cast<uint32_t>(stage)};}
 void MosaicoHeapProbeExit(MosaicoHeapProbeToken token){++heapProbeExits;if(heapProbeDepth!=1||token.core||token.value!=8)++bad;--heapProbeDepth;}
+static bool policyHealthy=true;
+static bool MosaicoPsramHeapPolicyHealthy(){return policyHealthy;}
 static bool halI2c=true,halDisplay=true,halButtons=true,halTouch=true,integrity=true;
 static unsigned frameValue=1,internalValue=40000,psramValue=1000000;static int64_t integrityLatency;
 static int64_t esp_timer_get_time(){++timerCalls;return clockUs;}
@@ -73,7 +75,7 @@ static bool heap_caps_check_integrity_all(bool noisy){if(noisy||heapProbeDepth!=
 '''
 
 CASES=r'''
-static void reset(){bad=cacheLocks=timerCalls=sdkReads=runningReads=nvsCalls=markCalls=timerStarts=timerStops=rollbackCalls=restarts=activityCalls=0;
+static void reset(){policyHealthy=true;bad=cacheLocks=timerCalls=sdkReads=runningReads=nvsCalls=markCalls=timerStarts=timerStops=rollbackCalls=restarts=activityCalls=0;
  heapProbeDepth=heapProbeEnters=heapProbeExits=0;heapProbeExpected=true;
  halCalls=frameCalls=internalCalls=psramCalls=integrityCalls=probeOrder=0;clockUs=100000;actualState=1;stateError=markError=createError=startError=0;noPartition=false;
  halI2c=halDisplay=halButtons=halTouch=integrity=true;frameValue=1;internalValue=40000;psramValue=1000000;integrityLatency=0;

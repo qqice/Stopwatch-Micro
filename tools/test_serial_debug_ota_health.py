@@ -33,6 +33,11 @@ namespace GaugeDischargeTrace{namespace NandBackend{bool busy(){return nandBusy;
     if auth_deny:
         header=header.replace('inline bool uartAllowed(', 'inline bool originalUartAllowed(')
         header+='\nnamespace serial_debug_transport {inline bool uartAllowed(const char*){return false;}}\n'
+    policy=(ROOT/'main/hal/mosaico/mosaico_psram_heap_policy.h').read_text()
+    prefix+=strip(policy)+r'''
+void MosaicoPsramHeapPolicySnapshot(MosaicoPsramHeapPolicyDiagnostic& out){out={};}
+bool MosaicoPsramHeapPolicyReadRecord(uint32_t,MosaicoPsramHeapPolicyRecord&){return false;}
+'''
     prefix+=strip(header)
     prefix+='namespace MosaicoOta{'+decl+r'''
 static HealthDiagnostic cached{};

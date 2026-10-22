@@ -14,6 +14,7 @@
 #include <host/powerbank_keepalive.h>
 #include <host/touch_sleep.h>
 #include <hal/mosaico/usb_console.h>
+#include <hal/mosaico/mosaico_psram_heap_policy.h>
 #include <hal/mosaico/mosaico_nand_probe.h>
 #include <hal/mosaico/mosaico_nand_store.h>
 #include <main_idle_wait.h>
@@ -524,6 +525,30 @@ bool __attribute__((noinline)) SerialDebug::handleCachedRead(const char* line)
     while (*p==' '||*p=='\t') ++p;
     const char* command=p;
     while (*p&&*p!=' '&&*p!='\t') ++p;
+    if (p-command==11&&!std::strncmp(command,"heap-policy",11)) {
+        if (_reply_uart&&!serial_debug_transport::uartAllowed("heap-policy")) {
+            result("heap-policy","FAIL","reason=uart_requires_extended_authorization no_changes=1");return true;
+        }
+        while (*p==' '||*p=='\t') ++p;
+        if (*p) {result("heap-policy","FAIL","reason=expected_no_arguments no_changes=1");return true;}
+        MosaicoPsramHeapPolicyDiagnostic policy;
+        MosaicoPsramHeapPolicySnapshot(policy);
+        debugPrintf("DBG HEAP_POLICY version=1 start=0x%lx end=0x%lx bytes=%lu skipped=%lu forwarded=%lu forward_failures=%lu faults=0x%lx reserved=%lu completed=%lu rodata_start=0x%lx rodata_end=0x%lx coherent=%d healthy=%d cached_only=1\r\n",
+            static_cast<unsigned long>(policy.start),static_cast<unsigned long>(policy.end),static_cast<unsigned long>(policy.bytes),
+            static_cast<unsigned long>(policy.skipped),static_cast<unsigned long>(policy.forwarded),
+            static_cast<unsigned long>(policy.forwardFailures),static_cast<unsigned long>(policy.faults),
+            static_cast<unsigned long>(policy.reserved),static_cast<unsigned long>(policy.completed),
+            static_cast<unsigned long>(policy.rodataStart),static_cast<unsigned long>(policy.rodataEnd),policy.coherent,policy.healthy);
+        for(uint32_t i=0;i<MosaicoPsramHeapPolicyRecordCapacity;++i) {
+            MosaicoPsramHeapPolicyRecord r;
+            if(!MosaicoPsramHeapPolicyReadRecord(i,r))continue;
+            debugPrintf("DBG HEAP_POLICY_REGION index=%lu start=0x%lx end=0x%lx caps0=0x%lx caps1=0x%lx caps2=0x%lx action=%lu rc=%ld\r\n",
+                static_cast<unsigned long>(i),static_cast<unsigned long>(r.start),static_cast<unsigned long>(r.end),
+                static_cast<unsigned long>(r.caps[0]),static_cast<unsigned long>(r.caps[1]),static_cast<unsigned long>(r.caps[2]),
+                static_cast<unsigned long>(r.action),static_cast<long>(r.result));
+        }
+        result("heap-policy","PASS");return true;
+    }
     if (p-command!=10||std::strncmp(command,"ota-health",10)) return false;
     if (_reply_uart&&!serial_debug_transport::uartAllowed("ota-health")) {
         result("ota-health","FAIL","reason=uart_requires_extended_authorization no_changes=1");return true;
