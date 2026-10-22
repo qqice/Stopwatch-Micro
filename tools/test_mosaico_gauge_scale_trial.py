@@ -159,7 +159,11 @@ static_assert(test());
  def test_actual_backend_isolated_compiles_and_stack(self):
   from test_mosaico_gauge_scale_runtime import FIXTURE
   fixture=FIXTURE.replace('#define MOSAICO_SCALE_TRIAL_MODEL_ONLY\n','')
-  fixture=fixture.replace('namespace {bool scale_trial_boot_restore_locked(){return false;}bool scale_append_trial_diagnostics(char*,size_t){return true;}}','')
+  # Runtime's isolated fixture also stubs native recovery. Keep that stub, but
+  # compile the REAL trial restore/diagnostic definitions below exactly once.
+  stale='namespace {void native_recovery_revoke_locked(){}bool scale_trial_boot_restore_locked(){return false;}bool scale_append_trial_diagnostics(char*,size_t){return true;}}'
+  self.assertIn(stale,fixture)
+  fixture=fixture.replace(stale,'namespace {void native_recovery_revoke_locked(){}}')
   fixture=fixture.replace('#include <cstdio>','#include <cstdio>\n#include <algorithm>\n#include "mosaico_gauge_model.h"')
   fixture=fixture.replace('namespace std {struct mutex{};struct recursive_mutex{};template<class T>struct lock_guard{explicit lock_guard(T&){};};}',r'''namespace std {struct mutex{};struct recursive_mutex{};
 struct try_to_lock_t{};inline constexpr try_to_lock_t try_to_lock{};

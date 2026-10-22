@@ -251,7 +251,9 @@ class ActualBackendTests(unittest.TestCase):
   # Execute the production backend, replacing only external transport bindings.
   code=code.replace('bool gauge_access_word(AccessWord){return mockGaugeIdentity();}','bool realAccess(AccessWord);bool gauge_access_word(AccessWord w){return realAccess(w);}')
   code=code.replace('bool gauge_control(GaugeCommand){return mockGaugeIdentity();}','bool enterModel();bool gauge_control(GaugeCommand){return enterModel();}')
-  code=code.replace('namespace {bool scale_trial_boot_restore_locked(){return false;}bool scale_append_trial_diagnostics(char*,size_t){return true;}}','')
+  # The captured trial fixture already removed the isolated runtime stubs.
+  self.assertIn('namespace {void native_recovery_revoke_locked(){}}',code)
+  self.assertNotIn('bool scale_trial_boot_restore_locked(){return false;}',code)
   fixture='struct Fixture{uint16_t address;uint8_t width;uint8_t original[4],target[4];};\nstatic constexpr Fixture fixture[]={'+','.join(rows)+'};\n'
   code+='\n'+fixture+MOCKS+'\nnamespace {bool enterModel(){++enters;operation=0x4a2;return true;}}\n'+RV_SUPPORT
   RUN.mkdir(parents=True,exist_ok=True)
