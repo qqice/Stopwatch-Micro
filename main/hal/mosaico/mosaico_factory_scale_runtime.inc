@@ -135,7 +135,7 @@ bool factory_scale_owned_intent(){
  return p==scale_recovery::Phase::Pending||p==scale_recovery::Phase::Restoring;
 }
 const esp_partition_t* factory_scale_rt_partition(unsigned slot){return slot<2?esp_partition_find_first(ESP_PARTITION_TYPE_APP,slot?ESP_PARTITION_SUBTYPE_APP_OTA_1:ESP_PARTITION_SUBTYPE_APP_OTA_0,nullptr):nullptr;}
-bool factory_scale_rt_version(const char* v){return !std::strcmp(v,"0.13.95-r6-mosaico-ota")||!std::strcmp(v,"0.13.95-r7-mosaico-ota");}
+bool factory_scale_rt_version(const char* v){return !std::strcmp(v,"0.13.95-r9-mosaico-ota")||!std::strcmp(v,"0.13.95-r10-mosaico-ota");}
 bool factory_scale_rt_verify_image(unsigned slot,const MosaicoOta::VerifiedImageDescriptor& image){
     const auto* part=factory_scale_rt_partition(slot);esp_ota_img_states_t state{};
     if(!part||!image.size||image.size>part->size||!factory_scale_rt_version(image.version)||
