@@ -217,6 +217,7 @@ static_assert(eccMasks(),"actual normalized masks C0=20 rejects before cache/no 
 
 ADAPTER_SYNTAX_PREFIX=r'''#include "main/hal/mosaico/mosaico_nand_store_model.h"
 #include "main/hal/mosaico/mosaico_nand_log_model.h"
+#include "main/hal/mosaico/mosaico_gauge_cold_store_model.h"
 #include "main/hal/mosaico/mosaico_nand_dma_reserve_model.h"
 #include <cstdio>
 #include <atomic>
@@ -228,7 +229,7 @@ constexpr int GPIO_NUM_24=24,GPIO_NUM_25=25,GPIO_MODE_OUTPUT=1,GPIO_PULLUP_ENABL
 constexpr int SPI3_HOST=3,SPI_DMA_CH_AUTO=3,SPI_DEVICE_HALFDUPLEX=1,SPI_NAND_IO_MODE_SIO=0;
 constexpr int SPI_TRANS_VARIABLE_ADDR=1,SPI_TRANS_VARIABLE_CMD=2,SPI_TRANS_VARIABLE_DUMMY=4,SPI_TRANS_USE_RXDATA=8;
 constexpr int MALLOC_CAP_SPIRAM=1,MALLOC_CAP_8BIT=2,MALLOC_CAP_INTERNAL=4,MALLOC_CAP_DMA=8;
-namespace MosaicoOta {bool tryStorageLease();void releaseStorageLease();}
+namespace MosaicoOta {bool tryStorageLease();void releaseStorageLease();bool currentTaskOwnsStorageLease();bool busy();}
 struct gpio_io_config_t {bool slp_sel=false;};
 struct gpio_config_t {uint64_t pin_bit_mask=0;int mode=0,pull_up_en=0,pull_down_en=0,intr_type=0;};
 struct spi_bus_config_t {int mosi_io_num=0,miso_io_num=0,sclk_io_num=0,quadwp_io_num=0,quadhd_io_num=0,max_transfer_sz=0;};
@@ -265,22 +266,30 @@ def adapter_fixture():
     source=re.sub(r'struct DmaAllocator \{.*?\} dmaAllocator;', '',source,flags=re.S)
     source=source.replace('MosaicoNandDma::Reservation<> dmaReservation;', 'MockReservation dmaReservation;')
     source=re.sub(r'struct StorageLease \{.*?\n\};',r'''struct StorageLease {
-    Fixture& owner;bool held;
-    constexpr StorageLease(Fixture& f):owner(f),held(!f.leaseDenied){++owner.leaseAttempts;if(held)++owner.leaseDepth;}
-    constexpr ~StorageLease(){if(held){--owner.leaseDepth;++owner.leaseReleases;}}
+    Fixture& owner;bool held,acquired;
+    constexpr StorageLease(Fixture& f,bool inherit=false):owner(f),held(!f.leaseDenied&&(!inherit||f.leaseDepth>0)),acquired(held&&!inherit){if(!inherit)++owner.leaseAttempts;if(acquired)++owner.leaseDepth;}
+    constexpr ~StorageLease(){if(acquired){--owner.leaseDepth;++owner.leaseReleases;}}
     constexpr explicit operator bool()const{return held;}
 };''',source,flags=re.S)
-    source=source.replace('StorageLease storageLease;', 'StorageLease storageLease{*this};')
+    source=source.replace('StorageLease storageLease(inheritStorageLease);', 'StorageLease storageLease{*this,inheritStorageLease};')
+    source=source.replace('namespace cold=mosaico_gauge_cold_store;', '')
     source=source.replace('std::mutex','MockMutex').replace('std::unique_lock<MockMutex>','MockLock').replace('std::try_to_lock','0')
     source=source.replace('std::atomic_bool','MockAtomic')
-    source=source.replace('void* memory=heap_caps_calloc(1,sizeof(Workspace),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);','Workspace* memory=allocateWorkspace();')
-    source=source.replace('auto* workspace=new(memory) Workspace;','auto* workspace=memory;')
-    source=source.replace('workspace->~Workspace();heap_caps_free(memory);','releaseWorkspace(memory);')
+    # Typed constexpr allocation adapters preserve the production choice:
+    # ordinary operations allocate only Workspace; cold scratch is separate.
+    source=source.replace('void* memory=heap_caps_calloc(1,coldOperation?sizeof(ColdWorkspace):sizeof(Workspace),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);',
+        'Workspace* workspace=coldOperation?nullptr:allocateWorkspace();ColdWorkspace* coldWorkspace=coldOperation?allocateColdWorkspace():nullptr;')
+    source=source.replace('if(!memory)', 'if(!workspace&&!coldWorkspace)')
+    source=source.replace('Workspace* workspace=coldOperation?nullptr:new(memory) Workspace;', '')
+    source=source.replace('ColdWorkspace* coldWorkspace=coldOperation?new(memory) ColdWorkspace:nullptr;', '')
+    source=source.replace('if(workspace)workspace->~Workspace();', 'if(workspace)releaseWorkspace(workspace);')
+    source=source.replace('if(coldWorkspace)coldWorkspace->~ColdWorkspace();', 'if(coldWorkspace)releaseColdWorkspace(coldWorkspace);')
+    source=source.replace('heap_caps_free(memory);', '')
     for signature in ('bool read(', 'bool write(', 'bool sync(', 'esp_err_t recordError(', 'esp_err_t releaseControl(', 'esp_err_t identity(', 'Result transaction('):source=source.replace(signature,'constexpr '+signature)
     for name in ('spi_nand_flash_read_page','spi_nand_flash_write_page','spi_nand_flash_sync'):
         source=source.replace('lastError='+name+'(', 'lastError=handle->owner->'+name+'(')
     mocks=r'''
- Workspace memory;
+ Workspace memory;ColdWorkspace coldMemory;
  int token=0;spi_nand_flash_device_t nandMemory;
  std::array<Model::Page,Model::RequiredPages> durable{},current{};
  bool allocationFail=false,occupied=false,busLive=false,deviceLive=false,geometryBad=false,unsafeErase=false;
@@ -298,6 +307,8 @@ def adapter_fixture():
  constexpr uint32_t mosaico_nand_compat_version(){return 0x01040104;}
  constexpr Workspace* allocateWorkspace(){++allocations;if(allocationFail)return nullptr;memory={};return &memory;}
  constexpr void releaseWorkspace(Workspace*){++frees;}
+ constexpr ColdWorkspace* allocateColdWorkspace(){++allocations;if(allocationFail)return nullptr;coldMemory={};return &coldMemory;}
+ constexpr void releaseColdWorkspace(ColdWorkspace*){++frees;}
  constexpr int gpio_set_level(int,int){++pinChanges;return ESP_OK;}
  constexpr int gpio_config(const gpio_config_t*){++pinChanges;return ESP_OK;}
  constexpr int gpio_reset_pin(int){++pinChanges;return ESP_OK;}
@@ -330,7 +341,7 @@ def adapter_fixture():
   Model::commit(durable[4],0,1,Model::crc(payload,Model::PayloadSize));current=durable;
  }
 '''
-    source=source.replace('enum class Operation { Load, Save, Format, LogLoad, LogAppend, LogRead };','enum class Operation { Load, Save, Format, LogLoad, LogAppend, LogRead };'+mocks)
+    source=re.sub(r'(enum class Operation \{[^}]+\};)',lambda match:match.group(1)+mocks,source,count=1)
     prefix=ADAPTER_SYNTAX_PREFIX.split('int spi_nand_flash_read_page(',1)[0]
     prefix=prefix.replace('struct spi_nand_flash_device_t {};','struct Fixture;struct spi_nand_flash_device_t {Fixture* owner=nullptr;};')
     prefix+=r'''
@@ -341,6 +352,7 @@ struct MockReservation {bool available=true;constexpr bool isReady()const{return
 '''
     return prefix+header+r'''
 using namespace MosaicoNandStore;
+namespace cold=mosaico_gauge_cold_store;
 struct Fixture {
 '''+source+r'''
 };

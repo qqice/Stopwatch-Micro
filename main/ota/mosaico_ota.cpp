@@ -42,6 +42,8 @@ std::mutex lock;
 std::mutex healthLock;
 // All admission transitions share this lease with persistent NAND I/O.
 std::recursive_mutex storageLeaseMutex;
+std::atomic<TaskHandle_t> storageLeaseOwner{nullptr};
+uint32_t storageLeaseDepth=0; // Touched only while this task owns the mutex.
 struct StorageAdmission {
  std::unique_lock<std::recursive_mutex> held{storageLeaseMutex,std::try_to_lock};
  explicit operator bool() const { return held.owns_lock()&&!GetHAL().gaugeScaleTrialActive(); }
@@ -475,10 +477,23 @@ void copyHealthDiagnostic(HealthDiagnostic& out)
 }
 bool tryStorageLease() {
     if(!storageLeaseMutex.try_lock())return false;
-    if(busy()){storageLeaseMutex.unlock();return false;}
+    const auto task=xTaskGetCurrentTaskHandle();
+    if(!task||busy()||storageLeaseDepth==UINT32_MAX){storageLeaseMutex.unlock();return false;}
+    ++storageLeaseDepth;
+    storageLeaseOwner.store(task,std::memory_order_release);
     return true;
 }
-void releaseStorageLease() { storageLeaseMutex.unlock(); }
+bool currentTaskOwnsStorageLease() {
+    const auto task=xTaskGetCurrentTaskHandle();
+    return task&&storageLeaseOwner.load(std::memory_order_acquire)==task;
+}
+void releaseStorageLease() {
+    // Never unlock another task's mutex. Nested users retain identity until the
+    // last matching successful tryStorageLease has been released.
+    if(!currentTaskOwnsStorageLease())return;
+    if(--storageLeaseDepth==0)storageLeaseOwner.store(nullptr,std::memory_order_release);
+    storageLeaseMutex.unlock();
+}
 bool blocksTwt()
 {
     const auto stage = statusStage.load();

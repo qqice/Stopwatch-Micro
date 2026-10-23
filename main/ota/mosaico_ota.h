@@ -61,6 +61,9 @@ void copyHealthDiagnostic(HealthDiagnostic& out);
 // Same-task, nonblocking lease; successful caller must release after NAND I/O.
 bool tryStorageLease();
 void releaseStorageLease();
+// Atomic RAM-only task identity: true only for a successful outstanding
+// tryStorageLease by this exact task, including recursive nesting.
+bool currentTaskOwnsStorageLease();
 uint32_t requestAgeMs();
 bool request(); // Caller must obtain explicit confirmation of USB/external power.
 bool automaticCheckDue(); // Always false: permanent manual-only discovery policy.

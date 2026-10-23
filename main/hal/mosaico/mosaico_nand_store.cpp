@@ -33,8 +33,12 @@ struct DmaAllocator {
     void release(uint8_t* pointer){heap_caps_free(pointer);} // Unpublished prepare failure only.
 } dmaAllocator;
 struct StorageLease {
-    bool held=MosaicoOta::tryStorageLease();
-    ~StorageLease(){if(held)MosaicoOta::releaseStorageLease();}
+    bool held=false,acquired=false;
+    explicit StorageLease(bool inherit=false){
+        if(inherit)held=MosaicoOta::currentTaskOwnsStorageLease()&&!MosaicoOta::busy();
+        else acquired=held=MosaicoOta::tryStorageLease();
+    }
+    ~StorageLease(){if(acquired)MosaicoOta::releaseStorageLease();}
     explicit operator bool()const{return held;}
 };
 bool cleanupFailed=false;
@@ -42,7 +46,9 @@ std::atomic_bool formatSession{false};
 Progress progressCallback=nullptr;
 void* progressContext=nullptr;
 struct Workspace {Model::Scratch scratch{};Payload snapshot{};LogPage logPage{};LogState logState{};std::array<uint32_t,8> traceCrc{};};
-enum class Operation { Load, Save, Format, LogLoad, LogAppend, LogRead };
+namespace cold=mosaico_gauge_cold_store;
+struct ColdWorkspace {cold::Scratch scratch{};ColdRecord expected{};std::array<uint32_t,18> protectedCrc{};bool publish=false;};
+enum class Operation { Load, Save, Format, LogLoad, LogAppend, LogRead, ColdLoad, ColdSave };
 struct IO {
     spi_nand_flash_device_t* handle;
     esp_err_t lastError=ESP_OK;
@@ -50,6 +56,29 @@ struct IO {
     bool write(uint32_t page,const Model::Page& data){lastError=spi_nand_flash_write_page(handle,data.data(),page);return lastError==ESP_OK;}
     bool sync(){lastError=spi_nand_flash_sync(handle);return lastError==ESP_OK;}
 };
+// The pure store only sees its canonical pair8/9. Remap to the selected
+// whitelist pair, and deny ALL other writes (including format markers).
+bool coldPageBase(ColdArea area,uint32_t& base){
+    if(area==ColdArea::Journal){base=8;return true;}
+    if(area==ColdArea::Proof){base=12;return true;}
+    return false;
+}
+struct ColdIO {
+    IO& io;uint32_t base;
+    bool read(uint32_t page,cold::Page& out){
+        if(page<2)return io.read(page,out);
+        if(page>=cold::PageBase&&page<cold::PageBase+2)return io.read(base+page-cold::PageBase,out);
+        io.lastError=ESP_ERR_INVALID_ARG;return false;
+    }
+    bool write(uint32_t page,const cold::Page& in){
+        if(page>=cold::PageBase&&page<cold::PageBase+2)return io.write(base+page-cold::PageBase,in);
+        io.lastError=ESP_ERR_INVALID_ARG;return false;
+    }
+    bool sync(){return io.sync();}
+};
+bool sameColdRecord(const ColdRecord& a,const ColdRecord& b){
+    return a.sequence==b.sequence&&a.phase==b.phase&&a.nonce==b.nonce&&a.binding==b.binding&&a.size==b.size&&a.payload==b.payload;
+}
 esp_err_t recordError(Model::Code code,esp_err_t ioError){
     switch(code){
     case Model::Code::Ok:return ESP_OK;
@@ -80,22 +109,29 @@ esp_err_t identity(spi_device_handle_t device){
     if((config&0x10)==0||(config&0x66)!=0)return ESP_ERR_NOT_SUPPORTED;
     return status&1?ESP_ERR_INVALID_STATE:ESP_OK;
 }
-Result transaction(Operation operation,const Payload* input,Payload* output,bool authorized,Progress progress,void* context,LogPage* logPage=nullptr,LogState* logState=nullptr,uint64_t logSequence=0){
+Result transaction(Operation operation,const Payload* input,Payload* output,bool authorized,Progress progress,void* context,LogPage* logPage=nullptr,LogState* logState=nullptr,uint64_t logSequence=0,ColdArea coldArea=ColdArea::Journal,const ColdRecord* coldInput=nullptr,ColdRecord* coldOutput=nullptr,const ColdPolicy* coldPolicy=nullptr,bool inheritStorageLease=false){
     const bool journal=operation==Operation::LogLoad||operation==Operation::LogAppend||operation==Operation::LogRead;
+    const bool coldOperation=operation==Operation::ColdLoad||operation==Operation::ColdSave;
+    uint32_t coldBase=0;
     Result result;
+    if(coldOperation&&(!coldPageBase(coldArea,coldBase)||!coldPolicy||!coldPolicy->ready()||(operation==Operation::ColdSave&&!coldInput)||(operation==Operation::ColdLoad&&!coldOutput))){result.error=ESP_ERR_INVALID_ARG;result.coldCode=cold::Code::Rejected;return result;}
     if(!authorized){result.error=ESP_ERR_INVALID_STATE;return result;}
-    StorageLease storageLease;
+    StorageLease storageLease(inheritStorageLease);
     if(!storageLease){result.error=ESP_ERR_INVALID_STATE;return result;}
     if(mosaico_nand_compat_version()!=0x01040104U){result.error=ESP_ERR_NOT_SUPPORTED;return result;}
     std::unique_lock<std::mutex> lock(mutex,std::try_to_lock);
     if(!lock||cleanupFailed){result.error=ESP_ERR_INVALID_STATE;return result;}
     result.stage=Stage::Allocation;
     if(!dmaReservation.isReady()){result.error=ESP_ERR_NO_MEM;return result;}
-    void* memory=heap_caps_calloc(1,sizeof(Workspace),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    // Cold scratch is separately allocated only for cold calls; old load/log
+    // transactions retain EXACTLY their previous workspace allocation size.
+    void* memory=heap_caps_calloc(1,coldOperation?sizeof(ColdWorkspace):sizeof(Workspace),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if(!memory){result.error=ESP_ERR_NO_MEM;return result;}
-    auto* workspace=new(memory) Workspace;
+    Workspace* workspace=coldOperation?nullptr:new(memory) Workspace;
+    ColdWorkspace* coldWorkspace=coldOperation?new(memory) ColdWorkspace:nullptr;
     if(input)workspace->snapshot=*input;
     if(logPage&&operation==Operation::LogAppend)workspace->logPage=*logPage;
+    if(coldInput)coldWorkspace->expected=*coldInput;
     spi_device_handle_t device=nullptr;spi_nand_flash_device_t* nand=nullptr;
     bool busOwned=false;uint32_t touched=0,sleepBefore=0,sleepChanged=0;
     auto finish=[&](){
@@ -123,8 +159,11 @@ Result transaction(Operation operation,const Payload* input,Payload* output,bool
             if(output)*output=workspace->snapshot;
             if(logPage)*logPage=workspace->logPage;
             if(logState)*logState=workspace->logState;
+            if(coldOutput&&coldWorkspace->publish)*coldOutput=coldWorkspace->expected;
         }
-        workspace->~Workspace();heap_caps_free(memory);return result;
+        if(workspace)workspace->~Workspace();
+        if(coldWorkspace)coldWorkspace->~ColdWorkspace();
+        heap_caps_free(memory);return result;
     };
     result.stage=Stage::Bus;
     spi_bus_config_t bus{};bus.mosi_io_num=21;bus.miso_io_num=22;bus.sclk_io_num=20;
@@ -167,6 +206,54 @@ Result transaction(Operation operation,const Payload* input,Payload* output,bool
     if(result.error!=ESP_OK)return finish();
     if(pageSize!=Model::PageSize||blocks!=1024||result.logicalPages<Model::RequiredPages){result.error=ESP_ERR_NOT_SUPPORTED;return finish();}
     IO io{nand};
+    if(coldOperation){
+        if(result.logicalPages<coldBase+2){result.error=ESP_ERR_NOT_SUPPORTED;return finish();}
+        result.stage=Stage::Record;ColdIO mapped{io,coldBase};
+        auto checkCold=[&](cold::Code code){
+            result.coldCode=code;
+            switch(code){
+            case cold::Code::Ready:case cold::Code::Empty:result.error=ESP_OK;break;
+            case cold::Code::NotFormatted:result.error=ESP_ERR_NOT_FOUND;break;
+            case cold::Code::Io:result.error=io.lastError==ESP_OK?ESP_FAIL:io.lastError;break;
+            case cold::Code::Rejected:result.error=ESP_ERR_INVALID_STATE;break;
+            default:result.error=ESP_ERR_INVALID_CRC;break;
+            }
+        };
+        if(operation==Operation::ColdSave){
+            // Preserve all neighbouring protocol pages and both legacy trace/
+            // log indexes. Data64+ cannot be written by the whitelist adapter.
+            if(result.logicalPages<18){result.error=ESP_ERR_NOT_SUPPORTED;return finish();}
+            for(unsigned i=0;i<18;++i)if(i<coldBase||i>=coldBase+2){
+                if(!io.read(i,coldWorkspace->scratch.page)){result.error=io.lastError;return finish();}
+                coldWorkspace->protectedCrc[i]=Model::crc(coldWorkspace->scratch.page,Model::PageSize);
+            }
+            checkCold(cold::save(mapped,coldWorkspace->scratch,coldWorkspace->expected,*coldPolicy,true));
+            if(result.error!=ESP_OK)return finish();
+            result.stage=Stage::Reopen;
+            result.error=spi_nand_flash_deinit_device(nand);nand=nullptr;
+            if(result.error!=ESP_OK){result.cleanupError=result.error;return finish();} // Unknown teardown: quarantine, no bus removal/retry.
+            result.error=spi_nand_flash_init_device(&config,&nand);if(result.error!=ESP_OK){nand=nullptr;return finish();}
+            io.handle=nand;
+            const auto loaded=cold::load(mapped,coldWorkspace->scratch,*coldPolicy);checkCold(loaded.code);
+            if(result.error!=ESP_OK)return finish();
+            if(loaded.code!=cold::Code::Ready||loaded.selected<0||!sameColdRecord(coldWorkspace->expected,coldWorkspace->scratch.records[unsigned(loaded.selected)])){
+                result.coldCode=cold::Code::Verify;result.error=ESP_ERR_INVALID_CRC;return finish();
+            }
+            for(unsigned i=0;i<18;++i)if(i<coldBase||i>=coldBase+2){
+                if(!io.read(i,coldWorkspace->scratch.page)){result.error=io.lastError;return finish();}
+                if(coldWorkspace->protectedCrc[i]!=Model::crc(coldWorkspace->scratch.page,Model::PageSize)){
+                    result.coldCode=cold::Code::Verify;result.error=ESP_ERR_INVALID_CRC;return finish();
+                }
+            }
+        }else{
+            const auto loaded=cold::load(mapped,coldWorkspace->scratch,*coldPolicy);checkCold(loaded.code);
+            if(result.error!=ESP_OK)return finish();
+            if(loaded.code==cold::Code::Ready){
+                coldWorkspace->expected=coldWorkspace->scratch.records[unsigned(loaded.selected)];coldWorkspace->publish=true;
+            }
+        }
+        result.formatted=true;result.stage=Stage::Complete;return finish();
+    }
     if(journal){
         if(result.logicalPages<LogModel::RequiredPages){result.error=ESP_ERR_NOT_SUPPORTED;return finish();}
         result.stage=Stage::Record;
@@ -262,6 +349,12 @@ Result save(const Payload& input,bool authorized){return transaction(Operation::
 Result logLoad(LogState& output,bool authorized){return transaction(Operation::LogLoad,nullptr,nullptr,authorized,nullptr,nullptr,nullptr,&output);}
 Result logAppend(LogPage& page,LogState& output,bool authorized){return transaction(Operation::LogAppend,nullptr,nullptr,authorized,nullptr,nullptr,&page,&output);}
 Result logRead(uint64_t sequence,LogPage& output,bool authorized){return transaction(Operation::LogRead,nullptr,nullptr,authorized,nullptr,nullptr,&output,nullptr,sequence);}
+Result coldLoad(ColdArea area,ColdRecord& output,const ColdPolicy& policy,bool authorized,bool inheritStorageLease){
+    return transaction(Operation::ColdLoad,nullptr,nullptr,authorized,nullptr,nullptr,nullptr,nullptr,0,area,nullptr,&output,&policy,inheritStorageLease);
+}
+Result coldSave(ColdArea area,const ColdRecord& input,const ColdPolicy& policy,bool authorized,bool inheritStorageLease){
+    return transaction(Operation::ColdSave,nullptr,nullptr,authorized,nullptr,nullptr,nullptr,nullptr,0,area,&input,nullptr,&policy,inheritStorageLease);
+}
 Result formatConfirm(bool authorized,Progress progress,void* context){return transaction(Operation::Format,nullptr,nullptr,authorized,progress,context);}
 }
 extern "C" void* mosaico_nand_dma_acquire(size_t size,size_t alignment){
