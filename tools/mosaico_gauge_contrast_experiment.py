@@ -161,6 +161,19 @@ def signed_mod_delta(after, before):
     return delta - 65536 if delta > 32768 else delta
 
 
+def average_transient(index, instant, average, pre_average, pre_received, off_intent, start, received):
+    """First-only bounded mean-filter carryover; never a load/count exemption."""
+    require(type(instant) is int and type(average) is int and instant < 0, 'instantaneous OFF current must be negative')
+    if average < 0:
+        return False
+    require(index == 0 and type(pre_average) is int and pre_average > 0 and 0 <= average <= pre_average,
+            'nonnegative average not first bounded filter transient')
+    require(all(type(x) in (int, float) and math.isfinite(x) for x in (pre_received, off_intent, start, received)) and
+            0 <= off_intent - pre_received < 5 and off_intent + 10 <= start < off_intent + 11 and
+            start <= received < off_intent + 16, 'first filter transient lacks fresh preOFF/timer evidence')
+    return True
+
+
 def off_budget(now, total_deadline, ram_deadline):
     require(all(math.isfinite(x) for x in (now, total_deadline, ram_deadline)), 'nonfinite deadline')
     # Includes OFF setter/bootstrap overhead and independent ON verification in
@@ -329,6 +342,7 @@ class Console:
                 if self.client.wake_preamble:
                     self.client._send_preamble()
                 result = self.client._command_once('debug ' + command, command.split()[0], bounded.remaining())
+                row['terminal_received_monotonic'] = self.clock.monotonic()  # BEFORE audit IO, not call-return time.
                 bounded.remaining()
             terminals = []
             for line in capture.getvalue().splitlines():
@@ -583,6 +597,7 @@ class Experiment:
         self.sent, self.settings, self.legacy = {}, None, None
         self.rebase_used = self.rebase_in_progress = False
         self.apply_start = None
+        self.last_on_sample = None
         self.apply_sent = self.apply_confirmed = self.settings_touched = False
         self.report = dict(kind='GCT1_contrast_experiment', stage=args.stage, arm=args.arm, source_crc=SOURCE,
                            complete=False, original_verified=False, target131_verified=False, V1_ON_verified=False,
@@ -676,6 +691,12 @@ class Experiment:
                 raise ValueError('3900mV floor: independentStop then V1 ON before gauge restore')
             require(p.get('valid') == p.get('readonly') == '1' and voltage <= 4350 and
                     2832 <= int(p['temperature_dK']) <= 3131 and sealed(p), 'physical envelope/SEALED/CFG0')
+            charge_row = self.call.rows[-1] if getattr(self.call, 'rows', None) else {}
+            charge_received = charge_row.get('terminal_received_monotonic')
+            require(charge_row.get('command') == 'gauge-charge' and charge_row.get('status') == 'PASS' and
+                    charge_row.get('parsed') == p and type(charge_received) in (int, float) and
+                    math.isfinite(charge_received) and started <= charge_received <= self.clock.monotonic(),
+                    'actual gauge-charge terminal receipt witness missing')
             g = self.call('gauge')
             require(g.get('valid') == g.get('capacity_valid') == g.get('raw_cc_valid') == '1' and
                     g.get('design_mah') == g.get('fcc_mah') == '65' and g.get('unit_factor') == g.get('unit_verified') == '0' and sealed(g), 'nominal65 gauge/units/security')
@@ -693,11 +714,41 @@ class Experiment:
             require(self.power.source == source and self.clock.monotonic() < started + GROUP_SECONDS, 'mixed/late sample group')
             row = dict(monotonic=self.clock.monotonic(), unix=self.clock.time(), started_monotonic=started,
                        deadline_monotonic=started + GROUP_SECONDS, physical=p, gauge=g, mode=mode, power=power,
-                       boot=boot, ota=ota, contrast=status, engine=engine, power_source=source)
+                       boot=boot, ota=ota, contrast=status, engine=engine, power_source=source,
+                       power_source_begin=source, power_source_end=self.power.source,
+                       charge_received_monotonic=charge_received,
+                       v1_original=dict(getattr(self.power, 'original', {})),
+                       source_verified=(self.power.on_known if source == 'on' else getattr(self.power, 'off_verified', None) is not None))
             if endpoint_check is not None:
                 row['endpoint_check'] = endpoint_check
             if source == 'off':
-                require(int(p['current_ma']) < 0 and int(p['average_current_ma']) < 0, 'OFF sample not discharging')
+                pre = self.last_on_sample
+                index = sum(s['power_source'] == 'off' for s in self.report['samples'])
+                instant, average = int(p['current_ma']), int(p['average_current_ma'])
+                transient = average_transient(index, instant, average,
+                    int(pre['physical']['average_current_ma']) if pre is not None else None,
+                    pre.get('charge_received_monotonic') if pre is not None else None,
+                    getattr(self.power, 'off_intent', None), started, charge_received)
+                if transient:
+                    intent, verified = self.power.off_intent, self.power.off_verified
+                    require(pre is not None and pre.get('power_source_begin') == pre.get('power_source_end') == 'on' and
+                        pre.get('source_verified') is True and row['source_verified'] is True and
+                        row['power_source_begin'] == row['power_source_end'] == 'off' and
+                        pre['boot']['count'] == boot['count'] == str(self.args.expected_boot) and
+                        all(pre['contrast'][k] == status[k] for k in ('phase', 'generation', 'epoch', 'arm')) and
+                        pre['v1_original'] == row['v1_original'] == dict(current=500, unit=1, voltage=5000, on=1) and
+                        type(verified) in (int, float) and math.isfinite(verified) and intent <= verified <= started and
+                        self.clock.monotonic() < intent + 16,
+                        'first average transient lacks known raw sources/same boot epoch/timely completion')
+                    row['last_ON_witness'] = dict(charge_received_monotonic=pre['charge_received_monotonic'],
+                        physical=pre['physical'], boot=pre['boot'], contrast=pre['contrast'],
+                        power_source_begin=pre['power_source_begin'], power_source_end=pre['power_source_end'],
+                        v1_original=pre['v1_original'], source_verified=pre['source_verified'])
+                    row['actual_OFF_intent_monotonic'], row['actual_OFF_verified_monotonic'] = intent, verified
+                row['mean_filter_transient'] = row['exclude_steady_average'] = transient
+            require(self.clock.monotonic() < started + GROUP_SECONDS, 'sample acceptance deadline including transient proof')
+            if source == 'on':
+                self.last_on_sample = row
             self.report['samples'].append(row)
         return row
 

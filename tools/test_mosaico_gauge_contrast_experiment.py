@@ -697,6 +697,115 @@ class HostTests(unittest.TestCase):
         receipt.write_text(json.dumps(dict(report_sha256=sha, child_exit_code=0, observed_child_exit_monotonic=200.)))
         self.assertTrue(e.load_evidence(path, sha, stage='on-smoke', arm='C'))
 
+    def test_average_transient_pure_exact_boundaries(self):
+        args = [0, -25, 5, 20, 100., 102., 112., 112.1]
+        self.assertTrue(e.average_transient(*args))
+        for average in (0, 20):
+            changed = list(args)
+            changed[2] = average
+            self.assertTrue(e.average_transient(*changed))
+        for index, value in ((0, 1), (1, 0), (1, 25), (2, 21), (3, 0),
+                             (4, 97.), (4, 103.), (4, None), (5, float('nan')),
+                             (6, 111.999), (6, 113.), (7, 118.), (7, 111.9)):
+            changed = list(args)
+            changed[index] = value
+            with self.assertRaises(ValueError):
+                e.average_transient(*changed)
+        self.assertFalse(e.average_transient(3, -25, -1, None, None, None, None, None))
+        with self.assertRaises(ValueError):
+            e.average_transient(3, 0, -1, None, None, None, None, None)
+
+    def transient_sample_harness(self):
+        obj, _, power, clock = self.experiment()
+        state = dict(schema='1', namespace='gcontrast', source_crc=e.SOURCE, factor='0', verified='0',
+            capacity_calibrated='0', original3000_UNTRUSTED='1', legacy_Failed_preserved='1',
+            never_publish_physical_units='1', deadline_seconds='720', host_deadline_seconds='660',
+            third_value='0', unexpected_count='0', arm='C', phase='2', generation='3', epoch='3', images_capability_verified='1')
+        values = {'voltage': 4200, 'instant': 20, 'average': 20}
+        class Scripted(Client):
+            def _command_once(self, text, expected, timeout):
+                from serial_debug_test import encode_command
+                self.serial.write(encode_command(text, True))
+                clock.now += .01
+                detail = {
+                    'gauge-charge': dict(valid='1', readonly='1', voltage_mv=str(values['voltage']),
+                        temperature_dK='3000', op_status='0026', current_ma=str(values['instant']), average_current_ma=str(values['average'])),
+                    'gauge': dict(valid='1', capacity_valid='1', raw_cc_valid='1', design_mah='65', fcc_mah='65',
+                        unit_factor='0', unit_verified='0', op_status='0026', raw_cc='100', rm_mah='65'),
+                    'gauge-mode': dict(readonly='1', mode_valid='1'),
+                    'power': dict(locked='1', phase='2', wifi_running='0', bt_connected='0', bt_advertising='0', cpu_mhz='160'),
+                    'boot': dict(count='10'), 'ota-status': dict(state='2', busy='0', pending='0'),
+                    'gauge-contrast': state,
+                    'gauge-engine': dict(definition_match='1', device_be='0220', fw_be='0003', build_be='0004',
+                        raw73='00' * 23, raw76='00' * 17, CEDVRemCap='65', SmoothRemCap='65')
+                }[expected]
+                details = ' '.join(key + '=' + value for key, value in detail.items())
+                print('DBG RESULT command=' + expected + ' status=PASS ' + details)
+                return types.SimpleNamespace(status='PASS', details=details)
+        client = Scripted(clock)
+        call = e.Console(client, obj.out, clock)
+        call.safety_hook, call.failure_hook = obj.safety, lambda command, exc: power.stop.set()
+        obj.call = call
+        power.original = dict(current=500, unit=1, voltage=5000, on=1)
+        power.off_intent = power.off_verified = None
+        return obj, call, power, clock, values, state
+
+    def test_real_Console_sample_first_mean_transient_retains_raw_RM_RawCC(self):
+        obj, call, power, clock, values, _ = self.transient_sample_harness()
+        on = obj.sample('on')
+        self.assertEqual(on['charge_received_monotonic'], call.rows[0]['terminal_received_monotonic'])
+        power.off_intent, power.off_verified, power.source, power.on_known = 102., 102.1, 'off', False
+        values.update(instant=-25, average=5)
+        clock.now = 112.1
+        off = obj.sample('off')
+        self.assertTrue(off['mean_filter_transient'])
+        self.assertTrue(off['exclude_steady_average'])
+        self.assertEqual(off['last_ON_witness']['charge_received_monotonic'], on['charge_received_monotonic'])
+        self.assertEqual(off['gauge']['raw_cc'], '100')
+        self.assertEqual(off['gauge']['rm_mah'], '65')
+        clock.now = 142.1
+        with self.assertRaisesRegex(ValueError, 'not first'):
+            obj.sample('off')
+        values['average'] = -1
+        steady = obj.sample('off')
+        self.assertFalse(steady['mean_filter_transient'])
+
+    def test_sample_transient_rejects_stale_missing_source_epoch_and_instant_proof(self):
+        for fault in ('missing_ON', 'stale_ON', 'epoch', 'source', 'instant'):
+            obj, _, power, clock, values, state = self.transient_sample_harness()
+            obj.sample('on')
+            power.off_intent, power.off_verified, power.source, power.on_known = 102., 102.1, 'off', False
+            values.update(instant=-25, average=5)
+            clock.now = 112.1
+            if fault == 'missing_ON':
+                obj.last_on_sample = None
+            elif fault == 'stale_ON':
+                obj.last_on_sample['charge_received_monotonic'] = 97.
+            elif fault == 'epoch':
+                state['epoch'] = '4'
+            elif fault == 'source':
+                obj.last_on_sample['source_verified'] = False
+            else:
+                values['instant'] = 0
+            with self.assertRaises(ValueError):
+                obj.sample('off')
+
+    def test_real_Console_floor_precedes_transient_exemption_and_any_audit_IO(self):
+        obj, call, power, clock, values, _ = self.transient_sample_harness()
+        obj.sample('on')
+        power.off_intent, power.off_verified, power.source, power.on_known = 102., 102.1, 'off', False
+        values.update(instant=-25, average=5, voltage=3900)
+        clock.now = 112.1
+        actual_open = Path.open
+        def check_open(path, *args, **kwargs):
+            self.assertTrue(power.stop.is_set())
+            return actual_open(path, *args, **kwargs)
+        with patch.object(Path, 'open', new=check_open):
+            with self.assertRaises(e.TypedKnownSafetyStop):
+                obj.sample('off')
+        self.assertEqual(len(obj.report['samples']), 1)
+        self.assertFalse(call.uncertain)
+
 
 if __name__ == '__main__':
     unittest.main()
