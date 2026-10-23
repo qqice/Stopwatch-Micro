@@ -70,6 +70,7 @@ struct ContrastRuntime {
  uint32_t observedGeneration=0;uint64_t observedEpoch=0;
  scale_recovery::Phase observedPhase=scale_recovery::Phase::Original;
  int64_t observedReadMs=0,appliedUs=0,nextPollUs=0,lastPollUs=0;
+ const char* prepareSource="none";bool prepareFreshDm=false;
  const char* observedStage="none";const char* nextReadStage="unknown";const char* reason="not_prepared";
 };
 ContrastRuntime* contrast_rt=nullptr;
@@ -199,7 +200,7 @@ bool contrast_owned_intent(){
  return p==scale_recovery::Phase::Pending||p==scale_recovery::Phase::Restoring;
 }
 const esp_partition_t* contrast_rt_partition(unsigned slot){return slot<2?esp_partition_find_first(ESP_PARTITION_TYPE_APP,slot?ESP_PARTITION_SUBTYPE_APP_OTA_1:ESP_PARTITION_SUBTYPE_APP_OTA_0,nullptr):nullptr;}
-bool contrast_rt_version(const char* v){return !std::strcmp(v,"0.13.95-r13-mosaico-ota")||!std::strcmp(v,"0.13.95-r14-mosaico-ota");}
+bool contrast_rt_version(const char* v){return !std::strcmp(v,"0.13.95-r15-mosaico-ota")||!std::strcmp(v,"0.13.95-r16-mosaico-ota");}
 bool contrast_rt_verify_image(unsigned slot,const MosaicoOta::VerifiedImageDescriptor& image){
     const auto* part=contrast_rt_partition(slot);esp_ota_img_states_t state{};
     if(!part||!image.size||image.size>part->size||!contrast_rt_version(image.version)||
@@ -496,8 +497,8 @@ bool contrast_capacity(char* out,size_t n,size_t required=1024){if(out&&n>=requi
 bool contrast_report(char* out,size_t n,bool ok){
  const auto* t=contrast_rt;const auto* s=t&&contrast_status==contrast_journal::Status::Ready&&t->journal.loaded.selected>=0?&t->journal.loaded.records[size_t(t->journal.loaded.selected)].snapshot:nullptr;
  const auto c=contrast_context_locked();
- const int k=std::snprintf(out,n,"reason=%s success=%d schema=1 namespace=gcontrast profile=Factory3000Contrast runtime_ready=1 phase=%u generation=%lu epoch=%llu arm=%s factor=%lld verified=%d capacity_calibrated=0 original3000_UNTRUSTED=1 legacy_Failed_preserved=1 prepared_fresh=%d images_capability_verified=%d protection=%d observed131=%u authenticated=%d third_value=%d unexpected_count=%u first_unexpected=%04x post_exit_full131=%d sealed_standard_fallback=%d deadline_seconds=720 source_crc=70a767be C_crc=91336fc0 B_crc=675dd812 never_publish_physical_units=1 host_deadline_seconds=660 contract=%s base_required=%u reuse_credit=%u dynamic_required=%u",
- t?t->reason:"psram_unavailable",ok,unsigned(s?uint8_t(s->phase):255),static_cast<unsigned long>(s?s->generation:0),static_cast<unsigned long long>(s?s->epoch:0),t&&t->record.arm==contrast_model::Arm::B?"B":"C",static_cast<long long>(c.factor),c.verified,contrast_prepared_fresh(),t&&t->imagesSet,contrast_protected(),unsigned(t?t->observed.count:0),t&&t->observed.authenticated,t&&t->thirdValue,unsigned(t?t->unexpectedCount:0),t?t->firstUnexpected:0,t&&t->postExitFull131,t&&t->sealedStandardFallback,contrast_contract_digest,unsigned(t?t->budgetBase:56),unsigned(t?t->budgetReuse:0),unsigned(t?t->budgetRequired:56));
+ const int k=std::snprintf(out,n,"reason=%s success=%d schema=1 namespace=gcontrast profile=Factory3000Contrast runtime_ready=1 phase=%u generation=%lu epoch=%llu arm=%s factor=%lld verified=%d capacity_calibrated=0 original3000_UNTRUSTED=1 legacy_Failed_preserved=1 prepared_fresh=%d prepare_source=%s prepare_fresh_dm131=%d images_capability_verified=%d protection=%d observed131=%u authenticated=%d third_value=%d unexpected_count=%u first_unexpected=%04x post_exit_full131=%d sealed_standard_fallback=%d deadline_seconds=720 source_crc=70a767be C_crc=91336fc0 B_crc=675dd812 never_publish_physical_units=1 host_deadline_seconds=660 contract=%s base_required=%u reuse_credit=%u dynamic_required=%u",
+ t?t->reason:"psram_unavailable",ok,unsigned(s?uint8_t(s->phase):255),static_cast<unsigned long>(s?s->generation:0),static_cast<unsigned long long>(s?s->epoch:0),t&&t->record.arm==contrast_model::Arm::B?"B":"C",static_cast<long long>(c.factor),c.verified,contrast_prepared_fresh(),t?t->prepareSource:"none",t&&t->prepareFreshDm,t&&t->imagesSet,contrast_protected(),unsigned(t?t->observed.count:0),t&&t->observed.authenticated,t&&t->thirdValue,unsigned(t?t->unexpectedCount:0),t?t->firstUnexpected:0,t&&t->postExitFull131,t&&t->sealedStandardFallback,contrast_contract_digest,unsigned(t?t->budgetBase:56),unsigned(t?t->budgetReuse:0),unsigned(t?t->budgetRequired:56));
  if(k<0||size_t(k)>=n){std::snprintf(out,n,"error=contrast_details_truncated");return false;}return ok;
 }
 bool contrast_two_fields(const cJSON* object,const char* a,const char* b){
@@ -562,7 +563,7 @@ bool Hal::gaugeContrastPrepare(const char* arm,char* out,size_t n){
 
  std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
  if(!contrast_storage_locked())return contrast_report(out,n,false);
- auto& t=*contrast_rt;const auto status=contrast_load_locked(true);t.preparedThisBoot=false;
+ auto& t=*contrast_rt;const auto status=contrast_load_locked(true);t.preparedThisBoot=false;t.prepareSource="none";t.prepareFreshDm=false;
  if(!arm||(std::strcmp(arm,"C")&&std::strcmp(arm,"B"))){t.reason="prepare_arm_C_or_B_required";return contrast_report(out,n,false);}
  const auto requestedArm=!std::strcmp(arm,"C")?contrast_model::Arm::C:contrast_model::Arm::B;
  if((status!=contrast_journal::Status::Missing&&status!=contrast_journal::Status::Ready)||
@@ -573,6 +574,42 @@ bool Hal::gaugeContrastPrepare(const char* arm,char* out,size_t n){
  if(!contrast_space_locked()||!factory_runtime()){t.reason="prepare_headroom_or_runtime";return contrast_report(out,n,false);}
  {std::lock_guard<std::mutex> battery(battery_mutex);native_recovery::Evidence e{};const auto mac=getFactoryMac();
   if(!factory_physical(3)||!factory_identity()||!native_evidence_locked(e)||!native_recovery::exact(e,mac.data())){t.reason="prepare_exact_factory3000_failed_evidence";return contrast_report(out,n,false);}}
+ // Existing GCT1 is the immutable authenticated recovery source, not a
+ // current DM observation. This admission never invokes the old FA receipt
+ // writer; apply must still authenticate every live field before CFG/write.
+ if(status==contrast_journal::Status::Ready){
+  if(!contrast_maintenance_original_cached_locked()||t.unexpectedCount||t.invalidOffset){t.reason="prepare_existing_original_not_clean";return contrast_report(out,n,false);}
+  const auto& original=t.journal.loaded.records[size_t(t.journal.loaded.selected)];
+  if(!contrast_journal::shape(original)||original.snapshot.generation==UINT32_MAX||original.snapshot.epoch==UINT64_MAX){t.reason="prepare_existing_source_or_counters_invalid";return contrast_report(out,n,false);}
+  if(factory_workspace&&factory_workspace->attempted){
+   if(!factory_workspace->revalidation||!factory_workspace->complete||!factory_workspace->live||factory_workspace->record.count!=131||factory_workspace->record.sourceCrc!=contrast_model::canonicalSourceCrc){t.reason="prepare_existing_prior_FA_failure_not_waived";return contrast_report(out,n,false);}
+   for(size_t i=0;i<131;++i)for(unsigned j=0;j<original.snapshot.fields[i].width;++j)
+    if(factory_workspace->raw[67+i*7+j]!=original.snapshot.fields[i].original[j]){t.reason="prepare_existing_prior_FA_source_mismatch";return contrast_report(out,n,false);}
+  }
+  ContrastStorageLease lease;if(!lease.held){t.reason="prepare_existing_OTA_lease";return contrast_report(out,n,false);}
+  std::lock_guard<std::mutex> battery(battery_mutex);
+  native_recovery::Evidence historical{};const auto mac=getFactoryMac();
+  if(!contrast_rt_physical(false)||!factory_physical(3)||!factory_identity()||!native_evidence_locked(historical)||!native_recovery::exact(historical,mac.data())||!contrast_rt_known_access()||!contrast_space_locked()||!contrast_rt_images_current())return contrast_report(out,n,false);
+  t.record=original; // Source bytes come only from the authenticated loaded GCT.
+  if(t.record.arm!=requestedArm){
+   t.record.arm=requestedArm;
+   for(size_t i=0;i<131;++i){auto& field=t.record.snapshot.fields[i];
+    for(unsigned j=0;j<4;++j)field.target[j]=field.original[j];
+    if(contrast_rt_owned(field.address)){const uint16_t value=field.address==0x929b?(requestedArm==contrast_model::Arm::C?0x112a:0x102a):65;field.target[0]=uint8_t(value>>8);field.target[1]=uint8_t(value);}
+   }
+   ++t.record.snapshot.generation;++t.record.snapshot.epoch;
+   if(!contrast_journal::shape(t.record)){t.reason="prepare_existing_arm_image_invalid";return contrast_report(out,n,false);}
+   contrast_status=contrast_journal::saveNvs(t.record,{true,true,true},t.journal);
+   if(contrast_status!=contrast_journal::Status::Ready){contrast_update_protection_locked();t.reason="prepare_existing_arm_commit_failed";return contrast_report(out,n,false);}
+  }
+  const auto& saved=t.journal.loaded.records[size_t(t.journal.loaded.selected)];
+  if(!contrast_journal::sameRecoveryImage(saved,t.record)||saved.snapshot.phase!=scale_recovery::Phase::Original){t.reason="prepare_existing_source_readback_mismatch";return contrast_report(out,n,false);}
+  t.restoreAttempted=false;t.bootRestoreAttempted=false;t.applyAttempted=false;t.preKeySpaceRejected=false;t.keysStarted=false;
+  t.verifiedGeneration=saved.snapshot.generation;t.verifiedEpoch=saved.snapshot.epoch;t.preparedUs=esp_timer_get_time();t.preparedThisBoot=true;
+  t.prepareSource="durable_original131";t.prepareFreshDm=false;
+  t.reason="prepared_existing_Original_NOT_fresh_DM_apply_requires_live_authenticated131";
+  contrast_update_protection_locked();return contrast_report(out,n,true);
+ }
  const auto now=esp_timer_get_time();
  const bool selfRestored=contrast_self_restored_source_locked(now);
  if(factory_workspace&&factory_workspace->attempted){
@@ -609,6 +646,7 @@ bool Hal::gaugeContrastPrepare(const char* arm,char* out,size_t n){
  const auto& saved=t.journal.loaded.records[size_t(t.journal.loaded.selected)];
  if(!contrast_journal::sameRecoveryImage(saved,t.record)){t.reason="prepare_original_readback_image_mismatch";return contrast_report(out,n,false);}
  t.verifiedGeneration=saved.snapshot.generation;t.verifiedEpoch=saved.snapshot.epoch;t.preparedUs=esp_timer_get_time();t.preparedThisBoot=true;
+ t.prepareSource="currentboot_authenticated_FA_full131";t.prepareFreshDm=true;
  t.reason=selfRestored?"prepared_self_restore_cached_source131_plus_fresh_sealed_standard_NOT_fresh_sealed_DM":"prepared_fresh131_Original_durable_NO_parameter_writes_UNTRUSTED3000";contrast_update_protection_locked();return contrast_report(out,n,true);
 }
 bool Hal::gaugeContrastImages(const char* proof,char* out,size_t n){

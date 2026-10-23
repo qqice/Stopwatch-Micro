@@ -133,7 +133,7 @@ def load_proof(path):
     require(isinstance(pairs, list) and len(pairs) == 2 and
             all(isinstance(p, dict) and set(p) == {'image', 'signature'} for p in pairs), 'new GCT1 wire pair required')
     key = cap.public_key(ROOT / 'main/ota/ota_public_key.h')
-    require({p['image']['version'] for p in pairs} == cap.VERSIONS, 'exact distinct r13/r14 pair required')
+    require({p['image']['version'] for p in pairs} == cap.VERSIONS, 'exact distinct reviewed GCT1 firmware pair required')
     for pair in pairs:
         m = pair['image']
         endorsement = {k: m[k] for k in ('version', 'size', 'sha256')}
@@ -655,6 +655,18 @@ def status_check(d, arm=None, phase=None):
     return d
 
 
+def prepare_provenance(detail):
+    # prepared_fresh is ONLY the120s admission lease, not DM read freshness.
+    modes = {'durable_original131': '0', 'currentboot_authenticated_FA_full131': '1'}
+    source, fresh = detail.get('prepare_source'), detail.get('prepare_fresh_dm131')
+    require(source in modes and fresh == modes[source] and detail.get('prepared_fresh') == '1' and
+            detail.get('source_crc') == SOURCE and detail.get('phase') == '0' and detail.get('protection') == '0' and
+            detail.get('images_capability_verified') == '1', 'unknown/inconsistent prepare source/fresh-DM provenance')
+    return dict(prepare_source=source, prepare_fresh_dm131=fresh,
+        durable_source_plus_fresh_standard_NOT_freshDM=source == 'durable_original131',
+        apply_preCFG_full131_required=True)
+
+
 def legacy_check(d):
     raw = bytearray()
     for key, size in (('reload_v1', 28), ('fcc_boot_v1', 48), ('fcc_fix_v1', 48)):
@@ -686,6 +698,7 @@ class Experiment:
         self.apply_sent = self.apply_confirmed = self.settings_touched = False
         self.report = dict(kind='GCT1_contrast_experiment', stage=args.stage, arm=args.arm, source_crc=SOURCE,
                            complete=False, original_verified=False, target131_verified=False, V1_ON_verified=False,
+                           preapply_standard_safe=False,
                            settings_restored=False, unknown_ack=False, legacy_crc='430c5ed4', errors=[], samples=[],
                            started_unix=clock.time(), SOC_repair=False, physical_calibration=False,
                            host_deadline_seconds=660, firmware_deadline_seconds=720, no_renewal=True)
@@ -919,12 +932,13 @@ class Experiment:
         self.images_capability()
         prepared = self.call(f'gauge-contrast prepare {self.args.arm} CONFIRM', timeout=180)
         status_check(prepared, self.args.arm, 0)
-        require(prepared.get('prepared_fresh') == '1', 'no fresh Original131')
+        provenance = prepare_provenance(prepared)
         self.report['prepared'] = prepared
+        self.report.update(provenance)
         save(self.out / 'prepare-receipt.json', dict(prepared=prepared, expected_boot=self.args.expected_boot,
             source_crc=SOURCE, immutable_source_sha256=SOURCE_SHA,
             terminal=self.call.rows[-1] if getattr(self.call, 'rows', None) else None,
-            full131_prepared_ACK_not_fresh_sealed_DM=True, apply_not_sent=True))
+            full131_prepared_ACK_not_fresh_sealed_DM=True, apply_not_sent=True, provenance=provenance))
         require(legacy_check(self.call('gauge-native-recovery evidence')) == self.legacy, 'Failed changed during prepare')
 
     def rebase_quiet_once(self):
@@ -1031,10 +1045,12 @@ class Experiment:
                     require(g.get('design_mah') == g.get('fcc_mah') == '3000' and sealed(g), 'Original3000 final standard')
                     self.report['original_verified'] = True
                 else:
-                    # Setup changed no IC parameters. A verified prepare is a
-                    # durable full Original source receipt, even if setup300
-                    # subsequently expires before any apply frame can be sent.
+                    # Setup changed no IC parameters. Do not turn a durable
+                    # prepare source into a current full-DM/restored131 claim.
+                    # RAM cleanup has a separate, fully validated standard-safe
+                    # eligibility below; successful trial full131 gates differ.
                     self.report['original_verified'] = False
+                    self.report['preapply_standard_safe'] = False
                     if self.clock.monotonic() < self.setup_deadline:
                         current = self.state()
                         if current.get('phase') == '255' and self.no_key_request() and not self.call.uncertain:
@@ -1053,6 +1069,7 @@ class Experiment:
                             status_check(current, self.args.arm, 0)
                             prepared = self.report.get('prepared')
                             if prepared and not self.call.uncertain:
+                                provenance = prepare_provenance(prepared)
                                 require(all(current.get(k) == prepared.get(k) for k in
                                     ('phase', 'generation', 'epoch', 'arm', 'source_crc')) and current.get('protection') == '0' and
                                     self.call('boot').get('count') == str(self.args.expected_boot), 'prepared Original cleanup proof changed')
@@ -1061,15 +1078,17 @@ class Experiment:
                                     gauge.get('design_mah') == gauge.get('fcc_mah') == '3000' and
                                     gauge.get('unit_factor') == gauge.get('unit_verified') == '0' and sealed(gauge),
                                     'prepared Original cleanup standard/security mismatch')
-                                self.report['original_verified'] = True
+                                self.report['preapply_standard_safe'] = True
                                 save(self.out / 'preapply-Original-cleanup.json', dict(prepared=prepared, current=current,
-                                    gauge=gauge, V1_ON_verified=True, apply_not_sent=True, no_restore_keys=True))
+                                    gauge=gauge, V1_ON_verified=True, apply_not_sent=True, no_restore_keys=True,
+                                    fresh_standard_only=True, full131_current_read_not_claimed=True, provenance=provenance))
                 require(legacy_check(self.call('gauge-native-recovery evidence')) == self.legacy, 'historical Failed changed')
                 save(self.out / 'historical-Failed-after.json', self.legacy)
             except BaseException as exc:
                 self.report['errors'].append('recovery: ' + repr(exc))
             # RAM settings only restore after proven Original and no UART uncertainty.
-            if self.settings_touched and (self.report['original_verified'] or self.report.get('prekey_missing_standard_verified')) and not self.call.uncertain:
+            if self.settings_touched and (self.report['original_verified'] or self.report.get('prekey_missing_standard_verified') or
+                    self.report['preapply_standard_safe']) and not self.call.uncertain:
                 try:
                     self.call.setup_cleanup = not self.apply_sent
                     self.call('settings restore')

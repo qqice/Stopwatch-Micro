@@ -15,23 +15,23 @@ class CapabilityTests(unittest.TestCase):
         m['signature']=base64.b64encode(self.key.sign(canonical_message(m['size'],m['sha256'],version,layout=m['layout']),ec.ECDSA(hashes.SHA256()))).decode()
         return image,m,c.endorse(m,image,self.key,self.pub,audited=True)
     def test_positive_pair(self):
-        a=self.pair('0.13.95-r13-mosaico-ota');b=self.pair('0.13.95-r14-mosaico-ota')
+        a=self.pair('0.13.95-r15-mosaico-ota');b=self.pair('0.13.95-r16-mosaico-ota')
         wire=c.wire_pair([a[1],b[1]],[a[2],b[2]],self.pub)
         self.assertLessEqual(len(base64.b64encode(json.dumps(wire,separators=(',',':')).encode())),1400)
         self.assertEqual(c.DIGEST,hashlib.sha256(c.CONTRACT.encode()).hexdigest())
     def test_tamper_wrong_contract_or_key(self):
-        image,m,cap=self.pair('0.13.95-r13-mosaico-ota')
-        for patch in ({'contract':'0'*64},{'size':True},{'version':'0.13.95-r14-mosaico-ota'},
+        image,m,cap=self.pair('0.13.95-r15-mosaico-ota')
+        for patch in ({'contract':'0'*64},{'size':True},{'version':'0.13.95-r16-mosaico-ota'},
                       {'sha256':'0'*64},{'signature':'AA=='},{'extra':1}):
             bad=copy.deepcopy(cap);bad.update(patch)
             with self.assertRaises((ValueError,InvalidSignature)):c.verify_endorsement(m,bad,self.pub)
         with self.assertRaises(InvalidSignature):c.verify_endorsement(m,cap,ec.generate_private_key(ec.SECP256R1()).public_key())
     def test_no_audit_image_mismatch_or_duplicate(self):
-        image,m,cap=self.pair('0.13.95-r13-mosaico-ota')
+        image,m,cap=self.pair('0.13.95-r15-mosaico-ota')
         with self.assertRaises(ValueError):c.endorse(m,image,self.key,self.pub)
         with self.assertRaises(ValueError):c.endorse(m,image+b'x',self.key,self.pub,audited=True)
         with self.assertRaises(ValueError):c.wire_pair([m,m],[cap,cap],self.pub)
-        for version in ('0.13.95-r11-mosaico-ota','0.13.95-r12-mosaico-ota','0.13.95-r15-mosaico-ota'):
+        for version in ('0.13.95-r11-mosaico-ota','0.13.95-r12-mosaico-ota','0.13.95-r13-mosaico-ota','0.13.95-r14-mosaico-ota','0.13.95-r17-mosaico-ota'):
             wrong=copy.deepcopy(m);wrong['version']=version
             with self.assertRaises(ValueError):c.canonical(wrong)
     def test_sdk_free_and_contract_wire_alignment(self):
@@ -43,6 +43,6 @@ class CapabilityTests(unittest.TestCase):
             self.assertIn(c.DIGEST,text)
             self.assertIn('MOSAICO-GAUGE-CONTRAST-CAP-v1',text)
         old=(root/'tools/mosaico_factory_scale_capability.py').read_text(encoding='utf8')
-        self.assertNotIn('0.13.95-r13-mosaico-ota',old)
+        self.assertNotIn('0.13.95-r15-mosaico-ota',old)
 
 if __name__=='__main__':unittest.main()

@@ -14,7 +14,7 @@ CONTRACT=('GCT1|Factory3000Contrast|source=70a767be|C=91336fc0|B=675dd812|owned3
           'C112a_DCFCC65|B102a_DCFCC65|fullsource131|never_publish_physical_units|'
           'boot_restore_after_SDK_VALID|deadline_seconds=720|host_deadline_seconds=660|no_Failed_waiver')
 DIGEST=hashlib.sha256(CONTRACT.encode('ascii')).hexdigest()
-VERSIONS={'0.13.95-r13-mosaico-ota','0.13.95-r14-mosaico-ota'}
+VERSIONS={'0.13.95-r15-mosaico-ota','0.13.95-r16-mosaico-ota'}
 
 def canonical(manifest):
     m=validate_manifest(manifest)

@@ -844,7 +844,8 @@ class HostTests(unittest.TestCase):
                     detail = dict(status, success='1')
                 elif command == 'gauge-contrast prepare C CONFIRM':
                     status.update(phase='0', generation='1', epoch='1', prepared_fresh='1',
-                                  images_capability_verified='1', success='1')
+                                  images_capability_verified='1', success='1',
+                                  prepare_source='currentboot_authenticated_FA_full131', prepare_fresh_dm131='1')
                     detail = dict(status)
                 elif command == 'boot':
                     detail = {'count': '10'}
@@ -1085,7 +1086,8 @@ class HostTests(unittest.TestCase):
         self.assertFalse(report['complete'])
         self.assertFalse(report['unknown_ack'])
         self.assertTrue(report['prepared']['prepared_fresh'] == '1')
-        self.assertTrue(report['original_verified'])
+        self.assertFalse(report['original_verified'])
+        self.assertTrue(report['preapply_standard_safe'])
         self.assertTrue(report['settings_restored'])
         self.assertTrue((obj.out / 'preapply-Original-cleanup.json').is_file())
         self.assertEqual(events.count('gauge-contrast prepare C CONFIRM'), 1)
@@ -1149,10 +1151,51 @@ class HostTests(unittest.TestCase):
                     report = obj.run()
                 self.assertTrue(report['prepared'])
                 self.assertFalse(report['original_verified'])
+                self.assertFalse(report['preapply_standard_safe'])
                 self.assertFalse(report['settings_restored'])
                 self.assertFalse(report['complete'])
                 self.assertNotIn('settings restore', events)
                 self.assertFalse((obj.out / 'preapply-Original-cleanup.json').exists())
+
+    def test_prepare_provenance_both_modes_and_inconsistent_or_missing_claims(self):
+        base = dict(prepared_fresh='1', phase='0', source_crc=e.SOURCE, protection='0', images_capability_verified='1')
+        for mode, fresh in (('durable_original131', '0'), ('currentboot_authenticated_FA_full131', '1')):
+            result = e.prepare_provenance(base | dict(prepare_source=mode, prepare_fresh_dm131=fresh))
+            self.assertEqual(result['prepare_fresh_dm131'], fresh)
+            self.assertEqual(result['durable_source_plus_fresh_standard_NOT_freshDM'], mode == 'durable_original131')
+            self.assertTrue(result['apply_preCFG_full131_required'])
+        good = base | dict(prepare_source='durable_original131', prepare_fresh_dm131='0')
+        for override in (dict(prepare_source='unknown'), dict(prepare_fresh_dm131='1'), dict(prepare_fresh_dm131=0),
+                         dict(prepared_fresh='0'), dict(protection='1'), dict(phase='2'), dict(images_capability_verified='0')):
+            with self.assertRaises(ValueError):
+                e.prepare_provenance(good | override)
+        with self.assertRaises(ValueError):
+            e.prepare_provenance(base)
+        with self.assertRaises(ValueError):
+            e.prepare_provenance(base | dict(prepare_source='currentboot_authenticated_FA_full131', prepare_fresh_dm131='0'))
+
+    def test_real_Console_both_prepare_modes_record_distinct_cleanup_provenance(self):
+        command = 'gauge-native-recovery evidence'
+        for mode, fresh in (('durable_original131', '0'), ('currentboot_authenticated_FA_full131', '1')):
+            with self.subTest(mode=mode):
+                obj, _, _, events, _, _ = self.images_harness(['pass'], guard_overrides={
+                    'gauge-contrast prepare C CONFIRM': dict(prepare_source=mode, prepare_fresh_dm131=fresh)},
+                    readonly_outcomes={command: ['pass', 'busy', 'busy', 'busy', 'pass']})
+                with patch.object(e, 'legacy_check', side_effect=lambda d: d):
+                    report = obj.run()
+                self.assertFalse(report['complete'])
+                self.assertFalse(report['original_verified'])
+                self.assertTrue(report['preapply_standard_safe'])
+                self.assertTrue(report['settings_restored'])
+                self.assertEqual(report['prepare_source'], mode)
+                self.assertEqual(report['prepare_fresh_dm131'], fresh)
+                receipt = json.loads((obj.out / 'prepare-receipt.json').read_bytes())
+                cleanup = json.loads((obj.out / 'preapply-Original-cleanup.json').read_bytes())
+                self.assertEqual(receipt['provenance']['prepare_source'], mode)
+                self.assertEqual(cleanup['provenance']['prepare_fresh_dm131'], fresh)
+                self.assertTrue(cleanup['full131_current_read_not_claimed'])
+                self.assertEqual(events.count('gauge-contrast prepare C CONFIRM'), 1)
+                self.assertFalse(any(event.startswith(('gauge-contrast apply ', 'gauge-contrast restore ')) for event in events))
 
 
 if __name__ == '__main__':

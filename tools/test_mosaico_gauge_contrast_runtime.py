@@ -16,7 +16,8 @@ namespace factory_scale_journal=mosaico_factory_scale_journal;
 namespace factory=mosaico_factory_audit;
 namespace native_recovery {struct Evidence{};bool exact(const Evidence&,const uint8_t*){return true;}}
 namespace {
-bool native_evidence_locked(native_recovery::Evidence&){return true;}
+bool nativeHistoryValid=true,knownAccessValid=true;
+bool native_evidence_locked(native_recovery::Evidence&){return nativeHistoryValid;}
 void native_recovery_revoke_locked(){}
 scale_journal::Status scale_load_locked(bool){return scale_journal::Status::Missing;}
 struct FactoryWorkspace {bool attempted=false,revalidation=false,complete=false,live=false;factory::Journal record{};factory::BackupBytes raw{};};
@@ -24,7 +25,7 @@ FactoryWorkspace* factory_workspace=nullptr;
 static mosaico_factory_scale_budget::Usage reuseUsageFixture{};
 const esp_partition_t* esp_ota_get_running_partition();
 bool factory_runtime();bool factory_identity(){return gauge_identity();}
-bool factory_physical(unsigned,factory::Standard* =nullptr){return factory_runtime();}
+bool factory_physical(unsigned sec,factory::Standard* =nullptr){uint16_t op=0,dc=0,fcc=0;return factory_runtime()&&gauge_word(0x3a,op)&&gauge_word(0x3c,dc)&&gauge_word(0x12,fcc)&&((op>>1)&3)==sec&&mosaico_gauge::configExitAccepted(op)&&dc==3000&&fcc==3000;}
 bool factory_read(uint16_t,uint8_t (&)[36]);
 }
 '''
@@ -37,7 +38,7 @@ static void reset(bool target=false){reuseUsageFixture={};gauge=true;runtimeStor
  auto r=baseline();factory_scale_journal::saveInto(memoryStore,r,{true,true,true},runtimeStorage.journal);
  if(target){++r.snapshot.generation;++r.snapshot.epoch;r.snapshot.phase=scale_recovery::Phase::Pending;factory_scale_journal::saveInto(memoryStore,r,{true,true,true},runtimeStorage.journal);++r.snapshot.generation;++r.snapshot.epoch;r.snapshot.phase=scale_recovery::Phase::Applied;factory_scale_journal::saveInto(memoryStore,r,{true,true,true},runtimeStorage.journal);}
  for(size_t i=0;i<131;++i)for(unsigned j=0;j<4;++j)gaugeRaw[i][j]=target?fixture[i].target[j]:fixture[i].original[j];
- operation=0xa6;unknownOp=false;defaultKeyCalls=0;exitAutoSeal=true;commitAckLossOnce=false;availableEntries=95;statsError=false;imageCryptoValid=true;sdkValid=true;invalidSdkSlot=-1;partitionReads[0]=partitionReads[1]=0;uiLocked=true;wifiRunning=bleAdvertising=bleConnected=otaBusy=otaHealth=false;powerPhase=2;nowUs=1000000;failPacketNoCommit=false;failReadAddress=0;readCalls=0;writes=enters=exits=seals=offsetWrites=unsafeSeals=0;freshExists=false;freshWrites=0;intentBeforeKeys=true;durableReject=false;dropPrekey=false;rejectPhaseOnce=-1;factory_workspace=nullptr;leaseDepth=0;leaseViolation=false;revalidationUnderLease=false;revalidationCalls=0;leaseAllowed=true;
+ operation=0xa6;unknownOp=false;defaultKeyCalls=0;exitAutoSeal=true;commitAckLossOnce=false;availableEntries=95;statsError=false;imageCryptoValid=true;sdkValid=true;nativeHistoryValid=knownAccessValid=true;nvsAvailableOverride=-1;cfgBeforeAuthenticated131=false;invalidSdkSlot=-1;partitionReads[0]=partitionReads[1]=0;uiLocked=true;wifiRunning=bleAdvertising=bleConnected=otaBusy=otaHealth=false;powerPhase=2;nowUs=1000000;failPacketNoCommit=false;failReadAddress=0;readCalls=0;writes=enters=exits=seals=offsetWrites=unsafeSeals=0;freshExists=false;freshWrites=0;intentBeforeKeys=true;durableReject=false;dropPrekey=false;rejectPhaseOnce=-1;factory_workspace=nullptr;leaseDepth=0;leaseViolation=false;revalidationUnderLease=false;revalidationCalls=0;leaseAllowed=true;
  for(unsigned i=0;i<131;++i){forwardPackets[i]=reversePackets[i]=0;}
  factory_scale_load_locked(true);runtimeStorage.verifiedGeneration=r.snapshot.generation;runtimeStorage.verifiedEpoch=r.snapshot.epoch;runtimeStorage.preparedThisBoot=!target;runtimeStorage.preparedUs=nowUs;runtimeStorage.imagesSet=true;
  for(unsigned i=0;i<2;++i){runtimeStorage.images[i].size=512;for(unsigned j=0;j<32;++j)runtimeStorage.images[i].hash[j]=0x42;std::snprintf(runtimeStorage.images[i].version,sizeof(runtimeStorage.images[i].version),i?"0.13.95-r12-mosaico-ota":"0.13.95-r11-mosaico-ota");}}
@@ -47,7 +48,7 @@ static mosaico_scale_trial::Result restore(){if(!factory_scale_begin_locked())re
 static ContrastRuntime contrastStorage;
 struct ContrastMemory {mosaico_gauge_contrast_journal::Blob blobs[2]{};bool present[2]{};unsigned writes=0,reads=0;
  mosaico_gauge_contrast_journal::ReadResult read(unsigned i,mosaico_gauge_contrast_journal::Blob& b){++reads;if(!present[i])return mosaico_gauge_contrast_journal::ReadResult::Missing;b=blobs[i];return mosaico_gauge_contrast_journal::ReadResult::Present;}
- bool write(unsigned i,const mosaico_gauge_contrast_journal::Blob& b){++writes;blobs[i]=b;present[i]=true;return true;}bool available(size_t& n){n=95;return true;}bool commit(){return !durableReject;}} contrastMemory;
+ bool write(unsigned i,const mosaico_gauge_contrast_journal::Blob& b){++writes;blobs[i]=b;present[i]=true;return true;}bool available(size_t& n){n=nvsAvailableOverride>=0?size_t(nvsAvailableOverride):95;return true;}bool commit(){return !durableReject;}} contrastMemory;
 namespace mosaico_gauge_contrast_journal {
 Status loadNvs(const std::array<uint8_t,6>& mac,Workspace& w){return loadInto(contrastMemory,mac,w);}
 Status saveNvs(const Record& r,const Admission& a,Workspace& w){return saveInto(contrastMemory,r,a,w);}}
@@ -55,7 +56,7 @@ static void resetContrast(bool b=false){reset();contrastStorage=ContrastRuntime{
  auto& r=contrastStorage.record;contrast_model::Record compact{};compact.mac=GetHAL().getFactoryMac();compact.source=contrast_model::sourceFixture;compact.generation=1;compact.epoch=1;compact.arm=b?contrast_model::Arm::B:contrast_model::Arm::C;contrast_runtime_store::expand(compact,r);
  contrast_journal::saveNvs(r,{true,true,true},contrastStorage.journal);contrastStorage.loaded=false;contrast_load_locked(true);
  contrastStorage.preparedThisBoot=true;contrastStorage.preparedUs=nowUs;contrastStorage.imagesSet=true;contrastStorage.verifiedGeneration=1;contrastStorage.verifiedEpoch=1;
- for(unsigned i=0;i<2;++i){contrastStorage.images[i]=runtimeStorage.images[i];std::snprintf(contrastStorage.images[i].version,sizeof(contrastStorage.images[i].version),i?"0.13.95-r14-mosaico-ota":"0.13.95-r13-mosaico-ota");}
+ for(unsigned i=0;i<2;++i){contrastStorage.images[i]=runtimeStorage.images[i];std::snprintf(contrastStorage.images[i].version,sizeof(contrastStorage.images[i].version),i?"0.13.95-r16-mosaico-ota":"0.13.95-r15-mosaico-ota");}
 }
 static auto contrastApply(){contrast_begin_locked();ContrastBackend b;auto result=mosaico_gauge_contrast_trial::apply(b);contrastStorage.operation=false;contrast_update_protection_locked();return result;}
 static auto contrastRestore(){contrast_begin_locked();ContrastBackend b;auto result=mosaico_gauge_contrast_trial::restore(b);contrastStorage.operation=false;contrast_update_protection_locked();return result;}
@@ -67,7 +68,7 @@ extern "C" int run_case(int id){resetContrast(id==2);
  if(id==5){nowUs+=120000001;contrastApply();return writes||defaultKeyCalls?8:0;}
  if(id==6){gaugeRaw[0][0]^=1;contrastApply();return writes?9:0;}
  if(id==7){if(contrastApply()!=mosaico_gauge_contrast_trial::Result::Applied)return 10;nowUs+=720000000;contrast_poll_locked();return writes!=6||contrast_context_locked().factor?11:0;}
- if(id==8){if(contrast_rt_version("0.13.95-r12-mosaico-ota")||!contrast_rt_version("0.13.95-r13-mosaico-ota"))return 12;return 0;}
+ if(id==8){if(contrast_rt_version("0.13.95-r12-mosaico-ota")||!contrast_rt_version("0.13.95-r15-mosaico-ota"))return 12;return 0;}
  if(id==9){contrastMemory.blobs[0][0]^=1;contrast_load_locked(true);return !contrast_protected()||contrast_audit_allowed_locked()?13:0;}
  if(id==10){contrastApply();if(contrastRestore()!=mosaico_gauge_contrast_trial::Result::Restored)return 14;contrastStorage.preparedThisBoot=true;contrastApply();return writes!=6?15:0;}
  if(id==11){contrastStorage.imagesSet=true;char out[1536];GetHAL().gaugeContrastImages("bad",out,sizeof(out));return contrastStorage.imagesSet?16:0;}
@@ -80,12 +81,41 @@ extern "C" int run_case(int id){resetContrast(id==2);
   if(id==15)contrastStorage.observed.raw[0][0]^=1;
   if(id==16)imageCryptoValid=false;
   bool ok=GetHAL().gaugeContrastPrepare("B",out,sizeof(out));
-  if(id!=12)return ok?20:0;
+  if(id==16)return ok?20:0;
+  if(id==13||id==15)return !ok||contrastStorage.prepareFreshDm?20:0;
   if(!ok||contrastStorage.record.arm!=contrast_model::Arm::B||revalidationCalls!=1)return 21;
   if(contrastApply()!=mosaico_gauge_contrast_trial::Result::Applied||writes!=8)return 22;
   return contrastRestore()!=mosaico_gauge_contrast_trial::Result::Restored||writes!=10?23:0;
  }
  if(id==17){contrastApply();nowUs+=720000000;wifiRunning=true;unsigned before=defaultKeyCalls;contrast_poll_locked();return defaultKeyCalls!=before||contrastStorage.active||!contrast_protected()?24:0;}
+
+ // Reboot with authenticated Original is durable-source admission, not fresh DM.
+ if(id>=41&&id<=51){char out[2048];contrastStorage.preparedThisBoot=false;contrastStorage.revalidatedUs=0;contrastStorage.observed={};factory_workspace=nullptr;nvsAvailableOverride=45;
+  const unsigned beforeWrites=contrastMemory.writes,beforeReads=readCalls;
+  if(id==42){contrastMemory={};contrastStorage=ContrastRuntime{};contrast_load_locked(true);nvsAvailableOverride=56;}
+  if(id==43){contrastMemory={};contrastStorage=ContrastRuntime{};contrast_load_locked(true);}
+  if(id==44)contrastMemory.blobs[0][0]^=1;
+  if(id==45)contrastStorage.keyFailed=true;
+  if(id==46)gaugeRaw[fieldIndex(0x929d)][1]^=1;
+  if(id==47)contrastStorage.images[1].hash[0]^=1;
+  if(id==48)nativeHistoryValid=false;
+  if(id==49)knownAccessValid=false;
+  if(id==50){GetHAL().gaugeFactoryAuditRevalidate(out,sizeof(out));static FactoryWorkspace failed;failed={};failed.attempted=true;factory_workspace=&failed;}
+  if(id==51){GetHAL().gaugeFactoryAuditRevalidate(out,sizeof(out));static FactoryWorkspace mismatch;mismatch={};mismatch.attempted=mismatch.revalidation=mismatch.complete=mismatch.live=true;mismatch.record.count=131;mismatch.record.sourceCrc=contrast_model::canonicalSourceCrc;factory_workspace=&mismatch;}
+  const unsigned priorAudits=revalidationCalls;bool ok=GetHAL().gaugeContrastPrepare("C",out,sizeof(out));
+  if(id==41){if(!ok||revalidationCalls!=priorAudits||contrastMemory.writes!=beforeWrites||readCalls!=beforeReads||defaultKeyCalls||contrastStorage.prepareFreshDm||std::strcmp(contrastStorage.prepareSource,"durable_original131")||contrastStorage.observed.count||!contrast_prepared_fresh())return 38;return 0;}
+  if(id==42){return !ok||revalidationCalls!=1||!contrastStorage.prepareFreshDm||std::strcmp(contrastStorage.prepareSource,"currentboot_authenticated_FA_full131")||contrastStorage.record.snapshot.count!=131?39:0;}
+  return ok||defaultKeyCalls||writes||enters?40:0;
+ }
+ if(id>=52&&id<=54){char out[2048];contrastStorage.preparedThisBoot=false;nvsAvailableOverride=45;
+  if(!GetHAL().gaugeContrastPrepare("C",out,sizeof(out)))return 41;
+  if(id==52)gaugeRaw[fieldIndex(0x9228)][0]^=1; // unowned threshold drift
+  if(id==53)gaugeRaw[fieldIndex(0x9184)][0]^=1; // safety calibration drift
+  if(id==54){if(contrastApply()!=mosaico_gauge_contrast_trial::Result::Applied||cfgBeforeAuthenticated131||contrastStorage.observed.count!=131||!contrastStorage.observed.authenticated)return 42;return 0;}
+  const auto result=contrastApply();
+  if(result!=mosaico_gauge_contrast_trial::Result::FailedClosed||writes||enters||cfgBeforeAuthenticated131||!contrast_protected()||!contrastStorage.protectionSealed||!seals||contrastStorage.journal.loaded.records[size_t(contrastStorage.journal.loaded.selected)].snapshot.phase!=(id==53?scale_recovery::Phase::Pending:scale_recovery::Phase::Restoring))return 43;
+  return 0;
+ }
  // Cached maintenance getter is exercised directly, never a mocked provider.
  if(id==18){contrastMemory={};contrastStorage=ContrastRuntime{};contrast_load_locked(true);unsigned reads=readCalls,nr=contrastMemory.reads,nw=contrastMemory.writes;
   bool safe=contrast_maintenance_cached_safe_locked();return !safe||readCalls!=reads||contrastMemory.reads!=nr||contrastMemory.writes!=nw||defaultKeyCalls?25:0;}
@@ -98,7 +128,7 @@ extern "C" int run_case(int id){resetContrast(id==2);
  // The crypto mock accepts only the exact independent canonical byte string.
  // These test canonical binding, not cryptographic implementation authenticity.
  if(id>=24&&id<=31){capMode=true;capReject=false;capVerified=0;cJSON signature{};signature.valuestring=const_cast<char*>("cap");auto image=contrastStorage.images[0];
-  std::snprintf(expectedCanonical,sizeof(expectedCanonical),"MOSAICO-GAUGE-CONTRAST-CAP-v1\nda8c79bcf2a17f01a3294394d7ca9b527d1a623a45fa1bc04c730a988cd69bdb\n0.13.95-r13-mosaico-ota\n512\n4242424242424242424242424242424242424242424242424242424242424242\n");
+  std::snprintf(expectedCanonical,sizeof(expectedCanonical),"MOSAICO-GAUGE-CONTRAST-CAP-v1\nda8c79bcf2a17f01a3294394d7ca9b527d1a623a45fa1bc04c730a988cd69bdb\n0.13.95-r15-mosaico-ota\n512\n4242424242424242424242424242424242424242424242424242424242424242\n");
   if(id==25)image.version[0]='1';if(id==26)++image.size;if(id==27)image.hash[0]^=1;
   if(id==28)expectedCanonical[0]='X';if(id==29)expectedCanonical[40]^=1;if(id==30)capReject=true;if(id==31)signature.valuestring=nullptr;
   bool ok=contrast_capability(&signature,image);return id==24?(!ok||capVerified!=1?31:0):(ok?32:0);}
@@ -133,8 +163,8 @@ class ContrastRuntimeTests(unittest.TestCase):
   self.assertIn('never_publish_physical_units',text)
   self.assertNotIn('c.factor=2',text)
   self.assertIn('available_entries>=56',text)
-  self.assertIn('0.13.95-r13-mosaico-ota',text)
-  self.assertIn('0.13.95-r14-mosaico-ota',text)
+  self.assertIn('0.13.95-r15-mosaico-ota',text)
+  self.assertIn('0.13.95-r16-mosaico-ota',text)
  def test_actual_runtime_rv32(self):
   self.assertEqual(hashlib.sha256(PRIVATE.read_bytes()).hexdigest(),EXPECTED)
   data=json.loads(PRIVATE.read_bytes())['fields'];changes={0x9184:0x7f73b645,0x9188:0x940aa522,0x91de:10,0x91fb:400,0x9201:200,0x920e:300,0x9210:350,0x9217:20,0x9228:120,0x922a:150,0x922c:80,0x923c:0xec,0x9264:3000,0x926b:400,0x929d:130,0x929f:130,0x92ab:434}
@@ -160,26 +190,28 @@ namespace mosaico_factory_scale_journal {mosaico_factory_scale_budget::Usage reu
   mocks=mocks.replace('a.priorSecurity=3;a.unsealVerified=1;a.fullVerified=1;', 'a.magic=0x47414331U;a.version=1;a.deviceType=0x220;a.unitMah=1;for(unsigned i=0;i<6;++i)a.mac[i]=GetHAL().getFactoryMac()[i];a.priorSecurity=3;a.lastSecurity=3;a.baseDesign=3000;a.baseFcc=3000;a.operationBefore=0xa6;a.unsealAttempted=1;a.fullAttempted=1;a.unsealVerified=1;a.fullVerified=1;').replace('a.state=uint8_t(mosaico_gauge::AccessState::Restored);return 0;', 'a.state=uint8_t(mosaico_gauge::AccessState::Restored);mosaico_gauge::seal(a);return 0;')
   mocks=mocks.replace('int64_t esp_timer_get_time(){return 1000000;}','int64_t esp_timer_get_time(){return nowUs;}')
   mocks=mocks.replace('static unsigned leaseDepth=0,revalidationCalls=0;static bool leaseViolation=false,revalidationUnderLease=false;static bool uiLocked=true,wifiRunning=false,bleAdvertising=false,bleConnected=false,otaBusy=false,otaHealth=false;static int powerPhase=2;static bool sdkValid=true,intentBeforeKeys=true,durableReject=false,dropPrekey=false;static int64_t nowUs=1000000;static int rejectPhaseOnce=-1;','')
-  mocks='static int invalidSdkSlot=-1;static unsigned partitionReads[2]{};static bool leaseAllowed=true;static bool capMode=false,capReject=false;static unsigned capVerified=0;static char expectedCanonical[300]{};\nstatic unsigned leaseDepth=0,revalidationCalls=0;static bool leaseViolation=false,revalidationUnderLease=false;static bool uiLocked=true,wifiRunning=false,bleAdvertising=false,bleConnected=false,otaBusy=false,otaHealth=false;static int powerPhase=2;static bool sdkValid=true,intentBeforeKeys=true,durableReject=false,dropPrekey=false;static int64_t nowUs=1000000;static int rejectPhaseOnce=-1;\n'+mocks
+  mocks='static int nvsAvailableOverride=-1;static bool cfgBeforeAuthenticated131=false;static int invalidSdkSlot=-1;static unsigned partitionReads[2]{};static bool leaseAllowed=true;static bool capMode=false,capReject=false;static unsigned capVerified=0;static char expectedCanonical[300]{};\nstatic unsigned leaseDepth=0,revalidationCalls=0;static bool leaseViolation=false,revalidationUnderLease=false;static bool uiLocked=true,wifiRunning=false,bleAdvertising=false,bleConnected=false,otaBusy=false,otaHealth=false;static int powerPhase=2;static bool sdkValid=true,intentBeforeKeys=true,durableReject=false,dropPrekey=false;static int64_t nowUs=1000000;static int rejectPhaseOnce=-1;\n'+mocks
   mocks=mocks.replace('if(w!=AccessWord::Seal)++defaultKeyCalls;','if(w!=AccessWord::Seal){++defaultKeyCalls;intentBeforeKeys &= factory_scale_rt->journal.loaded.selected>=0&&factory_scale_rt->journal.loaded.records[size_t(factory_scale_rt->journal.loaded.selected)].snapshot.phase!=scale_recovery::Phase::Original;}')
   mocks=mocks.replace('*s={491,9999,availableEntries,756,3};','unsigned present=unsigned(memoryStore.present[0])+unsigned(memoryStore.present[1]);*s={491,9999,dropPrekey&&present==2?53:availableEntries-(present==2?37:19),756,3};')
   # availableEntries expresses fresh-store95; with Original available76, Pending58.
-  mocks=mocks.replace('bool Hal::gaugeThresholdAudit(bool,char*,size_t){return false;}','bool Hal::gaugeThresholdAudit(bool,char*,size_t){return false;}bool Hal::gaugeFactoryAuditRevalidate(char*,size_t){++revalidationCalls;revalidationUnderLease|=leaseDepth!=0;static FactoryWorkspace audit;factory_workspace=&audit;audit={};audit.attempted=audit.revalidation=audit.complete=audit.live=true;audit.record.count=131;audit.record.sourceCrc=mosaico_factory_scale::factorySourceCrc;for(unsigned i=0;i<131;++i)for(unsigned k=0;k<fixture[i].width;++k)audit.raw[67+i*7+k]=fixture[i].original[k];return true;}')
+  mocks=mocks.replace('bool Hal::gaugeThresholdAudit(bool,char*,size_t){return false;}','bool Hal::gaugeThresholdAudit(bool,char*,size_t){return false;}bool Hal::gaugeFactoryAuditRevalidate(char*,size_t){++revalidationCalls;if(nvsAvailableOverride>=0&&nvsAvailableOverride<56)return false;revalidationUnderLease|=leaseDepth!=0;static FactoryWorkspace audit;factory_workspace=&audit;audit={};audit.attempted=audit.revalidation=audit.complete=audit.live=true;audit.record.count=131;audit.record.sourceCrc=mosaico_factory_scale::factorySourceCrc;for(unsigned i=0;i<131;++i)for(unsigned k=0;k<fixture[i].width;++k)audit.raw[67+i*7+k]=fixture[i].original[k];return true;}')
   mocks=mocks.replace('bool tryStorageLease(){return true;}void releaseStorageLease(){}','bool tryStorageLease(){if(!leaseAllowed)return false;if(leaseDepth){leaseViolation=true;return false;}++leaseDepth;return true;}void releaseStorageLease(){if(leaseDepth)--leaseDepth;else leaseViolation=true;}')
   support=old.RV_SUPPORT[:old.RV_SUPPORT.index('extern "C" {volatile int test_results')]
-  support=support.replace('0.13.90-mosaico-ota','0.13.95-r13-mosaico-ota').replace('0.13.91-mosaico-ota','0.13.95-r14-mosaico-ota')
+  support=support.replace('0.13.90-mosaico-ota','0.13.95-r15-mosaico-ota').replace('0.13.91-mosaico-ota','0.13.95-r16-mosaico-ota')
   support=support.replace('int mbedtls_base64_decode(unsigned char*,size_t,size_t*,const unsigned char*,size_t){return -1;}', 'int mbedtls_base64_decode(unsigned char* out,size_t cap,size_t* n,const unsigned char* input,size_t size){if(!capMode||size!=3||std::strncmp(reinterpret_cast<const char*>(input),"cap",3)||cap<8)return -1;for(unsigned i=0;i<8;++i)out[i]=0x55;*n=8;return 0;}')
   actual_runtime=(ROOT/'main/hal/mosaico/mosaico_factory_audit.inc').read_text().split('bool factory_runtime(){',1)[1].split('\n',1)[0]
-  support+='''\nnamespace {bool factory_runtime(){'''+actual_runtime+'''\nbool factory_read(uint16_t a,uint8_t (&b)[36]){return readModel(a,b);}bool enterModel(){++enters;operation=0x4a2;return true;}}\n'''
+  support+='''\nnamespace {bool factory_runtime(){'''+actual_runtime+'''\nbool factory_read(uint16_t a,uint8_t (&b)[36]){return readModel(a,b);}bool enterModel(){cfgBeforeAuthenticated131|=!contrast_rt||!contrast_rt->observed.authenticated||contrast_rt->observed.count!=131;++enters;operation=0x4a2;return true;}}\n'''
   mocks=mocks.replace('Power Network::powerStats(){return {true,false,2};}Ble Bluetooth::diagnostics(){return {false,false};}', 'Power Network::powerStats(){return {uiLocked,wifiRunning,powerPhase};}Ble Bluetooth::diagnostics(){return {bleAdvertising,bleConnected};}')
   mocks=mocks.replace('bool busy(){return false;}bool healthPending(){return false;}', 'bool busy(){return otaBusy;}bool healthPending(){return otaHealth;}')
   support=support.replace('int esp_ota_get_state_partition(const esp_partition_t*,', 'int esp_ota_get_state_partition(const esp_partition_t* p,').replace('*s=ESP_OTA_IMG_VALID;return imageCryptoValid?0:1;', '*s=sdkValid&&invalidSdkSlot!=(p==&imageParts[0]?0:1)?ESP_OTA_IMG_VALID:static_cast<esp_ota_img_states_t>(1);return 0;')
   support=support.replace('int esp_partition_read(const esp_partition_t*,size_t,void* p,size_t n){', 'int esp_partition_read(const esp_partition_t* part,size_t,void* p,size_t n){++partitionReads[part==&imageParts[0]?0:1];')
   support+='\nnamespace {const esp_partition_t* esp_ota_get_running_partition(){return &imageParts[0];}}\n'
   mocks=mocks.replace("factory_scale_rt_owned", "contrast_rt_owned")
+  mocks=mocks.replace('int mockLoadAccess(mosaico_gauge::AccessJournal& a,const uint8_t*){a={};','int mockLoadAccess(mosaico_gauge::AccessJournal& a,const uint8_t*){if(!knownAccessValid)return 9;a={};')
+  mocks=mocks.replace('dropPrekey&&present==2?53:availableEntries-(present==2?37:19)','nvsAvailableOverride>=0?unsigned(nvsAvailableOverride):(dropPrekey&&present==2?53:availableEntries-(present==2?37:19))')
   code+=fixture+mocks+CASES+support
   code+='\nextern "C" int64_t __divdi3(int64_t a,int64_t b){bool n=(a<0)!=(b<0);uint64_t q=__udivdi3(a<0?uint64_t(-a):uint64_t(a),b<0?uint64_t(-b):uint64_t(b));return n?-int64_t(q):int64_t(q);}'
-  code+='''\nextern "C" {volatile int test_results[41]={};}extern "C" __attribute__((noinline,used)) void test_done(){for(;;){asm volatile("");}}extern "C" void _start(){for(int i=0;i<41;++i)test_results[i]=run_case(i);test_done();}\n'''
+  code+='''\nextern "C" {volatile int test_results[55]={};}extern "C" __attribute__((noinline,used)) void test_done(){for(;;){asm volatile("");}}extern "C" void _start(){for(int i=0;i<55;++i)test_results[i]=run_case(i);test_done();}\n'''
   headers={**trial.STUBS,**old.HEADERS}
   headers['mbedtls/base64.h']+='\nint mbedtls_base64_encode(unsigned char*,size_t,size_t*,const unsigned char*,size_t);\n'
   headers['cstdint']+='\n#define INT64_MAX 0x7fffffffffffffffLL\n'
@@ -224,7 +256,7 @@ cJSON* cJSON_ParseWithOpts(const char*,const char**,bool){return nullptr;}bool c
     strings=struct.unpack_from('<10I',elf,shoff+sh[6]*shsize);text=elf[strings[4]:strings[4]+strings[5]]
     for pos in range(sh[4],sh[4]+sh[5],sh[9]):
      name,value,_,_,_,_=struct.unpack_from('<IIIBBH',elf,pos);symbols[text[name:].split(b'\0',1)[0].decode()]=value
-   uc.reg_write(UC_RISCV_REG_SP,0x1fffff0);uc.emu_start(entry,symbols['test_done'],timeout=20000000,count=1000000000);values=struct.unpack('<41i',bytes(uc.mem_read(symbols['test_results'],164)))
+   uc.reg_write(UC_RISCV_REG_SP,0x1fffff0);uc.emu_start(entry,symbols['test_done'],timeout=20000000,count=1000000000);values=struct.unpack('<55i',bytes(uc.mem_read(symbols['test_results'],220)))
    (RUN/'execution.log').write_text('Production GCT1 runtime; RV32 ISA; mock transport/storage/crypto/locks.\n'+f'ELF_SHA256={hashlib.sha256(elf).hexdigest()}\n'+''.join(f'case={i} result={v}\n' for i,v in enumerate(values)))
-   self.assertEqual(uc.reg_read(UC_RISCV_REG_PC),symbols['test_done']);self.assertEqual(values,(0,)*41,str(RUN/'execution.log'))
+   self.assertEqual(uc.reg_read(UC_RISCV_REG_PC),symbols['test_done']);self.assertEqual(values,(0,)*55,str(RUN/'execution.log'))
 if __name__=='__main__':unittest.main()
