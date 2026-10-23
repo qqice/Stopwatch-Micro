@@ -847,6 +847,12 @@ class HostTests(unittest.TestCase):
                                   images_capability_verified='1', success='1',
                                   prepare_source='currentboot_authenticated_FA_full131', prepare_fresh_dm131='1')
                     detail = dict(status)
+                elif command == 'gauge-contrast apply CONFIRM_EXTERNAL_POWER':
+                    status.update(phase='2', generation='3', epoch='3')
+                    detail = dict(status)
+                elif command == 'gauge-contrast restore CONFIRM':
+                    status.update(phase='0', generation='5', epoch='5')
+                    detail = dict(status)
                 elif command == 'boot':
                     detail = {'count': '10'}
                 elif command == 'ota-status':
@@ -1196,6 +1202,68 @@ class HostTests(unittest.TestCase):
                 self.assertTrue(cleanup['full131_current_read_not_claimed'])
                 self.assertEqual(events.count('gauge-contrast prepare C CONFIRM'), 1)
                 self.assertFalse(any(event.startswith(('gauge-contrast apply ', 'gauge-contrast restore ')) for event in events))
+
+    def bind_production_experiment(self, original, call, power):
+        out = original.out / 'actual-constructor-binding'
+        out.mkdir()
+        return e.Experiment(call, power, original.watcher, out, original.args, [], [], 'proof', original.clock)
+
+    def test_real_Console_Experiment_normal_supply_stop_cleanup_readonly_retries_PASS(self):
+        command = 'gauge-native-recovery evidence'
+        old, call, power, events, _, _ = self.images_harness(['pass'],
+            readonly_outcomes={command: ['pass', 'pass', 'busy', 'pass']})
+        old.args.stage = 'on-smoke'
+        obj = self.bind_production_experiment(old, call, power)
+        # Full source/target codec has its own tests; this is the actual UART
+        # transaction/recovery wiring, with synthetic apply/restore terminals.
+        obj.pages = lambda *args: None
+        obj.sample = lambda *args: None
+        on = power.ensure_on
+        def expected_on():
+            power.stop.set()  # Production ensure_on does this on normal early ON.
+            on()
+        power.ensure_on = expected_on
+        with patch.object(power.stop, 'wait', side_effect=AssertionError('supply-stop must not cancel readonly cleanup')), \
+             patch.object(obj.watcher.sticky, 'wait', wraps=obj.watcher.sticky.wait) as operator_wait, \
+             patch.object(e, 'legacy_check', side_effect=lambda d: d):
+            report = obj.run()
+        self.assertTrue(power.stop.is_set())
+        self.assertFalse(obj.watcher.sticky.is_set())
+        self.assertTrue(report['complete'])
+        self.assertFalse(report['unknown_ack'])
+        self.assertTrue(report['V1_ON_verified'])
+        self.assertTrue(report['settings_restored'])
+        self.assertEqual(events.count(command), 4)
+        operator_wait.assert_called_once_with(1)
+        self.assertEqual(events.count('gauge-contrast apply CONFIRM_EXTERNAL_POWER'), 1)
+        self.assertEqual(events.count('gauge-contrast restore CONFIRM'), 1)
+        busy = next(row for row in call.rows if row.get('typed_readonly_busy'))
+        cleanup_rows = [row for row in call.rows if row['monotonic'] >= busy['monotonic']][:5]
+        self.assertTrue(all(row['deadline'] == busy['deadline'] for row in cleanup_rows))
+
+    def test_real_Console_Experiment_operator_latch_aborts_readonly_backoff_without_resend(self):
+        command = 'gauge-native-recovery evidence'
+        old, call, power, events, _, _ = self.images_harness(['pass'], readonly_outcomes={command: ['busy', 'pass']})
+        obj = self.bind_production_experiment(old, call, power)
+        power.stop.set()
+        obj.watcher.sticky.set()
+        with self.assertRaisesRegex(ValueError, 'STOP during readonly'):
+            call(command)
+        self.assertEqual(events.count(command), 1)
+        self.assertFalse(call.uncertain)
+        self.assertFalse(any(event.startswith(('gauge-contrast apply ', 'gauge-contrast restore ')) for event in events))
+
+    def test_real_Console_Experiment_supply_stopped_unknown_timeout_dupe_never_retry(self):
+        command = 'gauge-native-recovery evidence'
+        for failure in ('timeout', 'duplicate', 'unknown'):
+            old, call, power, events, _, _ = self.images_harness(['pass'], readonly_outcomes={command: [failure, 'pass']})
+            obj = self.bind_production_experiment(old, call, power)
+            power.stop.set()
+            with patch.object(obj.watcher.sticky, 'wait', side_effect=AssertionError('unknown must never retry')):
+                with self.assertRaises((ValueError, TimeoutError)):
+                    call(command)
+            self.assertTrue(call.uncertain)
+            self.assertEqual(events.count(command), 1)
 
 
 if __name__ == '__main__':

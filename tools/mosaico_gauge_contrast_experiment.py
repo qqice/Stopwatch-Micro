@@ -707,7 +707,9 @@ class Experiment:
         call.failure_hook = lambda command, exc: self.power.stop.set()
         call.prekey_failure_check = self.known_images_failure
         call.expected_boot = args.expected_boot
-        call.retry_wait = lambda seconds: self.power.stop.wait(seconds)
+        # Supply termination is expected at early ON/floor/normal cleanup. Only
+        # the independent operator/error latch cancels a bounded RO backoff.
+        call.retry_wait = lambda seconds: self.watcher.sticky.wait(seconds)
 
     def no_key_request(self):
         return not self.apply_sent and not any(command.startswith(('gauge-contrast prepare ',
