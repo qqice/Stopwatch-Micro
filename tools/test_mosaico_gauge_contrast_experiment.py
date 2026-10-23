@@ -59,11 +59,22 @@ class Client:
         return types.SimpleNamespace(status='PASS', details='value=1')
 
 
+def engine_fixture(rm=65, cedv=None, smooth=None):
+    cedv, smooth = rm if cedv is None else cedv, rm if smooth is None else smooth
+    raw73, raw76 = bytearray(23), bytearray(17)
+    raw73[:2], raw76[:2] = cedv.to_bytes(2, 'little'), smooth.to_bytes(2, 'little')
+    return dict(readonly='1', valid='1fff', phase='3', definition_match='1', device_be='0220', fw_be='0003', build_be='0004',
+        echo73='0073', echo76='0076', echo02='0002', raw73=raw73.hex(), raw76=raw76.hex(), raw02='0220000300040000000000',
+        unit_factor='0', unit_verified='0', unit_epoch='3', unit_generation='3', CEDVRemCap=str(cedv), SmoothRemCap=str(smooth))
+
+
 def rows(ccs, rms=None, endpoint=False):
     output = []
     for i, cc in enumerate(ccs):
+        rm = 65 if rms is None else rms[i]
         row = dict(monotonic=10 + i * 30, gauge=dict(raw_cc=str((65534 + cc) & 65535),
-                   rm_mah=str(65 if rms is None else rms[i])), engine=dict(CEDVRemCap='65', SmoothRemCap='65'))
+                   rm_mah=str(rm), unit_epoch='3', unit_generation='3'), engine=engine_fixture(rm),
+                   contrast=dict(epoch='3', generation='3'))
         output.append(row)
     if endpoint:
         crossing = next(i for i, cc in enumerate(ccs) if cc >= 3)
@@ -731,13 +742,12 @@ class HostTests(unittest.TestCase):
                     'gauge-charge': dict(valid='1', readonly='1', voltage_mv=str(values['voltage']),
                         temperature_dK='3000', op_status='0026', current_ma=str(values['instant']), average_current_ma=str(values['average'])),
                     'gauge': dict(valid='1', capacity_valid='1', raw_cc_valid='1', design_mah='65', fcc_mah='65',
-                        unit_factor='0', unit_verified='0', op_status='0026', raw_cc='100', rm_mah='65'),
+                        unit_factor='0', unit_verified='0', unit_epoch='3', unit_generation='3', op_status='0026', raw_cc='100', rm_mah='65'),
                     'gauge-mode': dict(readonly='1', mode_valid='1'),
                     'power': dict(locked='1', phase='2', wifi_running='0', bt_connected='0', bt_advertising='0', cpu_mhz='160'),
                     'boot': dict(count='10'), 'ota-status': dict(state='2', busy='0', pending='0'),
                     'gauge-contrast': state,
-                    'gauge-engine': dict(definition_match='1', device_be='0220', fw_be='0003', build_be='0004',
-                        raw73='00' * 23, raw76='00' * 17, CEDVRemCap='65', SmoothRemCap='65')
+                    'gauge-engine': engine_fixture()
                 }[expected]
                 details = ' '.join(key + '=' + value for key, value in detail.items())
                 print('DBG RESULT command=' + expected + ' status=PASS ' + details)
@@ -1264,6 +1274,271 @@ class HostTests(unittest.TestCase):
                     call(command)
             self.assertTrue(call.uncertain)
             self.assertEqual(events.count(command), 1)
+
+    def test_full_window_scope_is_explicit_C_observe_only_even_dry(self):
+        self.assertFalse(e.parser().parse_args([]).full_off_window)
+        for options in (['--full-off-window'], ['--full-off-window', '--stage', 'observe', '--arm', 'B'],
+                        ['--full-off-window', '--stage', 'on-smoke', '--arm', 'B']):
+            with patch.object(e, 'Power', side_effect=AssertionError('DLL touched')), \
+                 patch.object(e, 'source_fields', side_effect=AssertionError('inputs touched')):
+                with self.assertRaisesRegex(ValueError, 'restricted'):
+                    e.main(options)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(e.main(['--full-off-window', '--stage', 'observe', '--arm', 'C']), 0)
+        dry = json.loads(output.getvalue())
+        self.assertTrue(dry['full_off_window_probe'])
+        self.assertTrue(dry['analysis_secondary_only'])
+        self.assertEqual(dry['ports_opened'], 0)
+
+    @staticmethod
+    def boundary_row(t, cc, rm, cedv=None, smooth=None):
+        return dict(power_source='off', power_source_begin='off', power_source_end='off', source_verified=True,
+            started_monotonic=t - .2, charge_received_monotonic=t - .1, monotonic=t,
+            physical=dict(valid='1', readonly='1', voltage_mv='4200', temperature_dK='3000', current_ma='-25', op_status='0026'),
+            gauge=dict(valid='1', capacity_valid='1', raw_cc_valid='1', design_mah='65', fcc_mah='65',
+                unit_factor='0', unit_verified='0', unit_epoch='3', unit_generation='3', op_status='0026', raw_cc=str(cc), rm_mah=str(rm)),
+            engine=engine_fixture(rm, cedv, smooth),
+            boot={'count': '10'}, contrast=dict(phase='2', generation='3', epoch='3', arm='C', source_crc=e.SOURCE))
+
+    def test_boundary96_uses_observed_boundary_not_first65_or_fourth_count(self):
+        data = [self.boundary_row(100, 100, 64), self.boundary_row(130, 102, 62),
+                self.boundary_row(160, 103, 61), self.boundary_row(190, 103, 61)]
+        result = e.boundary96_analysis(data)
+        self.assertEqual(result['outcome'], 'continued_below96')
+        self.assertEqual(result['boundary_index'], 1)
+        self.assertEqual(result['subsequent_positive_count_rows'][0]['boundary_relative_RawCC'], 1)
+        self.assertTrue(result['analysis_secondary_only'])
+        # First OFF already62 and a16-bit wrap are still boundary-relative.
+        data = [self.boundary_row(100, 65535, 62), self.boundary_row(130, 0, 61), self.boundary_row(160, 0, 61)]
+        self.assertEqual(e.boundary96_analysis(data)['outcome'], 'continued_below96')
+
+    def test_boundary96_missing_boundary_count_or_two_fresh_followups_is_inconclusive(self):
+        cases = ([self.boundary_row(100, 100, 63), self.boundary_row(130, 101, 61)],
+                 [self.boundary_row(100, 100, 62), self.boundary_row(130, 100, 62)],
+                 [self.boundary_row(100, 100, 62), self.boundary_row(130, 101, 61)])
+        for data in cases:
+            self.assertEqual(e.boundary96_analysis(data)['outcome'], 'inconclusive')
+        result = e.boundary96_analysis([self.boundary_row(100, 100, 62), self.boundary_row(130, 101, 62)])
+        self.assertEqual(result['outcome'], 'unresolved_not_plateau')
+        self.assertNotEqual(result['outcome'], 'platform')
+
+    def test_boundary96_stale_mixed_epoch_missing_support_or_floor_is_not_positive(self):
+        for fault in ('stale', 'epoch', 'support', 'floor', 'source'):
+            data = [self.boundary_row(100, 100, 62), self.boundary_row(130, 101, 61), self.boundary_row(160, 101, 61)]
+            if fault == 'stale':
+                data[-1]['charge_received_monotonic'] = data[-2]['charge_received_monotonic']
+            elif fault == 'epoch':
+                data[-1]['contrast']['epoch'] = '4'
+            elif fault == 'support':
+                del data[-1]['engine']['SmoothRemCap']
+            elif fault == 'floor':
+                data[-1]['physical']['voltage_mv'] = '3900'
+            else:
+                data[-1]['source_verified'] = False
+            self.assertEqual(e.boundary96_analysis(data)['outcome'], 'inconclusive')
+
+    def full_observation_harness(self, full=True, remaining=660):
+        old, call, _, clock = self.experiment()
+        old.args.full_off_window = full
+        owner = self
+        class ClockStop:
+            stopped = False
+            def set(self):
+                self.stopped = True
+            def is_set(self):
+                return self.stopped
+            def wait(self, seconds):
+                if self.stopped:
+                    return True
+                clock.now += seconds
+                return False
+        class Power(FakePower):
+            def __init__(self):
+                super().__init__()
+                self.stop, self.done = ClockStop(), self
+                self.monitor_error = self.cycle_fault = None
+                self.off_intent = self.off_verified = self.ends = None
+                self.hold = None
+                self.closed_at = None
+            def wait(self, seconds):
+                if clock.now >= self.ends:
+                    return True
+                clock.now = min(clock.now + seconds, self.ends)
+                return clock.now >= self.ends
+            def start_off(self, hold, limit):
+                self.hold, self.limit = hold, limit
+                self.off_intent = self.off_verified = clock.now
+                self.ends = clock.now + hold
+                self.source, self.on_known = 'off', False
+            def ensure_on(self):
+                self.closed_at = clock.now
+                self.source, self.on_known = 'on', True
+                self.stop.set()
+        power = Power()
+        obj = self.bind_production_experiment(old, call, power)
+        obj.deadline = clock.now + remaining
+        obj.ram_deadline = clock.now + 600
+        obj.rebase_quiet_once = lambda: None
+        def sample(source='off', endpoint_check=None):
+            index = len(obj.report['samples'])
+            row = owner.boundary_row(clock.now, 100 + index, 65 - index)
+            if endpoint_check is not None:
+                row['endpoint_check'] = endpoint_check
+            obj.report['samples'].append(row)
+            return row
+        obj.sample = sample
+        return obj, power, clock
+
+    def test_full_window_consumes_admitted_window_only30s_no_endpoints_default_unchanged(self):
+        full, power, clock = self.full_observation_harness(True)
+        start = clock.now
+        full.observe()
+        self.assertEqual(power.hold, 480)
+        self.assertEqual(power.closed_at - start, 480)
+        samples = full.report['samples']
+        self.assertTrue(full.report['full_off_window_probe'])
+        self.assertTrue(full.report['analysis_secondary_only'])
+        self.assertNotIn('early_stop_after_count_confirmation', full.report)
+        self.assertFalse(any('endpoint_check' in row for row in samples))
+        self.assertTrue(all(abs(b['monotonic'] - a['monotonic'] - 30) < .11 for a, b in zip(samples, samples[1:])))
+        self.assertEqual(full.report['boundary96_analysis']['outcome'], 'continued_below96')
+        normal, normal_power, normal_clock = self.full_observation_harness(False)
+        normal_start = normal_clock.now
+        normal.observe()
+        self.assertLess(normal_power.closed_at - normal_start, normal_power.hold)
+        self.assertTrue(normal.report['early_stop_after_count_confirmation'])
+        self.assertEqual(sum('endpoint_check' in row for row in normal.report['samples']), 2)
+        self.assertFalse(normal.report['full_off_window_probe'])
+
+    def test_full_window_no_late_transition_extra_sample_and_deadline_not_reset(self):
+        obj, power, clock = self.full_observation_harness(True, remaining=571)
+        deadline = obj.deadline
+        obj.observe()
+        self.assertEqual(power.hold, 470)
+        self.assertEqual(obj.deadline, deadline)
+        self.assertLess(obj.report['samples'][-1]['monotonic'], power.off_intent + power.hold - 10)
+        denied, denied_power, _ = self.full_observation_harness(True, remaining=550)
+        with self.assertRaisesRegex(ValueError, 'MINIMUM_OBSERVATION_UNAVAILABLE'):
+            denied.observe()
+        self.assertIsNone(denied_power.hold)
+
+    def test_full_window_safety_exception_does_not_wait_for_window_or_count_path(self):
+        obj, power, clock = self.full_observation_harness(True)
+        start = clock.now
+        def floor(*args, **kwargs):
+            power.stop.set()
+            raise e.TypedKnownSafetyStop('3900mV floor')
+        obj.sample = floor
+        with self.assertRaises(e.TypedKnownSafetyStop):
+            obj.observe()
+        self.assertTrue(power.stop.is_set())
+        self.assertLess(clock.now - start, 16)
+        self.assertNotIn('early_stop_after_count_confirmation', obj.report)
+
+    def test_full_probe_report_can_never_authorize_C_platform_even_with_parent_receipt(self):
+        base_path, _ = self.parent_evidence()
+        data = json.loads(base_path.read_bytes())
+        data.update(stage='observe', full_off_window_probe=True, analysis_secondary_only=True,
+            analysis=dict(outcome='platform', confirmed_after_three_counts=True))
+        path = self.out / 'full-probe.json'
+        sha = e.save(path, data)
+        e.save(Path(str(path) + '.complete.json'), dict(complete=True, within_deadline=True, report_sha256=sha))
+        e.save(self.out / 'root-acceptance.json', dict(report_sha256=sha, child_exit_code=0, observed_child_exit_monotonic=200.))
+        with self.assertRaisesRegex(ValueError, 'never authorize'):
+            e.load_evidence(path, sha, stage='observe', arm='C')
+
+    def test_boundary96_never_joins_OFF_ON_OFF_but_allows_prefix_and_tail_ON(self):
+        data = [self.boundary_row(100, 100, 62), self.boundary_row(130, 101, 61), self.boundary_row(160, 101, 61)]
+        with_on_gap = data[:1] + [{'power_source': 'on'}] + data[1:]
+        self.assertEqual(e.boundary96_analysis(with_on_gap)['outcome'], 'inconclusive')
+        self.assertIn('supply blocks', e.boundary96_analysis(with_on_gap)['error'])
+        padded = [{'power_source': 'on'}] + data + [{'power_source': 'on'}]
+        self.assertEqual(e.boundary96_analysis(padded)['outcome'], 'continued_below96')
+
+    def test_boundary96_requires_adjacent_RawCC_monotonic_not_only_boundary_delta(self):
+        data = [self.boundary_row(100, 100, 62), self.boundary_row(130, 102, 60), self.boundary_row(160, 101, 61)]
+        result = e.boundary96_analysis(data)
+        self.assertEqual(result['outcome'], 'inconclusive')
+        self.assertIn('adjacent RawCC', result['error'])
+
+    def test_boundary96_cadence_bounds_nonoverlap_and_near_followups_not_confirmation(self):
+        for gap in (.001, 23.999, 42.001, 70):
+            data = [self.boundary_row(100, 100, 62), self.boundary_row(130, 101, 61), self.boundary_row(130 + gap, 101, 61)]
+            self.assertEqual(e.boundary96_analysis(data)['outcome'], 'inconclusive_sampling_gap')
+        valid = [self.boundary_row(100, 100, 62), self.boundary_row(124, 101, 61), self.boundary_row(166, 101, 61)]
+        self.assertEqual(e.boundary96_analysis(valid)['outcome'], 'continued_below96')
+        valid[-1]['monotonic'] = valid[-1]['started_monotonic'] + 6
+        self.assertEqual(e.boundary96_analysis(valid)['outcome'], 'inconclusive')
+
+    def test_full_window70s_pause_skips_missed_absolute_slots_never_catches_up(self):
+        obj, power, clock = self.full_observation_harness(True)
+        original = power.wait
+        paused = [False]
+        def pause(seconds):
+            if not paused[0] and clock.now >= power.off_intent + 45:
+                clock.now += 70
+                paused[0] = True
+            return original(seconds)
+        power.wait = pause
+        obj.observe()
+        starts = [row['started_monotonic'] for row in obj.report['samples']]
+        self.assertTrue(all(b - a >= 24 for a, b in zip(starts, starts[1:])))
+        self.assertEqual(obj.report['full_window_sampling_skipped_slots'], [power.off_intent + 70, power.off_intent + 100])
+        self.assertTrue(any(b - a > 42 for a, b in zip(starts, starts[1:])))
+        self.assertEqual(obj.report['boundary96_analysis']['outcome'], 'inconclusive_sampling_gap')
+        self.assertEqual(power.closed_at - power.off_intent, 480)
+
+    def test_full_window_late_slot_window_and_late_end_never_add_fast_reads_or_extend_timer(self):
+        obj, power, clock = self.full_observation_harness(True)
+        original = power.wait
+        delayed = [False]
+        def late(seconds):
+            if not delayed[0] and clock.now >= power.off_intent + 9.9:
+                clock.now += 5.8
+                delayed[0] = True
+            return original(seconds)
+        power.wait = late
+        obj.observe()
+        starts = [row['started_monotonic'] for row in obj.report['samples']]
+        self.assertTrue(all(b - a >= 24 for a, b in zip(starts, starts[1:])))
+        self.assertEqual(power.hold, 480)
+        late_obj, late_power, late_clock = self.full_observation_harness(True, remaining=571)
+        end_wait = late_power.wait
+        shifted = [False]
+        def late_end(seconds):
+            if not shifted[0] and late_clock.now >= late_power.off_intent + 445:
+                late_clock.now += 70
+                shifted[0] = True
+            return end_wait(seconds)
+        late_power.wait = late_end
+        deadline = late_obj.deadline
+        late_obj.observe()
+        self.assertEqual(late_power.hold, 470)
+        self.assertEqual(late_obj.deadline, deadline)
+        self.assertTrue(all(row['monotonic'] < late_power.off_intent + late_power.hold - 10 for row in late_obj.report['samples']))
+
+    def test_primary_and_boundary_need_complete_supported_engine_not_leftover_cap_strings(self):
+        for invalid in ({'valid': '0fff'}, {'definition_match': '0'}, {'phase': '2'},
+                        {'unit_epoch': '4'}, {'unit_generation': '4'}):
+            data = rows([0, 1, 2, 3, 3, 3], endpoint=True)
+            data[-1]['engine'].update(invalid)
+            self.assertEqual(e.analyse(data)['outcome'], 'inconclusive')
+            boundary = [self.boundary_row(100, 100, 62), self.boundary_row(130, 101, 61), self.boundary_row(160, 101, 61)]
+            boundary[-1]['engine'].update(invalid)
+            self.assertEqual(e.boundary96_analysis(boundary)['outcome'], 'inconclusive')
+        data = rows([0, 1, 2, 3, 3, 3], endpoint=True)
+        data[-1]['engine'] = dict(CEDVRemCap='65', SmoothRemCap='65')
+        self.assertFalse(e.analyse(data)['confirmed_after_three_counts'])
+
+    def test_boundary96_capacity_cliff_not_count_matched_continuation(self):
+        for cliff in (0, 60):
+            data = [self.boundary_row(100, 100, 62), self.boundary_row(130, 101, cliff), self.boundary_row(160, 101, cliff)]
+            result = e.boundary96_analysis(data)
+            self.assertEqual(result['outcome'], 'inconclusive')
+            self.assertEqual(result['reason'], 'below_boundary_capacity_mismatch')
+        exact = [self.boundary_row(100, 100, 62), self.boundary_row(130, 102, 60), self.boundary_row(160, 102, 60)]
+        self.assertEqual(e.boundary96_analysis(exact)['outcome'], 'continued_below96')
 
 
 if __name__ == '__main__':

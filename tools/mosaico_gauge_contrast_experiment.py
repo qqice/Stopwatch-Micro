@@ -169,6 +169,8 @@ def load_evidence(path, sha, *, stage, arm, image_bindings=None):
     if image_bindings is not None:
         require(d.get('image_bindings') == image_bindings, 'evidence signed-BIN bindings differ')
     if stage == 'observe':
+        require(d.get('full_off_window_probe', False) is False and d.get('analysis_secondary_only', False) is False,
+                'full-window secondary probe can never authorize B/C-platform admission')
         require(d.get('analysis', {}).get('outcome') == 'platform' and d['analysis'].get('confirmed_after_three_counts') is True,
                 'B forbidden until valid C platform')
     return d
@@ -214,9 +216,29 @@ def off_budget(now, total_deadline, ram_deadline):
     return hold
 
 
+def supported_engine(row):
+    engine, gauge, context = row.get('engine', {}), row.get('gauge', {}), row.get('contrast', {})
+    if not all(engine.get(k) == v for k, v in dict(readonly='1', valid='1fff', phase='3',
+            definition_match='1', unit_factor='0', unit_verified='0').items()):
+        return False
+    if not all(isinstance(engine.get(k), str) and re.fullmatch('0|[1-9][0-9]*', engine[k]) for k in ('CEDVRemCap', 'SmoothRemCap')):
+        return False
+    for unit, journal in (('unit_epoch', 'epoch'), ('unit_generation', 'generation')):
+        if unit in engine or unit in gauge or journal in context:
+            if unit not in engine or unit not in gauge or journal not in context or not (
+                    engine[unit] == gauge[unit] == context[journal]):
+                return False
+            if not all(isinstance(value, str) and re.fullmatch('0|[1-9][0-9]*', value)
+                    for value in (engine[unit], gauge[unit], context[journal])):
+                return False
+    return True
+
+
 def analyse(samples):
     if not samples:
         return dict(outcome='inconclusive', reason='no_OFF_samples', confirmed_after_three_counts=False)
+    if not all(supported_engine(row) for row in samples):
+        return dict(outcome='inconclusive', reason='unsupported_or_epoch_mismatched_engine', confirmed_after_three_counts=False)
     first = samples[0]
     relative, crossed = [], None
     for i, row in enumerate(samples):
@@ -243,6 +265,78 @@ def analyse(samples):
                 relative=relative, supported= supports, no_0073_offset_guess=True,
                 nominal_units_only=True, physical_calibration=False,
                 protocol='three_counts_then_10s_and_two_5s_endpoint_checks')
+
+
+def boundary96_analysis(samples):
+    """Secondary-only boundary-relative discriminator, never C-platform proof."""
+    result = dict(outcome='inconclusive', analysis_secondary_only=True, physical_calibration=False,
+                  boundary_index=None, subsequent_positive_count_rows=[], confirmed_below96_rows=[], capacity_mismatch_rows=[])
+    rows, seen_off, trailing_on = [], False, False
+    try:
+        for row in samples:
+            if row.get('power_source') == 'on':
+                trailing_on |= seen_off
+                continue
+            require(not trailing_on, 'OFF after post-OFF ON would join different supply blocks')
+            seen_off = True
+            require(row.get('power_source') == row.get('power_source_begin') == row.get('power_source_end') == 'off' and
+                    row.get('source_verified') is True, 'unknown OFF source')
+            start, received, completed = (row.get(k) for k in
+                ('started_monotonic', 'charge_received_monotonic', 'monotonic'))
+            require(all(type(v) in (int, float) and math.isfinite(v) for v in (start, received, completed)) and
+                    start <= received <= completed < start + GROUP_SECONDS, 'stale/unproved sample time')
+            p, g, engine, context = row['physical'], row['gauge'], row['engine'], row['contrast']
+            require(p.get('valid') == p.get('readonly') == '1' and 3900 < int(p['voltage_mv']) <= 4350 and
+                    2832 <= int(p['temperature_dK']) <= 3131 and int(p['current_ma']) < 0 and sealed(p) and
+                    g.get('valid') == g.get('capacity_valid') == g.get('raw_cc_valid') == '1' and sealed(g) and
+                    g.get('design_mah') == g.get('fcc_mah') == '65' and g.get('unit_factor') == g.get('unit_verified') == '0' and
+                    context.get('phase') == '2' and context.get('arm') == 'C' and context.get('source_crc') == SOURCE and
+                    supported_engine(row),
+                    'unsafe/unsupported boundary sample')
+            raw = int(g['raw_cc'])
+            require(0 <= raw <= 65535, 'RawCC range')
+            capacities = (int(g['rm_mah']), int(engine['CEDVRemCap']), int(engine['SmoothRemCap']))
+            require(all(0 <= value <= 65 for value in capacities), 'capacity support missing/range')
+            identity = (row['boot']['count'], context['phase'], context['generation'], context['epoch'], context['arm'], context['source_crc'])
+            if rows:
+                if not 24 - 1e-6 <= start - rows[-1]['start'] <= 42 + 1e-6 or start < rows[-1]['completed']:
+                    return result | dict(outcome='inconclusive_sampling_gap', reason='OFF cadence outside24..42s or overlapping groups')
+                require(identity == rows[0]['identity'] and received > rows[-1]['received'] and
+                        completed > rows[-1]['completed'], 'mixed boot/epoch or duplicate/stale row')
+                require(signed_mod_delta(raw, rows[-1]['raw']) >= 0, 'adjacent RawCC moved backwards')
+            rows.append(dict(index=len(rows), raw=raw, capacities=capacities, identity=identity,
+                             start=start, received=received, completed=completed))
+        boundary = next((r for r in rows if r['capacities'] == (62, 62, 62)), None)
+        if boundary is None:
+            return result | dict(reason='boundary62_not_observed')
+        result['boundary_index'] = boundary['index']
+        for row in rows[boundary['index'] + 1:]:
+            delta = signed_mod_delta(row['raw'], boundary['raw'])
+            require(delta >= 0, 'RawCC direction/ambiguous boundary count')
+            if delta > 0:
+                result['subsequent_positive_count_rows'].append(dict(index=row['index'], boundary_relative_RawCC=delta,
+                    capacities=list(row['capacities'])))
+                expected = 62 - delta
+                if 0 <= expected <= 61 and all(value == expected for value in row['capacities']):
+                    result['confirmed_below96_rows'].append(row['index'])
+                elif expected < 0 or any(value < expected for value in row['capacities']) or all(value <= 61 for value in row['capacities']):
+                    result['capacity_mismatch_rows'].append(dict(index=row['index'], boundary_relative_RawCC=delta,
+                        expected_capacity=expected, capacities=list(row['capacities'])))
+        if result['capacity_mismatch_rows']:
+            return result | dict(reason='below_boundary_capacity_mismatch')
+        if (len(result['confirmed_below96_rows']) >= 2 and
+            rows[result['confirmed_below96_rows'][-1]]['start'] - rows[result['confirmed_below96_rows'][0]]['start'] >= 24 - 1e-6):
+            return result | dict(outcome='continued_below96', reason='two_fresh_rows_below_boundary_after_positive_count')
+        if any(row['capacities'] == [62, 62, 62] for row in result['subsequent_positive_count_rows']):
+            return result | dict(outcome='unresolved_not_plateau', reason='later_positive_count_still62_not_platform_evidence')
+        return result | dict(reason='no_subsequent_count' if not result['subsequent_positive_count_rows'] else 'followup_insufficient')
+    except (ValueError, KeyError, TypeError) as exc:
+        return result | dict(reason='invalid_fresh_boundary_evidence', error=str(exc))
+
+
+def validate_probe_scope(args):
+    require(not getattr(args, 'full_off_window', False) or (args.stage == 'observe' and args.arm == 'C'),
+            '--full-off-window is restricted to stage=observe arm=C')
 
 
 READ_COMMANDS = {'ping', 'status', 'gauge-charge', 'gauge', 'gauge-mode', 'gauge-engine', 'power', 'boot',
@@ -678,6 +772,7 @@ def legacy_check(d):
 
 class Experiment:
     def __init__(self, call, power, watcher, out, args, source, target, proof, clock=time):
+        validate_probe_scope(args)
         self.call, self.power, self.watcher, self.out, self.args = call, power, watcher, out, args
         self.source, self.target, self.proof, self.clock = source, target, proof, clock
         self.started = clock.monotonic()
@@ -693,12 +788,14 @@ class Experiment:
         self.sent, self.settings, self.legacy = {}, None, None
         self.rebase_used = self.rebase_in_progress = False
         self.apply_start = None
+        self.full_off_window = getattr(args, 'full_off_window', False)
         self.last_on_sample = None
         self.images_retry_ticket = None
         self.apply_sent = self.apply_confirmed = self.settings_touched = False
         self.report = dict(kind='GCT1_contrast_experiment', stage=args.stage, arm=args.arm, source_crc=SOURCE,
                            complete=False, original_verified=False, target131_verified=False, V1_ON_verified=False,
                            preapply_standard_safe=False,
+                           full_off_window_probe=self.full_off_window, analysis_secondary_only=self.full_off_window,
                            settings_restored=False, unknown_ack=False, legacy_crc='430c5ed4', errors=[], samples=[],
                            started_unix=clock.time(), SOC_repair=False, physical_calibration=False,
                            host_deadline_seconds=660, firmware_deadline_seconds=720, no_renewal=True)
@@ -874,6 +971,7 @@ class Experiment:
                        charge_received_monotonic=charge_received,
                        v1_original=dict(getattr(self.power, 'original', {})),
                        source_verified=(self.power.on_known if source == 'on' else getattr(self.power, 'off_verified', None) is not None))
+            require(supported_engine(row), 'unsupported/partial engine or epoch mismatch')
             if endpoint_check is not None:
                 row['endpoint_check'] = endpoint_check
             if source == 'off':
@@ -979,7 +1077,7 @@ class Experiment:
         self.report['shortened_from_480_for_budget'] = hold < 480
         limit = min(self.deadline, self.ram_deadline)
         self.power.start_off(hold, limit)
-        next_sample = None
+        next_sample, last_full_start = None, None
         while not self.power.done.wait(.1):
             require(not self.watcher.sticky.is_set() and self.power.monitor_error is None, 'STOP or V1 log error')
             require(self.clock.monotonic() + RECOVERY_RESERVE < limit, 'early ON recovery reserve')
@@ -989,8 +1087,24 @@ class Experiment:
                 next_sample = self.power.off_intent + 10
             if self.clock.monotonic() < next_sample:
                 continue
+            if self.full_off_window and self.clock.monotonic() >= next_sample + GROUP_SECONDS:
+                missed = math.floor((self.clock.monotonic() - next_sample) / 30) + 1
+                self.report.setdefault('full_window_sampling_skipped_slots', []).extend(next_sample + 30 * i for i in range(missed))
+                next_sample += missed * 30  # First future absolute-grid slot; never catch up.
+                continue
+            if self.full_off_window and last_full_start is not None and self.clock.monotonic() - last_full_start < 24 - 1e-6:
+                self.report.setdefault('full_window_sampling_skipped_slots', []).append(next_sample)
+                next_sample += 30
+                continue
+            if self.full_off_window and self.clock.monotonic() >= self.power.off_intent + hold - 10:
+                continue  # Keep the original OFF timer; no new near-transition sample or early ON.
             require(self.clock.monotonic() < self.power.off_intent + hold - 10, 'sample too near ON transition')
-            self.sample('off')
+            sampled = self.sample('off')
+            if self.full_off_window:
+                last_full_start = sampled['started_monotonic']
+                base = self.power.off_intent + 10
+                next_sample = base + (math.floor((self.clock.monotonic() - base) / 30) + 1) * 30
+                continue  # No count-triggered endpoints or early-stop path in this secondary probe.
             off = [row for row in self.report['samples'] if row['power_source'] == 'off']
             result = analyse(off)
             if result['crossed_index'] is not None:
@@ -1009,6 +1123,8 @@ class Experiment:
         self.power.ensure_on()
         require(self.power.cycle_fault is None, 'V1 cycle fault (ON verified): ' + str(self.power.cycle_fault))
         self.report['analysis'] = analyse([row for row in self.report['samples'] if row['power_source'] == 'off'])
+        if self.full_off_window:
+            self.report['boundary96_analysis'] = boundary96_analysis(self.report['samples'])
 
     def run(self):
         try:
@@ -1154,6 +1270,7 @@ def parser():
     p.add_argument('--expected-boot', type=int)
     p.add_argument('--arm', choices=('C', 'B'), default='C')
     p.add_argument('--stage', choices=('on-smoke', 'observe'), default='on-smoke')
+    p.add_argument('--full-off-window', action='store_true', help='secondary C-observe probe only: consume admitted OFF window, never authorize B')
     p.add_argument('--proof', type=Path)
     p.add_argument('--on-smoke-evidence', type=Path, help='observe: same-arm smoke; B on-smoke: preceding C smoke (both hash-bound)')
     p.add_argument('--on-smoke-sha256')
@@ -1165,10 +1282,12 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    validate_probe_scope(args)  # Also rejects invalid dry requests before files/ports/DLL.
     require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,100}', args.run) and args.run not in ('.', '..'), 'unsafe run')
     if not args.execute:
         print(json.dumps(dict(dry=True, ports_opened=0, DLL_loads=0, keys=0, no_experiment_performed=True,
-            stage=args.stage, arm=args.arm, SOC_repair=False,
+            stage=args.stage, arm=args.arm, SOC_repair=False, full_off_window_probe=args.full_off_window,
+            analysis_secondary_only=args.full_off_window,
             requires=['--execute', '--confirm-v1-sole-5v', '--expected-boot', '--proof'],
             maximum_OFF_seconds=480, dynamic_shortening=True)))
         return 0
