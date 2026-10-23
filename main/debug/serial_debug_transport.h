@@ -89,6 +89,7 @@ inline bool uartAllowed(const char* command) {
     if (!std::strcmp(command, "gauge-cold")) return true;
     if (!std::strcmp(command, "ota-health")) return true;
     if (!std::strcmp(command, "heap-policy")) return true;
+    if (!std::strcmp(command, "stack-budget")) return true;
     if (!std::strcmp(command, "gauge-contrast")) return true;
     if (!std::strcmp(command, "gauge-factory-scale")) return true;
     // Its observed-page subcommand remains readonly and in the same CRC-framed

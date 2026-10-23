@@ -59,6 +59,9 @@ private:
     uint32_t _format_overflow = 0;
     uint32_t _uart_read_errors = 0;
     void handleLine(char* line);
+    void __attribute__((noinline)) pollAsync();
+    bool __attribute__((noinline)) handleGaugeTrace(char* line);
+    bool __attribute__((noinline)) handleStackBudget(const char* line);
     bool __attribute__((noinline)) handleCachedRead(const char* line);
     bool __attribute__((noinline)) handleContrast(char* line);
     bool __attribute__((noinline)) handleCold(char* line);

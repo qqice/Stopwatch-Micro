@@ -82,6 +82,10 @@ struct SerialDebug {
         if(line[6]=='c') _async_test=AsyncTest::None;
         result("stub","PASS","");
     }
+    constexpr bool handleStackBudget(const char*) { return false; }
+    constexpr bool handleGaugeTrace(char*) { return false; }
+    constexpr bool handleCold(char*) { return false; }
+    constexpr bool handleContrast(char*) { return false; }
     constexpr bool handleCachedRead(const char*) { return false; }
     constexpr bool handleMaintenanceRestart(const char*) { return false; }
     constexpr bool handleFactoryScale(char*) { return false; }

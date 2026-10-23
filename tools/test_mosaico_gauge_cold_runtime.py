@@ -138,9 +138,14 @@ int mbedtls_base64_encode(unsigned char* out,size_t cap,size_t* count,const unsi
 namespace { static unsigned coldDeadlineReads=0;
 void coldAfterWord(uint8_t reg){if(reg==0x3a&&coldDeadlineReads&&!--coldDeadlineReads)nowUs=contrast_rt->appliedUs+600000000;}}
 extern "C" int run_case(int id){
- if(id>=20)return 0;
+ if(id>=22)return 0;
  using namespace coldtest;using namespace MosaicoGaugeCold;
  coldReset(false);coldDeadlineReads=0;coldForeignTask=false;
+ if(id==0&&(!contrast_rt_version("0.13.95-r19-mosaico-ota")||!contrast_rt_version("0.13.95-r20-mosaico-ota")||contrast_rt_version("0.13.95-r17-mosaico-ota")||contrast_rt_version("0.13.95-r18-mosaico-ota")))return 131;
+ if(id==20||id==21){const auto before=mediaWrites;std::snprintf(contrast_rt->images[0].version,sizeof(contrast_rt->images[0].version),"%s","0.13.95-r17-mosaico-ota");
+  if(id==21)std::snprintf(contrast_rt->images[1].version,sizeof(contrast_rt->images[1].version),"%s","0.13.95-r18-mosaico-ota");
+  return contrast_rt_images_current()||defaultKeyCalls||writes||mediaWrites!=before?132:0;}
+
  if(id==19){coldForeignTask=true;const auto before=mediaCalls;{ContrastStorageLease denied;if(denied.held)return 129;}coldForeignTask=false;return leaseDepth!=1||!MosaicoOta::currentTaskOwnsStorageLease()||mediaCalls!=before||defaultKeyCalls?130:0;}
  if(id>=14){
   state.bound=false;char out[1024];capMode=true;
@@ -246,7 +251,7 @@ void gauge_engine_locked(mosaico_gauge_engine::Snapshot&,uint8_t,uint8_t);
 '''
                 code=code.replace('#include "mosaico_gauge_contrast_runtime.inc"','#include "mosaico_gauge_contrast_runtime.inc"\n'+injection)
                 if hooks:
-                    code=code.replace('0.13.95-r15-mosaico-ota','0.13.95-r17-mosaico-ota').replace('0.13.95-r16-mosaico-ota','0.13.95-r18-mosaico-ota')
+                    code=code.replace('0.13.95-r15-mosaico-ota','0.13.95-r19-mosaico-ota').replace('0.13.95-r16-mosaico-ota','0.13.95-r20-mosaico-ota')
                     code=code.replace('#include "mosaico_gauge_contrast_runtime.inc"','#define MOSAICO_GAUGE_COLD_RUNTIME 1\n#include "mosaico_gauge_cold_runtime.h"\nnamespace MosaicoOta {bool currentTaskOwnsStorageLease();}\n#include "mosaico_gauge_contrast_runtime.inc"')
                     code=code.replace('static bool readModel(uint16_t a,uint8_t* b){++readCalls;', 'static bool coldOnceReadFault=false;static bool readModel(uint16_t a,uint8_t* b){++readCalls;if(coldOnceReadFault&&writes==1&&(operation&0x400)){coldOnceReadFault=false;return false;}')
                     code=code.replace('bool gauge_word(uint8_t r,uint16_t& v){return mockGaugeWord(r,v);}', 'void coldAfterWord(uint8_t);bool gauge_word(uint8_t r,uint16_t& v){bool ok=mockGaugeWord(r,v);coldAfterWord(r);return ok;}')
@@ -277,7 +282,7 @@ namespace std {struct mutex{unsigned held=0;void lock(){++held;}void unlock(){--
             public=[int(line.split('\t')[1]) for line in stack.splitlines() if 'mosaico_gauge_cold_runtime.inc:' in line and 'GLOBAL' not in line]
             self.assertLessEqual(max(public),512) # Shared envelope scratch is a separately reported deployment gate.
             with (base.RUN/'execution.log').open('a') as log:
-                log.write('meaningful_hook_cases=20 inherited_empty_tail_cases=35\n' if hooks else 'meaningful_cold_cases=35 inherited_empty_tail_cases=20\n')
+                log.write('meaningful_hook_cases=22 inherited_empty_tail_cases=33\n' if hooks else 'meaningful_cold_cases=35 inherited_empty_tail_cases=20\n')
         finally:
             base.CASES,base.RUN=before_cases,before_run
 

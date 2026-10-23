@@ -309,3 +309,25 @@ observed-page0..4. This is not a generic register writer. No plaintext credentia
 or signing key is sent to the device. Maintenance OTA remains available only
 for Missing or clean Original GCT state, with the existing physical and historical
 evidence checks; non-Original/corrupt/dirty state must not be waived.
+
+### One-shot cold-start experiment: resource admission
+
+The independent GCC1 protocol retains C across one normal power-off only after
+explicit authorization. V1 output-off is not MCU power-off: the internal cell
+continues supplying the board. On the next permitted cold boot, passive evidence
+must precede bounded exact-original restoration; unknown outcomes stop writes.
+This exception does not extend or replace the ordinary GCT1 warm-trial deadlines.
+
+Both actual recovery slots must contain the exact signed cold-capable pair
+accepted by the current capability verifier. A normal firmware signature alone
+does not authorize a gauge experiment. New release pairs require fresh actual
+SDK-VALID and network/runtime verification; old raw evidence remains immutable.
+
+Before any cell parameter operation, measure the main-task lifetime minimum stack
+margin with `debug stack-budget` (CDC or CRC-framed UART), including after the
+read-only signature/NAND paths. This command does not export or alter a recorder.
+`gauge-trace export` remains CDC-only and preserves all records. Its reported
+watermark is cumulative, not the stack used exclusively by that export or by the
+cold handler. Native `.su` files may omit variadic functions: include actual ELF
+frames, formatter/libc and UI/RTOS ancestors rather than summing only cold-code
+frames. Insufficient or unexplained margin blocks the experiment, not normal OTA.

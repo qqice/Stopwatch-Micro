@@ -199,7 +199,10 @@ void settingsBase64(const char* source, char (&encoded)[89])
 SerialDebug* SerialDebug::_writer = nullptr;
 int SerialDebug::debugPrintf(const char* format, ...)
 {
-    char bytes[1536];
+    // Serial formatting scratch is shared, never retained by either output.
+    static std::mutex mutex;
+    static char bytes[1536];
+    std::lock_guard<std::mutex> lock(mutex);
     va_list args; va_start(args, format);
     const int count = std::vsnprintf(bytes, sizeof(bytes), format, args);
     va_end(args);
@@ -391,6 +394,22 @@ void SerialDebug::poll()
         }
     }
 #endif
+    pollAsync();
+    drainUart();
+#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
+    if(_uart_active && (StandbySleep::monitoring() || MainIdleWait::snapshot().supported)) {
+        size_t buffered=0;
+        const bool rxUnknown=uart_get_buffered_data_len(UART_NUM_0,&buffered)!=ESP_OK;
+        const bool txPending=uart_wait_tx_done(UART_NUM_0,0)!=ESP_OK; // Zero-tick query, no waits.
+        const bool pending=rxUnknown || buffered || txPending || _uart_tx.pending() || _uart_line_length || _uart_line_overflow;
+        StandbySleep::uartTraffic(pending,false);
+        MainIdleWait::serialState(pending || _line_length || _line_overflow || _async_test!=AsyncTest::None,false);
+    }
+#endif
+}
+
+void __attribute__((noinline)) SerialDebug::pollAsync()
+{
     SerialDebug* previous = _writer;
     _writer = this; _reply_uart = _async_uart;
 #ifdef MOSAICO_BOARD
@@ -421,17 +440,6 @@ void SerialDebug::poll()
     }
 #endif
     _reply_uart = false; _writer = previous;
-    drainUart();
-#if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
-    if(_uart_active && (StandbySleep::monitoring() || MainIdleWait::snapshot().supported)) {
-        size_t buffered=0;
-        const bool rxUnknown=uart_get_buffered_data_len(UART_NUM_0,&buffered)!=ESP_OK;
-        const bool txPending=uart_wait_tx_done(UART_NUM_0,0)!=ESP_OK; // Zero-tick query, no waits.
-        const bool pending=rxUnknown || buffered || txPending || _uart_tx.pending() || _uart_line_length || _uart_line_overflow;
-        StandbySleep::uartTraffic(pending,false);
-        MainIdleWait::serialState(pending || _line_length || _line_overflow || _async_test!=AsyncTest::None,false);
-    }
-#endif
 }
 
 void SerialDebug::drainUart()
@@ -481,7 +489,7 @@ void SerialDebug::consume(char value)
             line[length] = '\0';
             char* command = _reply_uart ? serial_debug_transport::decodeUartLine(line, length) : line;
             if (command) {
-                if (!handleCachedRead(command)&&!handleMaintenanceRestart(command)&&!handleCold(command)&&!handleContrast(command)&&!handleFactoryScale(command)) handleLine(command);
+                if (!handleStackBudget(command)&&!handleGaugeTrace(command)&&!handleCachedRead(command)&&!handleMaintenanceRestart(command)&&!handleCold(command)&&!handleContrast(command)&&!handleFactoryScale(command)) handleLine(command);
             }
             else result("parse", "FAIL", "reason=uart_crc_frame_required no_changes=1");
         }
@@ -776,6 +784,102 @@ bool __attribute__((noinline)) SerialDebug::handleFactoryScale(char* line)
         page?GetHAL().gaugeFactoryScaleObservedPage(index,details,sizeof(details)):
         GetHAL().gaugeFactoryScaleObservedField(index,details,sizeof(details));
     result("gauge-factory-scale",ok?"PASS":"FAIL",details);return true;
+#else
+    (void)line;return false;
+#endif
+}
+
+bool __attribute__((noinline)) SerialDebug::handleStackBudget(const char* line)
+{
+#ifdef MOSAICO_BOARD
+    if(!line)return false;
+    const char* p=line;
+    while(*p==' '||*p=='\t')++p;
+    const char* root=p;
+    while(*p&&*p!=' '&&*p!='\t')++p;
+    const size_t rootSize=size_t(p-root);
+    if(!((rootSize==5&&!std::strncmp(root,"debug",5))||(rootSize==3&&!std::strncmp(root,"dbg",3))))return false;
+    while(*p==' '||*p=='\t')++p;
+    const char* command=p;
+    while(*p&&*p!=' '&&*p!='\t')++p;
+    if(p-command!=12||std::strncmp(command,"stack-budget",12))return false;
+    while(*p==' '||*p=='\t')++p;
+    if(*p){result("stack-budget","FAIL","reason=expected_no_arguments no_changes=1");return true;}
+    if(_reply_uart&&!serial_debug_transport::uartAllowed("stack-budget")){
+        result("stack-budget","FAIL","reason=uart_requires_extended_authorization no_changes=1");return true;
+    }
+    // Explicit read-only UART whitelist; consume() already checked its CRC.
+    // This cumulative current-task watermark is not an instantaneous/cold cost.
+    debugPrintf("DBG RESULT command=stack-budget status=PASS main_stack_hwm_bytes=%lu main_stack_config_bytes=%lu hwm_scope=cumulative_current_task readonly=1\r\n",
+        static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)),
+        static_cast<unsigned long>(CONFIG_ESP_MAIN_TASK_STACK_SIZE));
+    return true;
+#else
+    (void)line;return false;
+#endif
+}
+
+bool __attribute__((noinline)) SerialDebug::handleGaugeTrace(char* line)
+{
+#ifdef MOSAICO_BOARD
+    if(!line)return false;
+    const char* p=line;
+    while(*p==' '||*p=='\t')++p;
+    const char* root=p;
+    while(*p&&*p!=' '&&*p!='\t')++p;
+    const size_t rootSize=size_t(p-root);
+    if(!((rootSize==5&&!std::strncmp(root,"debug",5))||(rootSize==3&&!std::strncmp(root,"dbg",3))))return false;
+    while(*p==' '||*p=='\t')++p;
+    const char* command=p;
+    while(*p&&*p!=' '&&*p!='\t')++p;
+    if(p-command!=11||std::strncmp(command,"gauge-trace",11))return false;
+    if(_reply_uart&&!serial_debug_transport::uartAllowed("gauge-trace")){
+        result("gauge-trace","FAIL","reason=uart_requires_extended_authorization no_changes=1");return true;
+    }
+    // Preserve the old handleLine admission before moving this parser out of
+    // its large frame: even readonly trace exports were refused during OTA.
+    if(MosaicoOta::busy()){
+        result("gauge-trace","FAIL","reason=ota_busy no_changes=1");return true;
+    }
+    char* save=nullptr;
+    (void)::strtok_r(line," \t",&save);
+    (void)::strtok_r(nullptr," \t",&save);
+
+        const char* action=::strtok_r(nullptr," \t",&save);
+        if(!action)action="status";
+        const bool confirmed=!std::strcmp(action,"arm")||!std::strcmp(action,"resume")||!std::strcmp(action,"clear")||!std::strcmp(action,"checkpoint");
+        const char* confirm=confirmed?::strtok_r(nullptr," \t",&save):nullptr;
+        if((confirmed&&(!confirm||std::strcmp(confirm,"CONFIRM")))||::strtok_r(nullptr," \t",&save)) {
+            result("gauge-trace","FAIL","expected=status_arm_CONFIRM_resume_CONFIRM_stop_export_clear_CONFIRM_checkpoint_CONFIRM");return true;
+        }
+        bool emitted=true;
+        const auto emit=[](const char* line,void* context){
+            if(!SerialDebug::debugTraceLine(line))*static_cast<bool*>(context)=false;
+        };
+        if(!std::strcmp(action,"status")){
+            GaugeDischargeTrace::status(emit,&emitted);
+            result("gauge-trace",emitted?"PASS":"FAIL",emitted?"action=status readonly=1":"reason=trace_output_failed data_retained=1");return true;
+        }
+        if(!std::strcmp(action,"export")){
+            // Bulk export can exceed the bounded UART queue before its owner
+            // resumes draining. Keep UART status/control, export via CDC only.
+            if(_writer&&_writer->_reply_uart){result("gauge-trace","FAIL","reason=bulk_export_cdc_only data_retained=1");return true;}
+            GaugeDischargeTrace::exportRows(emit,&emitted);
+            char details[128];
+            std::snprintf(details,sizeof(details),"%s main_stack_hwm_bytes=%lu",
+                emitted?"action=export readonly=1":"reason=trace_output_failed data_retained=1",
+                static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)));
+            result("gauge-trace",emitted?"PASS":"FAIL",details);return true;
+        }
+        bool queued=false;
+        if(!std::strcmp(action,"arm"))queued=GaugeDischargeTrace::armConfirm();
+        else if(!std::strcmp(action,"resume"))queued=GaugeDischargeTrace::resumeConfirm();
+        else if(!std::strcmp(action,"stop"))queued=GaugeDischargeTrace::stop();
+        else if(!std::strcmp(action,"clear"))queued=GaugeDischargeTrace::clearConfirm();
+        else if(!std::strcmp(action,"checkpoint"))queued=GaugeDischargeTrace::checkpointConfirm();
+        else {result("gauge-trace","FAIL","reason=unknown_action");return true;}
+        result("gauge-trace",queued?"PASS":"FAIL",queued?"queued=1 persisted=0 check_status_pending0=1 gauge_parameter_writes=0":"queued=0 reason=busy_not_ready_or_refused");
+        return true;
 #else
     (void)line;return false;
 #endif
@@ -1918,43 +2022,7 @@ void SerialDebug::handleLine(char* line)
         result("gauge-fcc-limit",ok?"PASS":"FAIL",details);
         return;
     }
-    if (std::strcmp(command,"gauge-trace")==0) {
-        const char* action=::strtok_r(nullptr," \t",&save);
-        if(!action)action="status";
-        const bool confirmed=!std::strcmp(action,"arm")||!std::strcmp(action,"resume")||!std::strcmp(action,"clear")||!std::strcmp(action,"checkpoint");
-        const char* confirm=confirmed?::strtok_r(nullptr," \t",&save):nullptr;
-        if((confirmed&&(!confirm||std::strcmp(confirm,"CONFIRM")))||::strtok_r(nullptr," \t",&save)) {
-            result("gauge-trace","FAIL","expected=status_arm_CONFIRM_resume_CONFIRM_stop_export_clear_CONFIRM_checkpoint_CONFIRM");return;
-        }
-        bool emitted=true;
-        const auto emit=[](const char* line,void* context){
-            if(!SerialDebug::debugTraceLine(line))*static_cast<bool*>(context)=false;
-        };
-        if(!std::strcmp(action,"status")){
-            GaugeDischargeTrace::status(emit,&emitted);
-            result("gauge-trace",emitted?"PASS":"FAIL",emitted?"action=status readonly=1":"reason=trace_output_failed data_retained=1");return;
-        }
-        if(!std::strcmp(action,"export")){
-            // Bulk export can exceed the bounded UART queue before its owner
-            // resumes draining. Keep UART status/control, export via CDC only.
-            if(_writer&&_writer->_reply_uart){result("gauge-trace","FAIL","reason=bulk_export_cdc_only data_retained=1");return;}
-            GaugeDischargeTrace::exportRows(emit,&emitted);
-            char details[128];
-            std::snprintf(details,sizeof(details),"%s main_stack_hwm_bytes=%lu",
-                emitted?"action=export readonly=1":"reason=trace_output_failed data_retained=1",
-                static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)));
-            result("gauge-trace",emitted?"PASS":"FAIL",details);return;
-        }
-        bool queued=false;
-        if(!std::strcmp(action,"arm"))queued=GaugeDischargeTrace::armConfirm();
-        else if(!std::strcmp(action,"resume"))queued=GaugeDischargeTrace::resumeConfirm();
-        else if(!std::strcmp(action,"stop"))queued=GaugeDischargeTrace::stop();
-        else if(!std::strcmp(action,"clear"))queued=GaugeDischargeTrace::clearConfirm();
-        else if(!std::strcmp(action,"checkpoint"))queued=GaugeDischargeTrace::checkpointConfirm();
-        else {result("gauge-trace","FAIL","reason=unknown_action");return;}
-        result("gauge-trace",queued?"PASS":"FAIL",queued?"queued=1 persisted=0 check_status_pending0=1 gauge_parameter_writes=0":"queued=0 reason=busy_not_ready_or_refused");
-        return;
-    }
+
 #ifdef MOSAICO_NAND_STORE
     if (std::strcmp(command,"nand-store")==0) {
         const char* action=::strtok_r(nullptr," \t",&save);
