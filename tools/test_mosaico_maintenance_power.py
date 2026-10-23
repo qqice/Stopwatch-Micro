@@ -248,6 +248,12 @@ namespace std{inline unsigned locksHeld=0;struct mutex{bool available=true;};str
   self.assertIn('i2c_master_transmit_receive(gauge, &reg, 1, bytes, size, 20)',source)
   src=INC.read_text();model=(INC.parent/'mosaico_maintenance_power_model.h').read_text();ota=(ROOT/'main/ota/mosaico_ota.cpp').read_text()
   sections=[src[src.index('    if (!gauge)'):src.index('    const int64_t started')],src[src.index('    ok &= word(0x08'):],model[model.index('// SLUUBD4A'):],ota[ota.index('bool maintenancePowerSafe('):ota.index('\nbool ',ota.index('bool maintenancePowerSafe(')+5)]]
+  contrast_guard='#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME\n    if (!contrast_maintenance_cached_safe_locked())\n        return maintenance_power_reject("contrast_not_cached_stable_original_or_missing");\n#endif\n'
+  self.assertEqual(sections[0].count(contrast_guard),1)
+  sections[0]=sections[0].replace(contrast_guard,'')
+  contrast_reason='             (factory_scale_maintenance_original_cached_locked()\n#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME\n             || contrast_maintenance_original_cached_locked()\n#endif\n             ));'
+  self.assertEqual(sections[0].count(contrast_reason),1)
+  sections[0]=sections[0].replace(contrast_reason,'             factory_scale_maintenance_original_cached_locked());')
   self.assertEqual([hashlib.sha256(s.encode()).hexdigest() for s in sections],['00c19f0000a6010ad6a0885d150b8e0ec69f63ba1d13d737064a0a68a6a2a63d', '9a3010a5aa968237178ae2ba77c2d54dd466723cb984ad87a956083b6e595b2b', 'bfba4e2367e9f90fdce84af933337e734a8feb746cc2b3a1f1b74e3c819b21a8', 'f4acc3a4e99103f900dd4289a0991b178150450c26aaf5d2b904d8e865711831'])
   branch=src[src.index('    bool ok = word(0x3a'):src.index('    ok &= word(0x08')]
   self.assertIn('firstError == ESP_ERR_TIMEOUT',branch)

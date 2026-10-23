@@ -55,6 +55,7 @@ static Hal hal;Hal& GetHAL(){return hal;}
 namespace GaugeDischargeTrace{struct NandBackend{static bool busy(){++nandCalls;return nandBusy;}};}
 struct SerialDebug{
  bool _reply_uart=false;std::array<char,1536> _line{},_uart_line{};size_t _line_length=0,_uart_line_length=0;bool _line_overflow=false,_uart_line_overflow=false;
+ bool handleContrast(char*){return false;} // separately exercised by contrast integration
  bool handleFactoryScale(char*);void consume(char);
  bool handleMaintenanceRestart(const char*){return false;}
  bool handleCachedRead(const char* line){++cachedCalls;return !std::strcmp(line,"debug ota-health");}

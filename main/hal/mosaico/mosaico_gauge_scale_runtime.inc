@@ -179,17 +179,27 @@ void scale_invalidate_context_locked(){
     scale_update_protection_locked();
 }
 bool scale_journal_missing_locked(){
+#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
+    if(contrast_present_locked())return false;
+#endif
 #ifdef MOSAICO_FACTORY_SCALE_RUNTIME
     if(factory_scale_present_locked())return false;
 #endif
     return scale_load_locked()==scale_journal::Status::Missing;
 }
 bool scale_boot_fence_locked(){
-    // Populate the old ledger's READ-ONLY cache even when GSJ3 owns the gauge;
+    // Populate the old ledger's READ-ONLY cache even when GCT1/GSJ3 owns the gauge;
     // maintenance OTA must never initialize/recover it from its admission path.
     const auto s=scale_load_locked();
 #ifdef MOSAICO_FACTORY_SCALE_RUNTIME
-    if(!factory_scale_boot_fence_locked())return false;
+    const bool factoryAllowed=factory_scale_boot_fence_locked();
+#endif
+#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
+    const bool contrastAllowed=contrast_boot_fence_locked();
+    if(!contrastAllowed)return false;
+#endif
+#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
+    if(!factoryAllowed)return false;
 #endif
     if(s==scale_journal::Status::Missing)return true; // permits legacy, NOT physical scale1
     if(s!=scale_journal::Status::Ready)return false;
@@ -201,6 +211,9 @@ bool scale_boot_fence_locked(){
     return scale_trial_boot_restore_locked();
 }
 mosaico_gauge_physical::UnitContext scale_unit_context_locked(){
+#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
+    if(contrast_present_locked())return contrast_context_locked();
+#endif
 #ifdef MOSAICO_FACTORY_SCALE_RUNTIME
     if(factory_scale_present_locked())return factory_scale_context_locked();
 #endif

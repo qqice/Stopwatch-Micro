@@ -60,6 +60,7 @@ private:
     uint32_t _uart_read_errors = 0;
     void handleLine(char* line);
     bool __attribute__((noinline)) handleCachedRead(const char* line);
+    bool __attribute__((noinline)) handleContrast(char* line);
     bool __attribute__((noinline)) handleFactoryScale(char* line);
     bool __attribute__((noinline)) handleMaintenanceRestart(const char* line);
     void updateAsyncTest();

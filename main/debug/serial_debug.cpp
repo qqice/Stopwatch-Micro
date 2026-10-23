@@ -480,7 +480,7 @@ void SerialDebug::consume(char value)
             line[length] = '\0';
             char* command = _reply_uart ? serial_debug_transport::decodeUartLine(line, length) : line;
             if (command) {
-                if (!handleCachedRead(command)&&!handleMaintenanceRestart(command)&&!handleFactoryScale(command)) handleLine(command);
+                if (!handleCachedRead(command)&&!handleMaintenanceRestart(command)&&!handleContrast(command)&&!handleFactoryScale(command)) handleLine(command);
             }
             else result("parse", "FAIL", "reason=uart_crc_frame_required no_changes=1");
         }
@@ -622,6 +622,54 @@ bool __attribute__((noinline)) SerialDebug::handleMaintenanceRestart(const char*
     });
     if (!ok) result("runtime-restart","FAIL","reason=maintenance_restart_guard_or_recheck no_restart=1 Failed_preserved=1");
     return true;
+#else
+    (void)line;return false;
+#endif
+}
+
+bool __attribute__((noinline)) SerialDebug::handleContrast(char* line)
+{
+#ifdef MOSAICO_BOARD
+    if(!line)return false;
+    const char* p=line;while(*p==' '||*p=='\t')++p;
+    const char* root=p;while(*p&&*p!=' '&&*p!='\t')++p;
+    const size_t length=static_cast<size_t>(p-root);
+    if(!((length==5&&!std::strncmp(root,"debug",5))||(length==3&&!std::strncmp(root,"dbg",3))))return false;
+    while(*p==' '||*p=='\t')++p;
+    const char* command=p;while(*p&&*p!=' '&&*p!='\t')++p;
+    if(p-command!=14||std::strncmp(command,"gauge-contrast",14))return false;
+    if(_reply_uart&&!serial_debug_transport::uartAllowed("gauge-contrast")){
+        result("gauge-contrast","FAIL","reason=uart_authorization no_changes=1");return true;
+    }
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy()){
+        result("gauge-contrast","FAIL","reason=nand_format_maintenance no_changes=1");return true;
+    }
+#endif
+    char* save=nullptr;::strtok_r(line," \t",&save);::strtok_r(nullptr," \t",&save);
+    const char* action=::strtok_r(nullptr," \t",&save);if(!action)action="status";
+    const char* argument=::strtok_r(nullptr," \t",&save);
+    const bool status=!std::strcmp(action,"status"),images=!std::strcmp(action,"images"),
+        prepare=!std::strcmp(action,"prepare"),apply=!std::strcmp(action,"apply"),
+        restore=!std::strcmp(action,"restore"),page=!std::strcmp(action,"observed-page");
+    uint32_t index=0;
+    const char* confirm=prepare?::strtok_r(nullptr," \t",&save):nullptr;
+    const bool valid=status?!argument:images?argument&&*argument&&std::strlen(argument)<=1400:
+        prepare?argument&&(!std::strcmp(argument,"C")||!std::strcmp(argument,"B"))&&confirm&&!std::strcmp(confirm,"CONFIRM"):
+        apply?argument&&!std::strcmp(argument,"CONFIRM_EXTERNAL_POWER"):
+        restore?argument&&!std::strcmp(argument,"CONFIRM"):
+        page&&parseUnsignedStrict(argument,0,4,index);
+    if(!valid||::strtok_r(nullptr," \t",&save)){
+        result("gauge-contrast","FAIL","reason=expected_status_images_prepare_C_or_B_CONFIRM_apply_CONFIRM_EXTERNAL_POWER_restore_CONFIRM_observed-page_0..4");return true;
+    }
+    char details[1024]{};
+    const bool ok=status?GetHAL().gaugeContrastStatus(details,sizeof(details)):
+        images?GetHAL().gaugeContrastImages(argument,details,sizeof(details)):
+        prepare?GetHAL().gaugeContrastPrepare(argument,details,sizeof(details)):
+        apply?GetHAL().gaugeContrastApply(details,sizeof(details)):
+        restore?GetHAL().gaugeContrastRestore(details,sizeof(details)):
+        GetHAL().gaugeContrastObservedPage(index,details,sizeof(details));
+    result("gauge-contrast",ok?"PASS":"FAIL",details);return true;
 #else
     (void)line;return false;
 #endif

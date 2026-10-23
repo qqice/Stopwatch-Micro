@@ -58,6 +58,10 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, Maintenance
 #ifdef MOSAICO_FACTORY_SCALE_RUNTIME
     // Cached only: even an unchanged historical reason cannot admit a live
     // Pending/Applied/Restoring/corrupt factory transaction to maintenance OTA.
+#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
+    if (!contrast_maintenance_cached_safe_locked())
+        return maintenance_power_reject("contrast_not_cached_stable_original_or_missing");
+#endif
     if (!factory_scale_maintenance_cached_safe_locked())
         return maintenance_power_reject("factory_scale_not_cached_stable_original_or_missing");
 #endif
@@ -83,7 +87,11 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, Maintenance
 #ifdef MOSAICO_FACTORY_SCALE_RUNTIME
         knownHistoricalReason = knownHistoricalReason ||
             (!std::strcmp(gauge_boot_info.reason,"boot_critical_scale_recovery_required") &&
-             factory_scale_maintenance_original_cached_locked());
+             (factory_scale_maintenance_original_cached_locked()
+#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
+             || contrast_maintenance_original_cached_locked()
+#endif
+             ));
 #endif
         if (gauge_boot_info.attempted || !knownHistoricalReason)
             return maintenance_power_reject("critical_not_known_historical_failure");

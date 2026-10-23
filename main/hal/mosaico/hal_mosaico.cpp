@@ -249,6 +249,15 @@ std::recursive_mutex gauge_transaction_mutex;
 // transaction lock; sample/context access also owns battery_mutex.
 bool scale_boot_fence_locked();
 #define MOSAICO_FACTORY_SCALE_RUNTIME 1
+#define MOSAICO_GAUGE_CONTRAST_RUNTIME 1
+bool contrast_present_locked();
+bool contrast_boot_fence_locked();
+mosaico_gauge_physical::UnitContext contrast_context_locked();
+bool contrast_poll_locked();
+bool contrast_protected();
+bool contrast_audit_allowed_locked();
+bool contrast_maintenance_original_cached_locked();
+bool contrast_maintenance_cached_safe_locked();
 bool factory_scale_present_locked();
 bool factory_scale_boot_fence_locked();
 mosaico_gauge_physical::UnitContext factory_scale_context_locked();
@@ -3321,6 +3330,7 @@ bool Hal::setDisplayOrientation(uint16_t degrees)
 #include "mosaico_native_recovery.inc"
 #include "mosaico_factory_audit.inc"
 #include "mosaico_factory_scale_runtime.inc"
+#include "mosaico_gauge_contrast_runtime.inc"
 #include "mosaico_maintenance_power.inc"
 
 Hal::PhysicalBatterySnapshot Hal::physicalBatteryTelemetry(bool refresh)

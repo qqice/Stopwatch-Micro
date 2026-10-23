@@ -22,7 +22,7 @@ if(MOSAICO_BOARD)
     set(PLATFORM_SRCS "hal/hal.cpp" "hal/mosaico/hal_mosaico.cpp" "hal/mosaico/bt_config.c" "hal/mosaico/usb_console.c"
         "hal/ble/codex_micro_ble.cpp" "hal/ble/hid_gatt_compat.cpp"
         "hal/utils/button/Button_Class.cpp" "hal/utils/settings/settings.cc")
-    list(APPEND APP_SRCS "hal/mosaico/mosaico_factory_scale_journal.cpp")
+    list(APPEND APP_SRCS "hal/mosaico/mosaico_factory_scale_journal.cpp" "hal/mosaico/mosaico_gauge_contrast_journal.cpp")
 else()
 set(PLATFORM_SRCS
     "hal/hal.cpp"

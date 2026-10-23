@@ -188,6 +188,12 @@ public:
     // Dedicated UI/OTA copy. Raw telemetry/history are NEVER scaled in place.
     BatteryTelemetry batteryPolicyTelemetry(bool refresh = false);
     bool gaugeScalePrepare(char* details,size_t size);
+    bool gaugeContrastStatus(char*,size_t);
+    bool gaugeContrastImages(const char*,char*,size_t);
+    bool gaugeContrastPrepare(const char*,char*,size_t);
+    bool gaugeContrastApply(char*,size_t);
+    bool gaugeContrastRestore(char*,size_t);
+    bool gaugeContrastObservedPage(size_t,char*,size_t);
     bool gaugeFactoryScaleStatus(char* details,size_t size);
     bool gaugeFactoryScalePrepare(char* details,size_t size);
     bool gaugeFactoryScaleImages(const char* proof,char* details,size_t size);
@@ -275,6 +281,12 @@ public:
     bool gaugeFactoryAuditRevalidationStatus(char*,size_t) { return false; }
     bool gaugeFactoryAuditRevalidationField(size_t,char*,size_t) { return false; }
     bool gaugeFactoryAuditCapture(char*,size_t) { return false; }
+    bool gaugeContrastStatus(char*,size_t) { return false; }
+    bool gaugeContrastImages(const char*,char*,size_t) { return false; }
+    bool gaugeContrastPrepare(const char*,char*,size_t) { return false; }
+    bool gaugeContrastApply(char*,size_t) { return false; }
+    bool gaugeContrastRestore(char*,size_t) { return false; }
+    bool gaugeContrastObservedPage(size_t,char*,size_t) { return false; }
     bool gaugeFactoryScaleStatus(char*,size_t) { return false; }
     bool gaugeFactoryScalePrepare(char*,size_t) { return false; }
     bool gaugeFactoryScaleImages(const char*,char*,size_t) { return false; }

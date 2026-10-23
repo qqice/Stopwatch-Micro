@@ -90,6 +90,9 @@ mosaico_gauge_physical::UnitContext factory_scale_context_locked(){
  return c;
 }
 bool factory_scale_audit_allowed_locked(){
+#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
+ if(!contrast_audit_allowed_locked())return false;
+#endif
  const auto status=factory_scale_load_locked();
  if(!factory_scale_rt||factory_scale_rt->operation||factory_scale_rt->active)return false;
  return status==factory_scale_journal::Status::Missing||(status==factory_scale_journal::Status::Ready&&factory_scale_rt->journal.loaded.selected>=0&&factory_scale_rt->journal.loaded.records[size_t(factory_scale_rt->journal.loaded.selected)].snapshot.phase==scale_recovery::Phase::Original);
@@ -528,6 +531,10 @@ bool Hal::gaugeFactoryScalePrepare(char* out,size_t n){
  if(!factory_scale_capacity(out,n)){return false;}
 
  std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
+ if(contrast_present_locked()){if(out&&n)std::snprintf(out,n,"reason=GCT1_owns_mutations no_changes=1");return false;}
+#endif
+
  if(!factory_scale_storage_locked())return factory_scale_report(out,n,false);
  auto& t=*factory_scale_rt;const auto status=factory_scale_load_locked(true);t.preparedThisBoot=false;
  if((status!=factory_scale_journal::Status::Missing&&status!=factory_scale_journal::Status::Ready)||
@@ -589,6 +596,10 @@ FactoryScaleStorageLease lease;std::lock_guard<std::recursive_mutex> transaction
 bool Hal::gaugeFactoryScaleApply(char* out,size_t n){
  if(!factory_scale_capacity(out,n)){return false;}
 FactoryScaleStorageLease lease;std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
+ if(contrast_present_locked()){if(out&&n)std::snprintf(out,n,"reason=GCT1_owns_mutations no_changes=1");return false;}
+#endif
+
  if(!lease.held){return factory_scale_report(out,n,false);}
  const auto proof=factory_scale_budget_proof_locked(); // Stack-local; before operation.
  if(!factory_scale_begin_locked(&proof)){return factory_scale_report(out,n,false);}
@@ -601,6 +612,10 @@ FactoryScaleStorageLease lease;std::lock_guard<std::recursive_mutex> transaction
 bool Hal::gaugeFactoryScaleRestore(char* out,size_t n){
  if(!factory_scale_capacity(out,n)){return false;}
 FactoryScaleStorageLease lease;std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
+ if(contrast_present_locked()){if(out&&n)std::snprintf(out,n,"reason=GCT1_owns_mutations no_changes=1");return false;}
+#endif
+
  if(!lease.held||factory_scale_load_locked(true)!=factory_scale_journal::Status::Ready)return factory_scale_report(out,n,false);
  if(factory_scale_rt->journal.loaded.records[size_t(factory_scale_rt->journal.loaded.selected)].snapshot.phase==scale_recovery::Phase::Original){factory_scale_rt->reason="already_Original_UNTRUSTED_no_keys_no_CFG";return factory_scale_report(out,n,true);}
  return factory_scale_report(out,n,factory_scale_restore_locked());

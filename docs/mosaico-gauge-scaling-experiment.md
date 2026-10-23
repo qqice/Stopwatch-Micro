@@ -265,3 +265,47 @@ claim may be inferred from that historical firmware field. Restore remains
 permitted without external power, subject to the independent voltage,
 temperature, current, identity and recovery gates. No OTA or further apply is
 admitted during the scaled interval.
+
+## Independent GCT1 capacity/config contrast (r13/r14)
+This is a diagnostic transaction, not a permanent65mAh model or SOC repair.
+GCT1 has its own namespace, 320-byte dual records, full lossless public131
+source, generation/epoch chain and C/B identity. The only owned addresses are
+929b/929d/929f. C is112a/65/65 and B is102a/65/65; no gain, EDV, taper or
+calibration field is written. All phases publish UNKNOWN physical units.
+The old GSJ2/GSJ3 contracts and signed capability domains remain unchanged.
+
+Preparation authenticates the complete exact factory rollback image and the
+retained historical Failed evidence; fresh disagreement is not rewritten to
+manufacture a matching source. Pending must be durable/read back before keys.
+Restoration accepts only original/this-arm target values at owned addresses;
+all seven calibration fields are safety protected. A third calibration value
+prohibits parameter writes and leaves recovery protected. Successful closure
+retains pre-exit full131 authentication plus sealed standard proof when0091
+auto-seals; that is explicitly NOT a fresh sealed full-DM read.
+
+The firmware deadline is720 seconds from apply admission before Pending/keys,
+not from Applied publication. Host closure must stay within660 seconds.
+Neither is extended by status polls. Boot never applies an arm: after SDK VALID,
+an interrupted non-Original record can only take the authenticated restore path.
+Both actual signed r13/r14 BINs, size/hash/app descriptors and SDK VALID states
+must match a separate GCT1 capability endorsement before any forward write.
+NVS initial admission is56 available entries with no presumed GSJ3 reuse credit;
+subsequent transitions reserve a conservative replacement plus recovery margin.
+No old record or backup is removed.
+
+Reproduction-first: C must show RawCC movement with a flat RM before B is useful.
+If C tracks, stop: warm application did not reproduce the historical charging-
+shutdown/long-off failure. No automatic long discharge, deeper voltage, extra
+RESET/OCV command, hidden register, or chemistry retuning is authorized by this
+protocol. Routine0091 configuration exit reinitializes the model; its immediate
+SOC jump is never a success criterion. Valid observations use the same epoch,
+negative current and matched sampling; count and latency gates, voltage3900mV
+and all timing/thermal/transport guards take priority over completing an arm.
+A short inconclusive observation cannot be called a plateau or scaling cure.
+
+The local console uses CRC-framed gauge-contrast with status/images,
+prepare C|B CONFIRM, apply CONFIRM_EXTERNAL_POWER, restore CONFIRM and
+observed-page0..4. This is not a generic register writer. No plaintext credential
+or signing key is sent to the device. Maintenance OTA remains available only
+for Missing or clean Original GCT state, with the existing physical and historical
+evidence checks; non-Original/corrupt/dirty state must not be waived.
