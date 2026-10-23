@@ -1,5 +1,6 @@
 """Atomic evidence envelope model; injected TEST hash is NOT cryptography."""
 from pathlib import Path
+import json
 import subprocess
 import tempfile
 import unittest
@@ -38,19 +39,40 @@ constexpr v::Policy<NotCryptoTestHash> envelopePolicy(){return {binding(),truste
 
 
 class ColdEnvelopeTests(unittest.TestCase):
-    def compile(self, body):
+    def compile(self, body, both=True):
         directory = ROOT / 'artifacts/gauge-cold-envelope-tests'
         directory.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=directory) as tmp:
-            source = Path(tmp) / 'envelope.cpp'
-            source.write_text(FIXTURE + EXTRA + body, encoding='utf-8')
-            result = subprocess.run([str(COMPILER), '-std=c++20', '-Wall', '-Wextra', '-Werror',
-                                     '-fconstexpr-ops-limit=100000000', '-fsyntax-only',
-                                     '-I' + str(ROOT / 'main/hal/mosaico'), str(source)],
-                                    capture_output=True, text=True)
-            log = directory / (self._testMethodName + '.log')
-            log.write_text(result.stdout + result.stderr, encoding='utf-8')
-            self.assertEqual(result.returncode, 0, str(log))
+        for mode in (('legacy', 'workspace') if both else ('explicit',)):
+            extra, code = EXTRA, body
+            if mode == 'workspace':
+                # Run EVERY original positive/negative assertion through the
+                # explicit-workspace APIs too; adapters allocate only in tests.
+                adapters = r'''
+ template<class H> constexpr bool workspaceEncode(const m::Record& r,const v::Frames& f,uint8_t n,const m::Binding& b,const m::Digest& d,const H& h,q::Record& out){v::Workspace w{};return v::encode(r,f,n,b,d,h,out,w);}
+ template<class H> constexpr bool workspaceDecode(const q::Record& r,const m::Binding& b,const m::Digest& d,const H& h,v::Decoded& out){v::Workspace w{};return v::decode(r,b,d,h,out,w);}
+'''
+                extra = extra.replace('v::encode(', 'workspaceEncode(').replace('v::decode(', 'workspaceDecode(')
+                extra = extra.replace('struct NotCryptoTestHash', adapters + 'struct NotCryptoTestHash')
+                policy = r'''
+struct WorkspacePolicy {
+ constexpr bool valid(const q::Record& r)const{v::Workspace w{};return v::Policy<NotCryptoTestHash>{binding(),trustedDigest(),{},&w}.valid(r);}
+ constexpr bool initial(const q::Record& r)const{v::Workspace w{};return v::Policy<NotCryptoTestHash>{binding(),trustedDigest(),{},&w}.initial(r);}
+ constexpr bool transition(const q::Record& a,const q::Record& b)const{v::Workspace w{};return v::Policy<NotCryptoTestHash>{binding(),trustedDigest(),{},&w}.transition(a,b);}
+};
+constexpr WorkspacePolicy envelopePolicy(){return {};}
+'''
+                extra = extra.replace('constexpr v::Policy<NotCryptoTestHash> envelopePolicy(){return {binding(),trustedDigest(),{}};}', policy)
+                code = code.replace('v::encode(', 'workspaceEncode(').replace('v::decode(', 'workspaceDecode(')
+            with tempfile.TemporaryDirectory(dir=directory) as tmp:
+                source = Path(tmp) / 'envelope.cpp'
+                source.write_text(FIXTURE + extra + code, encoding='utf-8')
+                result = subprocess.run([str(COMPILER), '-std=c++20', '-Wall', '-Wextra', '-Werror',
+                                         '-fconstexpr-ops-limit=100000000', '-fsyntax-only',
+                                         '-I' + str(ROOT / 'main/hal/mosaico'), str(source)],
+                                        capture_output=True, text=True)
+                log = directory / (self._testMethodName + '.' + mode + '.log')
+                log.write_text(result.stdout + result.stderr, encoding='utf-8')
+                self.assertEqual(result.returncode, 0, str(log))
 
     def test_atomic_claim_prefix_capture_and_restore_chain(self):
         self.compile(r'''
@@ -141,6 +163,129 @@ constexpr bool test(){q::Record r{};m::Digest d{};unsigned called=0;
 }static_assert(test());
 ''')
 
+
+    def test_workspace_failure_outputs_aliases_and_reentrant_guard(self):
+        self.compile(r'''
+constexpr bool same(const q::Record& a,const q::Record& b){return a.sequence==b.sequence&&a.phase==b.phase&&a.nonce==b.nonce&&a.binding==b.binding&&a.size==b.size&&a.payload==b.payload;}
+constexpr bool same(const v::Decoded& a,const v::Decoded& b){return m::sameRecord(a.metadata,b.metadata)&&a.frames==b.frames&&a.count==b.count&&a.rawHash==b.rawHash;}
+constexpr bool test(){v::Workspace w{};const auto fs=frames();auto done=captured();done.evidenceDigest=bodyDigest(fs,2);const auto good=bundle(done,fs,2);
+ q::Record out=bundle(armed());const auto original=out;
+ if(v::encode(done,fs,2,binding(),trustedDigest(),NotCryptoTestHash{true},out,w)||!same(out,original)||w.busy)return false;
+ if(v::encode(done,fs,3,binding(),trustedDigest(),NotCryptoTestHash{},out,w)||!same(out,original))return false;
+ v::Decoded decoded{};if(!v::decode(good,binding(),trustedDigest(),NotCryptoTestHash{},decoded,w))return false;const auto before=decoded;
+ auto bad=good;bad.payload[16]^=1;if(v::decode(bad,binding(),trustedDigest(),NotCryptoTestHash{},decoded,w)||!same(decoded,before)||w.busy)return false;
+ if(v::decode(good,binding(),trustedDigest(),NotCryptoTestHash{true},decoded,w)||!same(decoded,before))return false;
+ w.inner=good;const auto inner=w.inner;if(v::decode(w.inner,binding(),trustedDigest(),NotCryptoTestHash{},decoded,w)||!same(w.inner,inner)||!same(decoded,before))return false;
+ w.staged=good;if(v::decode(w.staged,binding(),trustedDigest(),NotCryptoTestHash{},decoded,w)||!same(w.staged,good)||!same(decoded,before))return false;
+ if(v::encode(done,fs,2,binding(),trustedDigest(),NotCryptoTestHash{},w.inner,w)||!same(w.inner,inner))return false;
+ w.candidate=decoded;const auto candidate=w.candidate;
+ if(v::decode(good,binding(),trustedDigest(),NotCryptoTestHash{},w.candidate,w)||!same(w.candidate,candidate))return false;
+ if(v::decode(good,w.candidate.metadata.binding,trustedDigest(),NotCryptoTestHash{},decoded,w)||!same(decoded,before))return false;
+ if(v::decode(good,binding(),w.candidate.rawHash,NotCryptoTestHash{},decoded,w)||!same(decoded,before))return false;
+ if(v::encode(w.candidate.metadata,fs,2,binding(),trustedDigest(),NotCryptoTestHash{},out,w)||!same(out,original))return false;
+ if(v::encode(done,w.candidate.frames,2,binding(),trustedDigest(),NotCryptoTestHash{},out,w)||!same(out,original))return false;
+ w.busy=true;if(v::decode(good,binding(),trustedDigest(),NotCryptoTestHash{},decoded,w)||!same(decoded,before)||!w.busy)return false;
+ w.busy=false;return true;
+}static_assert(test());
+''', both=False)
+
+    def test_workspace_trusted_digest_and_binding_never_alias_overwritten_scratch(self):
+        self.compile(r'''
+constexpr bool equalOut(const v::Decoded& a,const v::Decoded& b){return m::sameRecord(a.metadata,b.metadata)&&a.frames==b.frames&&a.count==b.count&&a.rawHash==b.rawHash;}
+constexpr bool test(){v::Workspace w{};auto bad=bundle(armed());bad.binding[0]^=1;
+ v::Decoded out{};out.count=7;const auto before=out;const auto external=trustedDigest();
+ if(v::decode(bad,binding(),external,NotCryptoTestHash{},out,w)||external!=trustedDigest()||!equalOut(out,before))return false;
+ // Explicit reviewer counterexample: reject BEFORE inner.binding is replaced
+ // with the bad outer binding, preserving the original trusted anchor exactly.
+ w.inner.binding=trustedDigest();
+ if(v::decode(bad,binding(),w.inner.binding,NotCryptoTestHash{},out,w)||w.inner.binding!=trustedDigest()||!equalOut(out,before)||w.busy)return false;
+ m::Digest* anchors[]={&w.inner.binding,&w.staged.binding,
+  &w.candidate.rawHash,&w.candidate.metadata.evidenceDigest,&w.candidate.metadata.binding.slotHashes[0],&w.candidate.metadata.binding.slotHashes[1],&w.candidate.metadata.binding.contractDigest,&w.candidate.metadata.binding.source131ReceiptDigest,
+  &w.before.rawHash,&w.before.metadata.evidenceDigest,&w.before.metadata.binding.slotHashes[0],&w.before.metadata.binding.slotHashes[1],&w.before.metadata.binding.contractDigest,&w.before.metadata.binding.source131ReceiptDigest,
+  &w.after.rawHash,&w.after.metadata.evidenceDigest,&w.after.metadata.binding.slotHashes[0],&w.after.metadata.binding.slotHashes[1],&w.after.metadata.binding.contractDigest,&w.after.metadata.binding.source131ReceiptDigest};
+ q::Record encoded=bundle(handed());const auto original=encoded;
+ for(auto* anchor:anchors){*anchor=trustedDigest();
+  if(v::decode(bad,binding(),*anchor,NotCryptoTestHash{},out,w)||*anchor!=trustedDigest()||!equalOut(out,before)||w.busy)return false;
+  if(v::encode(armed(),{},0,binding(),*anchor,NotCryptoTestHash{},encoded,w)||*anchor!=trustedDigest()||encoded.payload!=original.payload||encoded.binding!=original.binding||encoded.sequence!=original.sequence||w.busy)return false;
+ }
+ m::Binding* bindings[]={&w.candidate.metadata.binding,&w.before.metadata.binding,&w.after.metadata.binding};
+ for(auto* expected:bindings){*expected=binding();
+  if(v::decode(bad,*expected,trustedDigest(),NotCryptoTestHash{},out,w)||!m::sameBinding(*expected,binding())||!equalOut(out,before))return false;
+  if(v::encode(armed(),{},0,*expected,trustedDigest(),NotCryptoTestHash{},encoded,w)||!m::sameBinding(*expected,binding())||encoded.payload!=original.payload)return false;
+ }
+ return true;
+}static_assert(test());
+''', both=False)
+
+    def test_workspace_policy_preserves_both_decodes_and_continuous_chain(self):
+        self.compile(r'''
+constexpr bool test(){v::Workspace w{};const v::Policy<NotCryptoTestHash> policy{binding(),trustedDigest(),{},&w};
+ const auto fs=frames();const auto a=bundle(armed()),h=bundle(handed()),claim=bundle(claimed(),fs,1);
+ auto done=captured();done.evidenceDigest=bodyDigest(fs,2);const auto full=bundle(done,fs,2);
+ if(!policy.initial(a)||!policy.valid(h)||!policy.transition(a,h)||!policy.transition(h,claim)||!policy.transition(claim,full))return false;
+ if(w.before.count!=1||w.after.count!=2||w.before.metadata.phase!=m::Phase::CaptureClaimed||w.after.metadata.phase!=m::Phase::Captured)return false;
+ if(policy.transition(full,claim)||policy.transition(a,full)||w.busy)return false;
+ if(!policy.transition(claim,full)||w.before.count!=1||w.after.count!=2)return false;
+ // Hash failures/negative transitions never leave the exclusive workspace busy.
+ const v::Policy<NotCryptoTestHash> broken{binding(),trustedDigest(),{true},&w};
+ if(broken.transition(claim,full)||w.busy)return false;
+ w.busy=true;if(policy.valid(a)||policy.initial(a)||policy.transition(a,h)||!w.busy)return false;
+ return true;
+}static_assert(test());
+''', both=False)
+
+    def test_workspace_nested_hash_callback_requires_separate_workspace(self):
+        self.compile(r'''
+struct NestedHash {v::Workspace* nested;const q::Record* record;unsigned* attempts;unsigned* accepted;
+ constexpr bool operator()(const uint8_t* p,size_t n,m::Digest& digest)const{
+  ++*attempts;v::Decoded out{};if(v::decode(*record,binding(),trustedDigest(),NotCryptoTestHash{},out,*nested))++*accepted;
+  return NotCryptoTestHash{}(p,n,digest);
+ }};
+constexpr bool test(){const auto fs=frames();auto done=captured();done.evidenceDigest=bodyDigest(fs,2);const auto full=bundle(done,fs,2);const auto empty=bundle(armed());
+ v::Workspace one{},two{};v::Decoded out{};unsigned attempts=0,accepted=0;
+ if(!v::decode(full,binding(),trustedDigest(),NestedHash{&one,&empty,&attempts,&accepted},out,one)||attempts!=1||accepted||one.busy)return false;
+ attempts=accepted=0;if(!v::decode(full,binding(),trustedDigest(),NestedHash{&two,&empty,&attempts,&accepted},out,one)||attempts!=1||accepted!=1||one.busy||two.busy)return false;
+ return out.count==2;
+}static_assert(test());
+''', both=False)
+
+    def test_rv32_explicit_workspace_stack_frames_and_evidence_budget(self):
+        directory = ROOT / 'artifacts/gauge-cold-envelope-tests'
+        directory.mkdir(parents=True, exist_ok=True)
+        source = directory / 'stack.cpp'
+        source.write_text(r'''
+#include "mosaico_gauge_cold_envelope.h"
+namespace v=mosaico_gauge_cold_envelope;
+extern bool trustedHash(const uint8_t*,size_t,v::trial::Digest&);
+struct Hash {bool operator()(const uint8_t* p,size_t n,v::trial::Digest& d)const{return trustedHash(p,n,d);}};
+extern "C" bool wsEncode(const v::trial::Record& r,const v::Frames& f,uint8_t n,const v::trial::Binding& b,const v::trial::Digest& d,v::store::Record& out,v::Workspace& w){return v::encode(r,f,n,b,d,Hash{},out,w);}
+extern "C" bool wsDecode(const v::store::Record& r,const v::trial::Binding& b,const v::trial::Digest& d,v::Decoded& out,v::Workspace& w){return v::decode(r,b,d,Hash{},out,w);}
+extern "C" bool wsValid(const v::Policy<Hash>& p,const v::store::Record& r){return p.valid(r);}
+extern "C" bool wsInitial(const v::Policy<Hash>& p,const v::store::Record& r){return p.initial(r);}
+extern "C" bool wsTransition(const v::Policy<Hash>& p,const v::store::Record& a,const v::store::Record& b){return p.transition(a,b);}
+''', encoding='utf-8')
+        result = subprocess.run([str(COMPILER), '-std=c++20', '-Os', '-Wall', '-Wextra', '-Werror',
+            '-fstack-usage', '-c', '-I' + str(ROOT / 'main/hal/mosaico'), str(source),
+            '-o', str(directory / 'stack.o')], capture_output=True, text=True)
+        log = directory / 'stack-compile.log'
+        log.write_text(result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, str(log))
+        frames = []
+        for line in (directory / 'stack.su').read_text().splitlines():
+            name, size, category = line.rsplit('\t', 2)
+            frames.append(dict(function=name, bytes=int(size), kind=category))
+        production = [entry for entry in frames if 'convenience' not in entry['function']]
+        self.assertTrue(production)
+        self.assertTrue(all(entry['kind'] == 'static' and entry['bytes'] <= 768 for entry in production))
+        self.assertTrue(any('decodeInto' in entry['function'] for entry in production))
+        self.assertTrue(any('evidence::decode' in entry['function'] for entry in production))
+        report = dict(compiler=str(COMPILER), flags='-std=c++20 -Os -fstack-usage',
+            per_function_limit_bytes=768, production_max_frame=max(e['bytes'] for e in production),
+            frames=frames, whole_chain_limit_768_claimed=False,
+            cumulative_example='Policy64+decodeInto96+frameRules48+existing evidenceDecode704+put48=960B; add actual SHA/NAND/runtime callers separately',
+            production_requires_nonnull_workspace=True,
+            null_workspace_fallback='compatibility only; large stack explicitly excluded from production bound')
+        (directory / 'stack-report.json').write_text(json.dumps(report, indent=2))
 
 if __name__ == '__main__':
     unittest.main()

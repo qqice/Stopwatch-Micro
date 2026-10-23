@@ -91,6 +91,22 @@ class ColdCapabilityTests(unittest.TestCase):
                 c.encode_binding(self.binding | changes)
         self.assertEqual(c.decode_binding(c.encode_binding(self.binding)), self.binding)
 
+    def test_binding_full_apply_restore_counter_headroom_and_raw_receipt_domain(self):
+        maximums = {'original_gct_generation': 0xffffffff, 'original_gct_epoch': 0xffffffffffffffff}
+        boundary = self.binding | {name: value - 4 for name, value in maximums.items()}
+        self.assertEqual(c.decode_binding(c.encode_binding(boundary)), boundary)
+        for name, maximum in maximums.items():
+            for value in (0, maximum - 3, maximum - 2, maximum - 1, maximum):
+                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                    c.validate_binding(self.binding | {name: value})
+                with self.subTest(wire_name=name, value=value), self.assertRaises(ValueError):
+                    c.encode_binding(self.binding | {name: value})
+        # Raw source-receipt hashing is NOT admission and retains its previous
+        # full nonzero uint domains; it cannot authorize a bound session.
+        digest = c.source_receipt(self.raw_source(), bytes.fromhex(self.binding['mac']),
+            0x220, 3, 4, 0xffffffff, 0xffffffffffffffff)
+        self.assertEqual(len(digest), 32)
+
     def test_raw_pair_preserved_byte_for_byte_and_whitespace_is_signed(self):
         raw = b'\n ' + self.raw + b' \n'
         payload = self.signed(raw)

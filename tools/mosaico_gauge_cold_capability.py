@@ -64,8 +64,8 @@ def validate_binding(b):
         type(b['build']) is int and b['build'] == 4 and type(b['recovery']) is int and b['recovery'] == 1,
         'production unicast/known gauge/SlotHashes binding required')
     require(b['source_crc'] == '70a767be' and b['target_crc'] == '91336fc0', 'fixed source/C profile only')
-    integer(b['original_gct_generation'], 1, 0xffffffff)
-    integer(b['original_gct_epoch'], 1, 0xffffffffffffffff)
+    integer(b['original_gct_generation'], 1, 0xffffffff - 4)  # Full GCT apply+restore headroom.
+    integer(b['original_gct_epoch'], 1, 0xffffffffffffffff - 4)
     integer(b['capture_budget_ms'], 1, 60000)
     hexbytes(b['nonce'], 16, True)
     require(isinstance(b['slot_hashes'], list) and len(b['slot_hashes']) == 2, 'two ordered BIN hashes required')

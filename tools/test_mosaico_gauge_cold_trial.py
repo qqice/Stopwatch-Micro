@@ -435,5 +435,20 @@ constexpr bool cases(){const auto r=armed();auto c=receiptContext();
 }static_assert(cases());
 ''')
 
+    def test_binding_reserves_full_GCT_apply_and_restore_counter_headroom(self):
+        self.compile(r'''
+constexpr bool test(){auto b=binding();b.originalGctGeneration=uint32_t(-1)-4;b.originalGctEpoch=uint64_t(-1)-4;
+ if(!m::validBinding(b))return false;
+ auto c=context();c.expected=b;if(!m::arm(m::Load::Missing,b,c).hasNext)return false;
+ for(unsigned remaining=0;remaining<4;++remaining){auto changed=b;changed.originalGctGeneration=uint32_t(-1)-remaining;
+ if(m::validBinding(changed))return false;
+ c.expected=changed;if(m::arm(m::Load::Missing,changed,c).hasNext)return false;
+ changed=b;changed.originalGctEpoch=uint64_t(-1)-remaining;if(m::validBinding(changed))return false;
+ c.expected=changed;if(m::arm(m::Load::Missing,changed,c).hasNext)return false;}
+ auto changed=b;changed.originalGctGeneration=0;if(m::validBinding(changed))return false;
+ changed=b;changed.originalGctEpoch=0;return !m::validBinding(changed);
+}static_assert(test());
+''')
+
 if __name__ == '__main__':
     unittest.main()

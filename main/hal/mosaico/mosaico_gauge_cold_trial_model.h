@@ -112,9 +112,12 @@ constexpr bool sameBinding(const Binding& a,const Binding& b){
         a.recovery==b.recovery&&a.slotHashes==b.slotHashes&&a.contractDigest==b.contractDigest&&
         a.source131ReceiptDigest==b.source131ReceiptDigest&&a.captureBudgetMs==b.captureBudgetMs;
 }
+// Reserve the COMPLETE original GCT Pending/Applied/Restoring/Original chain
+// (+4) before any key operation, not merely the forward +2 receipt.
 constexpr bool validBinding(const Binding& b){
     if(!nonzero(b.mac)||(b.mac[0]&1)||!identity(b.identity)||b.source!=sourceCrc||b.target!=targetCrc||
-       !b.originalGctGeneration||!b.originalGctEpoch||!nonzero(b.nonce)||!nonzero(b.source131ReceiptDigest)||
+       !b.originalGctGeneration||b.originalGctGeneration>uint32_t(-1)-4||
+       !b.originalGctEpoch||b.originalGctEpoch>uint64_t(-1)-4||!nonzero(b.nonce)||!nonzero(b.source131ReceiptDigest)||
        !b.captureBudgetMs||b.captureBudgetMs>maxCaptureMs)return false;
     if(b.recovery==RecoveryBinding::SlotHashes)return nonzero(b.slotHashes[0])&&nonzero(b.slotHashes[1])&&
         b.slotHashes[0]!=b.slotHashes[1]&&!nonzero(b.contractDigest);
