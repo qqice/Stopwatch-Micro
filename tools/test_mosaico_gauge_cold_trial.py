@@ -388,5 +388,52 @@ constexpr bool cases(){const auto existing=armed();
 ''')
 
 
+    def test_handoff_completed_owned_target_receipt_is_not_fresh_sealed_DM(self):
+        self.compile(r'''
+constexpr m::Context receiptContext(){auto c=context();c.nowMs=500;auto& s=c.safety;
+ s.freshAuthenticated131=false;s.image=m::Image::Unknown;s.securityLevel=3;
+ s.ownedCompletedGctTargetReceipt=s.targetReceiptNoSubsequentWriter=true;
+ s.targetReceiptGeneration=21;s.targetReceiptEpoch=21;s.targetReceiptStartedMs=100;s.targetReceiptObservedMs=400;return c;}
+constexpr bool cases(){const auto r=armed();auto c=receiptContext();
+ const auto d=m::handoff(r,c);if(!d.hasNext||d.next.phase!=m::Phase::HandedOff||d.publishPhysicalUnits||c.safety.freshAuthenticated131)return false;
+ c.nowMs=60400;if(!m::handoff(r,c).hasNext)return false; // Inclusive60s receipt age.
+ c.nowMs=60401;if(m::handoff(r,c).hasNext)return false;
+ for(unsigned fault=0;fault<22;++fault){c=receiptContext();auto& s=c.safety;
+ if(fault==0)s.ownedCompletedGctTargetReceipt=false;
+ if(fault==1)s.targetReceiptNoSubsequentWriter=false;
+ if(fault==2)s.targetReceiptGeneration=20;
+ if(fault==3)s.targetReceiptEpoch=20;
+ if(fault==4)s.targetReceiptStartedMs=101;
+ if(fault==5)s.targetReceiptObservedMs=99;
+ if(fault==6)s.targetReceiptObservedMs=501;
+ if(fault==7)s.securityKnown=false;
+ if(fault==8)s.targetStandard65=false;
+ if(fault==9)s.cfg0=false;
+ if(fault==10)s.cal0=false;
+ if(fault==11)s.calibrationUnchanged=false;
+ if(fault==12)s.operationKnownSafeForInspection=false;
+ if(fault==13)s.securityLevel=2;
+ if(fault==14)s.sealed=false;
+ if(fault==15)c.boot.nonce[0]=11;
+ if(fault==16)s.image=m::Image::Unexpected;
+ if(fault==17)s.image=m::Image::Source131;
+ if(fault==18)s.image=m::Image::Owned3Mixed;
+ if(fault==19)s.twoRecoverySlotsSdkValid=false;
+ if(fault==20)s.voltageMv=3999;
+ if(fault==21)s.identityVerified=false;
+ if(m::handoff(r,c).hasNext)return false;}
+ for(unsigned field=0;field<2;++field){auto a=r;c=receiptContext();
+ if(field==0){a.binding.originalGctGeneration=uint32_t(-1);c.safety.targetReceiptGeneration=1;}
+ else{a.binding.originalGctEpoch=uint64_t(-1);c.safety.targetReceiptEpoch=1;}
+ c.expected=a.binding;if(m::handoff(a,c).hasNext)return false;}
+ // The legacy fresh authenticated path is unchanged but still requires the
+ // actual standard65 gate; no fallback receipt is inferred from image strings.
+ c=context();c.nowMs=500;c.safety.image=m::Image::TargetC131;
+ if(!m::handoff(r,c).hasNext)return false;
+ c.safety.targetStandard65=false;
+ return !m::handoff(r,c).hasNext&&!m::physicalUnitsTrusted;
+}static_assert(cases());
+''')
+
 if __name__ == '__main__':
     unittest.main()

@@ -68,6 +68,15 @@ struct Safety {
     // Trusted wrapper sets ONLY after cold Armed has committed/read back and
     // a SECOND fresh131 source observation completes, before entering CFG.
     uint32_t source131AfterArmedSequence=0;
+    // Handoff-only completed SAME-operation GCT receipt, NOT fresh SEALED DM.
+    // Wrapper proves durable Pending(orig+1), its authenticated complete cached
+    // target131 CRC/identity/owned3/calibration, then Applied(orig+2) verified
+    // this boot. Neither standard65 nor this flag alone establishes that chain.
+    // Exclusive writer provenance must remain intact from that observation to
+    // now; any later/unknown writer invalidates the separate no-writer witness.
+    bool ownedCompletedGctTargetReceipt=false,targetReceiptNoSubsequentWriter=false;
+    uint32_t targetReceiptGeneration=0;uint64_t targetReceiptEpoch=0;
+    uint64_t targetReceiptStartedMs=0,targetReceiptObservedMs=0;
 };
 struct Context {
     Binding expected{};BootToken boot{};uint64_t nowMs=0;Safety safety{};
@@ -230,10 +239,25 @@ constexpr Decision arm(Load loaded,const Binding& binding,const Context& c){
     Record r{};r.binding=binding;r.sequence=1;r.armedBoot=c.boot;
     r.armedMs=c.safety.sealed?c.nowMs:c.safety.ownedGctStartedMs;return persist(r);
 }
+// This receipt allows no new key/parameter action. It only authorizes the
+// metadata handoff after the existing owned GCT operation has closed SEALED.
+constexpr bool handoffTargetReceipt(const Record& r,const Context& c){
+    const auto& s=c.safety;const auto& b=r.binding;
+    return r.phase==Phase::Armed&&sameBoot(r.armedBoot,c.boot)&&
+        s.ownedCompletedGctTargetReceipt&&s.targetReceiptNoSubsequentWriter&&
+        b.originalGctGeneration<=uint32_t(-1)-2&&b.originalGctEpoch<=uint64_t(-1)-2&&
+        s.targetReceiptGeneration==b.originalGctGeneration+2&&s.targetReceiptEpoch==b.originalGctEpoch+2&&
+        s.targetReceiptStartedMs==r.armedMs&&s.targetReceiptObservedMs>=r.armedMs&&
+        s.targetReceiptObservedMs<=c.nowMs&&c.nowMs-s.targetReceiptObservedMs<=60000&&
+        s.securityLevel==3&&s.sealed&&s.targetStandard65&&s.calibrationUnchanged&&
+        (s.image==Image::Unknown||s.image==Image::TargetC131);
+}
 constexpr Decision handoff(const Record& r,const Context& c){
     const auto error=checked(r,c);if(error!=Error::None)return result(Action::BlockedUnknown,error);
     if(r.phase!=Phase::Armed||!sameBoot(r.armedBoot,c.boot)||c.nowMs<r.armedMs||c.nowMs-r.armedMs>=armedRestoreTriggerMs||
-       !safe(c,true)||c.safety.voltageMv<4000||c.safety.image!=Image::TargetC131)return result(Action::Reject,Error::Phase);
+       !safe(c,false)||c.safety.voltageMv<4000||!c.safety.targetStandard65||
+       !((c.safety.freshAuthenticated131&&c.safety.calibrationUnchanged&&c.safety.image==Image::TargetC131)||
+         handoffTargetReceipt(r,c)))return result(Action::Reject,Error::Phase);
     auto next=r;++next.sequence;next.phase=Phase::HandedOff;next.handoffMs=c.nowMs;
     return transition(r,next)?persist(next):result(Action::BlockedUnknown,Error::Sequence);
 }
