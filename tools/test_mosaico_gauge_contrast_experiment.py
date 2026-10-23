@@ -806,9 +806,10 @@ class HostTests(unittest.TestCase):
         self.assertEqual(len(obj.report['samples']), 1)
         self.assertFalse(call.uncertain)
 
-    def images_harness(self, outcomes, guard_overrides=None):
+    def images_harness(self, outcomes, guard_overrides=None, readonly_outcomes=None):
         obj, _, power, clock = self.experiment()
         events, image_count = [], [0]
+        readonly_count = {}
         status = dict(schema='1', namespace='gcontrast', source_crc=e.SOURCE, factor='0', verified='0',
             capacity_calibrated='0', original3000_UNTRUSTED='1', legacy_Failed_preserved='1',
             never_publish_physical_units='1', deadline_seconds='720', host_deadline_seconds='660',
@@ -841,6 +842,10 @@ class HostTests(unittest.TestCase):
                         duplicate = outcome == 'duplicate'
                 elif command == 'gauge-contrast status':
                     detail = dict(status, success='1')
+                elif command == 'gauge-contrast prepare C CONFIRM':
+                    status.update(phase='0', generation='1', epoch='1', prepared_fresh='1',
+                                  images_capability_verified='1', success='1')
+                    detail = dict(status)
                 elif command == 'boot':
                     detail = {'count': '10'}
                 elif command == 'ota-status':
@@ -852,6 +857,9 @@ class HostTests(unittest.TestCase):
                         unit_factor='0', unit_verified='0', op_status='0026')
                 elif command == 'gauge-native-recovery evidence':
                     detail = {'evidence_crc': '430c5ed4'}
+                elif command == 'gauge-charge':
+                    detail = dict(valid='1', readonly='1', voltage_mv='4200', temperature_dK='3000',
+                                  op_status='0026', current_ma='20', average_current_ma='20')
                 elif command == 'settings get':
                     detail = dict(settings)
                 elif command == 'settings restore':
@@ -865,6 +873,22 @@ class HostTests(unittest.TestCase):
                     detail = {'value': value}
                 else:
                     detail = {'value': '1'}
+                if command in (readonly_outcomes or {}):
+                    index = readonly_count.get(command, 0)
+                    readonly_count[command] = index + 1
+                    choices = readonly_outcomes[command]
+                    selected = choices[min(index, len(choices) - 1)]
+                    if selected == 'timeout':
+                        raise TimeoutError('readonly timeout')
+                    if selected != 'pass':
+                        terminal = 'FAIL'
+                        detail = (dict(reason='ota_not_idle', readonly='1') if command == 'gauge-engine' else
+                            dict(reason='blocked_storage_lease', ram_only='1', resolved_this_boot='0', source_reason='none',
+                                 evidence_crc='00000000', proof_generation='0', failed_records_preserved='1', keys='0',
+                                 parameter_writes='0', nvs_writes='0'))
+                        duplicate = selected == 'duplicate'
+                        if selected == 'unknown':
+                            detail['reason'] = 'different_readonly_failure'
                 detail.update((guard_overrides or {}).get(command, {}))
                 details = ' '.join(key + '=' + value for key, value in detail.items())
                 line = f'DBG RESULT command={expected} status={terminal} ' + details
@@ -878,6 +902,11 @@ class HostTests(unittest.TestCase):
         call.check, call.deadline = obj.before_write, obj.deadline
         call.prekey_failure_check = obj.known_images_failure
         call.failure_hook = lambda command, exc: power.stop.set()
+        call.expected_boot = obj.args.expected_boot
+        def wait(seconds):
+            clock.now += seconds
+            return power.stop.is_set()
+        call.retry_wait = wait
         def ensure_on():
             events.append('INDEPENDENT_ON_DOUBLE_QUERY')
             power.on_known = True
@@ -954,6 +983,176 @@ class HostTests(unittest.TestCase):
         self.assertFalse(any(command.startswith(('gauge-contrast prepare ', 'gauge-contrast apply ', 'gauge-contrast restore ')) for command in events))
         self.assertEqual(json.loads((obj.out / 'settings-after.json').read_bytes()), original)
         self.assertTrue((obj.out / 'prekey-Missing-cleanup.json').is_file())
+
+    def test_real_Console_readonly_busy_to_PASS_exact_family_no_STOP_unknown(self):
+        for command in ('gauge-native-recovery evidence', 'gauge-engine'):
+            _, call, power, events, _, _ = self.images_harness(['pass'], readonly_outcomes={command: ['busy', 'pass']})
+            result = call(command)
+            self.assertTrue(result)
+            self.assertEqual(events.count(command), 2)
+            self.assertFalse(call.uncertain)
+            self.assertFalse(power.stop.is_set())
+            index = events.index(command)
+            self.assertEqual(events[index + 1:index + 4], ['ota-status', 'boot', 'gauge-contrast status'])
+            self.assertTrue(all(row['deadline'] == call.rows[0]['deadline'] for row in call.rows))
+
+    def test_readonly_busy_whitelist_strict_no_parameter_command_or_extra_fields(self):
+        native = dict(reason='blocked_storage_lease', ram_only='1', resolved_this_boot='0', source_reason='none',
+            evidence_crc='00000000', proof_generation='0', failed_records_preserved='1', keys='0', parameter_writes='0', nvs_writes='0')
+        self.assertTrue(e.readonly_busy('gauge-native-recovery evidence', native))
+        self.assertTrue(e.readonly_busy('gauge-engine', dict(reason='ota_not_idle', readonly='1')))
+        for command in ('gauge-contrast prepare C CONFIRM', 'gauge-contrast apply CONFIRM_EXTERNAL_POWER',
+                        'gauge-contrast restore CONFIRM', 'gauge-contrast status', 'gauge-charge'):
+            self.assertFalse(e.readonly_busy(command, native))
+        for key in ('keys', 'parameter_writes', 'nvs_writes', 'failed_records_preserved'):
+            changed = dict(native)
+            changed[key] = '1' if native[key] == '0' else '0'
+            self.assertFalse(e.readonly_busy('gauge-native-recovery evidence', changed))
+        self.assertFalse(e.readonly_busy('gauge-native-recovery evidence', native | {'extra': '1'}))
+        self.assertFalse(e.readonly_busy('gauge-engine', dict(reason='ota_not_idle', readonly='1', extra='1')))
+
+    def test_readonly_timeout_duplicate_unknown_and_prior_uncertain_never_retry(self):
+        command = 'gauge-native-recovery evidence'
+        for failure in ('timeout', 'duplicate', 'unknown', 'prior'):
+            _, call, _, events, _, _ = self.images_harness(['pass'], readonly_outcomes={command: ['busy' if failure == 'prior' else failure]})
+            call.uncertain = failure == 'prior'
+            with self.assertRaises((ValueError, TimeoutError)):
+                call(command)
+            self.assertEqual(events.count(command), 1)
+            self.assertTrue(call.uncertain)
+
+    def test_readonly_retry_caps_three_attempts_four_seconds_group_and_parent(self):
+        command = 'gauge-engine'
+        _, call, power, events, _, _ = self.images_harness(['pass'], readonly_outcomes={command: ['busy']})
+        start = call.clock.now
+        with self.assertRaises(e.TypedReadonlyBusy):
+            call(command, timeout=90)
+        self.assertEqual(events.count(command), 3)
+        self.assertLess(call.clock.now - start, 4)
+        self.assertFalse(call.uncertain)
+        self.assertFalse(power.stop.is_set())
+        for cap in ('group_deadline', 'deadline'):
+            _, call, _, events, _, _ = self.images_harness(['pass'], readonly_outcomes={command: ['busy']})
+            setattr(call, cap, call.clock.now + .9)
+            with self.assertRaisesRegex(ValueError, 'contention budget'):
+                call(command, timeout=90)
+            self.assertEqual(events.count(command), 1)
+            self.assertFalse(call.uncertain)
+            self.assertTrue(all(row['deadline'] <= 100.9 for row in call.rows))
+
+    def test_readonly_changed_SDK_boot_or_epoch_forbids_retry(self):
+        command = 'gauge-engine'
+        for change in ('SDK', 'boot', 'epoch'):
+            _, call, _, events, _, _ = self.images_harness(['pass'], readonly_outcomes={command: ['busy', 'pass']})
+            original = call.client._command_once
+            def changed(text, expected, timeout):
+                result = original(text, expected, timeout)
+                # Modify subsequent GUARD context, not the failed command.
+                if command in events:
+                    if change == 'SDK' and text == 'debug ota-status':
+                        result.details = 'state=2 busy=1 pending=0'
+                    elif change == 'boot' and text == 'debug boot':
+                        result.details = 'count=11'
+                    elif change == 'epoch' and text == 'debug gauge-contrast status':
+                        result.details = result.details.replace('epoch=0', 'epoch=1')
+                return result
+            # The terminal text must match the returned detail, so rewrite the
+            # synthetic stdout in the shim as if the actual device emitted it.
+            def shim(text, expected, timeout):
+                capture = io.StringIO()
+                with contextlib.redirect_stdout(capture):
+                    result = changed(text, expected, timeout)
+                print(f'DBG RESULT command={expected} status={result.status} ' + result.details)
+                return result
+            call.client._command_once = shim
+            with self.assertRaisesRegex(ValueError, 'phase epoch changed'):
+                call(command)
+            self.assertEqual(events.count(command), 1)
+
+    def test_real_prepare_receipt_precedes_busy_legacy_and_Original_RAM_cleanup(self):
+        command = 'gauge-native-recovery evidence'
+        obj, call, power, events, _, original_settings = self.images_harness(['pass'],
+            readonly_outcomes={command: ['pass', 'busy', 'busy', 'busy', 'pass']})
+        actual = call.client._command_once
+        def checked(text, expected, timeout):
+            if text == 'debug ' + command and call.gct_context and call.gct_context['phase'] == '0':
+                self.assertTrue(obj.report.get('prepared'))
+                self.assertTrue((obj.out / 'prepare-receipt.json').is_file())
+            return actual(text, expected, timeout)
+        call.client._command_once = checked
+        with patch.object(e, 'legacy_check', side_effect=lambda d: d):
+            report = obj.run()
+        self.assertFalse(report['complete'])
+        self.assertFalse(report['unknown_ack'])
+        self.assertTrue(report['prepared']['prepared_fresh'] == '1')
+        self.assertTrue(report['original_verified'])
+        self.assertTrue(report['settings_restored'])
+        self.assertTrue((obj.out / 'preapply-Original-cleanup.json').is_file())
+        self.assertEqual(events.count('gauge-contrast prepare C CONFIRM'), 1)
+        self.assertFalse(any(command.startswith(('gauge-contrast apply ', 'gauge-contrast restore ')) for command in events))
+        self.assertEqual(json.loads((obj.out / 'settings-after.json').read_bytes()), original_settings)
+
+    def test_actual_Console_parameter_commands_never_retry_readonly_busy_lookalike(self):
+        from serial_debug_test import encode_command
+        for command in ('gauge-contrast prepare C CONFIRM', 'gauge-contrast apply CONFIRM_EXTERNAL_POWER',
+                        'gauge-contrast restore CONFIRM'):
+            obj, call, power, events, _, _ = self.images_harness(['pass'])
+            obj.ram_deadline = call.clock.now + 600
+            def failed(text, expected, timeout):
+                call.client.serial.write(encode_command(text, True))
+                events.append(text.removeprefix('debug '))
+                detail = ('reason=blocked_storage_lease ram_only=1 resolved_this_boot=0 source_reason=none '
+                    'evidence_crc=00000000 proof_generation=0 failed_records_preserved=1 keys=0 parameter_writes=0 nvs_writes=0')
+                print(f'DBG RESULT command={expected} status=FAIL ' + detail)
+                return types.SimpleNamespace(status='FAIL', details=detail)
+            call.client._command_once = failed
+            with self.assertRaises(ValueError):
+                call(command)
+            self.assertEqual(events, [command])
+            self.assertTrue(call.uncertain)
+            self.assertTrue(power.stop.is_set())
+
+    def test_preapply_cleanup_negative_proof_never_restores_RAM_or_claims_Original(self):
+        command = 'gauge-native-recovery evidence'
+        for fault in ('epoch', 'boot', 'DC130', 'FCC130', 'security', 'readfail'):
+            with self.subTest(fault=fault):
+                obj, call, power, events, _, _ = self.images_harness(['pass'],
+                    readonly_outcomes={command: ['pass', 'busy', 'busy', 'busy', 'pass']})
+                cleanup = [False]
+                actual_on = power.ensure_on
+                def on():
+                    actual_on()
+                    cleanup[0] = True
+                power.ensure_on = on
+                actual_command = call.client._command_once
+                def changed(text, expected, timeout):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        result = actual_command(text, expected, timeout)
+                    if cleanup[0]:
+                        if fault == 'epoch' and text == 'debug gauge-contrast status':
+                            result.details = result.details.replace('epoch=1', 'epoch=2')
+                        elif fault == 'boot' and text == 'debug boot':
+                            result.details = 'count=11'
+                        elif text == 'debug gauge':
+                            if fault == 'DC130':
+                                result.details = result.details.replace('design_mah=3000', 'design_mah=130')
+                            elif fault == 'FCC130':
+                                result.details = result.details.replace('fcc_mah=3000', 'fcc_mah=130')
+                            elif fault == 'security':
+                                result.details = result.details.replace('op_status=0026', 'op_status=0000')
+                            elif fault == 'readfail':
+                                raise TimeoutError('cleanup standard reply unknown')
+                    print(f'DBG RESULT command={expected} status={result.status} ' + result.details)
+                    return result
+                call.client._command_once = changed
+                with patch.object(e, 'legacy_check', side_effect=lambda d: d):
+                    report = obj.run()
+                self.assertTrue(report['prepared'])
+                self.assertFalse(report['original_verified'])
+                self.assertFalse(report['settings_restored'])
+                self.assertFalse(report['complete'])
+                self.assertNotIn('settings restore', events)
+                self.assertFalse((obj.out / 'preapply-Original-cleanup.json').exists())
 
 
 if __name__ == '__main__':

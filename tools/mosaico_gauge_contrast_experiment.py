@@ -50,6 +50,30 @@ class TypedKnownPrekeyFailure(ValueError):
         super().__init__('known prekey images rejection: ' + detail['reason'])
 
 
+class TypedReadonlyBusy(ValueError):
+    """Known no-write contention terminal; not a transport/ACK uncertainty."""
+    def __init__(self, command, detail):
+        self.command, self.detail = command, dict(detail)
+        super().__init__('known readonly contention: ' + command)
+
+
+def readonly_busy(command, detail):
+    # Firmware sources: mosaico_native_recovery.inc native_report/evidence
+    # lease gate; serial_debug.cpp gauge-engine's pre-read OTA/storage lease.
+    if command == 'gauge-engine':
+        return detail == dict(reason='ota_not_idle', readonly='1')
+    if command != 'gauge-native-recovery evidence':
+        return False
+    fixed = dict(reason='blocked_storage_lease', ram_only='1', failed_records_preserved='1',
+                 keys='0', parameter_writes='0', nvs_writes='0')
+    return (set(detail) == set(fixed) | {'resolved_this_boot', 'source_reason', 'evidence_crc', 'proof_generation'} and
+        all(detail.get(k) == v for k, v in fixed.items()) and detail.get('resolved_this_boot') in ('0', '1') and
+        bool(re.fullmatch('[A-Za-z0-9_-]{1,100}', detail.get('source_reason', ''))) and
+        bool(re.fullmatch('[0-9a-f]{8}', detail.get('evidence_crc', ''))) and
+        bool(re.fullmatch('0|[1-9][0-9]{0,9}', detail.get('proof_generation', ''))) and
+        int(detail['proof_generation']) <= 0xffffffff)
+
+
 def parse(text):
     pairs = [token.split('=', 1) for token in text.split()]
     require(all(len(p) == 2 for p in pairs) and len({p[0] for p in pairs}) == len(pairs), 'malformed/duplicate fields')
@@ -310,6 +334,8 @@ class Console:
         self.safety_hook = self.failure_hook = None
         self.prekey_failure_check = None
         self.audit_errors = []
+        self.gct_context, self.boot_context, self.expected_boot = None, None, None
+        self.retry_wait = time.sleep
 
     @contextlib.contextmanager
     def group(self):
@@ -321,6 +347,40 @@ class Console:
             self.group_deadline = None
 
     def __call__(self, command, timeout=4, statuses=('PASS',)):
+        if command not in ('gauge-native-recovery evidence', 'gauge-engine') or statuses != ('PASS',) or self.uncertain:
+            return self._once(command, timeout, statuses)
+        require(math.isfinite(timeout) and timeout > 0, 'invalid readonly retry timeout')
+        end = self.clock.monotonic() + min(timeout, 4)
+        for cap in (self.group_deadline, self.deadline):
+            if cap is not None:
+                end = min(end, cap)
+        # Reuse a prior complete terminal context, never manufacture one from a
+        # failed read. Only the initial pre-prepare evidence needs this RO probe.
+        if self.gct_context is None:
+            self._once('gauge-contrast status', absolute_end=end)
+        if self.boot_context is None:
+            self._once('boot', absolute_end=end)
+        require(self.gct_context is not None and self.boot_context is not None,
+                'readonly retry requires complete known boot/GCT context')
+        baseline, boot = dict(self.gct_context), self.expected_boot or self.boot_context
+        for attempt in range(3):
+            try:
+                return self._once(command, timeout, statuses, absolute_end=end)
+            except TypedReadonlyBusy:
+                require(not self.uncertain, 'readonly audit/ACK uncertainty: never retry')
+                if attempt == 2:
+                    raise
+                require(self.clock.monotonic() + 1 < end, 'readonly total contention budget exhausted')
+                require(not self.retry_wait(1), 'STOP during readonly contention backoff')
+                ota = self._once('ota-status', absolute_end=end)
+                current_boot = self._once('boot', absolute_end=end)
+                self._once('gauge-contrast status', absolute_end=end)
+                require(all(ota.get(k) == v for k, v in dict(state='2', busy='0', pending='0').items()) and
+                    current_boot.get('count') == str(boot) and self.gct_context == baseline and
+                    self.clock.monotonic() < end, 'readonly retry SDK/boot/GCT phase epoch changed')
+        raise AssertionError('unreachable')
+
+    def _once(self, command, timeout=4, statuses=('PASS',), absolute_end=None):
         from serial_debug_test import encode_command, RESULT_RE
         require(allowed(command) and math.isfinite(timeout) and timeout > 0, 'command/timeout not allowed')
         end = self.clock.monotonic() + timeout
@@ -331,7 +391,7 @@ class Console:
         setup_cleanup = command == 'settings restore' and getattr(self, 'setup_cleanup', False)
         if new_apply:
             require(self.deadline is not None and self.clock.monotonic() < self.deadline, 'setup deadline before apply call')
-        for limit in (self.group_deadline, None if new_apply or setup_cleanup else self.deadline):
+        for limit in (self.group_deadline, None if new_apply or setup_cleanup else self.deadline, absolute_end):
             if limit is not None:
                 end = min(end, limit)
         original = self.client.serial
@@ -364,6 +424,14 @@ class Console:
             detail = parse(result.details)
             confirmed_terminal = result.status in ('PASS', 'FAIL')
             row.update(status=result.status, details=result.details, parsed=detail)
+            if result.status == 'PASS':
+                if command == 'boot' and re.fullmatch('[1-9][0-9]*', detail.get('count', '')):
+                    self.boot_context = detail['count']
+                if command.startswith('gauge-contrast ') and detail.get('namespace') == 'gcontrast' and all(
+                        key in detail for key in ('phase', 'generation', 'epoch', 'arm', 'source_crc')):
+                    self.gct_context = {key: detail[key] for key in ('phase', 'generation', 'epoch', 'arm', 'source_crc')}
+            if result.status == 'FAIL' and readonly_busy(command, detail):
+                raise TypedReadonlyBusy(command, detail)
             if (result.status == 'FAIL' and self.prekey_failure_check is not None and
                     self.prekey_failure_check(command, detail)):
                 raise TypedKnownPrekeyFailure(detail)
@@ -376,14 +444,16 @@ class Console:
         except BaseException as exc:
             primary = exc
             known_prekey = isinstance(exc, TypedKnownPrekeyFailure) and confirmed_terminal
-            if self.failure_hook is not None and not known_prekey:
+            known_readonly = isinstance(exc, TypedReadonlyBusy) and confirmed_terminal
+            if self.failure_hook is not None and not (known_prekey or known_readonly):
                 self.failure_hook(command, exc)  # Event.set only; no file/native IO.
             # A rejected preamble/wire fence is not evidence that a mutation was
             # sent. A sent mutation (including known FAIL) is never retried.
             known_safety = (isinstance(exc, TypedKnownSafetyStop) and confirmed_terminal and command == 'gauge-charge')
-            self.uncertain |= not (known_safety or known_prekey) and (not mutation(command) or self.fence.attempted)
+            self.uncertain |= not (known_safety or known_prekey or known_readonly) and (not mutation(command) or self.fence.attempted)
             row['typed_known_safety_stop'] = known_safety
             row['typed_known_prekey_failure'] = known_prekey
+            row['typed_readonly_busy'] = known_readonly
             row['error'] = repr(exc)
             raise
         finally:
@@ -623,6 +693,8 @@ class Experiment:
         call.safety_hook = self.safety
         call.failure_hook = lambda command, exc: self.power.stop.set()
         call.prekey_failure_check = self.known_images_failure
+        call.expected_boot = args.expected_boot
+        call.retry_wait = lambda seconds: self.power.stop.wait(seconds)
 
     def no_key_request(self):
         return not self.apply_sent and not any(command.startswith(('gauge-contrast prepare ',
@@ -848,8 +920,12 @@ class Experiment:
         prepared = self.call(f'gauge-contrast prepare {self.args.arm} CONFIRM', timeout=180)
         status_check(prepared, self.args.arm, 0)
         require(prepared.get('prepared_fresh') == '1', 'no fresh Original131')
-        require(legacy_check(self.call('gauge-native-recovery evidence')) == self.legacy, 'Failed changed during prepare')
         self.report['prepared'] = prepared
+        save(self.out / 'prepare-receipt.json', dict(prepared=prepared, expected_boot=self.args.expected_boot,
+            source_crc=SOURCE, immutable_source_sha256=SOURCE_SHA,
+            terminal=self.call.rows[-1] if getattr(self.call, 'rows', None) else None,
+            full131_prepared_ACK_not_fresh_sealed_DM=True, apply_not_sent=True))
+        require(legacy_check(self.call('gauge-native-recovery evidence')) == self.legacy, 'Failed changed during prepare')
 
     def rebase_quiet_once(self):
         require(not self.rebase_used and not self.rebase_in_progress and self.apply_confirmed and
@@ -958,7 +1034,7 @@ class Experiment:
                     # Setup changed no IC parameters. A verified prepare is a
                     # durable full Original source receipt, even if setup300
                     # subsequently expires before any apply frame can be sent.
-                    self.report['original_verified'] = bool(self.report.get('prepared') and not self.call.uncertain)
+                    self.report['original_verified'] = False
                     if self.clock.monotonic() < self.setup_deadline:
                         current = self.state()
                         if current.get('phase') == '255' and self.no_key_request() and not self.call.uncertain:
@@ -975,7 +1051,19 @@ class Experiment:
                                 V1_ON_verified=True, no_key_request=True, no_full131_claim=True))
                         else:
                             status_check(current, self.args.arm, 0)
-                            self.report['original_verified'] &= current.get('prepared_fresh') == '1'
+                            prepared = self.report.get('prepared')
+                            if prepared and not self.call.uncertain:
+                                require(all(current.get(k) == prepared.get(k) for k in
+                                    ('phase', 'generation', 'epoch', 'arm', 'source_crc')) and current.get('protection') == '0' and
+                                    self.call('boot').get('count') == str(self.args.expected_boot), 'prepared Original cleanup proof changed')
+                                gauge = self.call('gauge')
+                                require(gauge.get('valid') == gauge.get('capacity_valid') == '1' and
+                                    gauge.get('design_mah') == gauge.get('fcc_mah') == '3000' and
+                                    gauge.get('unit_factor') == gauge.get('unit_verified') == '0' and sealed(gauge),
+                                    'prepared Original cleanup standard/security mismatch')
+                                self.report['original_verified'] = True
+                                save(self.out / 'preapply-Original-cleanup.json', dict(prepared=prepared, current=current,
+                                    gauge=gauge, V1_ON_verified=True, apply_not_sent=True, no_restore_keys=True))
                 require(legacy_check(self.call('gauge-native-recovery evidence')) == self.legacy, 'historical Failed changed')
                 save(self.out / 'historical-Failed-after.json', self.legacy)
             except BaseException as exc:
