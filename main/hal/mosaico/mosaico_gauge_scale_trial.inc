@@ -520,6 +520,9 @@ bool Hal::gaugeScaleObservedField(size_t index,char* out,size_t size){
     if(count<0||static_cast<size_t>(count)>=size){std::snprintf(out,size,"error=scale_observed_details_truncated");return false;}return true;
 }
 bool Hal::gaugeScaleTrialActive() const {
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+    if(MosaicoGaugeCold::protectedState())return true;
+#endif
 #ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
     if(contrast_protected())return true;
 #endif
@@ -529,6 +532,9 @@ bool Hal::gaugeScaleTrialActive() const {
     return scale_trial_protection.load(std::memory_order_acquire);
 }
 void Hal::gaugeScalePoll(){
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+    if(cold_poll_supervisor())return;
+#endif
     std::unique_lock<std::recursive_mutex> transaction(gauge_transaction_mutex,std::try_to_lock);
     if(!transaction.owns_lock())return;
 #ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME

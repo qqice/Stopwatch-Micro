@@ -32,6 +32,14 @@ using namespace smooth_ui_toolkit;
 #include "main_idle_wait.h"
 #include <hal/mosaico/usb_console.h>
 #include <hal/mosaico/mosaico_nand_store.h>
+#include <hal/mosaico/mosaico_gauge_cold_crypto.h>
+#include <hal/mosaico/mosaico_gauge_cold_runtime.h>
+namespace {
+AppCodexMicro* cold_ui=nullptr;
+bool cold_quiet_enter(){return cold_ui&&(GetNetworkQuota().displayLocked()||cold_ui->debugLockDisplay());}
+// The GCT owner already pauses radios. No persisted or RAM setting was changed.
+bool cold_quiet_leave(){return true;}
+}
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
 #include <ota/panic_capture.h>
 #endif
@@ -40,6 +48,7 @@ extern "C" void mosaico_idle_usb_notify(void) { StandbySleep::usbActivity(); Mai
 extern "C" void app_main(void)
 {
 #ifdef MOSAICO_BOARD
+    MosaicoColdCrypto::prepareBootIdentity(); // One-shot entropy, before RF/ADC owners.
     MosaicoOta::healthPoll(false);
     mosaico_console_init();
 #if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_IDF_TARGET_ARCH_RISCV
@@ -60,6 +69,7 @@ extern "C" void app_main(void)
     (void)GetNetworkQuota().prepareOtaBuffers(); // Reserve before BLE/Wi-Fi fragment internal DMA SRAM.
     (void)MosaicoNandStore::prepareDmaBuffer(); // Independent NAND DMA reservation; never borrow OTA memory.
     MosaicoDisplay::init();
+    (void)MosaicoGaugeCold::startup(); // Read-only first; no recovery keys here.
     MainIdleWait::Lifetime idleWaitLifetime;
 #endif
     BootTraceStage(6);
@@ -101,6 +111,10 @@ extern "C" void app_main(void)
         mclog::tagError("Codex Micro", "failed to start system app");
         return;
     }
+#ifdef MOSAICO_BOARD
+    cold_ui=ota_app;
+    MosaicoGaugeCold::setQuietHooks({cold_quiet_enter,cold_quiet_leave});
+#endif
 
     BootTimingMark(BootTiming::UiReady);
     BootTraceStage(7);

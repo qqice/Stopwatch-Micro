@@ -61,6 +61,9 @@ struct ContrastRuntime {
  int64_t preparedUs=0,revalidatedUs=0,restoreCompletedUs=0;
  bool imagesSet=false,bootRestoreAttempted=false,active=false,hostPowerAttested=false;
  bool operation=false,accessTouched=false,keyFailed=false,sealAttempted=false;
+ // Separate from possibleDirty: a successful packet also sets possibleDirty.
+ // Never clear an uncertain ACK with a subsequent successful readback.
+ bool coldMutatorAckUnknown=false;
  uint8_t triedArms=0;
  bool applyAttempted=false,restoreAttempted=false,postExitFull131=false,sealedStandardFallback=false,protectionSealed=false;
  bool preKeySpaceRejected=false,keysStarted=false,thirdValue=false,possibleDirty=false,ownedDirty=false;
@@ -180,6 +183,9 @@ bool contrast_recovery_runtime(){
  !MosaicoOta::busy()&&!MosaicoOta::healthPending()&&p.phase==2&&!p.wifiRunning&&!b.advertising&&!b.connected;
 }
 bool contrast_rt_physical(bool restore){
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+ if(!MosaicoGaugeCold::keyWindowAllowed())return contrast_rt_fail("cold_owned_operation_deadline_or_owner");
+#endif
  if(!restore&&contrast_rt&&contrast_rt->applyAttempted&&contrast_rt->appliedUs>0&&!contrast_time_valid(*contrast_rt,esp_timer_get_time()))return contrast_rt_fail("apply_total_deadline_expired");
  if(!gauge||!(restore?contrast_recovery_runtime():factory_runtime()))return contrast_rt_fail("actual_SDK_VALID_quiet_radios_phase2_required");
  uint16_t op=0,mv=0,temp=0,current=0,average=0;
@@ -200,7 +206,13 @@ bool contrast_owned_intent(){
  return p==scale_recovery::Phase::Pending||p==scale_recovery::Phase::Restoring;
 }
 const esp_partition_t* contrast_rt_partition(unsigned slot){return slot<2?esp_partition_find_first(ESP_PARTITION_TYPE_APP,slot?ESP_PARTITION_SUBTYPE_APP_OTA_1:ESP_PARTITION_SUBTYPE_APP_OTA_0,nullptr):nullptr;}
-bool contrast_rt_version(const char* v){return !std::strcmp(v,"0.13.95-r15-mosaico-ota")||!std::strcmp(v,"0.13.95-r16-mosaico-ota");}
+bool contrast_rt_version(const char* v){
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+ return !std::strcmp(v,"0.13.95-r17-mosaico-ota")||!std::strcmp(v,"0.13.95-r18-mosaico-ota");
+#else
+ return !std::strcmp(v,"0.13.95-r15-mosaico-ota")||!std::strcmp(v,"0.13.95-r16-mosaico-ota");
+#endif
+}
 bool contrast_rt_verify_image(unsigned slot,const MosaicoOta::VerifiedImageDescriptor& image){
     const auto* part=contrast_rt_partition(slot);esp_ota_img_states_t state{};
     if(!part||!image.size||image.size>part->size||!contrast_rt_version(image.version)||
@@ -308,6 +320,10 @@ bool contrast_rt_intent(scale_recovery::Phase phase){
  return (saved.snapshot.generation==t.record.snapshot.generation&&saved.snapshot.epoch==t.record.snapshot.epoch&&saved.snapshot.phase==phase&&contrast_journal::sameRecoveryImage(saved,t.record))||contrast_rt_fail("intent_readback_mismatch");
 }
 struct ContrastBackend {
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+    std::unique_lock<std::mutex>* coldBattery=nullptr;
+    explicit ContrastBackend(std::unique_lock<std::mutex>* lock=nullptr):coldBattery(lock){}
+#endif
     
     bool restoring=false;
     void revoke(){contrast_invalidate_locked();}
@@ -315,6 +331,12 @@ struct ContrastBackend {
         restoring=restore;
         if(contrast_safety_fault)return contrast_rt_fail("trial_known_safety_calibration_fault_latched");
         if(scale_load_locked(true)!=scale_journal::Status::Missing||!contrast_legacy_original_locked())return contrast_rt_fail("contrast_requires_GSJ2_missing_GSJ3_missing_or_Original");
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+        if(MosaicoGaugeCold::protectedState()){
+            if(!MosaicoGaugeCold::ownsOperation()||!coldBattery)return contrast_rt_fail("cold_exclusive_backend_owner_required");
+            if(restore&&!MosaicoGaugeCold::beginRestore(*coldBattery))return contrast_rt_fail("cold_restore_intent_not_released");
+        }
+#endif
         if(!contrast_rt_physical(restore)||!contrast_rt_known_access())return false;
         if(restore){
             if(contrast_rt->preKeySpaceRejected&&!contrast_rt->keysStarted)return contrast_rt_fail("apply_prekey_space_rejected_no_automatic_keys");
@@ -334,7 +356,14 @@ struct ContrastBackend {
     }
     bool intent(bool restore){return contrast_rt_intent(restore?scale_recovery::Phase::Restoring:scale_recovery::Phase::Pending);}
     bool open(bool restore){
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+        if(restore&&MosaicoGaugeCold::protectedState()&&
+           (!coldBattery||!MosaicoGaugeCold::beforeRestoreKeys(*coldBattery)))return contrast_rt_fail("cold_restore_inspection_not_released");
+#endif
         uint16_t op=0;if(!contrast_rt_physical(restore)||!gauge_word(0x3a,op)||!contrast_rt_exact_identity())return contrast_rt_fail("trial_open_identity_status");
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+        if(restore&&MosaicoGaugeCold::isOwnedAbort()&&((op>>1)&3)!=1)return contrast_rt_fail("cold_owned_abort_retained_FA_only_no_new_keys");
+#endif
         if(((op>>1)&3)==1){
             if(!contrast_owned_intent()||(op&1)||!(op&0x20))return contrast_rt_fail("restore_retained_fa_requires_owned_intent_cal0_init1");
             if(!restore)return contrast_rt_fail("apply_requires_sealed_open3_path");
@@ -353,21 +382,30 @@ struct ContrastBackend {
         contrast_rt->keysStarted=true;
         const bool unseal=gauge_access_word(AccessWord::UnsealFirst)&&gauge_access_word(AccessWord::UnsealSecond);
         const bool unsealed=gauge_wait_security(2);
-        if(!unseal||!unsealed){contrast_rt->keyFailed=true;return contrast_rt_fail("trial_unseal_once_ack_or_security");}
+        if(!unseal||!unsealed){contrast_rt->coldMutatorAckUnknown=true;contrast_rt->keyFailed=true;return contrast_rt_fail("trial_unseal_once_ack_or_security");}
         gauge_delay_ms(5000);
         if(!contrast_rt_physical(restore))return false;
         const bool full=gauge_access_word(AccessWord::Full)&&gauge_access_word(AccessWord::Full);
         const bool fullAccess=gauge_wait_security(1);
-        if(!full||!fullAccess){contrast_rt->keyFailed=true;return contrast_rt_fail("trial_full_once_ack_or_security");}
+        if(!full||!fullAccess){contrast_rt->coldMutatorAckUnknown=true;contrast_rt->keyFailed=true;return contrast_rt_fail("trial_full_once_ack_or_security");}
         return true;
     }
     bool observe(bool restore){
         contrast_rt->nextReadStage=restore?"restore_pre_cfg_fa":"apply_pre_cfg_fa";
         if(!contrast_rt_read_all()||!contrast_rt_inspect(restore,false))return false;
         contrast_rt->noOpRestore=restore&&!contrast_rt->ownedDirty;
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+        if(MosaicoGaugeCold::protectedState()){
+            if(!coldBattery)return contrast_rt_fail("cold_observe_battery_owner_missing");
+            return restore?MosaicoGaugeCold::restoreSeam(*coldBattery):MosaicoGaugeCold::armSeam(*coldBattery);
+        }
+#endif
         return true;
     }
     bool enter(){
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+        if(!MosaicoGaugeCold::keyWindowAllowed())return contrast_rt_fail("cold_CFG_deadline");
+#endif
         if(restoring&&contrast_rt->noOpRestore){
             // Do not enter CFG again. If CFG1 was inherited from a failed
             // forward packet, the already observed owned-original/safe profile
@@ -382,6 +420,7 @@ struct ContrastBackend {
         uint16_t op=0;if(!gauge_word(0x3a,op)||((op>>1)&3)!=1||(op&1))return contrast_rt_fail("trial_enter_requires_fa_cal0");
         if(op&0x0400)return true; // retained CFG after interrupted forward stage
         const bool sent=gauge_control(GaugeCommand::EnterConfig);const bool observed=gauge_wait_config(true);
+        if(!sent||!observed)contrast_rt->coldMutatorAckUnknown=true;
         return (sent&&observed)||contrast_rt_fail("trial_enter_once_ack_or_cfg");
     }
     bool write(bool restore){
@@ -399,13 +438,25 @@ struct ContrastBackend {
             if(!contrast_rt_physical(restore)||!gauge_word(0x3a,op)||((op>>1)&3)!=1||!(op&0x0400)||(op&1))return contrast_rt_fail("trial_single_write_fa_cfg_cal_gate");
             uint8_t packet[7]={0x3e,uint8_t(f.address),uint8_t(f.address>>8),0,0,0,0};
             for(size_t j=0;j<f.width;++j)packet[3+j]=desired[j];
-            contrast_rt->possibleDirty=true;gauge_feed();
+            gauge_feed();
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+            // The preceding status read may itself cross the deadline.
+            if(!MosaicoGaugeCold::keyWindowAllowed())return contrast_rt_fail("cold_packet_deadline_no_packet_sent");
+#endif
+            contrast_rt->possibleDirty=true;
             // Set dirty BEFORE the one packet attempt: lost ACK is not evidence
             // of no write. Never resend the packet or commit after uncertain ACK.
-            if(i2c_master_transmit(gauge,packet,3+f.width,20)!=ESP_OK)return contrast_rt_fail("trial_parameter_packet_ack");
+            if(i2c_master_transmit(gauge,packet,3+f.width,20)!=ESP_OK){contrast_rt->coldMutatorAckUnknown=true;return contrast_rt_fail("trial_parameter_packet_ack");}
             gauge_delay_ms(1);
             const uint8_t commit[]={0x60,mosaico_gauge::macChecksum(packet+1,2+f.width),uint8_t(4+f.width)};
-            if(i2c_master_transmit(gauge,commit,sizeof(commit),20)!=ESP_OK)return contrast_rt_fail("trial_parameter_commit_ack");
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+            if(!MosaicoGaugeCold::keyWindowAllowed()){
+                // A packet may have staged bytes, but its commit was NOT sent.
+                // Do not let a later attempt assume an unambiguous boundary.
+                contrast_rt->coldMutatorAckUnknown=true;return contrast_rt_fail("cold_commit_deadline_after_staged_packet");
+            }
+#endif
+            if(i2c_master_transmit(gauge,commit,sizeof(commit),20)!=ESP_OK){contrast_rt->coldMutatorAckUnknown=true;return contrast_rt_fail("trial_parameter_commit_ack");}
             gauge_delay_ms(20);
             if(!contrast_rt_read_field(i,current))return false;
             for(size_t j=0;j<f.width;++j)if(current[j]!=desired[j])return contrast_rt_fail("trial_parameter_double_readback_mismatch");
@@ -418,7 +469,11 @@ struct ContrastBackend {
     }
     bool exit(){
         if(restoring&&contrast_rt->noOpRestore&&!contrast_rt->inheritedCfgExitRequired)return true;
-        return gauge_exit_config()||contrast_rt_fail("trial_exit_0091_once_failed");
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+        if(!MosaicoGaugeCold::keyWindowAllowed())return contrast_rt_fail("cold_exit_deadline");
+#endif
+        if(gauge_exit_config())return true;
+        contrast_rt->coldMutatorAckUnknown=true;return contrast_rt_fail("trial_exit_0091_once_failed");
     }
     bool seal(){
         uint16_t op=0;if(!gauge_word(0x3a,op)||!mosaico_gauge::configExitAccepted(op))return contrast_rt_fail("trial_seal_requires_cfg0_init1");
@@ -431,8 +486,12 @@ struct ContrastBackend {
         if(((op>>1)&3)!=1||!verify(restoring,true))return contrast_rt_fail("trial_post_exit_accessible_full131_mismatch");
         contrast_rt->postExitFull131=true;
         if(contrast_rt->sealAttempted)return contrast_rt_fail("trial_seal_no_retry");
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+        if(!MosaicoGaugeCold::keyWindowAllowed())return contrast_rt_fail("cold_seal_deadline");
+#endif
         contrast_rt->sealAttempted=true;const bool sent=gauge_access_word(AccessWord::Seal);const bool observed=gauge_wait_security(3);
         contrast_rt->protectionSealed=observed;
+        if(!sent||!observed)contrast_rt->coldMutatorAckUnknown=true;
         return (sent&&observed)||contrast_rt_fail("trial_seal_once_ack_or_security");
     }
     bool final(bool restore){
@@ -460,6 +519,11 @@ struct ContrastBackend {
     void protect(){
         contrast_protection.store(true,std::memory_order_release);
         contrast_rt->protectionSealed=false;
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+        // Cold failures retain their exact evidence; a generic cleanup Seal
+        // cannot be used to clear an uncertain cold attempt or ACK.
+        if(MosaicoGaugeCold::protectedState())return;
+#endif
         // Never Seal CFG1/CAL1/unknown, and never issue a cleanup 0091 that could
         // commit/reinitialize an unclassified mixed image. Durable intent stays.
         uint16_t op=0;
@@ -479,6 +543,7 @@ bool contrast_begin_locked(){
  t.record=t.journal.loaded.records[size_t(t.journal.loaded.selected)];
  if(!contrast_journal::shape(t.record))return contrast_rt_fail("closed_GCT1_profile_required");
  t.operation=true;t.accessTouched=false;t.sealAttempted=false;t.possibleDirty=false;
+ t.coldMutatorAckUnknown=false; // New operation only; never a readback waiver.
  t.noOpRestore=false;t.inheritedCfgExitRequired=false;t.ownedDirty=false;t.untouchedMismatch=false;t.unsafeCalibration=false;
  t.postExitFull131=false;t.sealedStandardFallback=false;t.protectionSealed=false;
  contrast_update_protection_locked();return true;
@@ -486,13 +551,35 @@ bool contrast_begin_locked(){
 bool contrast_restore_locked(){
  if(!contrast_begin_locked())return false;
  auto& t=*contrast_rt;t.active=false;
- std::lock_guard<std::mutex> battery(battery_mutex);ContrastBackend backend;
+ std::unique_lock<std::mutex> battery(battery_mutex);
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+ ContrastBackend backend(&battery);
+#else
+ ContrastBackend backend;
+#endif
  const auto result=mosaico_gauge_contrast_trial::restore(backend);t.operation=false;contrast_update_protection_locked();
+ battery.unlock();
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+ if(result==mosaico_gauge_contrast_trial::Result::Restored&&MosaicoGaugeCold::ownsOperation())
+  return MosaicoGaugeCold::onRestored(t.record.snapshot,t.observed,t.protectionSealed);
+#endif
  return result==mosaico_gauge_contrast_trial::Result::Restored;
 }
 bool contrast_poll_locked();
 bool contrast_startup_restore_locked(){return contrast_poll_locked();}
-struct ContrastStorageLease {bool held=MosaicoOta::tryStorageLease();~ContrastStorageLease(){if(held)MosaicoOta::releaseStorageLease();}};
+struct ContrastStorageLease {
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+ bool held=false,acquired=false;
+ ContrastStorageLease(){
+  if(MosaicoOta::currentTaskOwnsStorageLease())held=!MosaicoOta::busy();
+  else acquired=held=MosaicoOta::tryStorageLease();
+ }
+ ~ContrastStorageLease(){if(acquired)MosaicoOta::releaseStorageLease();}
+#else
+ bool held=MosaicoOta::tryStorageLease();
+ ~ContrastStorageLease(){if(held)MosaicoOta::releaseStorageLease();}
+#endif
+};
 bool contrast_capacity(char* out,size_t n,size_t required=1024){if(out&&n>=required)return true;if(out&&n)std::snprintf(out,n,"error=contrast_details_capacity_require_%u",unsigned(required));return false;}
 bool contrast_report(char* out,size_t n,bool ok){
  const auto* t=contrast_rt;const auto* s=t&&contrast_status==contrast_journal::Status::Ready&&t->journal.loaded.selected>=0?&t->journal.loaded.records[size_t(t->journal.loaded.selected)].snapshot:nullptr;
@@ -669,17 +756,34 @@ ContrastStorageLease lease;std::lock_guard<std::recursive_mutex> transaction(gau
 bool Hal::gaugeContrastApply(char* out,size_t n){
  if(!contrast_capacity(out,n)){return false;}
 ContrastStorageLease lease;std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+ if(MosaicoGaugeCold::protectedState()&&!MosaicoGaugeCold::ownsOperation())return contrast_report(out,n,false);
+#endif
  if(!lease.held){return contrast_report(out,n,false);}
  if(!contrast_begin_locked()){return contrast_report(out,n,false);}
  auto& t=*contrast_rt;
  t.hostPowerAttested=true; // ONLY root local-console CONFIRM_EXTERNAL_POWER route.
  if(t.record.snapshot.phase!=scale_recovery::Phase::Original){t.reason="apply_requires_Original";t.operation=false;contrast_update_protection_locked();return contrast_report(out,n,false);}
- std::lock_guard<std::mutex> battery(battery_mutex);ContrastBackend backend;
- const auto result=mosaico_gauge_contrast_trial::apply(backend);t.operation=false;contrast_update_protection_locked();return contrast_report(out,n,result==mosaico_gauge_contrast_trial::Result::Applied);
+ std::unique_lock<std::mutex> battery(battery_mutex);
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+ ContrastBackend backend(&battery);
+#else
+ ContrastBackend backend;
+#endif
+ const auto result=mosaico_gauge_contrast_trial::apply(backend);t.operation=false;contrast_update_protection_locked();
+ battery.unlock();
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+ if(result==mosaico_gauge_contrast_trial::Result::Restored&&MosaicoGaugeCold::ownsOperation())
+  (void)MosaicoGaugeCold::onRestored(t.record.snapshot,t.observed,t.protectionSealed);
+#endif
+ return contrast_report(out,n,result==mosaico_gauge_contrast_trial::Result::Applied);
 }
 bool Hal::gaugeContrastRestore(char* out,size_t n){
  if(!contrast_capacity(out,n)){return false;}
 ContrastStorageLease lease;std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+ if(MosaicoGaugeCold::protectedState()&&!MosaicoGaugeCold::ownsOperation())return contrast_report(out,n,false);
+#endif
  if(!lease.held||contrast_load_locked(true)!=contrast_journal::Status::Ready)return contrast_report(out,n,false);
  if(contrast_rt->journal.loaded.records[size_t(contrast_rt->journal.loaded.selected)].snapshot.phase==scale_recovery::Phase::Original){contrast_rt->reason="already_Original_UNTRUSTED_no_keys_no_CFG";return contrast_report(out,n,true);}
  return contrast_report(out,n,contrast_restore_locked());

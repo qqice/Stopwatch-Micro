@@ -154,6 +154,40 @@ def validate_pair(pair_raw, key, slot_images):
     return pairs
 
 
+def endorse_pair(manifests, images, private, verified_public, *, audited=False):
+    """Offline explicit release-audit endorsement, NOT SDK/hardware evidence.
+
+    Preserve caller slot order. This does not change the old GCT roster or its
+    signed contract/domain; it only endorses the exact new cold-capable pair.
+    The caller supplies in-memory key objects; no file/key/device IO occurs.
+    """
+    require(audited is True, 'completed explicit cold release audit required')
+    require(isinstance(private, ec.EllipticCurvePrivateKey) and isinstance(private.curve, ec.SECP256R1), 'P256 private key required')
+    require(private.public_key().public_numbers() == p256_public(verified_public).public_numbers(), 'signer differs from verified public key')
+    require(isinstance(manifests, (list, tuple)) and len(manifests) == 2, 'two explicit normal manifests required')
+    require(isinstance(images, (list, tuple)) and len(images) == 2 and all(type(image) is bytes for image in images), 'two ordered full BIN byte strings required')
+    normal = [dict(validate_manifest(manifest)) for manifest in manifests]
+    require(all(m['schema'] == 2 and m['layout'] == 'mosaico-dual-v2' for m in normal) and
+        {m.get('version') for m in normal} == VERSIONS, 'exact normal signed R17/R18 v2 pair required')
+    require(normal[0]['sha256'] != normal[1]['sha256'], 'distinct ordered recovery BIN hashes required')
+    # Validate BOTH complete normal releases before producing any endorsement.
+    for manifest, image in zip(normal, images):
+        verified_public.verify(base64.b64decode(manifest['signature'], validate=True),
+            canonical_message(manifest['size'], manifest['sha256'], manifest['version'], layout=manifest['layout']),
+            ec.ECDSA(hashes.SHA256()))
+        require(len(image) == manifest['size'] and hashlib.sha256(image).hexdigest() == manifest['sha256'], 'provided ordered full BIN size/SHA mismatch')
+        descriptor_version(image, manifest['version'])
+    pairs = []
+    for manifest in normal:
+        message = ('MOSAICO-GAUGE-CONTRAST-CAP-v1\n' + GCT_DIGEST + '\n' + manifest['version'] + '\n' +
+            str(manifest['size']) + '\n' + manifest['sha256'] + '\n').encode('ascii')
+        signature = der(private.sign(message, ec.ECDSA(hashes.SHA256())))
+        pairs.append(dict(image=manifest, signature=base64.b64encode(signature).decode('ascii')))
+    raw_pair = json.dumps(pairs, separators=(',', ':'), allow_nan=False).encode('ascii')
+    validate_pair(raw_pair, verified_public, images)
+    return raw_pair
+
+
 def session_message(binding_wire, pair_raw):
     decode_binding(binding_wire)
     require(type(pair_raw) is bytes and 0 < len(pair_raw) <= PAIR_RAW_MAX, 'pair raw bounds')

@@ -29,7 +29,7 @@ namespace std {template<class T,size_t N>struct array{T values[N];constexpr T& o
 namespace std {enum memory_order {memory_order_acquire,memory_order_release};template<class T>struct atomic {T value;constexpr atomic(T v):value(v){};void store(T v,memory_order){value=v;}T load(memory_order)const{return value;}};}
 ''',
 'mutex':'''#pragma once
-namespace std {struct mutex{void lock(){}void unlock(){}bool try_lock(){return true;}};using recursive_mutex=mutex;struct try_to_lock_t{};inline constexpr try_to_lock_t try_to_lock{};template<class T>struct lock_guard{explicit lock_guard(T&){};};template<class T>struct unique_lock{unique_lock(T&,try_to_lock_t){}bool owns_lock()const{return true;}};}
+namespace std {struct mutex{void lock(){}void unlock(){}bool try_lock(){return true;}};using recursive_mutex=mutex;struct try_to_lock_t{};inline constexpr try_to_lock_t try_to_lock{};template<class T>struct lock_guard{explicit lock_guard(T&){};};template<class T>struct unique_lock{explicit unique_lock(T&){}unique_lock(T&,try_to_lock_t){}bool owns_lock()const{return true;}void unlock(){}void lock(){}};}
 ''',
 'new':'''#pragma once
 #include <cstddef>

@@ -61,6 +61,7 @@ private:
     void handleLine(char* line);
     bool __attribute__((noinline)) handleCachedRead(const char* line);
     bool __attribute__((noinline)) handleContrast(char* line);
+    bool __attribute__((noinline)) handleCold(char* line);
     bool __attribute__((noinline)) handleFactoryScale(char* line);
     bool __attribute__((noinline)) handleMaintenanceRestart(const char* line);
     void updateAsyncTest();

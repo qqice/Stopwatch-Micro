@@ -13,6 +13,7 @@
 #include "standby_sleep.h"
 #include "mosaico_display_settings.h"
 #include <ota/mosaico_ota.h>
+#include <hal/mosaico/mosaico_gauge_cold_runtime.h>
 #else
 #define POWERBANK_PULSE_SUPPORTED 0
 #endif
@@ -33,7 +34,7 @@ bool safe() {
     portENTER_CRITICAL(&mux);
     const bool supplyAllowed=!model.automatic || autoPolicy.desired(esp_timer_get_time());
     portEXIT_CRITICAL(&mux);
-    if(!supplyAllowed || MosaicoOta::busy() || MosaicoOta::healthPending())return false;
+    if(!supplyAllowed || MosaicoGaugeCold::blocksAutomaticBankPulse() || MosaicoOta::busy() || MosaicoOta::healthPending())return false;
     auto& quota=GetNetworkQuota();
     if(!quota.displayLocked())return false;
     const auto p=quota.powerStats();
@@ -206,7 +207,7 @@ void serviceAutomatic() {
     if(!guard.owns_lock())return;
     portENTER_CRITICAL(&mux);
     autoPolicy.configure(display.effectiveConfig.smartKeepalive);
-    const bool wanted=autoPolicy.desired(now) && !fatal;
+    const bool wanted=autoPolicy.desired(now) && !fatal && !MosaicoGaugeCold::blocksAutomaticBankPulse();
     if(!wanted && model.automatic) {model.off();stats.state=State::Off;}
     const bool start=wanted && !model.enabled(now);
     const auto reservation=model.generation;

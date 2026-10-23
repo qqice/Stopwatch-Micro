@@ -17,6 +17,7 @@
 #include <hal/mosaico/mosaico_psram_heap_policy.h>
 #include <hal/mosaico/mosaico_nand_probe.h>
 #include <hal/mosaico/mosaico_nand_store.h>
+#include <hal/mosaico/mosaico_gauge_cold_runtime.h>
 #include <main_idle_wait.h>
 #include <host/uart_fifo_recovery_model.h>
 #include <host/mosaico_session_monitor.h>
@@ -480,7 +481,7 @@ void SerialDebug::consume(char value)
             line[length] = '\0';
             char* command = _reply_uart ? serial_debug_transport::decodeUartLine(line, length) : line;
             if (command) {
-                if (!handleCachedRead(command)&&!handleMaintenanceRestart(command)&&!handleContrast(command)&&!handleFactoryScale(command)) handleLine(command);
+                if (!handleCachedRead(command)&&!handleMaintenanceRestart(command)&&!handleCold(command)&&!handleContrast(command)&&!handleFactoryScale(command)) handleLine(command);
             }
             else result("parse", "FAIL", "reason=uart_crc_frame_required no_changes=1");
         }
@@ -622,6 +623,62 @@ bool __attribute__((noinline)) SerialDebug::handleMaintenanceRestart(const char*
     });
     if (!ok) result("runtime-restart","FAIL","reason=maintenance_restart_guard_or_recheck no_restart=1 Failed_preserved=1");
     return true;
+#else
+    (void)line;return false;
+#endif
+}
+
+bool __attribute__((noinline)) SerialDebug::handleCold(char* line)
+{
+#ifdef MOSAICO_BOARD
+    if(!line)return false;
+    const char* p=line;
+    while(*p==' '||*p=='\t')++p;
+    const char* root=p;
+    while(*p&&*p!=' '&&*p!='\t')++p;
+    const auto rootLength=static_cast<size_t>(p-root);
+    if(!((rootLength==5&&!std::strncmp(root,"debug",5))||(rootLength==3&&!std::strncmp(root,"dbg",3))))return false;
+    while(*p==' '||*p=='\t')++p;
+    const char* command=p;
+    while(*p&&*p!=' '&&*p!='\t')++p;
+    if(p-command!=10||std::strncmp(command,"gauge-cold",10))return false;
+    if(_reply_uart&&!serial_debug_transport::uartAllowed("gauge-cold")){
+        result("gauge-cold","FAIL","reason=uart_authorization no_changes=1");return true;
+    }
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy()){
+        result("gauge-cold","FAIL","reason=nand_format_maintenance no_changes=1");return true;
+    }
+#endif
+    char* save=nullptr;
+    ::strtok_r(line," \t",&save);::strtok_r(nullptr," \t",&save);
+    const char* action=::strtok_r(nullptr," \t",&save);
+    if(!action)action="status";
+    const char* argument=::strtok_r(nullptr," \t",&save);
+    const char* confirmation=::strtok_r(nullptr," \t",&save);
+    const bool status=!std::strcmp(action,"status"),bind=!std::strcmp(action,"bind"),
+        apply=!std::strcmp(action,"apply"),handoff=!std::strcmp(action,"handoff"),
+        recover=!std::strcmp(action,"recover"),cancel=!std::strcmp(action,"cancel"),
+        page=!std::strcmp(action,"evidence-page");
+    uint32_t index=0;
+    const bool valid=status?!argument:
+        bind?argument&&*argument&&std::strlen(argument)<=356&&confirmation&&!std::strcmp(confirmation,"CONFIRM"):
+        apply?argument&&!std::strcmp(argument,"CONFIRM_EXTERNAL_POWER")&&!confirmation:
+        handoff?argument&&!std::strcmp(argument,"CONFIRM_POWER_OFF_30S")&&!confirmation:
+        (recover||cancel)?argument&&!std::strcmp(argument,"CONFIRM")&&!confirmation:
+        page&&parseUnsignedStrict(argument,0,4,index)&&!confirmation;
+    if(!valid||::strtok_r(nullptr," \t",&save)){
+        result("gauge-cold","FAIL","reason=expected_status_bind_fragment_CONFIRM_apply_CONFIRM_EXTERNAL_POWER_handoff_CONFIRM_POWER_OFF_30S_recover_or_cancel_CONFIRM_evidence-page_0..4");return true;
+    }
+    char details[1024]{};
+    const bool ok=status?MosaicoGaugeCold::status(details,sizeof(details)):
+        bind?MosaicoGaugeCold::bindFragment(argument,details,sizeof(details)):
+        apply?MosaicoGaugeCold::apply(details,sizeof(details)):
+        handoff?MosaicoGaugeCold::handoff(details,sizeof(details)):
+        recover?MosaicoGaugeCold::recover(details,sizeof(details)):
+        cancel?MosaicoGaugeCold::cancel(details,sizeof(details)):
+        MosaicoGaugeCold::evidencePage(index,details,sizeof(details));
+    result("gauge-cold",ok?"PASS":"FAIL",details);return true;
 #else
     (void)line;return false;
 #endif

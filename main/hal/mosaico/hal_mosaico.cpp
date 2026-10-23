@@ -33,6 +33,7 @@
 #include "mosaico_threshold_audit_model.h"
 #include "mosaico_gauge_calibration_read_model.h"
 #include "mosaico_gauge_public_extra_read_model.h"
+#include "mosaico_gauge_cold_runtime.h"
 #include <host/network_quota.h>
 #include <hal/ble/codex_micro_ble.h>
 #include <ota/mosaico_ota.h>
@@ -250,6 +251,8 @@ std::recursive_mutex gauge_transaction_mutex;
 bool scale_boot_fence_locked();
 #define MOSAICO_FACTORY_SCALE_RUNTIME 1
 #define MOSAICO_GAUGE_CONTRAST_RUNTIME 1
+#define MOSAICO_GAUGE_COLD_RUNTIME 1
+bool cold_poll_supervisor();
 bool contrast_present_locked();
 bool contrast_boot_fence_locked();
 mosaico_gauge_physical::UnitContext contrast_context_locked();
@@ -701,6 +704,9 @@ enum class GaugeCommand : uint16_t { Identity = 0x0001, EnterConfig = 0x0090, Ex
 
 bool gauge_control(GaugeCommand command)
 {
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+    if(command!=GaugeCommand::Identity&&!MosaicoGaugeCold::keyWindowAllowed())return false;
+#endif
     // Closed command set: no seal/unseal, security keys, ROM, OTP, calibration,
     // charger controls or arbitrary command interface.
     if (command != GaugeCommand::Identity && command != GaugeCommand::EnterConfig &&
@@ -958,6 +964,9 @@ enum class AccessWord : uint16_t { UnsealFirst = 0x0414, UnsealSecond = 0x3672, 
 
 bool gauge_access_word(AccessWord word)
 {
+#ifdef MOSAICO_GAUGE_COLD_RUNTIME
+    if(!MosaicoGaugeCold::keyWindowAllowed())return false;
+#endif
     if (word != AccessWord::UnsealFirst && word != AccessWord::UnsealSecond &&
         word != AccessWord::Full && word != AccessWord::Seal) return false;
     const uint16_t value = static_cast<uint16_t>(word);
@@ -1691,6 +1700,16 @@ void Hal::pmic_init()
         return;
     }
     std::lock_guard<std::mutex> lock(battery_mutex);
+    // Passive RAM-only evidence precedes any sample/boot-reload fence. No
+    // access keys, CFG, Seal, parameter writer or NAND operation is used here.
+    // Ordinary Original boots avoid this extra diagnostic read altogether.
+    if (contrast_present_locked() && contrast_protected()) {
+        Hal::GaugeDiagnosticSnapshot standard{};
+        Hal::GaugeEngineSnapshot engine{};
+        gauge_diagnostic_locked(standard, mosaico_gauge_status::BootBefore, 0);
+        gauge_engine_locked(engine, mosaico_gauge_status::BootBefore, 0);
+        MosaicoGaugeCold::earlyPrefetch(standard, engine);
+    }
     sample_battery_locked();
     if (battery_valid) {
         ESP_LOGI(Tag, "BQ27220 read-only: SOC=%u voltage=%u mV raw current=%d mA (no scaling/correction)",
@@ -3331,7 +3350,26 @@ bool Hal::setDisplayOrientation(uint16_t degrees)
 #include "mosaico_factory_audit.inc"
 #include "mosaico_factory_scale_runtime.inc"
 #include "mosaico_gauge_contrast_runtime.inc"
+#include "mosaico_gauge_cold_runtime.inc"
 #include "mosaico_maintenance_power.inc"
+
+namespace {
+bool cold_poll_supervisor()
+{
+    if (!MosaicoGaugeCold::protectedState()) return false;
+    // Preserve OTA -> gauge transaction -> battery order through the entire
+    // dispatch, not just through the planner which requested it.
+    ContrastStorageLease lease;
+    if (!lease.held) return true;
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    MosaicoGaugeCold::RestoreRequest request{};
+    const bool held = MosaicoGaugeCold::poll(&request);
+    if (request.requested && MosaicoGaugeCold::ownsOperation()) {
+        if (!contrast_restore_locked()) MosaicoGaugeCold::onRestoreFailed();
+    }
+    return held;
+}
+}
 
 Hal::PhysicalBatterySnapshot Hal::physicalBatteryTelemetry(bool refresh)
 {
