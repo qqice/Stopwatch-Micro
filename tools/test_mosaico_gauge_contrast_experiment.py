@@ -1,0 +1,702 @@
+"""Host safety tests: no actual UART, DLL, device, network, or keys."""
+import contextlib
+import hashlib
+import io
+import json
+from pathlib import Path
+import tempfile
+import threading
+import types
+import unittest
+from unittest.mock import patch
+
+import mosaico_gauge_contrast_experiment as e
+
+
+class Clock:
+    def __init__(self):
+        self.now = 100.
+
+    def monotonic(self):
+        return self.now
+
+    def time(self):
+        return 1800000000 + self.now
+
+
+class Serial:
+    timeout = .1
+    write_timeout = 3
+
+    def __init__(self):
+        self.writes = []
+
+    def write(self, data):
+        self.writes.append(data)
+        return len(data)
+
+    def flush(self):
+        pass
+
+
+class Client:
+    uart = True
+    wake_preamble = True
+
+    def __init__(self, clock):
+        self.serial, self.clock, self.preamble_delay, self.fail = Serial(), clock, 0, False
+
+    def _send_preamble(self):
+        self.serial.write(b'U' * 32 + b'\n')
+        self.clock.now += self.preamble_delay
+
+    def _command_once(self, text, expected, timeout):
+        from serial_debug_test import encode_command
+        self.serial.write(encode_command(text, True))
+        if self.fail:
+            raise TimeoutError('unknown ACK')
+        print('DBG RESULT command=' + expected + ' status=PASS value=1')
+        return types.SimpleNamespace(status='PASS', details='value=1')
+
+
+def rows(ccs, rms=None, endpoint=False):
+    output = []
+    for i, cc in enumerate(ccs):
+        row = dict(monotonic=10 + i * 30, gauge=dict(raw_cc=str((65534 + cc) & 65535),
+                   rm_mah=str(65 if rms is None else rms[i])), engine=dict(CEDVRemCap='65', SmoothRemCap='65'))
+        output.append(row)
+    if endpoint:
+        crossing = next(i for i, cc in enumerate(ccs) if cc >= 3)
+        output[-2].update(endpoint_check=1, monotonic=output[crossing]['monotonic'] + 10)
+        output[-1].update(endpoint_check=2, monotonic=output[crossing]['monotonic'] + 15)
+    return output
+
+
+class FakeCall:
+    uncertain = False
+    deadline = None
+    check = None
+
+    def __init__(self):
+        self.commands = []
+        self.settings = {key: '1' for key in e.CONFIG_KEYS}
+        self.settings.update(temporary='1', lock_wifi_minutes='60', lock_ble_minutes='60', smart_keepalive='0')
+
+    def __call__(self, command, **kwargs):
+        self.commands.append(command)
+        if e.mutation(command):
+            self.check(command)
+        if command == 'settings get':
+            return dict(self.settings)
+        return {}
+
+    @contextlib.contextmanager
+    def group(self):
+        yield
+
+
+class FakePower:
+    def __init__(self):
+        self.stop = threading.Event()
+        self.on_known, self.source, self.thread = True, 'on', None
+        self.footer, self.error = {}, None
+        self.snapshots = 0
+
+    def snapshot(self):
+        self.snapshots += 1
+
+
+class HostTests(unittest.TestCase):
+    def setUp(self):
+        self.root = e.ROOT / 'artifacts/gauge-contrast-host-tests'
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.tmp = tempfile.TemporaryDirectory(dir=self.root)
+        self.out = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def experiment(self):
+        call, power, clock = FakeCall(), FakePower(), Clock()
+        watcher = types.SimpleNamespace(sticky=threading.Event())
+        args = types.SimpleNamespace(stage='observe', arm='C', expected_boot=10)
+        number = getattr(self, 'run_number', 0) + 1
+        self.run_number = number
+        out = self.out / f'run-{number}'
+        out.mkdir()
+        obj = e.Experiment(call, power, watcher, out, args, [], [], 'proof', clock)
+        return obj, call, power, clock
+
+    def test_default_dry_never_loads_ports_or_dll(self):
+        with patch.object(e, 'load_proof', side_effect=AssertionError('proof touched')), patch.object(e, 'Power', side_effect=AssertionError('DLL touched')):
+            capture = io.StringIO()
+            with contextlib.redirect_stdout(capture):
+                self.assertEqual(e.main([]), 0)
+                self.assertEqual(e.main(['--stage', 'observe', '--arm', 'B']), 0)
+            self.assertIn('"ports_opened": 0', capture.getvalue())
+
+    def test_execute_missing_explicit_admission_rejected_before_io(self):
+        with patch.object(e, 'source_fields', side_effect=AssertionError('input touched')):
+            with self.assertRaises(ValueError):
+                e.main(['--execute'])
+
+    def test_source_full131_and_only_three_targets(self):
+        source = e.source_fields()
+        c, b = e.target_fields(source, 'C'), e.target_fields(source, 'B')
+        self.assertEqual(len(source), 131)
+        self.assertEqual([x['address'] for x, y in zip(source, c) if x != y], ['929b', '929d', '929f'])
+        self.assertEqual([x['address'] for x, y in zip(c, b) if x != y], ['929b'])
+        self.assertEqual(e.canonical_crc(b), '675dd812')
+
+    def test_modular_wrap_and_half_range(self):
+        self.assertEqual(e.signed_mod_delta(1, 65534), 3)
+        self.assertEqual(e.signed_mod_delta(65534, 1), -3)
+        for args in ((32768, 0), (-1, 0), (65536, 0)):
+            with self.assertRaises(ValueError):
+                e.signed_mod_delta(*args)
+
+    def test_no_count_no_confirmation_and_no_guessed_0073(self):
+        self.assertEqual(e.analyse(rows([0, 1, 2, 2]))['outcome'], 'inconclusive')
+        self.assertEqual(e.analyse(rows([0, 1, 2, 3, 3, 3]))['outcome'], 'inconclusive')
+        data = rows([0, 1, 2, 3, 3, 3], endpoint=True)
+        self.assertEqual(e.analyse(data)['outcome'], 'platform')
+        data[-1]['engine'] = {'raw73': '00' * 23}
+        self.assertEqual(e.analyse(data)['outcome'], 'inconclusive')
+
+    def test_endpoint_latency_two_reads_and_residual(self):
+        data = rows([0, 1, 2, 3, 3, 3], [65, 64, 63, 62, 62, 62], endpoint=True)
+        self.assertEqual(e.analyse(data)['outcome'], 'tracking')
+        data[-1]['monotonic'] -= 1
+        self.assertFalse(e.analyse(data)['confirmed_after_three_counts'])
+        data[-1]['monotonic'] += 1
+        data[-1]['gauge']['rm_mah'] = '60'
+        self.assertEqual(e.analyse(data)['outcome'], 'nontracking')
+
+    def test_budget_minimum450_never_expands_global_or_max480(self):
+        self.assertEqual(e.off_budget(0, 660, 600), 480)
+        self.assertEqual(e.off_budget(29, 660, 600), 470)
+        self.assertEqual(e.off_budget(49, 660, 600), 450)
+        for args in ((50, 660, 600), (100, 640, 700), (0, float('inf'), 600)):
+            with self.assertRaises(ValueError):
+                e.off_budget(*args)
+
+    def test_mutation_fence_checks_at_wire_after_preamble(self):
+        clock = Clock()
+        client = Client(clock)
+        raw = client.serial
+        call = e.Console(client, self.out, clock)
+        call.deadline = clock.now + 300
+        checked = []
+        call.check = lambda command: checked.append((command, clock.now))
+        client.preamble_delay = 1
+        call('gauge-contrast apply CONFIRM_EXTERNAL_POWER')
+        self.assertEqual(checked, [('gauge-contrast apply CONFIRM_EXTERNAL_POWER', 101)])
+        self.assertEqual(len(raw.writes), 2)
+        self.assertEqual(raw.write_timeout, 3)
+
+    def test_late_preamble_blocks_real_frame_and_unknown_ack_never_retried(self):
+        clock, client = Clock(), None
+        client = Client(clock)
+        raw = client.serial
+        call = e.Console(client, self.out, clock)
+        call.deadline = clock.now + 300
+        call.check = lambda command: None
+        client.preamble_delay = 7
+        with self.assertRaises(TimeoutError):
+            call('gauge-contrast apply CONFIRM_EXTERNAL_POWER', timeout=6)
+        self.assertEqual(raw.writes, [b'U' * 32 + b'\n'])
+        self.assertTrue(call.uncertain)
+        with self.assertRaises(ValueError):
+            call('gauge-contrast restore CONFIRM')
+        self.assertEqual(len(raw.writes), 1)
+
+    def test_unknown_ack_latches_mutations_but_readonly_remains(self):
+        clock = Clock()
+        client = Client(clock)
+        call = e.Console(client, self.out, clock)
+        call.deadline = clock.now + 300
+        call.check = lambda command: None
+        client.fail = True
+        with self.assertRaises(TimeoutError):
+            call('gauge-contrast apply CONFIRM_EXTERNAL_POWER')
+        client.fail = False
+        self.assertEqual(call('gauge-contrast status'), {'value': '1'})
+        with self.assertRaises(ValueError):
+            call('settings restore')
+
+    def test_floor_first_immediately_sets_independent_stop(self):
+        obj, call, power, _ = self.experiment()
+        def response(command, **kwargs):
+            call.commands.append(command)
+            return {'voltage_mv': '3900'}
+        call.__class__ = type('FloorCall', (FakeCall,), {'__call__': staticmethod(response)})
+        with self.assertRaises(ValueError):
+            obj.sample()
+        self.assertEqual(call.commands, ['gauge-charge'])
+        self.assertTrue(power.stop.is_set())
+
+    def test_rebase_once_identical_values_does_not_extend_global(self):
+        obj, call, power, clock = self.experiment()
+        obj.apply_confirmed = True
+        obj.report['target131_verified'] = True
+        obj.ram_deadline = 500
+        for command in ('settings set lock_wifi_minutes 60 600', 'settings set lock_ble_minutes 60 600', 'settings set smart_keepalive 0 600'):
+            obj.sent[command] = 1
+        obj.state = lambda phase: {'phase': str(phase), 'images_capability_verified': '1'}
+        obj.pages = lambda *args: None
+        obj.sample = lambda *args: {'physical': {'voltage_mv': '4200'}}
+        old = obj.deadline
+        obj.rebase_quiet_once()
+        self.assertEqual(obj.deadline, old)
+        self.assertEqual(obj.ram_deadline, clock.now + 600)
+        self.assertEqual(power.snapshots, 1)
+        self.assertTrue(all(v == 2 for v in obj.sent.values()))
+        self.assertTrue(obj.report['RAM_alignment']['identical_settings'])
+        with self.assertRaises(ValueError):
+            obj.rebase_quiet_once()
+
+    def test_rebase_rejects_STOP_unknown_ack_active_OFF_and_missing_apply(self):
+        for fault in ('stop', 'uncertain', 'OFF', 'unapplied'):
+            obj, call, power, _ = self.experiment()
+            obj.apply_confirmed = True
+            obj.report['target131_verified'] = True
+            if fault == 'stop':
+                power.stop.set()
+            elif fault == 'uncertain':
+                call.uncertain = True
+            elif fault == 'OFF':
+                power.thread = object()
+            else:
+                obj.apply_confirmed = False
+            with self.assertRaises(ValueError):
+                obj.rebase_quiet_once()
+            self.assertFalse(obj.rebase_used)
+            self.assertEqual(call.commands, [])
+
+    def test_setup300_late_apply_never_arms_or_renews(self):
+        obj, _, _, clock = self.experiment()
+        obj.ram_deadline = clock.now + 600
+        clock.now += 301
+        before = obj.deadline
+        with self.assertRaises(ValueError):
+            obj.before_write('gauge-contrast apply CONFIRM_EXTERNAL_POWER')
+        self.assertIsNone(obj.apply_start)
+        self.assertEqual(obj.deadline, before)
+        self.assertFalse(obj.apply_sent)
+
+    def test_apply_wire_arms660_once_not_ack_relative_and_second_refused(self):
+        obj, call, _, clock = self.experiment()
+        obj.ram_deadline = clock.now + 600
+        clock.now += 100
+        obj.before_write('gauge-contrast apply CONFIRM_EXTERNAL_POWER')
+        self.assertEqual(obj.deadline, clock.now + 660)
+        self.assertEqual(obj.apply_start, clock.now)
+        self.assertEqual(call.deadline, min(obj.ram_deadline, obj.deadline))
+        self.assertTrue(obj.report['deadline_armed'])
+        self.assertEqual(obj.report['setup_elapsed'], 100)
+        before = obj.deadline
+        clock.now += 20
+        with self.assertRaises(ValueError):
+            obj.before_write('gauge-contrast apply CONFIRM_EXTERNAL_POWER')
+        self.assertEqual(obj.deadline, before)
+
+    def test_setup_expiring_during_preamble_refuses_wire_no_deadline_renewal(self):
+        obj, _, _, clock = self.experiment()
+        client = Client(clock)
+        raw = client.serial
+        call = e.Console(client, self.out, clock)
+        obj.call = call
+        call.check = obj.before_write
+        call.deadline = obj.setup_deadline
+        obj.ram_deadline = clock.now + 600
+        clock.now = obj.setup_deadline - 1
+        client.preamble_delay = 2
+        before = obj.deadline
+        with self.assertRaises(ValueError):
+            call('gauge-contrast apply CONFIRM_EXTERNAL_POWER', timeout=90)
+        self.assertEqual(raw.writes, [b'U' * 32 + b'\n'])
+        self.assertIsNone(obj.apply_start)
+        self.assertEqual(obj.deadline, before)
+
+    def test_evidence_hash_and_B_requires_real_C_platform(self):
+        d = dict(kind='GCT1_contrast_experiment', stage='observe', arm='C', complete=True,
+            original_verified=True, V1_ON_verified=True, settings_restored=True, source_crc=e.SOURCE,
+            legacy_crc='430c5ed4', target131_verified=True, unknown_ack=False, errors=[], image_bindings=['r13/r14'],
+            analysis={'outcome': 'inconclusive', 'confirmed_after_three_counts': False}, apply_start_monotonic=100)
+        path = self.out / 'C.json'
+        sha = e.save(path, d)
+        with self.assertRaises(ValueError):
+            e.load_evidence(path, sha, stage='observe', arm='C', image_bindings=['r13/r14'])
+        d['analysis'] = {'outcome': 'platform', 'confirmed_after_three_counts': True}
+        path2 = self.out / 'C-platform.json'
+        sha2 = e.save(path2, d)
+        e.save(Path(str(path2) + '.complete.json'), dict(complete=True, within_deadline=True, report_sha256=sha2))
+        e.save(self.out / 'root-acceptance.json', dict(report_sha256=sha2, child_exit_code=0, observed_child_exit_monotonic=200))
+        self.assertTrue(e.load_evidence(path2, sha2, stage='observe', arm='C', image_bindings=['r13/r14']))
+        with self.assertRaises(ValueError):
+            e.load_evidence(path2, '0' * 64, stage='observe', arm='C')
+        with self.assertRaises(ValueError):
+            e.load_evidence(path2, sha2, stage='observe', arm='C', image_bindings=['other BIN'])
+
+    def test_STOP_watcher_is_sticky_and_predicate_does_not_read_files(self):
+        stop = threading.Event()
+        watcher = e.StopWatcher(self.out / 'STOP', stop)
+        watcher.start()
+        try:
+            watcher.path.write_text('STOP')
+            self.assertTrue(stop.wait(2))
+            watcher.path.unlink()
+            self.assertTrue(watcher.sticky.is_set())
+            with patch.object(Path, 'exists', side_effect=AssertionError('predicate IO')):
+                self.assertTrue(stop.is_set())
+        finally:
+            watcher.close()
+
+    def test_no_old_mutations_restart_or_direct_i2c_in_allowlist(self):
+        for command in ('gauge-factory-scale status', 'gauge-factory-scale apply CONFIRM_EXTERNAL_POWER',
+                        'runtime-restart CONFIRM_EXTERNAL_POWER 430c5ed4', 'gauge-access open', 'settings set smart_keepalive 1 600'):
+            self.assertFalse(e.allowed(command))
+
+    def recovery_harness(self, unknown=False):
+        obj, _, power, clock = self.experiment()
+        events = []
+        phase = [0]
+        status = dict(schema='1', namespace='gcontrast', source_crc=e.SOURCE, factor='0', verified='0',
+            capacity_calibrated='0', original3000_UNTRUSTED='1', legacy_Failed_preserved='1',
+            never_publish_physical_units='1', deadline_seconds='720', host_deadline_seconds='660',
+            third_value='0', unexpected_count='0', arm='C', phase='2')
+        class Call:
+            uncertain = False
+            deadline = None
+            check = obj.before_write
+            def __call__(self, command, **kwargs):
+                events.append(command)
+                if e.mutation(command):
+                    self.check(command)
+                if command == 'gauge-contrast apply CONFIRM_EXTERNAL_POWER':
+                    phase[0] = 2
+                    if unknown:
+                        self.uncertain = True
+                        raise TimeoutError('apply ACK unknown')
+                    return dict(status)
+                if command == 'gauge-contrast restore CONFIRM':
+                    phase[0] = 0
+                    return dict(status, phase='0')
+                if command == 'gauge':
+                    return {'design_mah': '3000', 'fcc_mah': '3000', 'op_status': '0026'}
+                return {'evidence_crc': '430c5ed4'}
+        obj.call = Call()
+        obj.ram_deadline = clock.now + 600
+        obj.legacy = {'evidence_crc': '430c5ed4'}
+        def on():
+            events.append('INDEPENDENT_V1_ON_DOUBLE_QUERY')
+            power.on_known = True
+        power.ensure_on = on
+        obj.prepare = lambda: None
+        def state(expected=None):
+            if unknown:
+                # Firmware recovery is only observed; host never sends keys.
+                phase[0] = 0
+            return dict(status, phase=str(phase[0]))
+        obj.state = state
+        obj.pages = lambda *args: None
+        def sample(*args):
+            power.stop.set()
+            raise ValueError('floor injected')
+        obj.sample = sample
+        return obj, events
+
+    def test_after_apply_exception_independent_ON_precedes_restore(self):
+        obj, events = self.recovery_harness()
+        with patch.object(e, 'legacy_check', side_effect=lambda d: d):
+            report = obj.run()
+        self.assertTrue(report['original_verified'])
+        self.assertFalse(report['complete'])
+        self.assertEqual(events.count('gauge-contrast apply CONFIRM_EXTERNAL_POWER'), 1)
+        self.assertEqual(events.count('gauge-contrast restore CONFIRM'), 1)
+        self.assertLess(events.index('INDEPENDENT_V1_ON_DOUBLE_QUERY'), events.index('gauge-contrast restore CONFIRM'))
+
+    def test_unknown_apply_ACK_no_host_restore_or_other_keys(self):
+        obj, events = self.recovery_harness(unknown=True)
+        with patch.object(e, 'legacy_check', side_effect=lambda d: d):
+            report = obj.run()
+        self.assertTrue(report['unknown_ack'])
+        self.assertTrue(report['original_verified'])
+        self.assertFalse(report['complete'])
+        self.assertNotIn('gauge-contrast restore CONFIRM', events)
+        self.assertEqual(events.count('gauge-contrast apply CONFIRM_EXTERNAL_POWER'), 1)
+
+    def physical_console(self, detail=None, failure=None):
+        obj, _, power, clock = self.experiment()
+        class Physical(Client):
+            def _command_once(self, text, expected, timeout):
+                from serial_debug_test import encode_command
+                self.serial.write(encode_command(text, True))
+                if failure is not None:
+                    raise failure
+                print('DBG RESULT command=' + expected + ' status=PASS ' + detail)
+                return types.SimpleNamespace(status='PASS', details=detail)
+        client = Physical(clock)
+        call = e.Console(client, self.out, clock)
+        call.safety_hook = obj.safety
+        call.failure_hook = lambda cmd, exc: power.stop.set()
+        return call, power
+
+    def test_real_Console_floor_STOP_before_first_log_open_and_primary_fault_preserved(self):
+        call, power = self.physical_console('valid=1 readonly=1 voltage_mv=3900 temperature_dK=3000 op_status=0026')
+        def blocked_open(*args, **kwargs):
+            self.assertTrue(power.stop.is_set(), 'STOP must precede first audit open')
+            raise OSError('disk unavailable')
+        with patch.object(Path, 'open', side_effect=blocked_open):
+            with self.assertRaisesRegex(ValueError, '3900mV') as caught:
+                call('gauge-charge')
+        self.assertTrue(any('disk unavailable' in note for note in caught.exception.__notes__))
+        self.assertTrue(call.audit_errors)
+
+    def test_real_Console_invalid_voltage_temperature_and_unknown_STOP_before_fsync(self):
+        cases = [('valid=1 readonly=1 voltage_mv=0 temperature_dK=3000 op_status=0026', None),
+                 ('valid=1 readonly=1 voltage_mv=4200 temperature_dK=3300 op_status=0026', None),
+                 (None, TimeoutError('physical reply unknown'))]
+        for detail, failure in cases:
+            call, power = self.physical_console(detail, failure)
+            def check_fsync(fd):
+                self.assertTrue(power.stop.is_set(), 'STOP must precede audit fsync')
+                raise OSError('injected disk fault')
+            with patch.object(e.os, 'fsync', side_effect=check_fsync):
+                with self.assertRaises((ValueError, TimeoutError)):
+                    call('gauge-charge')
+            self.assertTrue(power.stop.is_set())
+
+    def production_power(self, complete=True, footer_error=None, native_error=None,
+                         kind=None, message=None, owned=False):
+        power = e.Power.__new__(e.Power)
+        power.stop = threading.Event()
+        power.thread = types.SimpleNamespace(join=lambda **kwargs: None, is_alive=lambda: False)
+        power.monitor = types.SimpleNamespace(join=lambda **kwargs: None, is_alive=lambda: False)
+        power.monitor_error = None
+        power.original = dict(current=500, unit=1, voltage=5000, on=1)
+        power.footer = dict(restored_on_verified=True, com_lock_retained=False, original=power.original,
+                            complete=complete, error=footer_error)
+        power.error, power.error_kind, power.error_message = native_error, kind, message
+        power.stop_owned, power.cycle_fault = owned, None
+        power.snapshot = lambda: None
+        return power
+
+    def test_production_ensure_ON_rejects_all_three_native_footer_counterexamples(self):
+        expected = 'RuntimeError: external stop requested during off interval'
+        for power in (
+            self.production_power(native_error='RuntimeError: parser failed after footer'),
+            self.production_power(complete=False),
+            self.production_power(complete=False, footer_error=expected, native_error='ValueError: unexpected reader error',
+                                  kind='ValueError', message='unexpected reader error', owned=True)):
+            power.ensure_on()
+            self.assertIsNotNone(power.cycle_fault)
+
+    def test_production_ensure_ON_accepts_only_clean_or_owned_exact_stop(self):
+        expected = 'RuntimeError: external stop requested during off interval'
+        natural = self.production_power()
+        natural.ensure_on()
+        self.assertIsNone(natural.cycle_fault)
+        controlled = self.production_power(complete=False, footer_error=expected,
+            native_error=repr(RuntimeError(expected)), kind='RuntimeError', message=expected, owned=True)
+        controlled.ensure_on()
+        self.assertIsNone(controlled.cycle_fault)
+        controlled.stop_owned = False
+        controlled.ensure_on()
+        self.assertIsNotNone(controlled.cycle_fault)
+
+    def test_production_ensure_ON_missing_lock_or_error_is_not_success(self):
+        for key in ('com_lock_retained', 'error'):
+            power = self.production_power()
+            del power.footer[key]
+            if key == 'com_lock_retained':
+                with self.assertRaises(ValueError):
+                    power.ensure_on()
+            else:
+                power.ensure_on()
+                self.assertIsNotNone(power.cycle_fault)
+
+    def test_pages_absolute_group_includes_disk_persistence(self):
+        obj, _, _, clock = self.experiment()
+        def pages(*args):
+            clock.now += 6.01
+            return {}
+        obj._pages = pages
+        with self.assertRaisesRegex(ValueError, 'including persistence'):
+            obj.pages([], {}, 1, 'unused')
+
+    def test_B_old_boot_platform_rejected_before_ports_DLL_or_run_creation(self):
+        pairs = [{'image': dict(version='r13', sha256='a', size=1)}, {'image': dict(version='r14', sha256='b', size=1)}]
+        def accepted(path, sha, **kwargs):
+            return {'boot_pin': 99}
+        with patch.object(e, 'source_fields', return_value=[]), patch.object(e, 'target_fields', return_value=[]), \
+             patch.object(e, 'load_proof', return_value=('proof', pairs)), patch.object(e, 'load_evidence', side_effect=accepted), \
+             patch.object(e, 'Power', side_effect=AssertionError('DLL touched')), \
+             patch.object(e, 'topology', side_effect=AssertionError('ports touched')):
+            with self.assertRaisesRegex(ValueError, 'exact observation boot'):
+                e.main(['--execute', '--confirm-v1-sole-5v', '--expected-boot', '100', '--arm', 'B', '--stage', 'observe',
+                    '--proof', 'unused', '--on-smoke-evidence', 'unused', '--c-platform-evidence', 'unused'])
+
+    def test_slow_final_report_never_becomes_accepted_evidence_even_failure_receipt_IO_fails(self):
+        obj, _, _, clock = self.experiment()
+        obj.report.update(complete=True, original_verified=True, V1_ON_verified=True, settings_restored=True,
+                          target131_verified=True)
+        real_save = e.save
+        def slow(path, data):
+            if str(path).endswith('.failed.json'):
+                raise OSError('failure receipt disk unavailable')
+            digest = real_save(path, data)
+            if Path(path).name == 'report.json':
+                clock.now = obj.deadline + 1
+            return digest
+        with patch.object(e, 'save', side_effect=slow):
+            obj.finish_report()
+        self.assertFalse(obj.report['complete'])
+        self.assertTrue(obj.claim.exists())
+        path = obj.out / 'report.json'
+        disk = json.loads(path.read_bytes())
+        self.assertTrue(disk['complete'])  # immutable raw report never rewritten
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'unfinished/failed'):
+            e.load_evidence(path, sha, stage='observe', arm='C')
+
+    def test_slow_completion_receipt_retains_UNFINISHED_claim(self):
+        obj, _, _, clock = self.experiment()
+        obj.report['complete'] = True
+        real_save = e.save
+        def slow(path, data):
+            digest = real_save(path, data)
+            if str(path).endswith('.complete.json'):
+                clock.now = obj.deadline + 1
+            return digest
+        with patch.object(e, 'save', side_effect=slow):
+            obj.finish_report()
+        self.assertFalse(obj.report['complete'])
+        self.assertTrue(obj.claim.exists())
+
+    def known_floor_wire(self, duplicate=False, timeout=False, prior_uncertain=False):
+        obj, _, power, clock = self.experiment()
+        events = []
+        class WireSerial(Serial):
+            def write(self, data):
+                events.append(data)
+                return super().write(data)
+        class Physical(Client):
+            def _command_once(self, text, expected, seconds):
+                from serial_debug_test import encode_command
+                self.serial.write(encode_command(text, True))
+                if timeout:
+                    raise TimeoutError('actual reply timeout')
+                details = ('valid=1 readonly=1 voltage_mv=3900 temperature_dK=3000 op_status=0026'
+                           if expected == 'gauge-charge' else 'value=1')
+                line = 'DBG RESULT command=' + expected + ' status=PASS ' + details
+                print(line)
+                if duplicate:
+                    print(line)
+                return types.SimpleNamespace(status='PASS', details=details)
+        client = Physical(clock)
+        client.serial = WireSerial()
+        call = e.Console(client, obj.out, clock)
+        obj.call = call
+        obj.apply_sent = obj.apply_confirmed = True
+        obj.apply_start = clock.now
+        obj.deadline, obj.ram_deadline = clock.now + 660, clock.now + 600
+        call.deadline, call.check = obj.deadline, obj.before_write
+        call.safety_hook = obj.safety
+        call.failure_hook = lambda command, exc: power.stop.set()
+        call.uncertain = prior_uncertain
+        def on():
+            events.append('INDEPENDENT_ON_DOUBLE_QUERY')
+            power.on_known = True
+        power.ensure_on = on
+        return obj, call, power, events
+
+    def test_real_Console_known_floor_ON_then_restore_actual_wire(self):
+        from serial_debug_test import encode_command
+        obj, call, power, events = self.known_floor_wire()
+        with self.assertRaises(e.TypedKnownSafetyStop):
+            call('gauge-charge')
+        self.assertTrue(power.stop.is_set())
+        self.assertFalse(call.uncertain)
+        power.ensure_on()
+        call('gauge-contrast restore CONFIRM')
+        frame = encode_command('debug gauge-contrast restore CONFIRM', True)
+        self.assertEqual(events.count(frame), 1)
+        self.assertLess(events.index('INDEPENDENT_ON_DOUBLE_QUERY'), events.index(frame))
+        self.assertEqual(obj.sent['gauge-contrast restore CONFIRM'], 1)
+
+    def test_real_Console_timeout_duplicate_or_prior_unknown_still_forbids_restore_wire(self):
+        from serial_debug_test import encode_command
+        for kwargs in ({'timeout': True}, {'duplicate': True}, {'prior_uncertain': True}):
+            _, call, power, events = self.known_floor_wire(**kwargs)
+            with self.assertRaises((ValueError, TimeoutError)):
+                call('gauge-charge')
+            self.assertTrue(call.uncertain)
+            power.ensure_on()
+            with self.assertRaises(ValueError):
+                call('gauge-contrast restore CONFIRM')
+            self.assertNotIn(encode_command('debug gauge-contrast restore CONFIRM', True), events)
+
+    def test_real_Console_known_temperature_vs_zero_invalid_fields(self):
+        for voltage, temperature, known in ((4200, 3300, True), (0, 3000, False)):
+            call, power = self.physical_console(f'valid=1 readonly=1 voltage_mv={voltage} temperature_dK={temperature} op_status=0026')
+            with self.assertRaises(ValueError):
+                call('gauge-charge')
+            self.assertTrue(power.stop.is_set())
+            self.assertEqual(call.uncertain, not known)
+
+    def test_claim_unlink_late_makes_return_incomplete_without_rewriting_report(self):
+        obj, _, _, clock = self.experiment()
+        obj.report['complete'] = True
+        unlink = Path.unlink
+        def slow(path, *args, **kwargs):
+            result = unlink(path, *args, **kwargs)
+            if path == obj.claim:
+                clock.now = obj.deadline + 1
+            return result
+        with patch.object(Path, 'unlink', new=slow):
+            obj.finish_report()
+        self.assertFalse(obj.report['complete'])
+        self.assertTrue(json.loads((obj.out / 'report.json').read_bytes())['complete'])
+        self.assertTrue((obj.out / 'report.json.failed.json').exists())
+        self.assertTrue(any('claim unlink' in error for error in obj.report['errors']))
+
+    def parent_evidence(self):
+        path = self.out / 'accepted-report.json'
+        d = dict(kind='GCT1_contrast_experiment', stage='on-smoke', arm='C', complete=True,
+            original_verified=True, V1_ON_verified=True, settings_restored=True, source_crc=e.SOURCE,
+            legacy_crc='430c5ed4', target131_verified=True, unknown_ack=False, errors=[], apply_start_monotonic=100.)
+        sha = e.save(path, d)
+        e.save(Path(str(path) + '.complete.json'), dict(complete=True, within_deadline=True, report_sha256=sha))
+        return path, sha
+
+    def test_missing_independent_parent_receipt_rejected_even_child_complete(self):
+        path, sha = self.parent_evidence()
+        with self.assertRaisesRegex(ValueError, 'root acceptance'):
+            e.load_evidence(path, sha, stage='on-smoke', arm='C')
+
+    def test_late_parent_receipt_rejected_even_child_complete(self):
+        path, sha = self.parent_evidence()
+        e.save(self.out / 'root-acceptance.json', dict(report_sha256=sha, child_exit_code=0,
+                                                     observed_child_exit_monotonic=760.))
+        with self.assertRaisesRegex(ValueError, 'parent exit/deadline'):
+            e.load_evidence(path, sha, stage='on-smoke', arm='C')
+
+    def test_parent_receipt_requires_typed_zero_finite_exit_and_exact_hash(self):
+        path, sha = self.parent_evidence()
+        receipt = self.out / 'root-acceptance.json'
+        variants = [dict(report_sha256=sha, child_exit_code=True, observed_child_exit_monotonic=200.),
+                    dict(report_sha256=sha, child_exit_code=1, observed_child_exit_monotonic=200.),
+                    dict(report_sha256=sha, child_exit_code=0, observed_child_exit_monotonic=float('nan')),
+                    dict(report_sha256=sha, child_exit_code=0, observed_child_exit_monotonic=99.),
+                    dict(report_sha256='0' * 64, child_exit_code=0, observed_child_exit_monotonic=200.)]
+        for data in variants:
+            receipt.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, 'parent exit/deadline'):
+                e.load_evidence(path, sha, stage='on-smoke', arm='C')
+        receipt.write_text(json.dumps(dict(report_sha256=sha, child_exit_code=0, observed_child_exit_monotonic=200.)))
+        self.assertTrue(e.load_evidence(path, sha, stage='on-smoke', arm='C'))
+
+
+if __name__ == '__main__':
+    unittest.main()
