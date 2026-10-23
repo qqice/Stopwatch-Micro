@@ -58,6 +58,16 @@ struct Safety {
     // Distinct attestation: standard65 alone NEVER implies fresh full131.
     bool targetStandard65=false,freshAuthenticated131=false,calibrationUnchanged=false;
     Image image=Image::Unknown;
+    // Forward-only seam inside the existing, exclusively owned GCT operation:
+    // Pending already durable; all SEALED->FA key ACKs known; current SEC=1,
+    // CFG0/CAL0; live source131 belongs to that SAME operation. Never infer
+    // knownFullAccess from SEC bits alone, nor set sealed=true while in FA.
+    bool ownedGctPending=false,knownFullAccess=false;
+    uint8_t securityLevel=0; // 0=legacy unspecified, 1=FA, 2=unsealed, 3=sealed
+    bool ownedGctDeadlineBound=false;uint64_t ownedGctStartedMs=0;
+    // Trusted wrapper sets ONLY after cold Armed has committed/read back and
+    // a SECOND fresh131 source observation completes, before entering CFG.
+    uint32_t source131AfterArmedSequence=0;
 };
 struct Context {
     Binding expected{};BootToken boot{};uint64_t nowMs=0;Safety safety{};
@@ -205,11 +215,20 @@ constexpr bool safe(const Context& c,bool full131,bool requireClosed=true){
 constexpr bool operationWindow(const Record& r,const Context& c){
     return sameBoot(r.armedBoot,c.boot)?c.nowMs>=r.armedMs&&c.nowMs-r.armedMs<armedLimitMs:c.nowMs<resumedStartupLimitMs;
 }
+constexpr bool forwardSourceAccess(const Context& c){
+    const auto& s=c.safety;
+    if(s.image!=Image::Source131||s.voltageMv<4000)return false;
+    if(s.sealed)return !s.ownedGctPending&&!s.ownedGctDeadlineBound&&!s.knownFullAccess&&
+        (s.securityLevel==0||s.securityLevel==3)&&safe(c,true);
+    return s.ownedGctPending&&s.knownFullAccess&&s.securityLevel==1&&s.ownedGctDeadlineBound&&
+        s.ownedGctStartedMs<=c.nowMs&&c.nowMs-s.ownedGctStartedMs<armedRestoreTriggerMs&&safe(c,true,false);
+}
 constexpr Decision arm(Load loaded,const Binding& binding,const Context& c){
     if(loaded!=Load::Missing||!c.nonceReservedFresh||c.legacyFallbackRequested||!validBinding(binding)||
-       !sameBinding(binding,c.expected)||!validBoot(c.boot)||!safe(c,true)||c.safety.voltageMv<4000||c.safety.image!=Image::Source131)
+       !sameBinding(binding,c.expected)||!validBoot(c.boot)||!forwardSourceAccess(c))
         return result(Action::BlockedUnknown,Error::Nonce);
-    Record r{};r.binding=binding;r.sequence=1;r.armedBoot=c.boot;r.armedMs=c.nowMs;return persist(r);
+    Record r{};r.binding=binding;r.sequence=1;r.armedBoot=c.boot;
+    r.armedMs=c.safety.sealed?c.nowMs:c.safety.ownedGctStartedMs;return persist(r);
 }
 constexpr Decision handoff(const Record& r,const Context& c){
     const auto error=checked(r,c);if(error!=Error::None)return result(Action::BlockedUnknown,error);
@@ -238,7 +257,10 @@ constexpr Decision startup(Load loaded,const Record& r,const Context& c){
             return result(Action::RestoreRequired);
         }
         // First observed different boot, not an attestation of physical OFF or
-        // exact boot ordinal. No capture data is read before durable claim.
+        // exact boot ordinal. No released experiment/final capture or FA read
+        // precedes durable claim. Passive early RAM-only readonly diagnostic
+        // prefetch (e.g. before NAND is ready) is NOT capture authorization; it
+        // may later be durably/atomically bound as Initial after the claim.
         if(c.startupKind!=StartupKind::PowerOn)return result(Action::FailureEvidenceRequired,Error::Boot);
         if(!operationWindow(r,c)||c.nowMs>=resumedCaptureLimitMs)return result(Action::FailureEvidenceRequired,Error::Expired);
         auto next=r;++next.sequence;next.phase=Phase::CaptureClaimed;next.claimedBoot=c.boot;next.claimMs=c.nowMs;
@@ -253,7 +275,8 @@ constexpr Decision afterPersist(const Record& before,const Record& next,const Pr
        !p.source131StillDurable||p.sequence!=next.sequence||p.phase!=next.phase||p.nonce!=next.binding.nonce||
        checked(next,c)!=Error::None){session.blocked=true;return result(Action::BlockedUnknown,Error::Durability);}
     if(next.phase==Phase::Armed){
-        if(!sameBoot(next.armedBoot,c.boot)||!safe(c,true)||c.safety.image!=Image::Source131){session.blocked=true;return result(Action::BlockedUnknown,Error::Safety);}
+        if(!sameBoot(next.armedBoot,c.boot)||!forwardSourceAccess(c)||
+           (!c.safety.sealed&&next.armedMs>c.safety.ownedGctStartedMs)){session.blocked=true;return result(Action::BlockedUnknown,Error::Safety);}
         return startup(Load::Present,next,c);
     }
     if(next.phase==Phase::HandedOff)return startup(Load::Present,next,c);
@@ -271,7 +294,8 @@ constexpr Decision afterPersist(const Record& before,const Record& next,const Pr
 }
 constexpr Decision authorizeApply(const Record& r,const Context& c,Session& session){
     const auto error=checked(r,c);if(error!=Error::None||session.blocked)return result(Action::BlockedUnknown,error);
-    if(r.phase!=Phase::Armed||!sameBoot(r.armedBoot,c.boot)||!safe(c,true)||c.safety.voltageMv<4000||c.safety.image!=Image::Source131||
+    if(r.phase!=Phase::Armed||!sameBoot(r.armedBoot,c.boot)||!forwardSourceAccess(c)||
+       c.safety.source131AfterArmedSequence!=r.sequence||(!c.safety.sealed&&r.armedMs>c.safety.ownedGctStartedMs)||
        c.nowMs<r.armedMs||c.nowMs-r.armedMs>=armedRestoreTriggerMs||session.applyReleased){session.blocked=true;return result(Action::BlockedUnknown,Error::Safety);}
     session.applyReleased=true;return result(Action::ApplyC65Owned3);
 }

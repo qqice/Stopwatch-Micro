@@ -100,6 +100,7 @@ constexpr bool cases(){const auto a=armed(),h=handed(),r=claimed();auto c=nextBo
  c.boot.nonce[0]=12;c.nowMs=0;if(m::startup(m::Load::Present,r,c).action!=m::Action::FailureEvidenceRequired)return false;
  auto interrupted=m::interruptedEvidence(r,c,evidence());if(!interrupted.hasNext||interrupted.next.phase!=m::Phase::CaptureFailed)return false;
  c=context();m::Session armSession{};if(m::afterPersist({},a,proof(a),c,armSession,true).action!=m::Action::KeepArmed720)return false;
+ c.safety.source131AfterArmedSequence=a.sequence;
  if(m::authorizeApply(a,c,armSession).action!=m::Action::ApplyC65Owned3||m::authorizeApply(a,c,armSession).action!=m::Action::BlockedUnknown)return false;
  return true;
 }static_assert(cases());
@@ -176,7 +177,7 @@ constexpr bool cases(){auto c=context();auto a=armed();m::Session session{};
  c.safety.voltageMv=3999;if(m::arm(m::Load::Missing,binding(),c).action!=m::Action::BlockedUnknown)return false;
  if(m::authorizeApply(a,c,session).action!=m::Action::BlockedUnknown)return false;
  c.safety.image=m::Image::TargetC131;c.nowMs=200;if(m::handoff(a,c).action!=m::Action::Reject)return false;
- c=context();c.safety.voltageMv=4000;session={};if(m::authorizeApply(a,c,session).action!=m::Action::ApplyC65Owned3)return false;
+ c=context();c.safety.voltageMv=4000;c.safety.source131AfterArmedSequence=a.sequence;session={};if(m::authorizeApply(a,c,session).action!=m::Action::ApplyC65Owned3)return false;
  auto r=restoring();c=nextBoot();c.safety.voltageMv=3500;session={};
  if(m::authorizeRestoreInspection(r,c,session).action!=m::Action::InspectForRestore)return false;
  c.safety.sealed=false;c.safety.freshAuthenticated131=true;c.safety.image=m::Image::TargetC131;
@@ -312,6 +313,76 @@ constexpr bool cases(){auto a=armed(),h=handed();a.sequence=98;h.sequence=99;
  c.safety.freshAuthenticated131=true;c.safety.image=m::Image::Source131;
  const auto done=m::restored(rest.next,c);if(!done.hasNext||done.next.sequence!=5)return false;
  for(auto original:{fail,rest.next,done.next}){auto x=original;x.sequence+=90;if(m::shape(x))return false;}
+ return true;
+}static_assert(cases());
+''')
+
+    def test_owned_FA_source_arm_commit_then_second_live131_allows_existing_CFG_once(self):
+        self.compile(r'''
+constexpr bool cases(){auto c=context();c.nowMs=150;auto& s=c.safety;
+ s.sealed=false;s.securityLevel=1;s.ownedGctPending=s.knownFullAccess=s.ownedGctDeadlineBound=true;s.ownedGctStartedMs=100;
+ auto arm=m::arm(m::Load::Missing,binding(),c);if(!arm.hasNext||!m::initial(arm.next)||arm.next.armedMs!=100)return false;
+ m::Session session{};c.nowMs=175;
+ if(m::afterPersist({},arm.next,proof(arm.next),c,session,true).action!=m::Action::KeepArmed720)return false;
+ auto premature=session;if(m::authorizeApply(arm.next,c,premature).action!=m::Action::BlockedUnknown)return false;
+ s.source131AfterArmedSequence=arm.next.sequence;c.nowMs=180; // Wrapper's second live observe, AFTER NAND readback.
+ if(m::authorizeApply(arm.next,c,session).action!=m::Action::ApplyC65Owned3)return false;
+ if(m::authorizeApply(arm.next,c,session).action!=m::Action::BlockedUnknown)return false;
+ c.nowMs=600100;if(m::startup(m::Load::Present,arm.next,c).action!=m::Action::RestoreRequired)return false;
+ c.nowMs=720100;if(m::operationWindow(arm.next,c))return false; // Never a new720s window from NAND timestamp150.
+ return true;
+}static_assert(cases());
+''')
+
+    def test_owned_FA_unknown_SEC2_missing_pending_keys_calibration_or_stale_source_never_admits(self):
+        self.compile(r'''
+constexpr m::Context owned(){auto c=context();c.nowMs=150;c.safety.sealed=false;c.safety.securityLevel=1;
+ c.safety.ownedGctPending=c.safety.knownFullAccess=c.safety.ownedGctDeadlineBound=true;c.safety.ownedGctStartedMs=100;return c;}
+constexpr bool cases(){const auto r=m::arm(m::Load::Missing,binding(),owned()).next;
+ for(unsigned fault=0;fault<15;++fault){auto c=owned();auto& s=c.safety;
+ if(fault==0)s.securityKnown=false;
+ if(fault==1)s.securityLevel=0;
+ if(fault==2)s.securityLevel=2;
+ if(fault==3)s.ownedGctPending=false;
+ if(fault==4)s.knownFullAccess=false;
+ if(fault==5)s.operationKnownSafeForInspection=false; // unresolved/unknown prior key ACK
+ if(fault==6)s.calibrationUnchanged=false;
+ if(fault==7)s.freshAuthenticated131=false;
+ if(fault==8)s.image=m::Image::TargetC131;
+ if(fault==9)s.cfg0=false;
+ if(fault==10)s.cal0=false;
+ if(fault==11)s.ownedGctDeadlineBound=false;
+ if(fault==12)s.ownedGctStartedMs=151;
+ if(fault==13)c.nowMs=600100;
+ if(fault==14)s.sealed=true; // SEC1 cannot be relabeled SEALED to bypass owned admission
+ if(m::arm(m::Load::Missing,binding(),c).action!=m::Action::BlockedUnknown)return false;
+ m::Session session{};if(m::afterPersist({},r,proof(r),c,session,true).action!=m::Action::BlockedUnknown)return false;
+ session={};s.source131AfterArmedSequence=r.sequence;if(m::authorizeApply(r,c,session).action!=m::Action::BlockedUnknown)return false;
+ }
+ auto c=owned();c.safety.source131AfterArmedSequence=2;m::Session session{};
+ if(m::authorizeApply(r,c,session).action!=m::Action::BlockedUnknown)return false;
+ c=context();c.safety.securityLevel=2;c.safety.source131AfterArmedSequence=1;session={};
+ if(m::authorizeApply(armed(),c,session).action!=m::Action::BlockedUnknown)return false;
+ c=owned();c.safety.ownedGctStartedMs=50;session={};c.safety.source131AfterArmedSequence=1;
+ if(m::authorizeApply(r,c,session).action!=m::Action::BlockedUnknown)return false; // Existing lease earlier than stored Armed anchor.
+ return true;
+}static_assert(cases());
+''')
+
+    def test_sealed_existing_pending_never_reanchors_old_GCT_lease_as_new_cold_arm(self):
+        self.compile(r'''
+constexpr bool cases(){const auto existing=armed();
+ for(uint64_t now:{150ULL,599000ULL,700100ULL}){auto c=context();c.nowMs=now;
+ c.safety.sealed=true;c.safety.securityLevel=3;c.safety.knownFullAccess=false;
+ c.safety.ownedGctPending=c.safety.ownedGctDeadlineBound=true;c.safety.ownedGctStartedMs=100;
+ const auto d=m::arm(m::Load::Missing,binding(),c);
+ if(d.action!=m::Action::BlockedUnknown||d.hasNext)return false;
+ m::Session session{};if(m::afterPersist({},existing,proof(existing),c,session,true).action!=m::Action::BlockedUnknown)return false;
+ c.safety.source131AfterArmedSequence=existing.sequence;session={};
+ if(m::authorizeApply(existing,c,session).action!=m::Action::BlockedUnknown)return false;
+ }
+ auto c=context();c.safety.ownedGctDeadlineBound=true;c.safety.ownedGctStartedMs=100;
+ if(m::arm(m::Load::Missing,binding(),c).action!=m::Action::BlockedUnknown)return false;
  return true;
 }static_assert(cases());
 ''')
