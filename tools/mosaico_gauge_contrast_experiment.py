@@ -43,6 +43,13 @@ class TypedKnownSafetyStop(ValueError):
     """
 
 
+class TypedKnownPrekeyFailure(ValueError):
+    """Unique explicit images FAIL, independently classified before any keys."""
+    def __init__(self, detail):
+        self.detail = dict(detail)
+        super().__init__('known prekey images rejection: ' + detail['reason'])
+
+
 def parse(text):
     pairs = [token.split('=', 1) for token in text.split()]
     require(all(len(p) == 2 for p in pairs) and len({p[0] for p in pairs}) == len(pairs), 'malformed/duplicate fields')
@@ -301,6 +308,7 @@ class Console:
         client.serial = self.fence
         self.rows, self.uncertain, self.check, self.group_deadline, self.deadline = [], False, None, None, None
         self.safety_hook = self.failure_hook = None
+        self.prekey_failure_check = None
         self.audit_errors = []
 
     @contextlib.contextmanager
@@ -353,9 +361,13 @@ class Console:
                         continue
                     terminals.append(terminal)
             require(terminals == [(command.split()[0], result.status, result.details)], 'residual/duplicate/unexpected terminal')
+            detail = parse(result.details)
+            confirmed_terminal = result.status in ('PASS', 'FAIL')
+            row.update(status=result.status, details=result.details, parsed=detail)
+            if (result.status == 'FAIL' and self.prekey_failure_check is not None and
+                    self.prekey_failure_check(command, detail)):
+                raise TypedKnownPrekeyFailure(detail)
             require(result.status in statuses, 'explicit terminal ' + result.status + ': ' + result.details)
-            row.update(status=result.status, details=result.details, parsed=parse(result.details))
-            confirmed_terminal = result.status == 'PASS'
             # Synchronous physical safety callback occurs BEFORE any log open,
             # write, flush or fsync, including this call's finally audit path.
             if self.safety_hook is not None:
@@ -363,13 +375,15 @@ class Console:
             return row['parsed']
         except BaseException as exc:
             primary = exc
-            if self.failure_hook is not None:
+            known_prekey = isinstance(exc, TypedKnownPrekeyFailure) and confirmed_terminal
+            if self.failure_hook is not None and not known_prekey:
                 self.failure_hook(command, exc)  # Event.set only; no file/native IO.
             # A rejected preamble/wire fence is not evidence that a mutation was
             # sent. A sent mutation (including known FAIL) is never retried.
             known_safety = (isinstance(exc, TypedKnownSafetyStop) and confirmed_terminal and command == 'gauge-charge')
-            self.uncertain |= not known_safety and (not mutation(command) or self.fence.attempted)
+            self.uncertain |= not (known_safety or known_prekey) and (not mutation(command) or self.fence.attempted)
             row['typed_known_safety_stop'] = known_safety
+            row['typed_known_prekey_failure'] = known_prekey
             row['error'] = repr(exc)
             raise
         finally:
@@ -598,6 +612,7 @@ class Experiment:
         self.rebase_used = self.rebase_in_progress = False
         self.apply_start = None
         self.last_on_sample = None
+        self.images_retry_ticket = None
         self.apply_sent = self.apply_confirmed = self.settings_touched = False
         self.report = dict(kind='GCT1_contrast_experiment', stage=args.stage, arm=args.arm, source_crc=SOURCE,
                            complete=False, original_verified=False, target131_verified=False, V1_ON_verified=False,
@@ -607,6 +622,54 @@ class Experiment:
         call.check, call.deadline = self.before_write, self.deadline
         call.safety_hook = self.safety
         call.failure_hook = lambda command, exc: self.power.stop.set()
+        call.prekey_failure_check = self.known_images_failure
+
+    def no_key_request(self):
+        return not self.apply_sent and not any(command.startswith(('gauge-contrast prepare ',
+            'gauge-contrast apply ', 'gauge-contrast restore ')) for command in self.sent)
+
+    def known_images_failure(self, command, detail):
+        # This combined firmware reason does NOT prove lease contention. It is
+        # retryable only after fresh independent guards exclude length/runtime
+        # and observable busy/protection faults, before prepare/keys whatsoever.
+        if (command != 'gauge-contrast images ' + self.proof or not self.no_key_request() or
+                not 0 < len(self.proof) <= 1400 or detail.get('reason') != 'images_lease_runtime_length'):
+            return False
+        try:
+            status_check(detail)
+            require(detail.get('success') == '0' and detail.get('runtime_ready') == '1' and
+                    detail.get('protection') == '0' and detail.get('images_capability_verified') == '0', 'known prekey shape')
+            require((detail.get('phase') == '255' and detail.get('generation') == detail.get('epoch') == '0') or
+                    (detail.get('phase') == '0' and int(detail['generation']) > 0 and int(detail['epoch']) > 0), 'prekey phase')
+        except (ValueError, KeyError, TypeError):
+            return False
+        return True
+
+    def images_capability(self):
+        command = 'gauge-contrast images ' + self.proof
+        for attempt in range(3):
+            require(self.no_key_request() and not self.call.uncertain and not self.watcher.sticky.is_set() and
+                    not self.power.stop.is_set() and self.clock.monotonic() < self.setup_deadline, 'images before-keys retry admission')
+            try:
+                result = self.call(command, timeout=90)
+                require(result.get('images_capability_verified') == '1', 'two actual SDK_VALID slot BINs not verified')
+                return result
+            except TypedKnownPrekeyFailure as exc:
+                self.report.setdefault('images_known_prekey_failures', []).append(dict(attempt=attempt + 1, detail=exc.detail))
+                require(not self.call.uncertain, 'images audit/ACK uncertainty: never retry')
+                if attempt == 2:
+                    raise
+                # One/two second backoff; only this exact gate can be resent.
+                require(not self.power.stop.wait(attempt + 1), 'STOP during images prekey backoff')
+                started = self.clock.monotonic()
+                with self.call.group():
+                    boot, ota, power = self.call('boot'), self.call('ota-status'), self.call('power')
+                    require(boot.get('count') == str(self.args.expected_boot) and
+                        all(ota.get(k) == v for k, v in dict(state='2', busy='0', pending='0').items()) and
+                        all(power.get(k) == v for k, v in dict(locked='1', phase='2', wifi_running='0', bt_connected='0', bt_advertising='0', cpu_mhz='160').items()) and
+                        self.clock.monotonic() < started + GROUP_SECONDS and 0 < len(self.proof) <= 1400,
+                        'fresh same-boot idle/quiet images retry guard failed')
+                self.images_retry_ticket = dict(command=command, expires=min(self.setup_deadline, self.clock.monotonic() + 2))
 
     def safety(self, command, detail):
         if command != 'gauge-charge':
@@ -631,8 +694,11 @@ class Experiment:
 
     def before_write(self, command):
         repeat = (self.rebase_in_progress and command.startswith('settings set ') and self.sent.get(command) == 1)
+        image_retry = (self.images_retry_ticket is not None and self.images_retry_ticket['command'] == command and
+            self.sent.get(command) in (1, 2) and self.no_key_request() and
+            self.clock.monotonic() < self.images_retry_ticket['expires'])
         setup_cleanup = command == 'settings restore' and not self.apply_sent
-        require((command not in self.sent or repeat) and (self.clock.monotonic() < self.deadline or setup_cleanup), 'duplicate/late mutation')
+        require((command not in self.sent or repeat or image_retry) and (self.clock.monotonic() < self.deadline or setup_cleanup), 'duplicate/late mutation')
         restoring = command in ('gauge-contrast restore CONFIRM', 'settings restore')
         if not restoring:
             require(not self.watcher.sticky.is_set() and not self.power.stop.is_set(), 'sticky STOP forbids forward mutation')
@@ -654,6 +720,8 @@ class Experiment:
         if command == 'gauge-contrast restore CONFIRM':
             require(self.remaining() > 75, 'restore+full131 closure reserve unavailable')
         self.sent[command] = self.sent.get(command, 0) + 1
+        if image_retry:
+            self.images_retry_ticket = None  # Actual-wire one-use guard; not an apply/prepare retry waiver.
         self.report.setdefault('mutation_wire', []).append(dict(command=command, monotonic=self.clock.monotonic()))
 
     def state(self, phase=None):
@@ -776,8 +844,7 @@ class Experiment:
             self.power.stop.wait(min(5, max(0, until - self.clock.monotonic())))
         p = self.call('gauge-charge')
         require(p.get('valid') == p.get('readonly') == '1' and 4150 <= int(p['voltage_mv']) <= 4350 and sealed(p), 'entry requires >=4150mV sealed')
-        image = self.call('gauge-contrast images ' + self.proof, timeout=90)
-        require(image.get('images_capability_verified') == '1', 'two actual SDK_VALID slot BINs not verified')
+        self.images_capability()
         prepared = self.call(f'gauge-contrast prepare {self.args.arm} CONFIRM', timeout=180)
         status_check(prepared, self.args.arm, 0)
         require(prepared.get('prepared_fresh') == '1', 'no fresh Original131')
@@ -893,14 +960,28 @@ class Experiment:
                     # subsequently expires before any apply frame can be sent.
                     self.report['original_verified'] = bool(self.report.get('prepared') and not self.call.uncertain)
                     if self.clock.monotonic() < self.setup_deadline:
-                        current = self.state(0)
-                        self.report['original_verified'] &= current.get('prepared_fresh') == '1'
+                        current = self.state()
+                        if current.get('phase') == '255' and self.no_key_request() and not self.call.uncertain:
+                            require(current.get('generation') == current.get('epoch') == '0' and
+                                current.get('protection') == '0', 'Missing GCT must be unprotected/no intent')
+                            gauge = self.call('gauge')
+                            require(gauge.get('valid') == gauge.get('capacity_valid') == '1' and
+                                gauge.get('design_mah') == gauge.get('fcc_mah') == '3000' and
+                                gauge.get('unit_factor') == gauge.get('unit_verified') == '0' and sealed(gauge),
+                                'prekey Missing requires standard Original3000/SEALED')
+                            self.report['original_verified'] = False  # Standard registers are NOT a full131 proof.
+                            self.report['prekey_missing_standard_verified'] = True
+                            save(self.out / 'prekey-Missing-cleanup.json', dict(gct=current, gauge=gauge,
+                                V1_ON_verified=True, no_key_request=True, no_full131_claim=True))
+                        else:
+                            status_check(current, self.args.arm, 0)
+                            self.report['original_verified'] &= current.get('prepared_fresh') == '1'
                 require(legacy_check(self.call('gauge-native-recovery evidence')) == self.legacy, 'historical Failed changed')
                 save(self.out / 'historical-Failed-after.json', self.legacy)
             except BaseException as exc:
                 self.report['errors'].append('recovery: ' + repr(exc))
             # RAM settings only restore after proven Original and no UART uncertainty.
-            if self.settings_touched and self.report['original_verified'] and not self.call.uncertain:
+            if self.settings_touched and (self.report['original_verified'] or self.report.get('prekey_missing_standard_verified')) and not self.call.uncertain:
                 try:
                     self.call.setup_cleanup = not self.apply_sent
                     self.call('settings restore')

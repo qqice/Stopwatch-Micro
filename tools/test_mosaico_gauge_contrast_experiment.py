@@ -806,6 +806,155 @@ class HostTests(unittest.TestCase):
         self.assertEqual(len(obj.report['samples']), 1)
         self.assertFalse(call.uncertain)
 
+    def images_harness(self, outcomes, guard_overrides=None):
+        obj, _, power, clock = self.experiment()
+        events, image_count = [], [0]
+        status = dict(schema='1', namespace='gcontrast', source_crc=e.SOURCE, factor='0', verified='0',
+            capacity_calibrated='0', original3000_UNTRUSTED='1', legacy_Failed_preserved='1',
+            never_publish_physical_units='1', deadline_seconds='720', host_deadline_seconds='660',
+            third_value='0', unexpected_count='0', arm='C', phase='255', generation='0', epoch='0',
+            runtime_ready='1', protection='0', images_capability_verified='0', prepared_fresh='0', success='0')
+        original_settings = {key: '1' for key in e.CONFIG_KEYS}
+        original_settings['temporary'] = '0'
+        settings = dict(original_settings)
+        class Scripted(Client):
+            def _command_once(self, text, expected, timeout):
+                from serial_debug_test import encode_command
+                self.serial.write(encode_command(text, True))
+                command = text.removeprefix('debug ')
+                events.append(command)
+                clock.now += .01
+                terminal = 'PASS'
+                duplicate = False
+                if command.startswith('gauge-contrast images '):
+                    index = image_count[0]
+                    image_count[0] += 1
+                    outcome = outcomes[min(index, len(outcomes) - 1)]
+                    if outcome == 'timeout':
+                        raise TimeoutError('images ACK unknown')
+                    detail = dict(status)
+                    if outcome == 'pass':
+                        detail.update(images_capability_verified='1', success='1')
+                    else:
+                        terminal = 'FAIL'
+                        detail['reason'] = 'different_proof_failure' if outcome == 'unknown' else 'images_lease_runtime_length'
+                        duplicate = outcome == 'duplicate'
+                elif command == 'gauge-contrast status':
+                    detail = dict(status, success='1')
+                elif command == 'boot':
+                    detail = {'count': '10'}
+                elif command == 'ota-status':
+                    detail = dict(state='2', busy='0', pending='0')
+                elif command == 'power':
+                    detail = dict(locked='1', phase='2', wifi_running='0', bt_connected='0', bt_advertising='0', cpu_mhz='160')
+                elif command == 'gauge':
+                    detail = dict(valid='1', capacity_valid='1', design_mah='3000', fcc_mah='3000',
+                        unit_factor='0', unit_verified='0', op_status='0026')
+                elif command == 'gauge-native-recovery evidence':
+                    detail = {'evidence_crc': '430c5ed4'}
+                elif command == 'settings get':
+                    detail = dict(settings)
+                elif command == 'settings restore':
+                    settings.clear()
+                    settings.update(original_settings)
+                    detail = {'restored': '1'}
+                elif command.startswith('settings set '):
+                    _, _, key, value, _ = command.split()
+                    settings.update(temporary='1')
+                    settings[key] = value
+                    detail = {'value': value}
+                else:
+                    detail = {'value': '1'}
+                detail.update((guard_overrides or {}).get(command, {}))
+                details = ' '.join(key + '=' + value for key, value in detail.items())
+                line = f'DBG RESULT command={expected} status={terminal} ' + details
+                print(line)
+                if duplicate:
+                    print(line)
+                return types.SimpleNamespace(status=terminal, details=details)
+        client = Scripted(clock)
+        call = e.Console(client, obj.out, clock)
+        obj.call = call
+        call.check, call.deadline = obj.before_write, obj.deadline
+        call.prekey_failure_check = obj.known_images_failure
+        call.failure_hook = lambda command, exc: power.stop.set()
+        def ensure_on():
+            events.append('INDEPENDENT_ON_DOUBLE_QUERY')
+            power.on_known = True
+        power.ensure_on = ensure_on
+        return obj, call, power, events, image_count, original_settings
+
+    def test_real_Console_images_known_FAIL_fresh_guards_PASS_only_gate_repeated(self):
+        obj, call, power, events, count, _ = self.images_harness(['lease', 'pass'])
+        with patch.object(power.stop, 'wait', return_value=False):
+            result = obj.images_capability()
+        self.assertEqual(result['images_capability_verified'], '1')
+        self.assertEqual(count[0], 2)
+        self.assertFalse(call.uncertain)
+        self.assertFalse(power.stop.is_set())
+        self.assertEqual(events, ['gauge-contrast images proof', 'boot', 'ota-status', 'power', 'gauge-contrast images proof'])
+        self.assertEqual(obj.sent['gauge-contrast images proof'], 2)
+        self.assertTrue(obj.no_key_request())
+
+    def test_images_unknown_FAIL_timeout_duplicate_prior_uncertain_never_retry(self):
+        for outcome in ('unknown', 'timeout', 'duplicate', 'prior_uncertain'):
+            obj, call, power, events, count, _ = self.images_harness([outcome])
+            if outcome == 'prior_uncertain':
+                call.uncertain = True
+            with patch.object(power.stop, 'wait', return_value=False):
+                with self.assertRaises((ValueError, TimeoutError)):
+                    obj.images_capability()
+            self.assertEqual(count[0], 0 if outcome == 'prior_uncertain' else 1)
+            self.assertTrue(call.uncertain)
+            self.assertTrue(obj.no_key_request())
+
+    def test_images_gate_capped_three_attempts_and_no_prepare_retry_ticket(self):
+        obj, call, power, _, count, _ = self.images_harness(['lease'])
+        with patch.object(power.stop, 'wait', return_value=False):
+            with self.assertRaises(e.TypedKnownPrekeyFailure):
+                obj.images_capability()
+        self.assertEqual(count[0], 3)
+        self.assertFalse(call.uncertain)
+        self.assertIsNone(obj.images_retry_ticket)
+        obj.before_write('gauge-contrast prepare C CONFIRM')
+        with self.assertRaises(ValueError):
+            obj.before_write('gauge-contrast prepare C CONFIRM')
+        self.assertFalse(obj.known_images_failure('gauge-contrast images proof', {}))
+
+    def test_images_retry_guard_wrong_boot_busy_or_nonquiet_never_resends(self):
+        for overrides in ({'boot': {'count': '11'}}, {'ota-status': {'busy': '1'}}, {'power': {'phase': '1'}}):
+            obj, _, power, _, count, _ = self.images_harness(['lease', 'pass'], overrides)
+            with patch.object(power.stop, 'wait', return_value=False):
+                with self.assertRaisesRegex(ValueError, 'retry guard failed'):
+                    obj.images_capability()
+            self.assertEqual(count[0], 1)
+            self.assertIsNone(obj.images_retry_ticket)
+            self.assertTrue(obj.no_key_request())
+
+    def test_actual_Console_missing_cleanup_ON_standard3000_and_RAM_no_keys(self):
+        obj, call, power, events, _, original = self.images_harness(['lease'])
+        obj.legacy = {'evidence_crc': '430c5ed4'}
+        def prepare():
+            obj.settings = call('settings get')
+            obj.settings_touched = True
+            for command in ('settings set lock_wifi_minutes 60 600', 'settings set lock_ble_minutes 60 600',
+                            'settings set smart_keepalive 0 600'):
+                call(command)
+            obj.images_capability()
+        obj.prepare = prepare
+        with patch.object(power.stop, 'wait', return_value=False), patch.object(e, 'legacy_check', side_effect=lambda d: d):
+            report = obj.run()
+        self.assertFalse(report['complete'])
+        self.assertFalse(report['original_verified'])
+        self.assertFalse(report['unknown_ack'])
+        self.assertTrue(report['prekey_missing_standard_verified'])
+        self.assertTrue(report['V1_ON_verified'])
+        self.assertTrue(report['settings_restored'])
+        self.assertLess(events.index('INDEPENDENT_ON_DOUBLE_QUERY'), events.index('settings restore'))
+        self.assertFalse(any(command.startswith(('gauge-contrast prepare ', 'gauge-contrast apply ', 'gauge-contrast restore ')) for command in events))
+        self.assertEqual(json.loads((obj.out / 'settings-after.json').read_bytes()), original)
+        self.assertTrue((obj.out / 'prekey-Missing-cleanup.json').is_file())
+
 
 if __name__ == '__main__':
     unittest.main()
