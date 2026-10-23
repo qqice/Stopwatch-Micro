@@ -119,20 +119,27 @@ class StackBudgetTests(unittest.TestCase):
         (RUN/'execution.json').write_text(json.dumps(dict(source_sha256=hashlib.sha256(source.encode()).hexdigest(),cases=[dict(**c,result=values[i]) for i,c in enumerate(cases)],limits='actual extracted handlers; libc/trace/FreeRTOS mocks, not SDK/device validation'),indent=2))
         self.assertEqual(values,(0,)*len(cases),str(RUN/'execution.json'))
 
-    def test_printf_shared_scratch_transport_and_overflow_rv32(self):
+    def test_printf_nonmosaico_array_unchanged_rv32(self):
+        self.test_printf_shared_scratch_transport_and_overflow_rv32(False)
+
+    def test_printf_shared_scratch_transport_and_overflow_rv32(self,mosaico=True):
         RUN.mkdir(parents=True,exist_ok=True)
         body=base.extract(SOURCE.read_text(),'int SerialDebug::debugPrintf(')
         support=base.SUPPORT.split('static bool forceUartDeny',1)[0]+r'''
 using va_list=__builtin_va_list;
 #define va_start(a,b) __builtin_va_start(a,b)
 #define va_end(a) __builtin_va_end(a)
-static unsigned held=0,faults=0,queued=0,printed=0;
+static unsigned held=0,faults=0,queued=0,printed=0,formats=0,allocAttempts=0,allocSuccess=0;
+static bool failAllocation=true;
+constexpr int MALLOC_CAP_SPIRAM=0x400,MALLOC_CAP_8BIT=0x4;
+static char psram[1536];
+void* heap_caps_malloc(size_t n,int caps){if(held!=1||n!=1536||caps!=(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT))++faults;++allocAttempts;if(failAllocation)return nullptr;++allocSuccess;return psram;}
 static int wanted=5;static bool queueOk=true;static char pattern='A';static unsigned shortWrite=0;
 static char output[1536]{};void* stdout=nullptr;
 namespace std {
 struct mutex{void lock(){if(held)++faults;++held;}void unlock(){if(held!=1)++faults;--held;}};
 template<class T>struct lock_guard{T& lock;explicit lock_guard(T& x):lock(x){lock.lock();}~lock_guard(){lock.unlock();}};
-int vsnprintf(char* out,size_t capacity,const char*,va_list){if(held!=1)++faults;for(size_t i=0;i+1<capacity&&i<size_t(wanted<0?0:wanted);++i)out[i]=pattern;return wanted;}
+int vsnprintf(char* out,size_t capacity,const char*,va_list){++formats;if(held!=1||capacity!=1536)++faults;for(size_t i=0;i+1<capacity&&i<size_t(wanted<0?0:wanted);++i)out[i]=pattern;return wanted;}
 size_t fwrite(const void* in,size_t unit,size_t count,void*){if(held!=1||unit!=1)++faults;++printed;for(size_t i=0;i<count;++i)output[i]=static_cast<const char*>(in)[i];return shortWrite?shortWrite:count;}
 }
 struct SerialDebug{static SerialDebug* _writer;bool _reply_uart=false;unsigned _format_overflow=0;
@@ -144,7 +151,15 @@ static int debugPrintf(const char*,...);
 extern "C" int run_case(int id){SerialDebug console;SerialDebug::_writer=&console;wanted=5;queueOk=true;shortWrite=0;pattern='A';held=faults=printed=queued=0;for(auto& c:output)c=0;
  if(id==1){console._reply_uart=true;wanted=7;}if(id==2){console._reply_uart=true;queueOk=false;}
  if(id==3)wanted=1536;if(id==4)wanted=1535;if(id==5)wanted=-7;if(id==6)shortWrite=3;if(id==7)SerialDebug::_writer=nullptr;
+ #ifdef MOSAICO_BOARD
+ if(id==0){int failed=SerialDebug::debugPrintf("mock");if(failed!=-1||held||faults||formats||queued||printed||allocAttempts!=1||allocSuccess||console._format_overflow)return 9;failAllocation=false;}
+#endif
  const int result=SerialDebug::debugPrintf("mock_%u",123U);
+#ifdef MOSAICO_BOARD
+ if(allocAttempts!=2||allocSuccess!=1)return 10;
+#else
+ if(allocAttempts||allocSuccess)return 11;
+#endif
  if(held||faults)return 1;
  if(id==3)return result!=-1||console._format_overflow!=1||queued||printed?2:0;
  if(id==5)return result!=-7||console._format_overflow||queued||printed?3:0;
@@ -158,10 +173,10 @@ extern "C" {volatile int test_results[8];void __attribute__((noinline,used)) tes
         with tempfile.TemporaryDirectory(prefix='printf-stack-',dir=RUN) as td:
             temp=Path(td)
             for name in ('cstdint','cstddef','cstring'):(temp/name).write_text(base.HEADERS[name])
-            src=temp/'printf.cpp';src.write_text(support+body+checks);elf=RUN/'printf.elf'
+            src=temp/'printf.cpp';src.write_text(('#define MOSAICO_BOARD 1\n' if mosaico else '')+support+body+checks);elf=RUN/('printf.elf' if mosaico else 'printf-nonmosaico.elf')
             cmd=[str(base.CLANG),'--target=riscv32-unknown-elf','-march=rv32im','-mabi=ilp32','-std=c++20','-O1','-fstack-usage','-ffunction-sections','-fdata-sections','-fno-builtin','-fno-exceptions','-fno-rtti','-nostdinc++','-nostdlib','-I'+str(temp),str(src),'--ld-path='+str(base.CLANG.parent/'ld.lld.exe'),'-Wl,--gc-sections','-Wl,-e,_start','-Wl,-Ttext=0x10000','-o',str(elf)]
             result=subprocess.run(cmd,capture_output=True,text=True,env={**os.environ,'TMP':str(temp),'TEMP':str(temp)})
-            (RUN/'printf-compile.log').write_text(result.stdout+result.stderr);self.assertEqual(result.returncode,0,str(RUN/'printf-compile.log'))
+            (RUN/('printf-compile.log' if mosaico else 'printf-nonmosaico-compile.log')).write_text(result.stdout+result.stderr);self.assertEqual(result.returncode,0,str(RUN/'printf-compile.log'))
         sys.path.insert(0,str(ROOT/'.artifacts/tools/unicorn-2.1.4-private-001/package'))
         from unicorn import Uc,UC_ARCH_RISCV,UC_MODE_RISCV32
         from unicorn.riscv_const import UC_RISCV_REG_SP,UC_RISCV_REG_PC
@@ -173,7 +188,7 @@ extern "C" {volatile int test_results[8];void __attribute__((noinline,used)) tes
         emulator.reg_write(UC_RISCV_REG_SP,0x1fffff0);emulator.emu_start(struct.unpack_from('<I',data,24)[0],symbols['test_done'],timeout=20000000,count=100000000)
         self.assertEqual(emulator.reg_read(UC_RISCV_REG_PC),symbols['test_done'])
         values=struct.unpack('<8i',bytes(emulator.mem_read(symbols['test_results'],32)))
-        (RUN/'printf-execution.json').write_text(json.dumps(dict(results=values,limits='real debugPrintf with pure formatter/transport/lock ownership mocks; no concurrency or libc/device certification'),indent=2))
+        (RUN/('printf-execution.json' if mosaico else 'printf-nonmosaico-execution.json')).write_text(json.dumps(dict(results=values,limits='real debugPrintf with pure formatter/transport/lock ownership mocks; no concurrency or libc/device certification'),indent=2))
         self.assertEqual(values,(0,)*8)
 
     def test_source_stack_boundaries_and_order(self):
@@ -188,7 +203,7 @@ extern "C" {volatile int test_results[8];void __attribute__((noinline,used)) tes
         budget=base.extract(source,'bool __attribute__((noinline)) SerialDebug::handleStackBudget(')
         for forbidden in ('GaugeDischargeTrace','Nand','GetHAL','setTemporary','char details') :self.assertNotIn(forbidden,budget)
         printf=base.extract(source,'int SerialDebug::debugPrintf(')
-        self.assertIn('static char bytes[1536]',printf);self.assertLess(printf.index('std::lock_guard'),printf.index('std::vsnprintf'));self.assertLess(printf.index('std::lock_guard'),printf.index('std::fwrite'))
+        self.assertIn('static char bytes[Capacity]',printf);self.assertIn('heap_caps_malloc(Capacity,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)',printf);self.assertNotIn('sizeof(bytes)',printf);self.assertLess(printf.index('std::lock_guard'),printf.index('std::vsnprintf'));self.assertLess(printf.index('std::lock_guard'),printf.index('std::fwrite'))
         self.assertIn('CONFIG_ESP_MAIN_TASK_STACK_SIZE',budget);self.assertIn('cumulative_current_task',budget)
 
 if __name__=='__main__':unittest.main()

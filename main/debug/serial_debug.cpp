@@ -201,13 +201,24 @@ int SerialDebug::debugPrintf(const char* format, ...)
 {
     // Serial formatting scratch is shared, never retained by either output.
     static std::mutex mutex;
-    static char bytes[1536];
+    static constexpr std::size_t Capacity=1536;
+#ifdef MOSAICO_BOARD
+    static char* bytes=nullptr;
+#else
+    static char bytes[Capacity];
+#endif
     std::lock_guard<std::mutex> lock(mutex);
+#ifdef MOSAICO_BOARD
+    if(!bytes){
+        bytes=static_cast<char*>(heap_caps_malloc(Capacity,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+        if(!bytes)return -1; // No INTERNAL fallback, formatting, or partial output.
+    }
+#endif
     va_list args; va_start(args, format);
-    const int count = std::vsnprintf(bytes, sizeof(bytes), format, args);
+    const int count = std::vsnprintf(bytes, Capacity, format, args);
     va_end(args);
     if (count < 0) return count;
-    if (static_cast<std::size_t>(count) >= sizeof(bytes)) {
+    if (static_cast<std::size_t>(count) >= Capacity) {
         if (_writer) ++_writer->_format_overflow;
         return -1; // Do not emit a misleading truncated result or secret fragment.
     }

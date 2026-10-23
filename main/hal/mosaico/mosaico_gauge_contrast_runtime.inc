@@ -208,7 +208,7 @@ bool contrast_owned_intent(){
 const esp_partition_t* contrast_rt_partition(unsigned slot){return slot<2?esp_partition_find_first(ESP_PARTITION_TYPE_APP,slot?ESP_PARTITION_SUBTYPE_APP_OTA_1:ESP_PARTITION_SUBTYPE_APP_OTA_0,nullptr):nullptr;}
 bool contrast_rt_version(const char* v){
 #ifdef MOSAICO_GAUGE_COLD_RUNTIME
- return !std::strcmp(v,"0.13.95-r19-mosaico-ota")||!std::strcmp(v,"0.13.95-r20-mosaico-ota");
+ return !std::strcmp(v,"0.13.95-r21-mosaico-ota")||!std::strcmp(v,"0.13.95-r22-mosaico-ota");
 #else
  return !std::strcmp(v,"0.13.95-r15-mosaico-ota")||!std::strcmp(v,"0.13.95-r16-mosaico-ota");
 #endif

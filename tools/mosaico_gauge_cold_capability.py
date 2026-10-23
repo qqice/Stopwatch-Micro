@@ -27,7 +27,7 @@ CONTRACT = ('GCC1|ColdC65Once|GCT1source=70a767be|C=91336fc0|owned3|full131_back
     'first_readonly|durable_claim_and_raw_before_restore|unknown_stop_no_retries|no_SOC_OCV_gain_EDV_writes|'
     '0091_exit_only|units_unknown|no_off_wallclock_guarantee|legacy_Failed_preserved')
 CONTRACT_SHA = hashlib.sha256(CONTRACT.encode('ascii')).digest()
-VERSIONS = frozenset(('0.13.95-r19-mosaico-ota', '0.13.95-r20-mosaico-ota'))
+VERSIONS = frozenset(('0.13.95-r21-mosaico-ota', '0.13.95-r22-mosaico-ota'))
 SESSION_DOMAIN = b'MOSAICO-GAUGE-COLD-CAP-v1\n'
 SOURCE_DOMAIN = b'MOSAICO-GAUGE-COLD-SOURCE-v1\n'
 BINDING_SIZE, HEADER_SIZE, PAYLOAD_MAX, PAIR_RAW_MAX = 188, 56, 1536, 1050
@@ -139,7 +139,7 @@ def validate_pair(pair_raw, key, slot_images):
     require(isinstance(pairs, list) and len(pairs) == 2 and all(isinstance(p, dict) and set(p) == {'image', 'signature'} and
         isinstance(p['image'], dict) and isinstance(p['signature'], str) for p in pairs), 'exact ordered old pair schema')
     require(isinstance(slot_images, (list, tuple)) and len(slot_images) == 2 and all(type(b) is bytes for b in slot_images), 'two explicit local BIN byte strings required')
-    require({p['image'].get('version') for p in pairs} == VERSIONS, 'exact production R19/R20 required; draft/older forbidden')
+    require({p['image'].get('version') for p in pairs} == VERSIONS, 'exact production R21/R22 required; draft/older forbidden')
     for pair, image in zip(pairs, slot_images):
         m = validate_manifest(pair['image'])
         require(m['schema'] == 2 and m['layout'] == 'mosaico-dual-v2', 'normal signed v2 manifest required')
@@ -168,7 +168,7 @@ def endorse_pair(manifests, images, private, verified_public, *, audited=False):
     require(isinstance(images, (list, tuple)) and len(images) == 2 and all(type(image) is bytes for image in images), 'two ordered full BIN byte strings required')
     normal = [dict(validate_manifest(manifest)) for manifest in manifests]
     require(all(m['schema'] == 2 and m['layout'] == 'mosaico-dual-v2' for m in normal) and
-        {m.get('version') for m in normal} == VERSIONS, 'exact normal signed R19/R20 v2 pair required')
+        {m.get('version') for m in normal} == VERSIONS, 'exact normal signed R21/R22 v2 pair required')
     require(normal[0]['sha256'] != normal[1]['sha256'], 'distinct ordered recovery BIN hashes required')
     # Validate BOTH complete normal releases before producing any endorsement.
     for manifest, image in zip(normal, images):
