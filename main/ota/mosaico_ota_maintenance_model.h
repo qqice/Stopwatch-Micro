@@ -7,22 +7,23 @@ inline bool shaValid(const char* s) {
     for (unsigned i=0;i<64;++i) if (!((s[i]>='0' && s[i]<='9') || (s[i]>='a' && s[i]<='f'))) return false;
     return true;
 }
-// RAM-only, one boot / one transaction. No persistence and no automatic renewal.
+// RAM-only, one boot / one explicitly confirmed USB transaction. No persistence.
+// The old 30..600 argument is syntax-compatible only, not an in-flight expiry.
 struct Grant {
     bool enabled=false;
     char sha[65]{};
-    int64_t deadlineUs=0, lastUs=0;
+    int64_t lastUs=0;
     uint32_t runningAddress=0, bootAddress=0, unmountEpoch=0;
     void clear() { enabled=false; }
     bool matches(const char* s) const { return shaValid(s) && !std::strcmp(sha,s); }
     bool start(const char* s,uint32_t ttl,int64_t now,uint32_t running,uint32_t boot,uint32_t epoch=0) {
         clear();
-        if (!shaValid(s) || ttl<30 || ttl>600 || now<0 || now>INT64_MAX-int64_t(ttl)*1000000) return false;
-        std::memcpy(sha,s,65); deadlineUs=now+int64_t(ttl)*1000000; lastUs=now;
+        if (!shaValid(s) || ttl<30 || ttl>600 || now<0) return false;
+        std::memcpy(sha,s,65); lastUs=now;
         runningAddress=running; bootAddress=boot; unmountEpoch=epoch; enabled=true; return true;
     }
     bool check(int64_t now,bool usb,uint32_t running,uint32_t boot,uint32_t expectedBoot,uint32_t epoch=0) {
-        if (!enabled || now<lastUs || now>=deadlineUs || !usb || running!=runningAddress || boot!=expectedBoot || epoch!=unmountEpoch) {
+        if (!enabled || now<lastUs || !usb || running!=runningAddress || boot!=expectedBoot || epoch!=unmountEpoch) {
             clear(); return false;
         }
         lastUs=now; return true;

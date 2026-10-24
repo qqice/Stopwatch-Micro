@@ -11,77 +11,49 @@ CPP = (ROOT / 'main/ota/mosaico_ota.cpp').read_text()
 
 
 class OtaPowerTests(unittest.TestCase):
-    def test_only_physical_policy_accessors(self):
+    def test_usb_short_circuits_all_gauge_eligibility(self):
         self.assertNotRegex(CPP, r'\bbatteryTelemetry\s*\(')
-        self.assertEqual(CPP.count('batteryPolicyTelemetry(true)'), 4)
-        for name in ('gaugeSafe', 'downloadPowerSafe', 'automaticPowerSafe', 'installPowerSafe'):
+        for name in ('downloadPowerSafe', 'automaticPowerSafe', 'installPowerSafe'):
             body = CPP.split('bool ' + name + '(', 1)[1].split('\n}', 1)[0]
-            self.assertIn('batteryPolicyTelemetry(true)', body)
+            self.assertLess(body.index('activeUsbPower()'), body.index('physicalBatteryTelemetry(true).native'))
+            self.assertNotIn('GaugeBootReloadStatus', body)
+            self.assertNotIn('gaugeScaleTrialActive', body)
 
     def test_actual_cpp_boundaries(self):
         automatic = CPP.split('bool automaticPowerSafe(', 1)[1].split('bool installPowerSafe(', 1)[0]
         expression = re.search(r'return (b.valid.*?);', automatic, re.S).group(1)
-        self.assertIn('GaugeBootReloadStatus::Critical) return false;', automatic)
-        self.assertIn('const bool external = tud_mounted() || b.currentMa > 3;', automatic)
         code = r'''
 #include "main/ota/mosaico_ota_power.h"
 struct Telemetry {
- bool valid=true, capacityValid=true, nominalConfigured=true;
- uint8_t reportedSoc=60;
- uint16_t voltageMv=3900, remainingMah=600, fullMah=1000, operationStatus=6;
+ bool valid=true, capacityValid=false, nominalConfigured=false;
+ uint8_t reportedSoc=0;
+ uint16_t voltageMv=3900, remainingMah=0, fullMah=0, operationStatus=6;
  int16_t currentMa=-20;
 };
 using MosaicoOta::manualInstallPowerSafe;
-using MosaicoOta::useManualInstallPolicy;
-constexpr bool automatic(const Telemetry& b, bool external, bool critical) {
- if(critical) return false;
- return AUTOMATIC_EXPRESSION;
-}
+constexpr bool automatic(const Telemetry& b) { return AUTOMATIC_EXPRESSION; }
 constexpr bool test() {
  Telemetry b;
- if(!manualInstallPowerSafe(b,false,false) || automatic(b,false,false)) return false;
- if(!automatic(b,true,false) || automatic(b,true,true)) return false;
- if(manualInstallPowerSafe(b,true,true)) return false;
- b.valid=false; if(manualInstallPowerSafe(b,true,false)||automatic(b,true,false)) return false; b.valid=true;
- b.voltageMv=3899; if(manualInstallPowerSafe(b,true,false)||automatic(b,true,false)) return false; b.voltageMv=3900;
- for(uint16_t status : {uint16_t(0),uint16_t(2),uint16_t(4),uint16_t(7),uint16_t(0x406),uint16_t(0x407)}) {
-  b.operationStatus=status; if(manualInstallPowerSafe(b,true,false)||automatic(b,true,false)) return false;
- } b.operationStatus=6;
- b.reportedSoc=59; if(manualInstallPowerSafe(b,false,false)) return false;
- if(!manualInstallPowerSafe(b,true,false)||!automatic(b,true,false)) return false;
- b.currentMa=4; if(!manualInstallPowerSafe(b,false,false)) return false;
- b.currentMa=3; if(manualInstallPowerSafe(b,false,false)) return false; b.currentMa=-20;
- b.reportedSoc=100; if(!manualInstallPowerSafe(b,false,false)) return false;
- b.reportedSoc=101; if(manualInstallPowerSafe(b,false,false)) return false; b.reportedSoc=60;
- b.capacityValid=false; if(manualInstallPowerSafe(b,false,false)) return false;
- if(!manualInstallPowerSafe(b,true,false)) return false; b.capacityValid=true;
- b.nominalConfigured=false; if(manualInstallPowerSafe(b,false,false)) return false; b.nominalConfigured=true;
- b.fullMah=0; if(manualInstallPowerSafe(b,false,false)) return false; b.fullMah=1000;
- b.remainingMah=0; if(manualInstallPowerSafe(b,false,false)) return false;
- b.remainingMah=1001; if(manualInstallPowerSafe(b,false,false)) return false;
- b.remainingMah=599; if(manualInstallPowerSafe(b,false,false)) return false;
- b.remainingMah=600; if(!manualInstallPowerSafe(b,false,false)) return false;
- b.fullMah=1001; if(manualInstallPowerSafe(b,false,false)) return false;
- b.remainingMah=601; if(!manualInstallPowerSafe(b,false,false)) return false;
- b.fullMah=65535; b.remainingMah=39320; if(manualInstallPowerSafe(b,false,false)) return false;
- b.remainingMah=39321; if(!manualInstallPowerSafe(b,false,false)) return false;
- b.remainingMah=65535; if(!manualInstallPowerSafe(b,false,false)) return false;
- for(bool usb : {false,true}) for(bool autoMode : {false,true}) {
-  const bool manual=useManualInstallPolicy(usb,autoMode);
-  if(manual != (usb || !autoMode)) return false;
-  if((manual ? manualInstallPowerSafe(b,false,false) : automatic(b,false,false)) != manual) return false;
- }
+ // Battery voltage is fresh physical evidence, not calibrated capacity/SOC/history.
+ if(!manualInstallPowerSafe(b,false,true)||automatic(b))return false;
+ b.currentMa=4;if(!automatic(b))return false;
+ b.valid=false;if(!manualInstallPowerSafe(b,true,true)||manualInstallPowerSafe(b,false,false))return false;
+ b.valid=true;b.voltageMv=0;if(!manualInstallPowerSafe(b,true,true)||manualInstallPowerSafe(b,false,false))return false;
+ b.voltageMv=3899;if(manualInstallPowerSafe(b,false,false)||automatic(b))return false;
+ b.voltageMv=3900;b.operationStatus=7;
+ if(!manualInstallPowerSafe(b,true,true)||manualInstallPowerSafe(b,false,false)||automatic(b))return false;
+ b.operationStatus=6;b.reportedSoc=255;
+ if(!manualInstallPowerSafe(b,false,true))return false;
  return true;
 }
 static_assert(test());
-'''.replace('AUTOMATIC_EXPRESSION', expression).replace('#include "main/', '#include <initializer_list>\n#include "main/', 1)
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / 'power.cpp'
-            source.write_text(code)
+'''.replace('AUTOMATIC_EXPRESSION', expression)
+        run = ROOT / 'artifacts/ota-power-policy-tests';run.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=run) as directory:
+            source = Path(directory) / 'power.cpp';source.write_text(code)
             result = subprocess.run([str(COMPILER), '-std=c++17', '-fsyntax-only', '-I' + str(ROOT), str(source)], capture_output=True, text=True)
             log = ROOT / '.artifacts/mosaico/ota-power-constexpr.log'
-            log.parent.mkdir(parents=True, exist_ok=True)
-            log.write_text(result.stdout + result.stderr)
+            log.parent.mkdir(parents=True, exist_ok=True);log.write_text(result.stdout + result.stderr)
             self.assertEqual(result.returncode, 0, str(log))
 
     def test_fresh_gate_twice_and_manual_mode_only(self):
@@ -93,7 +65,7 @@ static_assert(test());
         self.assertLess(install.index('recordAttempt(power)'), install.index('esp_ota_set_boot_partition(target)'))
         self.assertIn('manual ? "install_power_required" : "install_external_power_required"', install)
         gate = CPP.split('bool installPowerSafe(', 1)[1].split('bool exactSlot(', 1)[0]
-        self.assertIn('batteryPolicyTelemetry(true)', gate)
+        self.assertIn('physicalBatteryTelemetry(true).native', gate)
         self.assertIn('if (!manual) return automaticPowerSafe(evidence);', gate)
 
     def test_journal_evidence_same_commit_old_key_optional(self):

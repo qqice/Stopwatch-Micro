@@ -23,7 +23,9 @@ bool requestReboot();
 // LOCAL UART/USB CONFIRM only: caller attests stable USB-only external 5V.
 // tud_mounted is connection evidence, NOT a physical 5V measurement.
 // USB polling cannot guarantee detection of physical power loss.
-// SHA is immutable for this RAM-only transaction; TTL must be 30..600 seconds.
+// Maintenance OTA does not sample or gate on gauge/history/calibration.
+// SHA is immutable for this RAM-only transaction. The legacy 30..600 TTL argument
+// remains accepted but does not expire a live, continuously connected USB transaction.
 bool requestMaintenanceUpdate(const char* expectedSha, uint32_t ttlSeconds);
 bool requestMaintenanceReboot(const char* expectedSha, uint32_t ttlSeconds);
 // Host attests SOLE stable external 5V (USB or separately verified V1).
@@ -65,7 +67,7 @@ void releaseStorageLease();
 // tryStorageLease by this exact task, including recursive nesting.
 bool currentTaskOwnsStorageLease();
 uint32_t requestAgeMs();
-bool request(); // Caller must obtain explicit confirmation of USB/external power.
+bool request(); // Existing local bypass: explicit external-power confirmation AND active connected USB.
 bool automaticCheckDue(); // Always false: permanent manual-only discovery policy.
 bool requestAutomatic(const char* manifest);
 bool takeRequest(); // Only the network owner consumes requests and writes images.

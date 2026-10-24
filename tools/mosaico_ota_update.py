@@ -192,7 +192,7 @@ def main():
  p.add_argument('--keep-locked',action='store_true',help='Require an already locked display; do not wake it before requesting OTA')
  p.add_argument('--uart',action='store_true',help='Use CRC-framed JLink/FT4232 UART instead of board CDC; requires explicit --port')
  p.add_argument('--boot-status-probe',action='store_true',help='One read-only status snapshot during boot health verification; never changes health gates')
- p.add_argument('--maintenance-ttl',type=int,default=None,help='Maintenance USB power grant lifetime, 30..600 seconds')
+ p.add_argument('--maintenance-ttl',type=int,default=None,help='Legacy maintenance argument (30..600); firmware keeps the confirmed USB transaction live until disconnect/completion')
  p.add_argument('--confirm-usb-power',action='store_true',help='Human attestation: stable USB is sole 5V supply, not inferred from telemetry')
  p.add_argument('--expected-version',help='Exact target firmware version; mandatory for maintenance acceptance')
  args=p.parse_args()

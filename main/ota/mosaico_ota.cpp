@@ -46,7 +46,7 @@ std::atomic<TaskHandle_t> storageLeaseOwner{nullptr};
 uint32_t storageLeaseDepth=0; // Touched only while this task owns the mutex.
 struct StorageAdmission {
  std::unique_lock<std::recursive_mutex> held{storageLeaseMutex,std::try_to_lock};
- explicit operator bool() const { return held.owns_lock()&&!GetHAL().gaugeScaleTrialActive(); }
+ explicit operator bool() const { return held.owns_lock()&&storageLeaseDepth==0; }
 };
 std::mutex snapshotLock; // Never held over flash, crypto, NVS, or telemetry calls.
 UiSnapshot ui{0, 0, 0, UiStage::Idle, "", "-", "", "", "", -1, -1, false, false, false, 0};
@@ -68,9 +68,6 @@ std::atomic<const char*> autoState{"idle"};
 // Separate from usbBypass/automaticMode: ordinary UI requests never inherit this grant.
 std::atomic<bool> maintenanceMode{false};
 MosaicoOtaMaintenance::Grant maintenanceGrant;
-Hal::MaintenancePowerSnapshot maintenancePower;
-int64_t maintenanceRawUs = 0;
-uint32_t maintenanceRawBytes = 0;
 bool currentHashChecked = false, currentHashValid = false;
 char currentHash[65]{};
 esp_ota_handle_t handle = 0;
@@ -106,11 +103,18 @@ bool gaugeSafe()
     const auto b = GetHAL().batteryPolicyTelemetry(true);
     return b.valid && ((b.operationStatus >> 1) & 3) == 3 && !(b.operationStatus & 0x0401);
 }
+// USB enumeration is connection evidence, not an electrical measurement. Local
+// bypass/maintenance callers retain their explicit external-power confirmation.
+bool activeUsbPower()
+{
+    const auto usb = mosaico_console_usb_snapshot();
+    return tud_mounted() && usb.mounted && usb.connected && !usb.suspended;
+}
 bool downloadPowerSafe()
 {
-    if(GetHAL().gaugeScaleTrialActive())return false;
-    if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical) return false;
-    const auto b = GetHAL().batteryPolicyTelemetry(true);
+    if (activeUsbPower()) return true; // Never touch stalled/missing/historical gauge on USB.
+    if (usbBypass) return false; // Confirmed USB transaction cannot silently fall back to battery.
+    const auto b = GetHAL().physicalBatteryTelemetry(true).native;
     return b.valid && ((b.operationStatus >> 1) & 3) == 3 && !(b.operationStatus & 0x0401) && b.voltageMv >= 3500;
 }
 struct InstallPowerEvidence { char text[96]{}; };
@@ -122,24 +126,27 @@ void captureInstallPower(InstallPowerEvidence* evidence, const Hal::BatteryTelem
 }
 bool automaticPowerSafe(InstallPowerEvidence* evidence = nullptr)
 {
-    if(GetHAL().gaugeScaleTrialActive())return false;
-    if (GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical) return false;
-    const auto b = GetHAL().batteryPolicyTelemetry(true);
-    const bool external = tud_mounted() || b.currentMa > 3;
-    captureInstallPower(evidence, b, external, false);
-    // Conservative charging/enumerated USB policy, NOT a measured VBUS or SOC claim.
+    if (activeUsbPower()) {
+        if (evidence) std::snprintf(evidence->text, sizeof(evidence->text), "usb_power_no_gauge:1,manual:0");
+        return true;
+    }
+    if (usbBypass) return false;
+    const auto b = GetHAL().physicalBatteryTelemetry(true).native;
+    captureInstallPower(evidence, b, b.currentMa > 3, false);
     return b.valid && ((b.operationStatus >> 1) & 3) == 3 && !(b.operationStatus & 0x0401) &&
-        b.voltageMv >= 3900 && external;
+        b.voltageMv >= 3900 && b.currentMa > 3;
 }
 bool installPowerSafe(bool manual, InstallPowerEvidence* evidence = nullptr)
 {
-    if(GetHAL().gaugeScaleTrialActive())return false;
+    if (activeUsbPower()) {
+        if (evidence) std::snprintf(evidence->text, sizeof(evidence->text), "usb_power_no_gauge:1,manual:%d", manual);
+        return true;
+    }
+    if (usbBypass) return false;
     if (!manual) return automaticPowerSafe(evidence);
-    const bool critical = GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical;
-    const auto b = GetHAL().batteryPolicyTelemetry(true);
-    const bool external = tud_mounted();
-    captureInstallPower(evidence, b, external || b.currentMa > 3, true);
-    return manualInstallPowerSafe(b, external, critical);
+    const auto b = GetHAL().physicalBatteryTelemetry(true).native;
+    captureInstallPower(evidence, b, false, true);
+    return manualInstallPowerSafe(b, false, false);
 }
 MosaicoOtaLayout::Id currentLayout()
 {
@@ -186,49 +193,19 @@ bool currentReady()
 }
 bool maintenancePowerSafe(bool fresh = false, uint32_t endBytes = 0)
 {
-    int64_t now = 0;
-    // Re-read partitions and sticky USB state on every attempt, after every
-    // scheduling yield and after raw I/O. Never renew the original lease.
-    const auto grantSafe = [&]() {
-        now = esp_timer_get_time();
-        const auto* running = esp_ota_get_running_partition();
-        const auto* boot = esp_ota_get_boot_partition();
-        const uint32_t expectedBoot = selected.load() && target ? target->address : maintenanceGrant.bootAddress;
-        const auto usbState = mosaico_console_usb_snapshot();
-        if (!maintenanceMode || GetHAL().gaugeScaleTrialActive() || !running || !boot) {
-            maintenanceGrant.clear(); return false;
-        }
-        return maintenanceGrant.check(now,
-            tud_mounted() && usbState.mounted && usbState.connected && !usbState.suspended,
-            running->address, boot->address, expectedBoot, usbState.unmounts);
-    };
-    if (!grantSafe()) return false;
-    if (MosaicoOtaMaintenance::refreshDue(fresh, now, maintenanceRawUs, endBytes, maintenanceRawBytes)) {
-        const int64_t retryStartedUs = now;
-        Hal::MaintenancePowerSnapshot sample;
-        for (;;) {
-            if (!grantSafe() || now - retryStartedUs >= 250000 || !currentReady()) { maintenanceGrant.clear(); return false; }
-            Hal::MaintenancePowerResult result = Hal::MaintenancePowerResult::Rejected;
-            const bool sampled = GetHAL().tryMaintenancePowerSnapshot(sample, &result);
-            // Snapshot I/O and contention both consume lease time. No cached
-            // fallback and no retries for actual read, state, voltage or temperature failures.
-            if (!grantSafe() || !currentReady()) { maintenanceGrant.clear(); return false; }
-            if (sampled) {
-                if (!MosaicoOtaMaintenance::powerSafe(sample, now)) { maintenanceGrant.clear(); return false; }
-                break;
-            }
-            // The per-call result, not shared diagnostics, proves mutex contention.
-            // Do not schedule a tick that would extend the <=250ms retry window.
-            if (result != Hal::MaintenancePowerResult::Busy ||
-                now - retryStartedUs >= 250000 - int64_t(portTICK_PERIOD_MS) * 1000) {
-                maintenanceGrant.clear(); return false;
-            }
-            vTaskDelay(1); // Release CPU, never wait while owning either HAL mutex.
-        }
-        maintenancePower = sample; maintenanceRawUs = now; maintenanceRawBytes = endBytes;
+    // Compatible call signature; USB maintenance intentionally performs NO HAL
+    // gauge/I2C read, capacity/calibration/profile or historical-Failed check.
+    (void)fresh; (void)endBytes;
+    const auto* running = esp_ota_get_running_partition();
+    const auto* boot = esp_ota_get_boot_partition();
+    if (!maintenanceMode || !running || !boot || !currentReady()) {
+        maintenanceGrant.clear(); return false;
     }
-    if (!MosaicoOtaMaintenance::powerSafe(maintenancePower, now)) { maintenanceGrant.clear(); return false; }
-    return true;
+    const uint32_t expectedBoot = selected.load() && target ? target->address : maintenanceGrant.bootAddress;
+    const auto usb = mosaico_console_usb_snapshot();
+    return maintenanceGrant.check(esp_timer_get_time(),
+        tud_mounted() && usb.mounted && usb.connected && !usb.suspended,
+        running->address, boot->address, expectedBoot, usb.unmounts);
 }
 void failLocked(const char* message)
 {
@@ -524,6 +501,7 @@ bool request()
           ui.sha256[0] = ui.signatureShort[0] = 0;
           verified.store(false); ++ui.revision;
       } }
+    if (!activeUsbPower()) return false; // Local confirmed bypass requires connected USB.
     const bool accepted = requestLocked(true);
     usbBypass = accepted;
     return accepted; // Explicit USB bypass skips screen approvals, never safety gates.
@@ -550,7 +528,7 @@ bool requestMaintenanceUpdate(const char* expectedSha, uint32_t ttlSeconds)
     const auto usbState=mosaico_console_usb_snapshot();
     if (!currentReady() || !running || !boot || running->address!=boot->address ||
         !maintenanceGrant.start(expectedSha,ttlSeconds,esp_timer_get_time(),running->address,boot->address,usbState.unmounts)) return maintenanceDenied("maintenance_grant_invalid");
-    maintenanceMode=true; maintenanceRawUs=0; maintenanceRawBytes=0;
+    maintenanceMode=true;
     automaticMode=usbBypass=false; approvedHash[0]=0;
     if (!maintenancePowerSafe(true)) return reject("maintenance_admission_power");
     // Grant exists before requestLocked wakes/queues any owner work.
@@ -620,12 +598,16 @@ bool maintenanceStatus(char* out,size_t length)
     if (!guard.owns_lock()) { std::snprintf(out,length,"maintenance=busy"); return false; }
     const int64_t now=esp_timer_get_time();
     const auto usbState=mosaico_console_usb_snapshot();
+    const auto* running=esp_ota_get_running_partition();
+    const auto* boot=esp_ota_get_boot_partition();
+    const uint32_t expectedBoot=selected.load() && target ? target->address : maintenanceGrant.bootAddress;
     // Diagnostic only: never renew/revoke a grant from a status read.
-    const bool live=maintenanceGrant.enabled && now>=maintenanceGrant.lastUs && now<maintenanceGrant.deadlineUs &&
+    const bool live=maintenanceGrant.enabled && running && boot && currentReady() &&
+        running->address==maintenanceGrant.runningAddress && boot->address==expectedBoot && now>=maintenanceGrant.lastUs &&
         tud_mounted() && usbState.mounted && usbState.connected && !usbState.suspended &&
         usbState.unmounts==maintenanceGrant.unmountEpoch;
-    std::snprintf(out,length,"maintenance=%d grant=%d selected=%d ttl_ms=%lu sha=%s usb_connection_only=1 reason=%s",
-        maintenanceMode.load(),live,selected.load(),static_cast<unsigned long>(live ? (maintenanceGrant.deadlineUs-now)/1000 : 0),
+    std::snprintf(out,length,"maintenance=%d grant=%d selected=%d ttl_ms=%lu sha=%s usb_connection_only=1 usb_power_maintenance_no_gauge=1 grant_lifetime=usb_transaction reason=%s",
+        maintenanceMode.load(),live,selected.load(),static_cast<unsigned long>(live ? UINT32_MAX : 0),
         maintenanceMode ? maintenanceGrant.sha : "-",reason);
     return true;
 }
@@ -721,9 +703,11 @@ bool takeRequest()
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (!active.load() && approvedRequest.load() && requestAgeMs() >= 120000) return reject("request_timeout");
     if (!active.load() && approvedRequest.exchange(false)) {
+        // A newly approved normal transaction must not inherit the previous
+        // USB-only request's no-battery-fallback latch.
+        usbBypass = false;
         if (!currentReady()) { publish(UiStage::Failed, "running_not_ready"); return false; }
         if (!downloadPowerSafe()) { publish(UiStage::WaitingPower, "download_voltage_or_gauge"); return false; }
-        usbBypass = false;
         if (!requestLocked(autoInstall.load(), true)) return false;
     }
     if (maintenanceMode && pending && !maintenancePowerSafe(true)) return reject("maintenance_request_expired");
@@ -823,9 +807,8 @@ bool installVerified()
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if ((usbBypass || automaticMode || maintenanceMode) && esp_timer_get_time() - readySince < 1500000) return false;
     // The physical bypass is explicitly confirmed by a local human/operator.
-    // Use the existing manual battery-floor safety policy even when a full
-    // V1-fed cell has zero charging current. Unconfirmed automatic runs retain
-    // the charging/enumerated-USB policy.
+    // Connected USB never samples the gauge; battery-only keeps the existing
+    // real voltage/sealed conditions without capacity/profile eligibility.
     const bool manual = useManualInstallPolicy(usbBypass, automaticMode);
     if (maintenanceMode && !maintenancePowerSafe(true,received.load())) return reject("maintenance_install_power");
     if (!currentReady() || (!maintenanceMode && !installPowerSafe(manual))) {
@@ -840,7 +823,7 @@ bool installVerified()
     InstallPowerEvidence power;
     if (maintenanceMode) {
         if (!maintenancePowerSafe(true,received.load())) return reject("maintenance_preselector_power");
-        std::snprintf(power.text,sizeof(power.text),"maintenance_usb_attested,mv:%u,temp:%u",maintenancePower.voltageMv,maintenancePower.temperatureDeciK);
+        std::snprintf(power.text,sizeof(power.text),"maintenance_usb_attested,no_gauge_read:1");
     }
     if (!currentReady() || (!maintenanceMode && !installPowerSafe(manual, &power))) {
         active.store(false); installSince = 0;

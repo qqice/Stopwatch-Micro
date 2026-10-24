@@ -1049,40 +1049,45 @@ Power A/B uses OFF/ON on the same image after charging is complete.
 
 ## Explicit USB maintenance OTA (default OFF)
 
-This local-console-only mode is for the inspected historical gauge-failure case,
-not a replacement for ordinary battery/automatic OTA admission. It never clears
-`Critical`, changes gauge parameters or trusts an uncalibrated SOC display.
-The operator must confirm that USB is the sole stable 5V source. Enumeration is
-only a connection veto, **not proof of external voltage or current**.
+This existing local-console USB maintenance path is independent of gauge
+history, calibration/profile state and capacity estimates. It never clears old
+`Critical`/Failed evidence or changes gauge parameters. The operator explicitly
+confirms stable USB 5V; mounted/connected/not-suspended USB is connection
+information, **not proof of external voltage or current**.
 
 ```
 debug ota-maintenance status
 debug ota-maintenance power
-debug ota-maintenance update CONFIRM_USB_POWER <64-hex-image-SHA256> <30..600-seconds>
-debug ota-maintenance reboot CONFIRM_USB_POWER <same-verified-image-SHA256> <30..600-seconds>
+debug ota-maintenance update CONFIRM_USB_POWER <64-hex-image-SHA256> <legacy-30..600-argument>
+debug ota-maintenance reboot CONFIRM_USB_POWER <same-verified-image-SHA256> <legacy-30..600-argument>
 ```
 
-UART commands require the existing CRC framing; CDC is also a local physical
-console. `power` reports only the last cached raw-admission reason and performs
-no I2C, granting or power measurement. Successful update/reboot requests wake the
-network owner; status/power and rejected requests do not wake it.
+UART commands retain CRC framing; CDC is also a local physical console. The
+legacy numerical argument remains accepted for tool compatibility, but does not
+expire a live confirmed USB transaction during download or the reboot wait.
+Status reports `grant_lifetime=usb_transaction` and compatibility
+`ttl_ms=4294967295` when live, otherwise `ttl_ms=0`. This is not a countdown.
+Successful update/reboot requests wake the network owner; status/power and
+rejected requests do not wake it. `power` is a separate cached diagnostic, not an
+update prerequisite or a measurement performed by the update path.
 
-The single-transaction RAM grant is fixed to the hash before manifest fetch and
-to the running VALID slot. It expires without automatic renewal and is revoked
-by USB disconnect (including detach/reconnect between checks), suspension,
-clock rollback, cancellation or a different ordinary request. Fresh raw BQ
-voltage/temperature/security checks remain mandatory: 3900..4350mV, 10..40C,
-SEALED/CFG0/CAL0/INITCOMP; unknown histories, unsafe calibration or an active
-scaling/recovery transaction reject maintenance. Capacity is restricted to the
-inspected 65/65 or 3000/3000 standard pairs, without asserting calibration.
-Private signature, version, layout, image hash, heap/integrity, healthy-current
-slot and SDK boot-health/rollback checks remain unchanged.
+The RAM grant is pinned to the candidate hash and current VALID slot. USB loss,
+suspension, detach/reconnect epoch changes, boot/running-address changes,
+cancellation, transaction completion/reboot or an ordinary replacement request
+end that authority. The USB update path makes no gauge/HAL/I2C power reads: no
+voltage/temperature/capacity/history/calibration checks are applied to it. A
+currently held shared storage-write lease still causes temporary Busy; historical
+trial state does not. Ordinary confirmed USB bypass likewise avoids gauge reads.
+Battery-only fallback uses native physical telemetry and retains fresh
+valid/sealed/voltage conditions, not SOC, profile or capacity-calibration gates.
+Signature, version, layout, image hash, healthy fallback/current slot, and SDK
+boot-health/rollback checks remain unchanged.
 
 A lost ACK is **unknown**, not permission to resend. Query status first. If the
-selector has already been committed, loss/expiry of the grant keeps the verified
-candidate at ReadyReboot; it never blindly rewrites the old selector. Only a new
-explicit local same-hash reboot authorization can continue that step. Ordinary,
-automatic and battery OTA cannot inherit this maintenance authority.
+selector has already been committed, loss of USB authority retains the verified
+candidate at ReadyReboot; it never blindly rewrites the old selector. A new local
+same-hash reboot confirmation is needed after actual authority loss, not merely
+because a download or reboot wait took longer than the old TTL.
 
 Deployment and a real network-OTA round trip are required before treating this
 source implementation as an available unattended recovery facility.
