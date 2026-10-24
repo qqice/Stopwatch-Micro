@@ -269,9 +269,9 @@ class Controller:
 
 def run(backend, port, ports, output, off_seconds=0, confirm_single_supply=False,
         timeout=5, lock_directory=None, stop_requested=None):
-    if (type(off_seconds) is not int or not 0 <= off_seconds <= 600 or
+    if (type(off_seconds) is not int or not 0 <= off_seconds <= 1200 or
             (off_seconds and not confirm_single_supply)):
-        raise ValueError('off requires integer 1..600 seconds and --confirm-single-supply')
+        raise ValueError('off requires integer 1..1200 seconds and --confirm-single-supply')
     if not math.isfinite(timeout) or not 0 < timeout <= 30:
         raise ValueError('timeout must be finite and in (0,30] seconds')
     if stop_requested is not None and not callable(stop_requested):
@@ -381,8 +381,8 @@ def main(argv=None):
         from serial.tools import list_ports
         ports = list(list_ports.comports())
         validate_identity(args.port, ports)  # Reject topology before loading native code.
-        if not 0 <= args.off_seconds <= 600 or (args.off_seconds and not args.confirm_single_supply):
-            raise ValueError('off requires 1..600 seconds and --confirm-single-supply')
+        if not 0 <= args.off_seconds <= 1200 or (args.off_seconds and not args.confirm_single_supply):
+            raise ValueError('off requires 1..1200 seconds and --confirm-single-supply')
         backend = OutputBackend(args.dll, args.dll_sha256)
         result = run(backend, args.port, ports, args.output, args.off_seconds,
                      args.confirm_single_supply, args.timeout)

@@ -503,13 +503,22 @@ class ControlTests(unittest.TestCase):
         self.run_backend(b, off=0)
         self.assertFalse(any(x.get('kind') == 1 for x in self.audit()))
 
+    def test_requested_15_minute_window_uses_existing_finally_on(self):
+        b = FakeBackend()
+        with patch.object(c.Controller, 'hold') as hold:
+            c.run(b, 'COM7', [port()], self.output, 900, True, .04, self.root)
+        self.assertTrue(hold.called)
+        self.assertGreater(hold.call_args.args[0], 890)
+        self.assertEqual(b.state, b.original)
+        self.assertTrue(self.audit()[-1]['restored_on_verified'])
+
     def test_validation_identity_confirmation_exclusive_output_and_lock(self):
         for devices in ([port(serial='other')], [port(vid=1)], [port(), port()],
                         [port(), port('COM8', vid=0x303a)],
                         [port(), port('COM8', vid=2, description='USB CDC')]):
             with self.assertRaises(ValueError):
                 c.validate_identity('COM7', devices)
-        for seconds, confirmed in ((1, False), (-1, True), (601, True), (True, True), (1.0, True)):
+        for seconds, confirmed in ((1, False), (-1, True), (1201, True), (True, True), (1.0, True)):
             b = FakeBackend()
             with self.assertRaises(ValueError):
                 c.run(b, 'COM7', [port()], self.output, seconds, confirmed, .04, self.root)
