@@ -1377,29 +1377,38 @@ void CodexMicroView::modeEvent(lv_event_t* e) {
     if (!hit->owner->_rotationFault && !hit->owner->_suppressed && !hit->owner->_locked && !hit->owner->_swipeConsumed && !hit->owner->_settingsOpen && !hit->owner->_settingsAnimating && !hit->owner->_slideTo && hit->owner->_rotationPhase == RotationPhase::Idle && !hit->owner->otaBusy()) hit->owner->showHistory(hit->index == 1);
 }
 void CodexMicroView::refreshBattery(uint32_t now) {
+    // Native SOC is display data, not permission to write the gauge or install
+    // firmware. An unverified capacity model must not hide a readable gauge.
+    const auto display = GetHAL().physicalBatteryTelemetry(false).native;
     const auto telemetry = GetHAL().batteryPolicyTelemetry(false);
-    _batteryReadTick = now; _batterySeen = true; _batteryValid = telemetry.valid;
+    _batteryReadTick = now;
     _chargeSupply.update(telemetry.valid, telemetry.currentMa, telemetry.reportedSoc);
     PowerbankKeepalive::observeSupply(telemetry.valid, _chargeSupply.external);
     _batteryCharging = telemetry.valid && telemetry.currentMa > 3;
     const bool critical = GetHAL().gaugeBootReloadInfo().status == Hal::GaugeBootReloadStatus::Critical;
     _externalPowerReady = MosaicoOta::manualInstallPowerSafe(telemetry, tud_mounted(), critical);
     if (!_locked) renderOtaAction();
+    // A busy bus/diagnostic read must not erase the last readable value.
+    if (!display.valid && _batterySeen && _batteryValid) {
+        lv_obj_set_style_text_color(_locked ? _lockBattery : _battery, lv_color_hex(Gray), 0);
+        return;
+    }
+    _batterySeen = true; _batteryValid = display.valid;
     char text[80];
-    if (telemetry.valid) std::snprintf(text, sizeof(text), "%u%%%s", static_cast<unsigned>(telemetry.reportedSoc), telemetry.nominalConfigured ? "*" : "?");
+    if (display.valid) std::snprintf(text, sizeof(text), "%u%%%s", static_cast<unsigned>(display.reportedSoc), telemetry.nominalConfigured ? "*" : "?");
     else std::snprintf(text, sizeof(text), "?");
-    const uint32_t color = telemetry.valid ? levelColor(static_cast<uint16_t>(telemetry.reportedSoc) * 100) : Gray;
+    const uint32_t color = display.valid ? levelColor(static_cast<uint16_t>(display.reportedSoc) * 100) : Gray;
     if (_locked) {
         lv_label_set_text(_lockBattery, text);
         lv_point_t size;lv_text_get_size(&size,text,&lv_font_montserrat_20,0,0,480,LV_TEXT_FLAG_NONE);
         const auto row=mosaico_lock_sessions::batteryRow(size.x,size.y);
         lv_obj_set_size(_lockBattery,size.x,size.y);place(_lockBatteryIcon,row.iconX,334);place(_lockBattery,row.textX,row.textY);
         lv_obj_set_style_text_color(_lockBattery, lv_color_hex(color), 0);
-        setIcon(_lockBatteryIcon, Icon::Battery, color, telemetry.reportedSoc, telemetry.valid);
+        setIcon(_lockBatteryIcon, Icon::Battery, color, display.reportedSoc, display.valid);
     } else {
         lv_label_set_text(_battery, text);
         lv_obj_set_style_text_color(_battery, lv_color_hex(color), 0);
-        setIcon(_batteryIcon, Icon::Battery, color, telemetry.reportedSoc, telemetry.valid);
+        setIcon(_batteryIcon, Icon::Battery, color, display.reportedSoc, display.valid);
         if (_chargeSupply.external) lv_obj_remove_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
     }
 
