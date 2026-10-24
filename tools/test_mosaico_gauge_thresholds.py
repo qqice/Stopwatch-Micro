@@ -93,6 +93,47 @@ constexpr bool faults(){
 static_assert(reads(),"exact closed fields, U1/signed BE2 anchors, full CRC/MAC codec");
 static_assert(faults(),"all boundaries ACK/NVS failures, no replay, one key attempt, unconditional cleanup");
 ''')
+ def test_normal65_observed_profile_config_and_failure_closed(self):
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
+  backend=source.split('struct GaugeThresholdBackend {',1)[1].split('\n} // namespace',1)[0]
+  read='constexpr bool readThresholds(){'+backend.split('    bool readThresholds(){',1)[1].split('    // Existing schema-2 journal',1)[0]
+  self.compile(r'''
+#include "mosaico_threshold_audit_model.h"
+#include "mosaico_gauge_calibration_read_model.h"
+#include "mosaico_gauge_public_extra_read_model.h"
+template<uint16_t Config>struct Fake{
+ bool normalTarget65=true,readPublicExtra=true;int mode=0,profiles=0;
+ uint16_t expectedConfig=0x112a;
+ mosaico_threshold::Values values{};mosaico_calibration::Values calibration{};mosaico_public_extra::Values publicExtra{};
+ constexpr bool reject(const char*){return false;}
+ static constexpr bool gauge_mac_read(uint16_t,uint8_t*){return true;}
+ template<class R>constexpr bool gauge_profile_read_stable(R,uint16_t (&v)[3],const char*&){
+  ++profiles;if(mode==1)return false;v[0]=Config;v[1]=mode==2?100:65;v[2]=mode==3?100:65;return true;
+ }
+ static constexpr bool gauge_threshold_read(mosaico_threshold::Selector s,uint8_t* b){
+  uint16_t value=s==mosaico_threshold::Selector::Config?Config:65;b[2]=value>>8;b[3]=value;return true;
+ }
+ static constexpr bool gauge_calibration_read(mosaico_calibration::Selector,uint8_t* b){b[2]=0;b[3]=65;return true;}
+ static constexpr bool gauge_public_extra_read(mosaico_public_extra::Selector,uint8_t* b){b[2]=0;b[3]=65;return true;}
+'''+read+r'''
+};
+constexpr bool cases(){
+ Fake<0x102a> normal;if(!normal.readThresholds()||normal.expectedConfig!=0x102a||normal.profiles!=1||!normal.values.anchors||normal.values.readable!=59||normal.calibration.readable!=7||!normal.publicExtra.complete)return false;
+ Fake<0x112a> oldNormal;if(!oldNormal.readThresholds()||oldNormal.expectedConfig!=0x112a)return false;
+ for(int mode=1;mode<=3;++mode){Fake<0x102a> bad;bad.mode=mode;if(bad.readThresholds()||bad.values.readable||bad.calibration.readable||bad.publicExtra.readable)return false;}
+ Fake<0x2000> range;if(range.readThresholds())return false;
+ Fake<0x112a> legacy;legacy.normalTarget65=false;if(!legacy.readThresholds()||legacy.profiles)return false;
+ Fake<0x102a> mismatch;mismatch.normalTarget65=false;if(mismatch.readThresholds()||mismatch.profiles)return false;
+ return true;
+}
+static_assert(cases(),"normal65 uses observed config, read failure stops capture, legacy expectation unchanged");
+''')
+  method=source.split('bool Hal::gaugeThresholdAudit(',1)[1].split('bool Hal::gaugeThresholdAuditField(',1)[0]
+  self.assertIn('normalTarget65?normal_gauge_fence_locked():scale_boot_fence_locked()',method)
+  self.assertIn('gauge_load_normal_target(normalTarget)==ESP_OK&&normalTarget==mosaico_gauge::NominalMah',method)
+  self.assertIn('backend.normalTarget65=normalTarget65',method)
+  self.assertIn('if(!normalTarget65){',backend)
+  self.assertIn('!mosaico_gauge::bootHistoryEligible(nominal,access))',backend)
  def test_actual_cached_field_bounds_no_io(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
   getter='constexpr bool field('+source.split('bool Hal::gaugeThresholdAuditField(',1)[1].split('// Pure cache inspection:',1)[0]
@@ -221,7 +262,7 @@ struct GaugeFccBackend{
 };
 struct Fake {
  struct Standard{uint16_t op=0,soc=0,cycles=0,mv=0,temp=0,dc=0,fcc=0;int16_t current=0,average=0;}before;
- bool gauge=true,standardSeen=false,beforeStandardValid=false,wrong=false;
+ bool gauge=true,standardSeen=false,beforeStandardValid=false,wrong=false,normalTarget65=false;
  int64_t now=0,lastStandardUs=0,previousCompleted=-1;int reads=0,waits=0,ids=0,controls=0;uint16_t expectedConfig=0;
  constexpr Fake& GetHAL(){return *this;}
  constexpr std::array<uint8_t,6> getFactoryMac(){return {42,0,0,0,0,0};}
@@ -250,6 +291,7 @@ struct Fake {
 };
 constexpr bool cases(){
  Fake f;uint8_t mac[6]{};if(!f.preflight(mac)||f.reads!=9||f.waits||f.ids!=1||f.controls!=1||mac[0]!=42||!f.beforeStandardValid||f.before.mv!=3803||f.expectedConfig!=0x112a)return false;
+ Fake normal;normal.normalTarget65=true;if(!normal.preflight(mac)||normal.expectedConfig!=0||normal.reads!=9||normal.ids!=1||normal.controls!=1)return false;
  Fake::Standard after{};
  if(!f.standard(after)||f.reads!=18||f.waits!=1||f.wrong)return false;
  if(!f.standard(after)||f.reads!=27||f.waits!=2||f.wrong)return false;
@@ -337,6 +379,9 @@ struct GaugeFccBackend{mosaico_fcc_limit::Load loadRaw(const char*,mosaico_fcc_l
 bool gauge_threshold_read(mosaico_threshold::Selector,uint8_t*);
 bool gauge_public_extra_read(mosaico_public_extra::Selector,uint8_t[36]);
 bool gauge_calibration_read(mosaico_calibration::Selector,uint8_t*);
+bool scale_boot_fence_locked();bool normal_gauge_fence_locked();int gauge_load_normal_target(uint16_t&);
+bool gauge_mac_read(uint16_t,uint8_t*);
+template<class Reader>bool gauge_profile_read_stable(Reader,uint16_t (&)[3],const char*&);
 '''+backend+method)
   for forbidden in ('gauge_control(', 'gauge_exit_config(', 'gauge_write_field(', 'gaugeSetNominalCapacity(', 'gaugeOcvMeasure(', 'sample_battery_locked('):self.assertNotIn(forbidden,backend+method)
   self.assertEqual(backend.count('gauge_delay_ms(5000)'),3)
@@ -351,6 +396,6 @@ bool gauge_calibration_read(mosaico_calibration::Selector,uint8_t*);
   serial=(ROOT/'main/debug/serial_debug.cpp').read_text()
   cmd=serial.split('if (std::strcmp(command,"gauge-thresholds")==0)',1)[1].split('if (std::strcmp(command, "gauge-ocv")',1)[0]
   self.assertIn('privileged&&_writer&&_writer->_reply_uart',cmd)
-  trace=serial.split('if (std::strcmp(command,"gauge-trace")==0)',1)[1].split('if (std::strcmp(command,"gauge-thresholds")',1)[0]
+  trace=serial.split('SerialDebug::handleGaugeTrace(char* line)',1)[1].split('\nvoid SerialDebug::',1)[0]
   for token in ('armConfirm()','clearConfirm()','exportRows(','status(','queued=1 persisted=0 check_status_pending0=1'):self.assertIn(token,trace)
 if __name__=='__main__':unittest.main()

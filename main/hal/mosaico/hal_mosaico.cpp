@@ -1457,6 +1457,7 @@ struct GaugeThresholdBackend {
     using Load=mosaico_threshold::Load;
     static constexpr const char* Key="thresh_aud_v1";
     uint16_t expectedConfig=0x112A;
+    bool normalTarget65=false;
     mosaico_threshold::Values values{};
     mosaico_calibration::Values calibration{};
     mosaico_public_extra::Values publicExtra{};
@@ -1532,9 +1533,13 @@ struct GaugeThresholdBackend {
         const auto mac=GetHAL().getFactoryMac();mosaico_gauge::Journal nominal{};mosaico_gauge::AccessJournal access{};
         GaugeFccBackend reader;mosaico_fcc_limit::Journal runtime{};
         if(gauge_load_journal(nominal,mac.data())!=ESP_OK||gauge_load_access(access,mac.data())!=ESP_OK||
-           !mosaico_gauge::bootHistoryEligible(nominal,access)||reader.loadRaw(mosaico_fcc_limit::journalKey,runtime)!=mosaico_fcc_limit::Load::Present||
-           !mosaico_fcc_limit::verifiedRuntimePermission(runtime))return reject("known_key_and_runtime_history_required");
-        expectedConfig=runtime.target.config;readControl();
+           !mosaico_gauge::bootHistoryEligible(nominal,access))return reject("known_key_and_runtime_history_required");
+        if(!normalTarget65){
+            if(reader.loadRaw(mosaico_fcc_limit::journalKey,runtime)!=mosaico_fcc_limit::Load::Present||
+               !mosaico_fcc_limit::verifiedRuntimePermission(runtime))return reject("known_key_and_runtime_history_required");
+            expectedConfig=runtime.target.config;
+        }
+        readControl();
         for(unsigned i=0;i<6;++i)outMac[i]=mac[i];
         return true;
     }
@@ -1552,6 +1557,14 @@ struct GaugeThresholdBackend {
     }
     bool readThresholds(){
         calibration={};
+        if(normalTarget65){
+            // Already in FA through the existing coordinator. Observe the actual
+            // stable profile word; normal65 does not imply the old FCC-limit bit.
+            uint16_t profile[3]{};const char* reason="dm_denied_io_or_auth";
+            if(!gauge_profile_read_stable(gauge_mac_read,profile,reason))return reject(reason);
+            if(profile[1]!=65||profile[2]!=65)return reject("normal_profile_capacity_anchor");
+            expectedConfig=profile[0];
+        }
         if(!mosaico_threshold::readStable(gauge_threshold_read,expectedConfig,values))return reject("dm_denied_auth_unstable_or_anchor");
         if(!mosaico_calibration::readStable(gauge_calibration_read,calibration))return reject("calibration_denied_auth_or_unstable");
         // Independent RAM-only result: never changes the 59-field journal/CRC.
@@ -2085,12 +2098,14 @@ bool Hal::gaugeSafetySelfTest() const { return mosaico_gauge::selftest(); }
 bool Hal::gaugeThresholdAudit(bool privileged,char* details,size_t detailsSize)
 {
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
-    if(privileged&&!scale_boot_fence_locked()){if(details&&detailsSize)std::snprintf(details,detailsSize,"blocked_scale_recovery_required");return false;}
+    uint16_t normalTarget=0;
+    const bool normalTarget65=privileged&&gauge_load_normal_target(normalTarget)==ESP_OK&&normalTarget==mosaico_gauge::NominalMah;
+    if(privileged&&!(normalTarget65?normal_gauge_fence_locked():scale_boot_fence_locked())){if(details&&detailsSize)std::snprintf(details,detailsSize,"blocked_scale_recovery_required");return false;}
     std::lock_guard<std::mutex> battery(battery_mutex);
     gauge_threshold_cached={};gauge_threshold_cached_generation=0;
     gauge_calibration_cached={};
     gauge_public_extra_cached={};gauge_public_extra_generation=0;
-    GaugeThresholdBackend backend;backend.readPublicExtra=privileged;
+    GaugeThresholdBackend backend;backend.readPublicExtra=privileged;backend.normalTarget65=normalTarget65;
     mosaico_threshold::Result result{};
     bool ok=false;
     if(privileged){mosaico_threshold::Coordinator<GaugeThresholdBackend> coordinator(backend);result=coordinator.run();ok=result.success;}
