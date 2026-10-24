@@ -760,24 +760,26 @@ bool __attribute__((noinline)) SerialDebug::handleCold(char* line)
     if(!action)action="status";
     const char* argument=::strtok_r(nullptr," \t",&save);
     const char* confirmation=::strtok_r(nullptr," \t",&save);
-    const bool status=!std::strcmp(action,"status"),bind=!std::strcmp(action,"bind"),
+    const bool status=!std::strcmp(action,"status"),verify=!std::strcmp(action,"verify"),bind=!std::strcmp(action,"bind"),
         apply=!std::strcmp(action,"apply"),handoff=!std::strcmp(action,"handoff"),
         recover=!std::strcmp(action,"recover"),cancel=!std::strcmp(action,"cancel"),
         page=!std::strcmp(action,"evidence-page");
     uint32_t index=0;
     const bool valid=status?!argument:
+        verify?argument&&*argument&&std::strlen(argument)<=356&&!confirmation:
         bind?argument&&*argument&&std::strlen(argument)<=356&&confirmation&&!std::strcmp(confirmation,"CONFIRM"):
         apply?argument&&!std::strcmp(argument,"CONFIRM_EXTERNAL_POWER")&&!confirmation:
         handoff?argument&&!std::strcmp(argument,"CONFIRM_POWER_OFF_30S")&&!confirmation:
         (recover||cancel)?argument&&!std::strcmp(argument,"CONFIRM")&&!confirmation:
         page&&parseUnsignedStrict(argument,0,4,index)&&!confirmation;
     if(!valid||::strtok_r(nullptr," \t",&save)){
-        result("gauge-cold","FAIL","reason=expected_status_bind_fragment_CONFIRM_apply_CONFIRM_EXTERNAL_POWER_handoff_CONFIRM_POWER_OFF_30S_recover_or_cancel_CONFIRM_evidence-page_0..4");return true;
+        result("gauge-cold","FAIL","reason=expected_status_verify_fragment_bind_fragment_CONFIRM_apply_CONFIRM_EXTERNAL_POWER_handoff_CONFIRM_POWER_OFF_30S_recover_or_cancel_CONFIRM_evidence-page_0..4");return true;
     }
     char* details=diagnosticScratch();
     if(!details){result("gauge-cold","FAIL","reason=diagnostic_buffer_unavailable no_changes=1");return true;}
     std::memset(details,0,DiagnosticCapacity);
     const bool ok=status?MosaicoGaugeCold::status(details,DiagnosticCapacity):
+        verify?MosaicoGaugeCold::verifyFragment(argument,details,DiagnosticCapacity):
         bind?MosaicoGaugeCold::bindFragment(argument,details,DiagnosticCapacity):
         apply?MosaicoGaugeCold::apply(details,DiagnosticCapacity):
         handoff?MosaicoGaugeCold::handoff(details,DiagnosticCapacity):

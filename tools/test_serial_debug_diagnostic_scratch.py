@@ -16,6 +16,7 @@ static bool invoked(char* out,size_t n){++halCalls;if(n!=1024)++faults;for(size_
 namespace GaugeDischargeTrace {namespace NandBackend{bool busy(){return nandBusy;}}}
 namespace MosaicoGaugeCold {
 bool status(char* p,size_t n){return invoked(p,n);}bool bindFragment(const char*,char* p,size_t n){return invoked(p,n);}
+bool verifyFragment(const char*,char* p,size_t n){return invoked(p,n);}
 bool apply(char* p,size_t n){return invoked(p,n);}bool handoff(char* p,size_t n){return invoked(p,n);}
 bool recover(char* p,size_t n){return invoked(p,n);}bool cancel(char* p,size_t n){return invoked(p,n);}
 bool evidencePage(uint32_t,char* p,size_t n){return invoked(p,n);}
@@ -59,8 +60,8 @@ class ScratchTests(unittest.TestCase):
             line='debug '+name+' status';frames.append('uart '+f'{zlib.crc32(line.encode()):08x}'+' '+line)
         check=CHECK+' if(id==7){console._reply_uart=true;'
         for frame in frames:check+='if(!dispatch(console,'+json.dumps(frame)+',true))return 11;'
-        check+='return allocations!=1||halCalls!=3||faults?12:0;}return 99;}\n'
-        check+='extern "C" {volatile int test_results[8];void __attribute__((noinline,used)) test_done(){for(;;){asm volatile("");}}void _start(){for(int i=0;i<8;++i)test_results[i]=run_case(i);test_done();}}'
+        check+='return allocations!=1||halCalls!=3||faults?12:0;}if(id==8){oom=true;dispatch(console,"debug gauge-cold verify cap");if(halCalls||allocations!=1)return 13;oom=false;dispatch(console,"debug gauge-cold verify cap");return halCalls!=1||allocations!=2||faults?14:0;}return 99;}\n'
+        check+='extern "C" {volatile int test_results[9];void __attribute__((noinline,used)) test_done(){for(;;){asm volatile("");}}void _start(){for(int i=0;i<9;++i)test_results[i]=run_case(i);test_done();}}'
         code='#define MOSAICO_BOARD 1\n#define MOSAICO_NAND_STORE 1\n'+PREFIX+transport+'\nnamespace serial_debug_transport {bool uartAllowed(const char* command){return !deny&&productionUartAllowed(command);}}\n'+parser+actual+check
         with tempfile.TemporaryDirectory(prefix='diagnostic-',dir=RUN) as td:
             temp=Path(td)
@@ -78,8 +79,8 @@ class ScratchTests(unittest.TestCase):
             kind,position,address,_,length,_,_,_=struct.unpack_from('<8I',data,offset+i*size)
             if kind==1:emulator.mem_write(address,data[position:position+length])
         emulator.reg_write(UC_RISCV_REG_SP,0x1fffff0);emulator.emu_start(struct.unpack_from('<I',data,24)[0],symbols['test_done'],timeout=20000000,count=100000000)
-        values=struct.unpack('<8i',bytes(emulator.mem_read(symbols['test_results'],32)))
-        (RUN/'execution.json').write_text(json.dumps(dict(results=values,limits='actual three handlers and shared scratch; HAL/allocator/task/libc mocked, no hardware'),indent=2));self.assertEqual(values,(0,)*8)
+        values=struct.unpack('<9i',bytes(emulator.mem_read(symbols['test_results'],36)))
+        (RUN/'execution.json').write_text(json.dumps(dict(results=values,limits='actual three handlers and shared scratch; HAL/allocator/task/libc mocked, no hardware'),indent=2));self.assertEqual(values,(0,)*9)
     def test_scope(self):
         source=SOURCE.read_text();helper=base.extract(source,'char* __attribute__((noinline)) SerialDebug::diagnosticScratch(')
         self.assertIn('MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT',helper);self.assertNotIn('MALLOC_CAP_INTERNAL',helper)

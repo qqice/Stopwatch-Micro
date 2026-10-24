@@ -5,6 +5,7 @@
 #include "mbedtls/pk.h"
 #include "mbedtls/base64.h"
 #include "esp_random.h"
+#include "esp_mac.h"
 #include "bootloader_random.h"
 #include "esp_ota_ops.h"
 #include "esp_task_wdt.h"
@@ -23,7 +24,7 @@ namespace capsule=mosaico_gauge_cold_capsule;
 namespace trial=mosaico_gauge_cold_trial;
 namespace store=mosaico_gauge_cold_store;
 namespace {
-constexpr const char* Versions[2]={"0.13.95-r23-mosaico-ota","0.13.95-r24-mosaico-ota"};
+constexpr const char* Versions[2]={"0.13.95-r25-mosaico-ota","0.13.95-r26-mosaico-ota"};
 constexpr const char* GctDigest="da8c79bcf2a17f01a3294394d7ca9b527d1a623a45fa1bc04c730a988cd69bdb";
 // One writer publishes an immutable token. Readers never inspect token storage
 // while initialization/failure is in progress; no retry can race publication.
@@ -173,6 +174,13 @@ bool actual(unsigned slot,const MosaicoOta::VerifiedImageDescriptor& image){
 }
 } // namespace
 
+bool physicalMac(std::array<uint8_t,6>& out){
+    out={};std::array<uint8_t,6> physical{};
+    // Unlike esp_efuse_mac_get_default on IEEE802154 SoCs, this SDK table
+    // entry is explicitly six bytes and does NOT insert the MAC_EXT octets.
+    if(esp_read_mac(physical.data(),ESP_MAC_EFUSE_FACTORY)!=ESP_OK||!trial::nonzero(physical)||(physical[0]&1))return false;
+    out=physical;return true;
+}
 bool sha256(const uint8_t* data,size_t size,Digest& out){
     out={};if(!data||!size||psa_crypto_init()!=PSA_SUCCESS)return false;
     Digest hash{};size_t used=0;
@@ -200,10 +208,11 @@ bool extractBinding(const Record& record,Binding& candidate){
        !proof::decode(record.payload,record.size,binding).canonical()||record.nonce!=binding.nonce)return false;
     candidate=binding;return true;
 }
-bool authenticate(const Record& record,const std::array<uint8_t,6>& boardMac,const mosaico_gauge_contrast::Raw& durableSource,Authenticated& out,const char*& reason){
+bool authenticate(const Record& record,const mosaico_gauge_contrast::Raw& durableSource,Authenticated& out,const char*& reason){
     out={};reason="cold_auth_unverified";
     if(!MosaicoOta::currentTaskOwnsStorageLease())return fail(reason,"cold_auth_ota_lease_required");
-    Authenticated candidate{};
+    Authenticated candidate{};std::array<uint8_t,6> boardMac{};
+    if(!physicalMac(boardMac))return fail(reason,"cold_auth_physical_mac_unavailable");
     if(!extractBinding(record,candidate.binding)||candidate.binding.mac!=boardMac)return fail(reason,"cold_auth_shape_or_mac");
     if(durableSource!=mosaico_gauge_contrast::sourceFixture)return fail(reason,"cold_auth_complete_source_mismatch");
     proof::SourceReceiptInput source{};Digest receipt{};

@@ -23,6 +23,9 @@ bool poll(RestoreRequest* request=nullptr); // true: cold owns/holds recovery
 // attestation or current-session generation/nonce authority is implied.
 bool status(char*,size_t);
 bool evidencePage(size_t index,char*,size_t); // Cached SHA-checked192B slices only
+// Non-consuming candidate validation only: no Cold proof/journal operations,
+// nonce reservation, active-session installation, hold or live DM131 assertion.
+bool verifyFragment(const char* base64Fragment,char*,size_t);
 bool bindFragment(const char* base64Fragment,char*,size_t);
 bool apply(char*,size_t);
 bool handoff(char*,size_t);

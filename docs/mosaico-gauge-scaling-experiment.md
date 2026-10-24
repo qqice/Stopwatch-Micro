@@ -340,3 +340,37 @@ proof that the named command caused it. A drop during the observer's own output
 is available on the next query. The observer never resets the RTOS watermark;
 allocation failure disables attribution only. These volatile observations do not
 replace the retained NAND system logs or original gauge records.
+
+
+### Cold candidate authentication preflight and MAC domains
+
+The active cold-capable pair is exactly r25/r26. The old GCT1 host endorsement
+roster r15/r16 and its signed domain/contract remain unchanged. Prior failed
+candidate packets, including unused host nonces, are immutable evidence; a new
+release/session is not permission to overwrite an existing Cold proof or journal.
+
+`debug gauge-cold verify <GCS1-base64-fragment>` is a non-consuming candidate
+probe (no CONFIRM argument). It requires a clean stable Original and no active,
+bound, durable or blocked Cold session. It rebuilds the exact candidate with the
+cached pair bytes and uses the same physical identity, canonical source receipt,
+normal/GCT/session signatures and both actual SDK-VALID/full-BIN verification as
+bind. Success remains candidate-only: it does not install an active session,
+reserve a nonce, read/write Cold proof/journal pages, hold recovery, unseal or
+write IC parameters. The operation-local `nand_proof_writes=0` and
+`nand_journal_writes=0` counters do not claim that independent system logging is
+idle. `live_dm131_verified=0` explicitly excludes a fresh SEALED-DM claim.
+A later bind repeats validation and empty-area/readback checks; verify alone can
+never authorize apply. Unknown outcomes must not be retried as mutating commands.
+
+The Cold Binding MAC is the physical six-byte factory EUI48, read through the
+SDK's six-byte `ESP_MAC_EFUSE_FACTORY` interface. It is not the legacy six-byte
+journal MAC prefix retained by GCT/GSJ3/access/Failed records. On IEEE802154 S31,
+`esp_efuse_mac_get_default` expands to eight bytes; treating its first six as the
+physical EUI48 changes the identity domain. Cold authentication has no fallback
+to that truncated domain. The probe reports `physical_mac` and
+`legacy_journal_mac` separately. Existing journal authentication and records are
+not migrated or silently rewritten by the Cold probe. The canonical source131
+receipt still hashes the full reviewed original222 bytes plus the physical MAC,
+known gauge identity, original GCT generation and epoch; this is not a live DM
+read. Normal software build/signature checks and offline mocks do not establish
+that the current device's actual flash/SDK checks have executed successfully.

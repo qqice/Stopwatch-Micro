@@ -45,6 +45,21 @@ struct Runtime {
  const char* reason="not_loaded";
 };
 Runtime* runtime=nullptr;
+// Candidate-only PSRAM is separate from the active Runtime. Serialized by the
+// same gauge transaction mutex; never passed to coldSave/load/commit by verify.
+struct CandidateWorkspace {
+ crypto::Record proof{};crypto::Authenticated authenticated{};
+ mosaico_gauge_contrast::Raw source{};uint8_t fragment[384]{};
+ std::array<uint8_t,6> physical{},legacy{};
+ char physicalHex[13]{},legacyHex[13]{};
+};
+CandidateWorkspace* candidate=nullptr;
+bool candidateStorage(){
+ if(candidate)return true;
+ void* memory=heap_caps_calloc(1,sizeof(CandidateWorkspace),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+ if(!memory)return false; // Never install a hold on a readonly probe failure.
+ candidate=new(memory)CandidateWorkspace{};return true;
+}
 QuietHooks quietHooks{};
 std::atomic<bool> protection{false},allowFallback{true};
 evidence::Frame prefetched{};
@@ -97,13 +112,14 @@ bool safetyWords(uint16_t& op,uint16_t& mv,uint16_t& temp,uint16_t& dc,uint16_t&
 bool mediaGate(){uint16_t mv=0,temp=0;
  return gauge&&gauge_word(8,mv)&&gauge_word(6,temp)&&mv>=3500&&mv<=4350&&temp>=2832&&temp<=3131;
  }
-bool parentSource(){
+bool parentSource(mosaico_gauge_contrast::Raw& destination){
  if(contrast_load_locked(true)!=contrast_journal::Status::Ready||!contrast_rt||contrast_rt->journal.loaded.selected<0)return false;
  const auto& parent=contrast_rt->journal.loaded.records[size_t(contrast_rt->journal.loaded.selected)];
  if(!contrast_journal::shape(parent)||parent.arm!=mosaico_gauge_contrast::Arm::C)return false;
- for(size_t i=0;i<131;++i)for(unsigned j=0;j<parent.snapshot.fields[i].width;++j)runtime->source[mosaico_gauge_contrast::rawOffset(i)+j]=parent.snapshot.fields[i].original[j];
+ for(size_t i=0;i<131;++i)for(unsigned j=0;j<parent.snapshot.fields[i].width;++j)destination[mosaico_gauge_contrast::rawOffset(i)+j]=parent.snapshot.fields[i].original[j];
  return true;
 }
+bool parentSource(){return runtime&&parentSource(runtime->source);}
 bool historical(){native_recovery::Evidence e{};
  const auto mac=GetHAL().getFactoryMac();
  return native_evidence_locked(e)&&native_recovery::exact(e,mac.data());
@@ -245,20 +261,38 @@ bool envelopeTransition(void* p,const Nand& a,const Nand& b){return static_cast<
  }
 MosaicoNandStore::ColdPolicy envelopePolicy(EnvelopePolicy& p){return {&p,envelopeValid,envelopeInitial,envelopeTransition};
  }
+bool authenticateProof(const Nand& proof,mosaico_gauge_contrast::Raw& source,crypto::Authenticated& authenticated,bool actual,const char*& reason){
+ {std::lock_guard<std::mutex> battery(battery_mutex);
+ if(!parentSource(source)||!historical()){reason="cold_source_or_historical_Failed_mismatch";return false;}}
+ // Physical MAC is read INSIDE crypto. The source/Failed records intentionally
+ // remain authenticated in the unchanged legacy journal-MAC domain.
+ if(!crypto::authenticate(proof,source,authenticated,reason))return false;
+ if(!actual){authenticated.actualImagesVerified=false;return true;}
+ return crypto::verifyActualImages(authenticated,reason);
+}
 bool authenticate(bool persistent=true,bool historicalOnly=false){
- auto& t=*runtime;
+ auto& t=*runtime;const char* reason=nullptr;
+ if(!authenticateProof(t.proof,t.source,t.authenticated,!historicalOnly,reason))return persistent?fail(reason?reason:"cold_auth_failed"):reject(reason?reason:"cold_auth_failed");
+ if(historicalOnly)return true;
  {std::lock_guard<std::mutex> battery(battery_mutex);
- if(!parentSource()||!historical())return persistent?fail("cold_source_or_historical_Failed_mismatch"):reject("cold_source_or_historical_Failed_mismatch");
- }
- const char* reason=nullptr;
- if(!crypto::authenticate(t.proof,GetHAL().getFactoryMac(),t.source,t.authenticated,reason))return persistent?fail(reason?reason:"cold_auth_failed"):reject(reason?reason:"cold_auth_failed");
- // Historical authentication validates the immutable signed receipt/source,
- // not the firmware slots or the generation of a subsequent safe operation.
- if(historicalOnly){t.authenticated.actualImagesVerified=false;return true;}
- if(!crypto::verifyActualImages(t.authenticated,reason))return persistent?fail(reason?reason:"cold_actual_images_failed"):reject(reason?reason:"cold_actual_images_failed");
+ if(!parentBound())return persistent?fail("cold_original_parent_binding_changed"):reject("cold_original_parent_binding_changed");}
+ return true;
+}
+// Both bind and verify use this same complete production path. It has no Cold
+// NAND IO and cannot authorize apply or mutate the active Runtime.
+bool validateFragment(const char* fragment,CandidateWorkspace& c,const char*& reason){
+ c.authenticated={};size_t decoded=0;
+ if(!fragment||!std::strlen(fragment)||std::strlen(fragment)>356||mbedtls_base64_decode(c.fragment,sizeof(c.fragment),&decoded,
+    reinterpret_cast<const uint8_t*>(fragment),std::strlen(fragment))||!decoded){reason="cold_fragment_base64_invalid";return false;}
+ if(!crypto::buildFromFragment(c.fragment,decoded,contrast_rt->decodedProof,c.proof,reason))return false;
+ // Preserve authenticate's real reason; builder's success description is not
+ // an authentication failure and must NEVER overwrite the more specific one.
+ if(!authenticateProof(c.proof,c.source,c.authenticated,true,reason))return false;
  {std::lock_guard<std::mutex> battery(battery_mutex);
- if(!parentBound())return persistent?fail("cold_original_parent_binding_changed"):reject("cold_original_parent_binding_changed");
- }
+ uint16_t op=0,mv=0,temp=0,dc=0,fcc=0;
+ if(!contrast_maintenance_original_cached_locked()||!safetyWords(op,mv,temp,dc,fcc)||dc!=3000||fcc!=3000||((op>>1)&3)!=3||!mosaico_gauge::configExitAccepted(op)){reason="cold_candidate_Original_not_clean";return false;}
+ const auto& parent=contrast_rt->journal.loaded.records[size_t(contrast_rt->journal.loaded.selected)].snapshot;
+ if(parent.generation!=c.authenticated.binding.originalGctGeneration||parent.epoch!=c.authenticated.binding.originalGctEpoch){reason="cold_candidate_exact_Original_parent_required";return false;}}
  return true;
 }
 bool loadJournal(){
@@ -547,6 +581,28 @@ bool startup(){
  if(t.decision.action==trial::Action::Complete)return fail("cold_terminal_Restored_conflicts_nonOriginal_GCT_no_Complete_waiver");
  return fail("cold_startup_model_rejected");
 }
+bool verifyFragment(const char* fragment,char* out,size_t n){
+ if(!capacity(out,n))return false;
+ Lease lease;std::lock_guard<std::recursive_mutex> txn(gauge_transaction_mutex);
+ const char* reason="cold_verify_unverified";bool ok=false;
+ if(candidate){candidate->physical={};candidate->legacy={};candidate->authenticated={};}
+ if(!lease.held)reason="cold_verify_OTA_lease_required";
+ else if(runtime&&(runtime->bound||runtime->durable||runtime->blocked||runtime->applyInFlight||runtime->restoreIssued))reason="cold_verify_active_or_blocked_rejected";
+ else if(contrast_load_locked(true)!=contrast_journal::Status::Ready||!contrast_maintenance_original_cached_locked()||!contrast_rt->imagesSet)reason="cold_verify_clean_Original_images_required";
+ else if(!candidateStorage())reason="cold_verify_PSRAM_unavailable";
+ else{
+  candidate->physical={};candidate->legacy=GetHAL().getFactoryMac();
+  if(!crypto::physicalMac(candidate->physical))reason="cold_verify_physical_mac_unavailable";
+  else if(validateFragment(fragment,*candidate,reason)){ok=true;reason="cold_verify_authenticated_candidate_only_not_bound";}
+ }
+ if(candidate){
+  if(!ok)candidate->authenticated={};
+  for(unsigned i=0;i<6;++i){std::snprintf(candidate->physicalHex+2*i,3,"%02x",candidate->physical[i]);std::snprintf(candidate->legacyHex+2*i,3,"%02x",candidate->legacy[i]);}
+ }
+ const int used=std::snprintf(out,n,"success=%d reason=%s candidate_only=1 operation_local=1 physical_mac=%s legacy_journal_mac=%s session_verified=%d actual_images_verified=%d active_session_installed=0 nonce_reserved=0 keys=0 parameter_writes=0 nand_proof_writes=0 nand_journal_writes=0 live_dm131_verified=0 physical_units=UNKNOWN",
+ ok,reason,candidate?candidate->physicalHex:"unknown",candidate?candidate->legacyHex:"unknown",ok&&candidate->authenticated.sessionVerified,ok&&candidate->authenticated.actualImagesVerified);
+ return used>=0&&size_t(used)<n&&ok;
+}
 bool bindFragment(const char* fragment,char* out,size_t n){
  if(!capacity(out,n))return false;
  Lease lease;
@@ -561,13 +617,10 @@ bool bindFragment(const char* fragment,char* out,size_t n){
  if(!storage())return report(out,n,false);
  auto& t=*runtime;
  if(t.blocked||t.durable||(t.bound&&!t.historicalOnly)||!fragment||std::strlen(fragment)>512||!contrast_rt->imagesSet)return report(out,n,false);
- size_t decoded=0;
  const char* reason=nullptr;
- if(mbedtls_base64_decode(t.fragment,sizeof(t.fragment),&decoded,reinterpret_cast<const uint8_t*>(fragment),std::strlen(fragment))||!decoded||!crypto::buildFromFragment(t.fragment,decoded,contrast_rt->decodedProof,t.proof,reason)||!authenticate(false)){
-  reject(reason?reason:"cold_fragment_auth_failed");return report(out,n,false);
- }
- const auto& parent=contrast_rt->journal.loaded.records[size_t(contrast_rt->journal.loaded.selected)].snapshot;
- if(parent.generation!=t.authenticated.binding.originalGctGeneration||parent.epoch!=t.authenticated.binding.originalGctEpoch)return report(out,n,reject("cold_bind_requires_current_exact_Original_parent"));
+ if(!candidateStorage())return report(out,n,reject("cold_bind_PSRAM_unavailable"));
+ if(!validateFragment(fragment,*candidate,reason))return report(out,n,reject(reason?reason:"cold_fragment_auth_failed"));
+ t.proof=candidate->proof;t.source=candidate->source;t.authenticated=candidate->authenticated;
  {std::lock_guard<std::mutex> battery(battery_mutex);if(!mediaGate())return fail("cold_bind_NAND_safety");}
  const auto old=MosaicoNandStore::coldLoad(MosaicoNandStore::ColdArea::Proof,t.verify,candidatePolicy(),true,true);
  if(grant(old))return report(out,n,reject("cold_proof_nonce_already_reserved_no_overwrite"));

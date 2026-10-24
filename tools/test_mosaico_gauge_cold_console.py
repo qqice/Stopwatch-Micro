@@ -53,7 +53,7 @@ def vectors():
     for i, line in enumerate(('debug gauge-cold', 'dbg gauge-cold', 'debug gauge-cold status',
         ' \tdebug\t gauge-cold\tstatus \t', 'dbg gauge-cold\t', 'debug gauge-cold status  ')):
         add('status_' + str(i), line, 0)
-    valid = [('bind x CONFIRM', 1), ('apply CONFIRM_EXTERNAL_POWER', 2),
+    valid = [('verify x', 7), ('bind x CONFIRM', 1), ('apply CONFIRM_EXTERNAL_POWER', 2),
         ('handoff CONFIRM_POWER_OFF_30S', 3), ('recover CONFIRM', 4), ('cancel CONFIRM', 5)]
     for command, action in valid:
         add('valid_' + command.split()[0], 'debug gauge-cold ' + command, action)
@@ -63,7 +63,7 @@ def vectors():
     for page in ('0', '1', '2', '3', '4', '00', '0004'):
         add('page_' + page, 'debug gauge-cold evidence-page ' + page, 6, page=int(page))
     invalid = ['status unexpected', 'status x y', 'status CONFIRM', 'status x y z',
-        'bind', 'bind x', 'bind CONFIRM', 'bind x confirm', 'bind x CONFIRM extra',
+        'verify', 'verify x CONFIRM', 'verify x extra', 'verify '+ 'A'*357, 'bind', 'bind x', 'bind CONFIRM', 'bind x confirm', 'bind x CONFIRM extra',
         'bind x CONFIRM extra extra', 'bind ' + 'A' * 357 + ' CONFIRM',
         'apply', 'apply CONFIRM', 'apply confirm_external_power', 'apply CONFIRM_EXTERNAL_POWER CONFIRM',
         'apply CONFIRM_EXTERNAL_POWER x y', 'handoff', 'handoff CONFIRM', 'handoff CONFIRM_POWER_OFF_60S',
@@ -117,13 +117,14 @@ extern "C" char* strtok_r(char* text,const char* delimiters,char** saved){char* 
  char* token=p;while(*p&&!delimiter(*p,delimiters))++p;if(*p)*p++=0;*saved=p;return token;
 }
 static bool forceUartDeny=false,nandBusy=false,backendOk=true;
-static unsigned calls[7]{},resultCount=0,lastPage=99,lastBindLength=0;
+static unsigned calls[8]{},resultCount=0,lastPage=99,lastBindLength=0;
 static char resultStatus[8]{},resultDetails[1024]{};
 static void copyString(char* out,const char* text,size_t cap){size_t i=0;for(;i+1<cap&&text&&text[i];++i)out[i]=text[i];out[i]=0;}
 namespace GaugeDischargeTrace {namespace NandBackend {bool busy(){return nandBusy;}}}
 namespace MosaicoGaugeCold {
 static bool invoked(unsigned action,char* out,size_t n){++calls[action];copyString(out,"mock_cold_only",n);return backendOk;}
 bool status(char* out,size_t n){return invoked(0,out,n);}
+bool verifyFragment(const char* fragment,char* out,size_t n){lastBindLength=std::strlen(fragment);return invoked(7,out,n);}
 bool bindFragment(const char* fragment,char* out,size_t n){lastBindLength=std::strlen(fragment);return invoked(1,out,n);}
 bool apply(char* out,size_t n){return invoked(2,out,n);}
 bool handoff(char* out,size_t n){return invoked(3,out,n);}
@@ -139,7 +140,7 @@ struct SerialDebug {bool _reply_uart=false;bool handleCold(char*);
 
 CHECK = r'''
 static int check(const char* input,bool handled,int action,bool uart,bool deny,bool busy,bool backend,bool unchanged,bool framed,int page,int bindLength,const char* detail){
- forceUartDeny=deny;nandBusy=busy;backendOk=backend;resultCount=0;lastPage=99;lastBindLength=0;for(unsigned i=0;i<7;++i)calls[i]=0;resultStatus[0]=resultDetails[0]=0;
+ forceUartDeny=deny;nandBusy=busy;backendOk=backend;resultCount=0;lastPage=99;lastBindLength=0;for(unsigned i=0;i<8;++i)calls[i]=0;resultStatus[0]=resultDetails[0]=0;
  char line[1024]{},original[1024]{};if(input){copyString(line,input,sizeof(line));copyString(original,input,sizeof(original));}
  SerialDebug console;console._reply_uart=uart;char* command=input?line:nullptr;
  if(framed&&command)command=serial_debug_transport::decodeUartLine(command,std::strlen(command));
@@ -147,12 +148,12 @@ static int check(const char* input,bool handled,int action,bool uart,bool deny,b
  if(actual!=handled)return 1;
  if(unchanged&&std::strcmp(line,original))return 2;
  if(resultCount!=(handled?1U:0U))return 3;
- unsigned total=0;for(unsigned i=0;i<7;++i){total+=calls[i];if(calls[i]!=unsigned(action==int(i)))return 4;}
+ unsigned total=0;for(unsigned i=0;i<8;++i){total+=calls[i];if(calls[i]!=unsigned(action==int(i)))return 4;}
  if(total!=unsigned(action>=0))return 5;
  if(handled&&std::strcmp(resultStatus,action>=0&&backend?"PASS":"FAIL"))return 6;
  if(detail&&std::strcmp(resultDetails,detail))return 7;
  if(action==6&&page>=0&&lastPage!=unsigned(page))return 8;
- if(action==1&&bindLength>=0&&lastBindLength!=unsigned(bindLength))return 9;
+ if((action==1||action==7)&&bindLength>=0&&lastBindLength!=unsigned(bindLength))return 9;
  return 0;
 }
 '''

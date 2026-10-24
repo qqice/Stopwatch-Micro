@@ -13,13 +13,13 @@ RUN=ROOT/'artifacts/gauge-cold-runtime-tests'
 MOCKS=r'''
 namespace coldtest {
 namespace m=mosaico_gauge_cold_trial;namespace e=mosaico_gauge_cold_envelope;namespace s=mosaico_gauge_cold_store;
-static MosaicoGaugeCold::Runtime state;
+static MosaicoGaugeCold::Runtime state;static MosaicoGaugeCold::CandidateWorkspace candidateState;
 static std::array<s::Page,14> pages{};static s::Scratch scratch{};
 static unsigned mediaCalls=0,mediaWrites=0,frameReads=0,allocations=0;
 static bool failSave=false,failReadback=false,cryptoGood=true,quietGood=true,batteryViolation=false,engineIncomplete=false;
 static bool actualImagesGood=true;static unsigned actualVerifyCalls=0;
 static uint32_t opaqueError=0;static uint8_t boot=10;static int resetReason=ESP_RST_POWERON;
-static m::Binding binding(){m::Binding b{};b.mac=GetHAL().getFactoryMac();b.originalGctGeneration=1;b.originalGctEpoch=1;b.nonce[0]=1;b.slotHashes[0][0]=1;b.slotHashes[1][0]=2;b.source131ReceiptDigest[0]=3;return b;}
+static m::Binding binding(){m::Binding b{};b.mac={0x30,0xed,0xa0,0xf4,0x0b,0xfc};b.originalGctGeneration=1;b.originalGctEpoch=1;b.nonce[0]=1;b.slotHashes[0][0]=1;b.slotHashes[1][0]=2;b.source131ReceiptDigest[0]=3;return b;}
 struct IO {uint32_t base;
  bool read(uint32_t i,s::Page& out){if(i>=8)i=base+i-8;if(i>=pages.size())return false;out=pages[i];return true;}
  bool write(uint32_t i,const s::Page& in){if(i<8||i>9)return false;i=base+i-8;pages[i]=in;++mediaWrites;return true;}bool sync(){return true;}};
@@ -31,11 +31,12 @@ namespace MosaicoColdCrypto {
 bool sha256(const uint8_t* p,size_t n,Digest& out){uint32_t h=2166136261U;for(size_t i=0;i<n;++i)h=(h^p[i])*16777619U;for(unsigned i=0;i<32;++i)out[i]=uint8_t((h>>(8*(i%4)))^i);return coldtest::cryptoGood;}
 void prepareBootIdentity(){}mosaico_gauge_cold_trial::BootToken bootIdentity(){mosaico_gauge_cold_trial::BootToken b{};b.nonce[0]=coldtest::boot;b.verified=true;return b;}
 bool extractBinding(const Record& r,Binding& b){b=coldtest::binding();return mosaico_gauge_cold_store::shape(r)&&r.sequence==1&&r.phase==1&&r.nonce==b.nonce;}
-bool authenticate(const Record& r,const std::array<uint8_t,6>& mac,const mosaico_gauge_contrast::Raw& raw,Authenticated& out,const char*& reason){
- out={};out.binding=coldtest::binding();if(!coldtest::cryptoGood||mac!=out.binding.mac||raw!=mosaico_gauge_contrast::sourceFixture){reason="mock_auth_reject";return false;}
+bool physicalMac(std::array<uint8_t,6>& out){out=coldtest::binding().mac;return true;}
+bool authenticate(const Record& r,const mosaico_gauge_contrast::Raw& raw,Authenticated& out,const char*& reason){
+ out={};out.binding=coldtest::binding();if(!coldtest::cryptoGood||raw!=mosaico_gauge_contrast::sourceFixture){reason="mock_auth_reject";return false;}
  out.bindingHash=r.binding;out.sessionVerified=true;reason="mock_session";return true;}
 bool verifyActualImages(Authenticated& out,const char*& reason){++coldtest::actualVerifyCalls;out.actualImagesVerified=coldtest::cryptoGood&&coldtest::actualImagesGood;reason="mock_actual";return out.actualImagesVerified;}
-bool buildFromFragment(const uint8_t*,size_t,const char*,Record& out,const char*&){out={};out.sequence=1;out.phase=1;out.nonce=coldtest::binding().nonce;out.binding[0]=55;out.size=1;out.payload[0]=99;return true;}
+bool buildFromFragment(const uint8_t*,size_t,const char*,Record& out,const char*& reason){reason="cold_fragment_structural_only_authenticate_required";out={};out.sequence=1;out.phase=1;out.nonce=coldtest::binding().nonce;out.binding[0]=55;out.size=1;out.payload[0]=99;return true;}
 }
 namespace MosaicoNandStore {
 static Result result(mosaico_gauge_cold_store::Code code){Result r{};r.stage=Stage::Complete;r.coldCode=code;r.error=(code==mosaico_gauge_cold_store::Code::Ready||code==mosaico_gauge_cold_store::Code::Empty)?ESP_OK:9;return r;}
@@ -53,7 +54,7 @@ void gauge_engine_locked(mosaico_gauge_engine::Snapshot& out,uint8_t phase,uint8
 namespace coldtest {
 static bool quietEnter(){return quietGood;}static bool quietLeave(){return true;}
 static void coldReset(bool target=false){resetContrast();if(target){(void)contrastApply();writes=enters=defaultKeyCalls=0;}
- state.~Runtime();new(&state)MosaicoGaugeCold::Runtime{};MosaicoGaugeCold::runtime=&state;MosaicoGaugeCold::protection.store(false);MosaicoGaugeCold::allowFallback.store(true);MosaicoGaugeCold::prefetchSet=false;MosaicoGaugeCold::startupEntered=false;MosaicoGaugeCold::quietHooks={};
+ state.~Runtime();new(&state)MosaicoGaugeCold::Runtime{};MosaicoGaugeCold::runtime=&state;candidateState.~CandidateWorkspace();new(&candidateState)MosaicoGaugeCold::CandidateWorkspace{};MosaicoGaugeCold::candidate=&candidateState;MosaicoGaugeCold::protection.store(false);MosaicoGaugeCold::allowFallback.store(true);MosaicoGaugeCold::prefetchSet=false;MosaicoGaugeCold::startupEntered=false;MosaicoGaugeCold::quietHooks={};
  for(auto& p:pages)p.fill(255);s::nand::marker(pages[0]);s::nand::marker(pages[1]);mediaCalls=mediaWrites=frameReads=allocations=0;failSave=failReadback=engineIncomplete=false;cryptoGood=quietGood=actualImagesGood=true;actualVerifyCalls=0;batteryViolation=false;boot=10;opaqueError=0;resetReason=ESP_RST_POWERON;nowUs=1000000;leaseDepth=1;
  state.authenticated.binding=binding();state.authenticated.bindingHash[0]=55;state.authenticated.sessionVerified=state.authenticated.actualImagesVerified=true;state.bound=true;state.nonceFresh=true;
 }
@@ -65,8 +66,32 @@ static void prefetch(){state.frame={};state.frame.kind=mosaico_gauge_cold_eviden
 static bool seedHanded(){seedProof();if(!seed(armed())||!seed(handed()))return false;boot=11;nowUs=10000;prefetch();return true;}
 static bool finalCapture(){MosaicoGaugeCold::RestoreRequest r{};nowUs=25010000;return MosaicoGaugeCold::poll(&r)&&state.durable&&state.decoded.metadata.phase==m::Phase::Captured&&!r.requested;}
 }
-extern "C" int run_case(int id){if(id>=35)return 0;using namespace coldtest;using namespace MosaicoGaugeCold;
- coldReset(id>=5&&id!=15&&id!=16&&id!=17&&id!=18&&id!=34);
+extern "C" int run_case(int id){if(id>=46)return 0;using namespace coldtest;using namespace MosaicoGaugeCold;
+ coldReset(id<35&&id>=5&&id!=15&&id!=16&&id!=17&&id!=18&&id!=34);
+ if(id>=35){
+  capMode=true;state.bound=false;state.authenticated={};const auto baseline=mediaWrites;char out[1024]{};
+  auto contains=[](const char* text,const char* word){for(size_t i=0;i<std::strlen(text);++i)if(!std::strncmp(text+i,word,std::strlen(word)))return true;return false;};
+  if(id==36)state.bound=true;
+  if(id==37)state.durable=true;
+  if(id==38)state.blocked=true;
+  if(id==39)cryptoGood=false;
+  if(id==40)actualImagesGood=false;
+  if(id==41)nativeHistoryValid=false;
+  if(id==42)MosaicoGaugeCold::candidate=nullptr;
+  if(id==44)MosaicoGaugeCold::runtime=nullptr;
+  if(id==45){state.applyInFlight=true;MosaicoGaugeCold::protection.store(true);MosaicoGaugeCold::allowFallback.store(false);}
+  const bool held=protectedState(),fallback=fallbackAllowed();const bool accepted=verifyFragment("cap",out,sizeof(out));
+  const bool expected=id==35||id==43||id==44;
+  if(accepted!=expected||mediaCalls||mediaWrites!=baseline||defaultKeyCalls||writes||protectedState()!=held||fallbackAllowed()!=fallback)return 140;
+  if(id==39&&!contains(out,"reason=mock_auth_reject"))return 141;
+  if(id==40&&!contains(out,"reason=mock_actual"))return 142;
+  if(expected&&(!contains(out,"nonce_reserved=0")||!contains(out,"nand_proof_writes=0")||!contains(out,"nand_journal_writes=0")||!contains(out,"live_dm131_verified=0")||!contains(out,"physical_mac=30eda0f40bfc")))return 143;
+  if(id==44)return MosaicoGaugeCold::runtime?144:0;
+  if(expected&&(state.bound||state.durable||state.authenticated.sessionVerified||state.proof.size))return 145;
+  if(id==43){if(apply(out,sizeof(out))||defaultKeyCalls||writes||protectedState()!=held)return 146;}
+  if(id==39){cryptoGood=false;if(bindFragment("cap",out,sizeof(out))||!contains(out,"reason=mock_auth_reject")||mediaCalls||mediaWrites!=baseline||defaultKeyCalls)return 147;}
+  return 0;
+ }
  if(id==0){std::unique_lock<std::mutex> b(battery_mutex);auto before=mediaCalls;return !armSeam(b)||mediaCalls!=before?1:0;}
  if(id==1){MosaicoGaugeCold::runtime=nullptr;return !startup()||mediaCalls||allocations||protectedState()?2:0;}
  if(id==2||id==3||id==4||id==15||id==16||id==17||id==18){contrast_begin_locked();ContrastBackend old;if(!old.admit(false)||!old.intent(false)||!old.open(false)||!old.observe(false))return 3;
@@ -141,7 +166,7 @@ extern "C" int run_case(int id){
  if(id>=22)return 0;
  using namespace coldtest;using namespace MosaicoGaugeCold;
  coldReset(false);coldDeadlineReads=0;coldForeignTask=false;
- if(id==0&&(!contrast_rt_version("0.13.95-r23-mosaico-ota")||!contrast_rt_version("0.13.95-r24-mosaico-ota")||contrast_rt_version("0.13.95-r21-mosaico-ota")||contrast_rt_version("0.13.95-r22-mosaico-ota")||contrast_rt_version("0.13.95-r17-mosaico-ota")||contrast_rt_version("0.13.95-r18-mosaico-ota")))return 131;
+ if(id==0&&(!contrast_rt_version("0.13.95-r25-mosaico-ota")||!contrast_rt_version("0.13.95-r26-mosaico-ota")||contrast_rt_version("0.13.95-r21-mosaico-ota")||contrast_rt_version("0.13.95-r22-mosaico-ota")||contrast_rt_version("0.13.95-r17-mosaico-ota")||contrast_rt_version("0.13.95-r18-mosaico-ota")))return 131;
  if(id==20||id==21){const auto before=mediaWrites;std::snprintf(contrast_rt->images[0].version,sizeof(contrast_rt->images[0].version),"%s","0.13.95-r17-mosaico-ota");
   if(id==21)std::snprintf(contrast_rt->images[1].version,sizeof(contrast_rt->images[1].version),"%s","0.13.95-r18-mosaico-ota");
   return contrast_rt_images_current()||defaultKeyCalls||writes||mediaWrites!=before?132:0;}
@@ -251,7 +276,7 @@ void gauge_engine_locked(mosaico_gauge_engine::Snapshot&,uint8_t,uint8_t);
 '''
                 code=code.replace('#include "mosaico_gauge_contrast_runtime.inc"','#include "mosaico_gauge_contrast_runtime.inc"\n'+injection)
                 if hooks:
-                    code=code.replace('0.13.95-r15-mosaico-ota','0.13.95-r23-mosaico-ota').replace('0.13.95-r16-mosaico-ota','0.13.95-r24-mosaico-ota')
+                    code=code.replace('0.13.95-r15-mosaico-ota','0.13.95-r25-mosaico-ota').replace('0.13.95-r16-mosaico-ota','0.13.95-r26-mosaico-ota')
                     code=code.replace('#include "mosaico_gauge_contrast_runtime.inc"','#define MOSAICO_GAUGE_COLD_RUNTIME 1\n#include "mosaico_gauge_cold_runtime.h"\nnamespace MosaicoOta {bool currentTaskOwnsStorageLease();}\n#include "mosaico_gauge_contrast_runtime.inc"')
                     code=code.replace('static bool readModel(uint16_t a,uint8_t* b){++readCalls;', 'static bool coldOnceReadFault=false;static bool readModel(uint16_t a,uint8_t* b){++readCalls;if(coldOnceReadFault&&writes==1&&(operation&0x400)){coldOnceReadFault=false;return false;}')
                     code=code.replace('bool gauge_word(uint8_t r,uint16_t& v){return mockGaugeWord(r,v);}', 'void coldAfterWord(uint8_t);bool gauge_word(uint8_t r,uint16_t& v){bool ok=mockGaugeWord(r,v);coldAfterWord(r);return ok;}')
@@ -282,7 +307,7 @@ namespace std {struct mutex{unsigned held=0;void lock(){++held;}void unlock(){--
             public=[int(line.split('\t')[1]) for line in stack.splitlines() if 'mosaico_gauge_cold_runtime.inc:' in line and 'GLOBAL' not in line]
             self.assertLessEqual(max(public),512) # Shared envelope scratch is a separately reported deployment gate.
             with (base.RUN/'execution.log').open('a') as log:
-                log.write('meaningful_hook_cases=22 inherited_empty_tail_cases=33\n' if hooks else 'meaningful_cold_cases=35 inherited_empty_tail_cases=20\n')
+                log.write('meaningful_hook_cases=22 inherited_empty_tail_cases=33\n' if hooks else 'meaningful_cold_cases=46 inherited_empty_tail_cases=9\n')
         finally:
             base.CASES,base.RUN=before_cases,before_run
 

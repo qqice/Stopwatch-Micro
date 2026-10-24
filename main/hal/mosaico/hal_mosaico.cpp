@@ -26,6 +26,7 @@
  * SOFTWARE.
  */
 #include "../hal.h"
+#include "../legacy_factory_mac.h"
 #include "../utils/settings/settings.h"
 #include "mosaico_gauge_model.h"
 #include "mosaico_fcc_limit_journal_codec.h"
@@ -1007,10 +1008,12 @@ esp_err_t gauge_load_access(mosaico_gauge::AccessJournal& journal, const uint8_t
 
 bool gauge_sealed_prior_verified()
 {
-    uint8_t mac[6]{};
-    if (esp_efuse_mac_get_default(mac) != ESP_OK) return false;
+    std::array<uint8_t, 6> mac{};
+    if (!hal_legacy_factory_mac::read(mac, [](uint8_t* received) {
+            return esp_efuse_mac_get_default(received);
+        })) return false;
     mosaico_gauge::AccessJournal access{};
-    return gauge_load_access(access, mac) == ESP_OK && access.priorSecurity == 3 &&
+    return gauge_load_access(access, mac.data()) == ESP_OK && access.priorSecurity == 3 &&
            access.unsealVerified && access.fullVerified && !mosaico_gauge::failedDefaultAttempt(access) &&
            (access.state == static_cast<uint8_t>(mosaico_gauge::AccessState::Opened) ||
             access.state == static_cast<uint8_t>(mosaico_gauge::AccessState::Restored));

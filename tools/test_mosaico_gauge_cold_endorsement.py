@@ -90,11 +90,11 @@ class ColdEndorsementTests(unittest.TestCase):
     def test_old_mixed_draft_duplicate_versions_rejected(self):
         for versions in (('0.13.95-r15-mosaico-ota', '0.13.95-r16-mosaico-ota'),
             ('0.13.95-r17-mosaico-ota', '0.13.95-r18-mosaico-ota'),
-            ('0.13.95-r23-mosaico-ota', '0.13.95-r18-mosaico-ota'),
-            ('0.13.95-r17-mosaico-ota', '0.13.95-r24-mosaico-ota'),
-            ('0.13.95-r23-mosaico-ota', '0.13.95-r16-mosaico-ota'),
-            ('0.13.95-r23-cold-draft', '0.13.95-r24-mosaico-ota'),
-            ('0.13.95-r23-mosaico-ota', '0.13.95-r23-mosaico-ota')):
+            ('0.13.95-r25-mosaico-ota', '0.13.95-r18-mosaico-ota'),
+            ('0.13.95-r17-mosaico-ota', '0.13.95-r26-mosaico-ota'),
+            ('0.13.95-r25-mosaico-ota', '0.13.95-r16-mosaico-ota'),
+            ('0.13.95-r25-cold-draft', '0.13.95-r26-mosaico-ota'),
+            ('0.13.95-r25-mosaico-ota', '0.13.95-r25-mosaico-ota')):
             records = [self.normal(version) for version in versions]
             with self.subTest(versions=versions), self.assertRaises(ValueError):
                 self.endorse([m for m, _ in records], [b for _, b in records])
@@ -107,12 +107,12 @@ class ColdEndorsementTests(unittest.TestCase):
                 self.endorse(images=images)
         # Fully normal-signed hash/size still cannot substitute a wrong embedded
         # descriptor version. Both signatures are valid in this negative test.
-        m, image = self.normal('0.13.95-r23-mosaico-ota', self.images[1])
+        m, image = self.normal('0.13.95-r25-mosaico-ota', self.images[1])
         with self.assertRaisesRegex(ValueError, 'distinct'):
             self.endorse([m, self.manifests[1]], [image, self.images[1]])
         other = bytearray(self.images[1])
         other[-1] ^= 1
-        m, image = self.normal('0.13.95-r23-mosaico-ota', bytes(other))
+        m, image = self.normal('0.13.95-r25-mosaico-ota', bytes(other))
         with self.assertRaisesRegex(ValueError, 'descriptor'):
             self.endorse([m, self.manifests[1]], [image, self.images[1]])
 
@@ -124,7 +124,7 @@ class ColdEndorsementTests(unittest.TestCase):
         with self.assertRaises(InvalidSignature):
             self.endorse(m)
         for schema, layout in ((1, 'mosaico-dual-v2'), (2, 'mosaico-dual-v1')):
-            first, image = self.normal('0.13.95-r23-mosaico-ota', schema=schema, layout=layout)
+            first, image = self.normal('0.13.95-r25-mosaico-ota', schema=schema, layout=layout)
             with self.subTest(schema=schema, layout=layout), self.assertRaises(ValueError):
                 self.endorse([first, self.manifests[1]], [image, self.images[1]])
         m = copy.deepcopy(self.manifests)

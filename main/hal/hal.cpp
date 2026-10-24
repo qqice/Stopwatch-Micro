@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include "legacy_factory_mac.h"
 #include <memory>
 #include <esp_log.h>
 #include <mooncake_log.h>
@@ -114,8 +115,10 @@ void Hal::feedTheDog()
 
 std::array<uint8_t, 6> Hal::getFactoryMac()
 {
-    std::array<uint8_t, 6> mac;
-    esp_efuse_mac_get_default(mac.data());
+    std::array<uint8_t, 6> mac{};
+    hal_legacy_factory_mac::read(mac, [](uint8_t* received) {
+        return esp_efuse_mac_get_default(received);
+    });
     return mac;
 }
 

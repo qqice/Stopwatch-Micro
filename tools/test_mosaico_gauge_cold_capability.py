@@ -153,17 +153,17 @@ class ColdCapabilityTests(unittest.TestCase):
         duplicate = self.raw.replace(b'"size":512', b'"size":512,"size":512', 1)
         with self.assertRaises(ValueError):
             c.validate_pair(duplicate, self.pub, self.images)
-        for version in ('0.13.95-r23-cold-draft', '0.13.95-r15-mosaico-ota', '0.13.95-r17-mosaico-ota', '0.13.95-r18-mosaico-ota', '0.13.95-r25-mosaico-ota'):
+        for version in ('0.13.95-r25-cold-draft', '0.13.95-r15-mosaico-ota', '0.13.95-r17-mosaico-ota', '0.13.95-r18-mosaico-ota', '0.13.95-r23-mosaico-ota', '0.13.95-r24-mosaico-ota', '0.13.95-r27-mosaico-ota'):
             image, pair = self.pair(version)
             raw = json.dumps([pair, self.pairs[1]], separators=(',', ':')).encode()
             with self.assertRaises(ValueError):
                 c.validate_pair(raw, self.pub, [image, self.images[1]])
         for versions in (('0.13.95-r21-mosaico-ota', '0.13.95-r22-mosaico-ota'),
-                         ('0.13.95-r21-mosaico-ota', '0.13.95-r24-mosaico-ota'),
+                         ('0.13.95-r21-mosaico-ota', '0.13.95-r26-mosaico-ota'),
                          ('0.13.95-r19-mosaico-ota', '0.13.95-r20-mosaico-ota'),
-                         ('0.13.95-r19-mosaico-ota', '0.13.95-r24-mosaico-ota'),
+                         ('0.13.95-r19-mosaico-ota', '0.13.95-r26-mosaico-ota'),
                          ('0.13.95-r17-mosaico-ota', '0.13.95-r18-mosaico-ota'),
-                         ('0.13.95-r17-mosaico-ota', '0.13.95-r24-mosaico-ota')):
+                         ('0.13.95-r17-mosaico-ota', '0.13.95-r26-mosaico-ota')):
             records = [self.pair(version) for version in versions]
             raw = json.dumps([p for _, p in records], separators=(',', ':')).encode()
             with self.subTest(versions=versions), self.assertRaises(ValueError):
@@ -181,7 +181,7 @@ class ColdCapabilityTests(unittest.TestCase):
         pairs = copy.deepcopy(self.pairs)
         images = list(self.images)
         changed = bytearray(images[0])
-        changed[48:80] = b'0.13.95-r23-cold-draft'.ljust(32, b'\0')
+        changed[48:80] = b'0.13.95-r25-cold-draft'.ljust(32, b'\0')
         images[0] = bytes(changed)
         m = pairs[0]['image']
         m['sha256'] = hashlib.sha256(images[0]).hexdigest()

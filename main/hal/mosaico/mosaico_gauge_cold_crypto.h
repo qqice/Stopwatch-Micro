@@ -16,6 +16,9 @@ struct Authenticated {
     Digest bindingHash{},pairHash{},packetHash{};
     bool sessionVerified=false,actualImagesVerified=false;
 };
+// Physical eFuse EUI48 ONLY; never the legacy six-byte journal prefix.
+// ESP_MAC_EFUSE_FACTORY is a six-byte SDK interface. Failure clears out.
+bool physicalMac(std::array<uint8_t,6>& out);
 bool sha256(const uint8_t* data,size_t size,Digest& out);
 struct Hasher {bool operator()(const uint8_t* data,size_t size,Digest& out)const{return sha256(data,size,out);}};
 // First call must be BEFORE any RF/ADC owner starts. Atomic one-shot state
@@ -28,8 +31,7 @@ bool extractBinding(const Record& record,Binding& candidate);
 // Caller holds the OTA storage lease; no battery lock. Verifies full source
 // receipt, device MAC, both normal/GCT signatures and the cold-session signature.
 // Current GCT phase/generation and all live safety gates remain caller duties.
-bool authenticate(const Record& record,const std::array<uint8_t,6>& boardMac,
-                  const mosaico_gauge_contrast::Raw& durableSource,
+bool authenticate(const Record& record,const mosaico_gauge_contrast::Raw& durableSource,
                   Authenticated& out,const char*& reason);
 // Separately rehashes both FULL actual images and requires SDK VALID. Caller
 // owns OTA lease (checked against the current task). Failure clears proof.

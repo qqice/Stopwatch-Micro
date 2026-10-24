@@ -6,6 +6,7 @@ signatures establish fixture consistency only, not execution of the C++ crypto.
 import json
 from pathlib import Path
 import re
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -72,6 +73,7 @@ namespace capsule=mosaico_gauge_cold_capsule;
 namespace trial=mosaico_gauge_cold_trial;
 namespace store=mosaico_gauge_cold_store;
 using namespace MosaicoColdCrypto;
+constexpr int ESP_OK=0,ESP_MAC_EFUSE_FACTORY=2;
 constexpr int compare(const void* a,const void* b,size_t n)=delete;
 constexpr int compare(const uint8_t* a,const uint8_t* b,size_t n){for(size_t i=0;i<n;++i)if(a[i]!=b[i])return 1;return 0;}
 constexpr int compare(const uint8_t* a,const char* b,size_t n){for(size_t i=0;i<n;++i)if(a[i]!=uint8_t(b[i]))return 1;return 0;}
@@ -79,18 +81,20 @@ constexpr void copy(uint8_t* a,const uint8_t* b,size_t n){for(size_t i=0;i<n;++i
 constexpr int compareTextN(const char* a,const char* b,size_t n){for(size_t i=0;i<n;++i){if(a[i]!=b[i])return 1;if(!a[i])return 0;}return 0;}
 constexpr size_t boundedLength(const char* a,size_t n){size_t i=0;while(i<n&&a[i])++i;return i;}
 constexpr Digest toyHash(const uint8_t* data,size_t size){Digest d{};for(size_t i=0;i<size;++i)d[i%32]=uint8_t((d[i%32]*33)^data[i]^uint8_t(i));return d;}
-constexpr Binding binding(){Binding b{};b.mac={0x24,1,2,3,4,5};b.originalGctGeneration=19;b.originalGctEpoch=19;b.nonce.fill(1);b.slotHashes[0].fill(2);b.slotHashes[1].fill(3);b.source131ReceiptDigest.fill(4);proof::SourceReceiptInput input{};proof::sourceReceiptHashInput(b,mosaico_gauge_contrast::sourceFixture,input);b.source131ReceiptDigest=toyHash(input.data(),input.size());return b;}
+constexpr Binding binding(){Binding b{};b.mac={0x30,0xed,0xa0,0xf4,0x0b,0xfc};b.originalGctGeneration=19;b.originalGctEpoch=19;b.nonce.fill(1);b.slotHashes[0].fill(2);b.slotHashes[1].fill(3);b.source131ReceiptDigest.fill(4);proof::SourceReceiptInput input{};proof::sourceReceiptHashInput(b,mosaico_gauge_contrast::sourceFixture,input);b.source131ReceiptDigest=toyHash(input.data(),input.size());return b;}
 struct Harness {
- static constexpr const char* Versions[2]={"0.13.95-r23-mosaico-ota","0.13.95-r24-mosaico-ota"};
+ static constexpr const char* Versions[2]={"0.13.95-r25-mosaico-ota","0.13.95-r26-mosaico-ota"};
+ bool physicalGood=true;std::array<uint8_t,6> actualPhysical=binding().mac;
  bool lease=true,hashOk=true,pairOk=true,signatureOk=true,actualOk=true;
  unsigned pairCalls=0,signatureCalls=0,actualCalls=0;bool pairBeforeSession=false;
+ constexpr int esp_read_mac(uint8_t* out,int type){if(type!=2||!physicalGood)return -1;for(unsigned i=0;i<6;++i)out[i]=actualPhysical[i];return 0;}
  constexpr bool ownsLease(){return lease;}
  constexpr bool sha256(const uint8_t* data,size_t size,Digest& out){out={};if(!hashOk||!data||!size)return false;out=toyHash(data,size);return true;}
  constexpr bool signature(const uint8_t*,size_t,const uint8_t*,size_t){++signatureCalls;return signatureOk;}
  constexpr bool pair(const proof::Bytes&,Authenticated& out){pairBeforeSession|=signatureCalls==0;++pairCalls;for(unsigned i=0;i<2;++i)for(size_t j=0;Versions[i][j];++j)out.images[i].version[j]=Versions[i][j];for(unsigned i=0;i<2;++i){for(unsigned j=0;j<32;++j)out.images[i].hash[j]=out.binding.slotHashes[i][j];out.images[i].size=500;}return pairOk;}
  constexpr bool actual(unsigned,const MosaicoOta::VerifiedImageDescriptor&){++actualCalls;return actualOk;}
 '''
-        for name in ('allowedVersion', 'allowedPairVersions', 'fail', 'bindingWire', 'extractBinding', 'authenticate', 'verifyActualImages', 'buildFromFragment'):
+        for name in ('allowedVersion', 'allowedPairVersions', 'fail', 'physicalMac', 'bindingWire', 'extractBinding', 'authenticate', 'verifyActualImages', 'buildFromFragment'):
             method = function(name)
             method = 'constexpr ' + method
             method = method.replace('MosaicoOta::currentTaskOwnsStorageLease()', 'ownsLease()')
@@ -128,23 +132,24 @@ constexpr bool cases(){Harness h;const auto f=fragment();Record out{};const char
         self.compile(self.prefix() + r'''
 constexpr bool invalidSessionNeverParses(){const auto r=packet();Harness invalid;invalid.signatureOk=false;
  Authenticated out{};const char* why=nullptr;
- return !invalid.authenticate(r,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why)&&
+ return !invalid.authenticate(r,mosaico_gauge_contrast::sourceFixture,out,why)&&
   invalid.pairCalls==0&&invalid.signatureCalls==1&&!out.sessionVerified;
 }static_assert(invalidSessionNeverParses());
 constexpr bool cases(){const auto r=packet();Harness h;Authenticated out{};const char* why=nullptr;
- if(!h.authenticate(r,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why)||!out.sessionVerified||out.actualImagesVerified||h.pairCalls!=1||h.signatureCalls!=1||h.pairBeforeSession)return false;
- h.lease=false;out.sessionVerified=true;if(h.authenticate(r,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why)||out.sessionVerified||h.pairCalls!=1)return false;
- h.lease=true;auto source=mosaico_gauge_contrast::sourceFixture;source[0]^=1;
- if(h.authenticate(r,binding().mac,source,out,why)||out.sessionVerified)return false;
- auto mac=binding().mac;mac[5]^=1;if(h.authenticate(r,mac,mosaico_gauge_contrast::sourceFixture,out,why))return false;
- auto bad=r;bad.nonce[0]^=1;if(h.authenticate(bad,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why))return false;
- bad=r;bad.binding[31]^=1;if(h.authenticate(bad,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why))return false;
- bad=r;bad.phase=2;if(h.authenticate(bad,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why))return false;
- bad=r;bad.sequence=2;if(h.authenticate(bad,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why))return false;
- bad=r;bad.payload[bad.size]=1;if(h.authenticate(bad,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why))return false;
- h.hashOk=false;if(h.authenticate(r,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why))return false;
- h.hashOk=true;h.pairOk=false;if(h.authenticate(r,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why)||out.sessionVerified)return false;
- h.pairOk=true;h.signatureOk=false;if(h.authenticate(r,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why)||out.sessionVerified)return false;
+ if(!h.authenticate(r,mosaico_gauge_contrast::sourceFixture,out,why)||!out.sessionVerified||out.actualImagesVerified||h.pairCalls!=1||h.signatureCalls!=1||h.pairBeforeSession)return false;
+ h.lease=false;out.sessionVerified=true;if(h.authenticate(r,mosaico_gauge_contrast::sourceFixture,out,why)||out.sessionVerified||h.pairCalls!=1)return false;
+ h.lease=true;h.physicalGood=false;if(h.authenticate(r,mosaico_gauge_contrast::sourceFixture,out,why)||out.sessionVerified)return false;h.physicalGood=true;
+ auto source=mosaico_gauge_contrast::sourceFixture;source[0]^=1;
+ if(h.authenticate(r,source,out,why)||out.sessionVerified)return false;
+ h.actualPhysical[5]^=1;if(h.authenticate(r,mosaico_gauge_contrast::sourceFixture,out,why))return false;h.actualPhysical=binding().mac;
+ auto bad=r;bad.nonce[0]^=1;if(h.authenticate(bad,mosaico_gauge_contrast::sourceFixture,out,why))return false;
+ bad=r;bad.binding[31]^=1;if(h.authenticate(bad,mosaico_gauge_contrast::sourceFixture,out,why))return false;
+ bad=r;bad.phase=2;if(h.authenticate(bad,mosaico_gauge_contrast::sourceFixture,out,why))return false;
+ bad=r;bad.sequence=2;if(h.authenticate(bad,mosaico_gauge_contrast::sourceFixture,out,why))return false;
+ bad=r;bad.payload[bad.size]=1;if(h.authenticate(bad,mosaico_gauge_contrast::sourceFixture,out,why))return false;
+ h.hashOk=false;if(h.authenticate(r,mosaico_gauge_contrast::sourceFixture,out,why))return false;
+ h.hashOk=true;h.pairOk=false;if(h.authenticate(r,mosaico_gauge_contrast::sourceFixture,out,why)||out.sessionVerified)return false;
+ h.pairOk=true;h.signatureOk=false;if(h.authenticate(r,mosaico_gauge_contrast::sourceFixture,out,why)||out.sessionVerified)return false;
  return true;
 }static_assert(cases());
 ''')
@@ -152,9 +157,9 @@ constexpr bool cases(){const auto r=packet();Harness h;Authenticated out{};const
     def test_actual_gate_separate_lease_both_images_and_changed_binding_clear(self):
         self.compile(self.prefix() + r'''
 constexpr bool cases(){Harness h;Authenticated out{};const char* why=nullptr;const auto r=packet();
- if(!h.allowedVersion("0.13.95-r23-mosaico-ota")||!h.allowedVersion("0.13.95-r24-mosaico-ota"))return false;
- if(h.allowedVersion("0.13.95-r21-mosaico-ota")||h.allowedVersion("0.13.95-r22-mosaico-ota")||h.allowedVersion("0.13.95-r19-mosaico-ota")||h.allowedVersion("0.13.95-r20-mosaico-ota")||h.allowedVersion("0.13.95-r17-mosaico-ota")||h.allowedVersion("0.13.95-r18-mosaico-ota")||h.allowedVersion("0.13.95-r25-mosaico-ota")||h.allowedVersion("0.13.95-r23-cold-draft"))return false;
- if(!h.authenticate(r,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why)||out.actualImagesVerified)return false;
+ if(!h.allowedVersion("0.13.95-r25-mosaico-ota")||!h.allowedVersion("0.13.95-r26-mosaico-ota"))return false;
+ if(h.allowedVersion("0.13.95-r23-mosaico-ota")||h.allowedVersion("0.13.95-r24-mosaico-ota")||h.allowedVersion("0.13.95-r21-mosaico-ota")||h.allowedVersion("0.13.95-r22-mosaico-ota")||h.allowedVersion("0.13.95-r19-mosaico-ota")||h.allowedVersion("0.13.95-r20-mosaico-ota")||h.allowedVersion("0.13.95-r17-mosaico-ota")||h.allowedVersion("0.13.95-r18-mosaico-ota")||h.allowedVersion("0.13.95-r27-mosaico-ota")||h.allowedVersion("0.13.95-r25-cold-draft"))return false;
+ if(!h.authenticate(r,mosaico_gauge_contrast::sourceFixture,out,why)||out.actualImagesVerified)return false;
  const auto good=out;if(!h.verifyActualImages(out,why)||!out.actualImagesVerified||h.actualCalls!=2)return false;
  out=good;h.lease=false;if(h.verifyActualImages(out,why)||out.sessionVerified||out.actualImagesVerified||h.actualCalls!=2)return false;
  h.lease=true;out=good;out.binding.originalGctEpoch++;if(h.verifyActualImages(out,why)||out.sessionVerified)return false;
@@ -244,7 +249,7 @@ constexpr int textCompare(const char* a,const char* b){while(*a&&*a==*b){++a;++b
 constexpr int textCompareN(const char* a,const char* b,size_t n){for(size_t i=0;i<n;++i){if(a[i]!=b[i])return 1;if(!a[i])return 0;}return 0;}
 constexpr int bytesCompare(const uint8_t* a,const uint8_t* b,size_t n){for(size_t i=0;i<n;++i)if(a[i]!=b[i])return 1;return 0;}
 struct Actual {
- static constexpr const char* Versions[2]={"0.13.95-r23-mosaico-ota","0.13.95-r24-mosaico-ota"};
+ static constexpr const char* Versions[2]={"0.13.95-r25-mosaico-ota","0.13.95-r26-mosaico-ota"};
  esp_partition_t part{};int state=ESP_OTA_IMG_VALID;bool ioOk=true,descOk=true,hashOk=true;
  bool badVersion=false,badProject=false,zeroElf=false,subscribed=true;unsigned descOrder[2]={0,1};
  unsigned reads=0,feeds=0,aborts=0;size_t bytes=0;
@@ -322,13 +327,87 @@ constexpr bool cases(){
         self.assertEqual(pair, raw)
         fragment = b'GCS1' + binding + len(sig).to_bytes(2, 'little') + sig
         self.assertLessEqual(len(fragment), 266)
-        self.assertEqual({p['image']['version'] for p in fixture.pairs}, {'0.13.95-r23-mosaico-ota', '0.13.95-r24-mosaico-ota'})
+        self.assertEqual({p['image']['version'] for p in fixture.pairs}, {'0.13.95-r25-mosaico-ota', '0.13.95-r26-mosaico-ota'})
         text = CPP.read_text()
         self.assertIn(capability.GCT_DIGEST, text)
         self.assertIn('mbedtls_pk_verify', text)
         self.assertIn('MosaicoOta::verifySignedImageDescriptor', text)
         self.assertIn('esp_ota_get_state_partition', text)
         self.assertIn('psa_hash_update', text)
+
+    def test_production_physical_EUI48_six_bytes_and_no_legacy_fallback(self):
+        self.compile(self.prefix() + r'''
+constexpr bool cases(){Harness h;std::array<uint8_t,6> out{};
+ if(!h.physicalMac(out)||out!=binding().mac)return false;
+ const std::array<uint8_t,6> legacy{0x30,0xed,0xa0,0xff,0xfe,0xf4};if(out==legacy)return false;
+ h.physicalGood=false;out.fill(9);if(h.physicalMac(out)||trial::nonzero(out))return false;
+ h.physicalGood=true;h.actualPhysical={};out.fill(9);if(h.physicalMac(out)||trial::nonzero(out))return false;
+ h.actualPhysical=binding().mac;h.actualPhysical[0]|=1;out.fill(9);return !h.physicalMac(out)&&!trial::nonzero(out);
+}static_assert(cases());
+''')
+
+    def test_real_old_session_public_key_vectors_native_auth_flow_not_active_roster(self):
+        # This is the preserved failed23/24 packet, not a new signature. Actual
+        # P256 is verified in Python with the production PUBLIC key only. RV32
+        # below executes production auth control flow using public SHA oracles;
+        # it is NOT claimed to execute SDK PSA/mbedTLS or actual flash IO.
+        import base64
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from ota_release import canonical_message
+        directory = ROOT / '.artifacts/private/mosaico/cold-r23-r24-session-signed-001'
+        if not directory.is_dir():
+            self.skipTest('preserved actual public packet not present in this checkout')
+        payload = (directory / 'session.bin').read_bytes()
+        b, wire, pair_raw, sig = capability.decode_payload(payload)
+        key = capability.public_key(ROOT / 'main/ota/ota_public_key.h')
+        pairs = json.loads(pair_raw)
+        self.assertEqual({p['image']['version'] for p in pairs}, {'0.13.95-r23-mosaico-ota','0.13.95-r24-mosaico-ota'})
+        for pair in pairs:
+            manifest = pair['image']
+            key.verify(base64.b64decode(manifest['signature']), canonical_message(manifest['size'],manifest['sha256'],manifest['version'],layout=manifest['layout']), ec.ECDSA(hashes.SHA256()))
+            message = ('MOSAICO-GAUGE-CONTRAST-CAP-v1\n'+capability.GCT_DIGEST+'\n'+manifest['version']+'\n'+str(manifest['size'])+'\n'+manifest['sha256']+'\n').encode()
+            key.verify(base64.b64decode(pair['signature']),message,ec.ECDSA(hashes.SHA256()))
+        message = capability.session_message(wire,pair_raw)
+        key.verify(sig,message,ec.ECDSA(hashes.SHA256()))
+        with self.assertRaises(InvalidSignature):
+            key.verify(sig[:-1]+bytes([sig[-1]^1]),message,ec.ECDSA(hashes.SHA256()))
+        with self.assertRaises(ValueError):
+            capability.validate_pair(pair_raw,key,[b'not-an-image',b'not-an-image'])
+        import runpy,hashlib
+        metadata = runpy.run_path(str(ROOT/'.artifacts/mosaico/cold-r23-r24-metadata-001.py'),run_name='public_fixture_only')
+        raw = metadata['backup_raw']((ROOT/metadata['BACKUP']).read_bytes())
+        source_input = capability.SOURCE_DOMAIN+bytes.fromhex(b['mac'])+struct.pack('<HHBIQ',0x220,3,4,19,19)+raw
+        self.assertEqual(hashlib.sha256(source_input).hexdigest(),b['source131_receipt_digest'])
+        inputs = [('RealSource',source_input),('RealWire',wire),('RealPair',pair_raw),('RealPacket',payload)]
+        cpparray=lambda data:'{'+','.join(str(v) for v in data)+'}'
+        constants = ''
+        for name,data in inputs:
+            constants += 'constexpr std::array<uint8_t,'+str(len(data))+'> '+name+'='+cpparray(data)+';\n'
+            constants += 'constexpr Digest '+name+'Hash='+cpparray(hashlib.sha256(data).digest())+';\n'
+        constants += 'constexpr std::array<uint8_t,16> RealNonce='+cpparray(bytes.fromhex(b['nonce']))+';\n'
+        prefix = self.prefix().replace('struct Harness {',constants+'struct Harness {\n unsigned digestCalls=0;')
+        original = 'constexpr bool sha256(const uint8_t* data,size_t size,Digest& out){out={};if(!hashOk||!data||!size)return false;out=toyHash(data,size);return true;}'
+        oracle = 'constexpr bool sha256(const uint8_t* data,size_t size,Digest& out){++digestCalls;out={};'
+        for name,data in inputs:
+            oracle += 'if(size=='+str(len(data))+'&&!compare(data,'+name+'.data(),size)){out='+name+'Hash;return true;}'
+        oracle += 'return false;}'
+        self.assertIn(original,prefix)
+        prefix = prefix.replace(original,oracle)
+        self.compile(prefix+r'''
+constexpr Record realRecord(){Record r{};r.phase=1;r.sequence=1;r.nonce=RealNonce;r.binding=RealWireHash;r.size=RealPacket.size();for(size_t i=0;i<RealPacket.size();++i)r.payload[i]=RealPacket[i];return r;}
+constexpr bool cases(){const auto packet=realRecord();Authenticated out{};const char* reason=nullptr;
+ Harness current;current.pairOk=false;
+ if(current.authenticate(packet,mosaico_gauge_contrast::sourceFixture,out,reason)||current.digestCalls!=4||current.signatureCalls!=1||current.pairCalls!=1||compareTextN(reason,"cold_auth_pair_signatures",64))return false;
+ Harness wrong;wrong.actualPhysical={0x30,0xed,0xa0,0xff,0xfe,0xf4};
+ if(wrong.authenticate(packet,mosaico_gauge_contrast::sourceFixture,out,reason)||wrong.digestCalls||compareTextN(reason,"cold_auth_shape_or_mac",64))return false;
+ Harness signature;signature.signatureOk=false;
+ if(signature.authenticate(packet,mosaico_gauge_contrast::sourceFixture,out,reason)||signature.pairCalls||compareTextN(reason,"cold_auth_session_signature",64))return false;
+ Harness source;auto bad=mosaico_gauge_contrast::sourceFixture;bad[0]^=1;
+ return !source.authenticate(packet,bad,out,reason)&&!source.digestCalls&&!compareTextN(reason,"cold_auth_complete_source_mismatch",64);
+}static_assert(cases());
+''')
 
     def test_real_sdk_s31_syntax_adapter_only_no_shared_outputs(self):
         db = ROOT / '.artifacts/mosaico/ota-build/compile_commands.json'
