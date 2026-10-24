@@ -84,7 +84,8 @@ bool Hal::gaugeNativeRecoveryEvidence(char* out,size_t size){
  if(accessLoad==ESP_OK)hex("access_v1",reinterpret_cast<const uint8_t*>(&access),sizeof(access));
  if(!ok)return false;
  const int extra=std::snprintf(out+used,size-used,"tx_v1_load=%d access_v1_load=%d ",int(txLoad),int(accessLoad));
- if(extra<0||size_t(extra)>=size-used)return false;used+=size_t(extra);
+ if(extra<0||size_t(extra)>=size-used)return false;
+ used+=size_t(extra);
  const int n=std::snprintf(out+used,size-used,"evidence_crc=%08lx crc_not_auth=1 readonly=1",static_cast<unsigned long>(native_recovery::digest(e)));
  return n>=0&&size_t(n)<size-used;
 }

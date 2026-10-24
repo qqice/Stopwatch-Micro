@@ -1828,7 +1828,8 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
             std::lock_guard<std::mutex> battery(battery_mutex);
             uint16_t op=0,dc=0,fcc=0;
             if(!gauge||!gauge_word(0x3a,op)) {
-                if(reason&&reasonSize)std::snprintf(reason,reasonSize,"blocked_standard_telemetry");return false;
+                if(reason&&reasonSize)std::snprintf(reason,reasonSize,"blocked_standard_telemetry");
+                return false;
             }
             sealed=configExitAccepted(op)&&((op>>1)&3)==3;
             alreadyNominal=sealed&&gauge_word(0x3c,dc)&&gauge_word(0x12,fcc)&&keepLearnedNominal(dc,fcc);
@@ -2386,7 +2387,8 @@ bool Hal::gaugeReconcileNominal(char* reason, size_t reasonSize)
     if(!lease.held){if(reason&&reasonSize)std::snprintf(reason,reasonSize,"blocked_ota_storage_lease");return false;}
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     if(!normal_gauge_fence_locked()){
-        if(reason&&reasonSize)std::snprintf(reason,reasonSize,"blocked_scale_recovery_required");return false;
+        if(reason&&reasonSize)std::snprintf(reason,reasonSize,"blocked_scale_recovery_required");
+        return false;
     }
     std::lock_guard<std::mutex> lock(battery_mutex);
     const auto report = [&](bool ok, const char* why) {
