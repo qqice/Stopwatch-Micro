@@ -53,11 +53,16 @@ char* strtok_r(char* value,const char*,char** save){char* p=value?value:*save;if
 struct Hal {__attribute__((noinline)) bool call(int action,char* out,size_t n){asm volatile(""::"r"(out),"r"(n):"memory");++halCalls;actionSeen=action;return true;}bool gaugeFactoryScaleStatus(char* p,size_t n){return call(0,p,n);}bool gaugeFactoryScalePrepare(char* p,size_t n){return call(1,p,n);}bool gaugeFactoryScaleImages(const char* proof,char* p,size_t n){return std::strlen(proof)<=1400&&call(2,p,n);}bool gaugeFactoryScaleApply(char* p,size_t n){return call(3,p,n);}bool gaugeFactoryScaleRestore(char* p,size_t n){return call(4,p,n);}bool gaugeFactoryScaleObservedField(size_t i,char* p,size_t n){indexSeen=i;return call(5,p,n);}bool gaugeFactoryScaleObservedPage(size_t i,char* p,size_t n){indexSeen=i;return call(6,p,n);}};
 static Hal hal;Hal& GetHAL(){return hal;}
 namespace GaugeDischargeTrace{struct NandBackend{static bool busy(){++nandCalls;return nandBusy;}};}
+enum class ConsoleStackTag{Outside};ConsoleStackTag consoleStackCommand(const char*){return ConsoleStackTag::Outside;}
+void consoleStackObserve(ConsoleStackTag,unsigned,bool){}
 struct SerialDebug{
  bool _reply_uart=false;std::array<char,1536> _line{},_uart_line{};size_t _line_length=0,_uart_line_length=0;bool _line_overflow=false,_uart_line_overflow=false;
  bool handleContrast(char*){return false;} // separately exercised by contrast integration
  bool handleCold(char*){return false;} // separately exercised by cold console integration
  bool handleFactoryScale(char*);void consume(char);
+ static constexpr size_t DiagnosticCapacity=1024;
+ char* diagnosticScratch(){static char buffer[DiagnosticCapacity];return buffer;}
+ bool handleStackBudget(const char*){return false;}bool handleSleepIo(const char*){return false;}bool handleGaugeTrace(const char*){return false;}
  bool handleMaintenanceRestart(const char*){return false;}
  bool handleCachedRead(const char* line){++cachedCalls;return !std::strcmp(line,"debug ota-health");}
  void handleLine(char*){++legacyCalls;}
@@ -135,10 +140,10 @@ class FactoryIntegrationTests(unittest.TestCase):
   check=rv32.function(native,'void native_recovery_check_sample_locked(');self.assertLess(check.index('factory_scale_present_locked'),check.index('scale_mutation_in_progress'))
   hal=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text();self.assertLess(hal.index('#include "mosaico_factory_audit.inc"'),hal.index('#include "mosaico_factory_scale_runtime.inc"'))
   for name in ['gaugeAccess','gaugeSetNominalCapacity','gaugeThresholdAudit','gaugeOcvMeasure','gaugeFccLimitRepair']:
-   body=rv32.function(hal,'bool Hal::'+name+'(');self.assertIn('scale_boot_fence_locked()',body)
-   if 'gauge_access_word(' in body:self.assertLess(body.index('scale_boot_fence_locked()'),body.index('gauge_access_word('))
+   body=rv32.function(hal,'bool Hal::'+name+'(');fence='normal_gauge_fence_locked()' if name in ['gaugeAccess','gaugeSetNominalCapacity'] else 'scale_boot_fence_locked()';self.assertIn(fence,body)
+   if 'gauge_access_word(' in body:self.assertLess(body.index(fence),body.index('gauge_access_word('))
   reconcile=rv32.function(hal,'bool Hal::gaugeReconcileNominal(')
-  self.assertLess(reconcile.index('factory_scale_present_locked()'),reconcile.index('gauge_load_journal('))
+  self.assertLess(reconcile.index('normal_gauge_fence_locked()'),reconcile.index('gauge_load_journal('))
   fence=rv32.function(runtime,'bool scale_boot_fence_locked(');self.assertLess(fence.index('scale_load_locked()'),fence.index('factory_scale_boot_fence_locked()'))
   missing=rv32.function(runtime,'bool scale_journal_missing_locked(');self.assertLess(missing.index('factory_scale_present_locked()'),missing.index('scale_load_locked()'))
   protection=rv32.function(trial,'bool Hal::gaugeScaleTrialActive(');self.assertIn('factory_scale_protected()',protection)

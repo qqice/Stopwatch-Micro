@@ -73,6 +73,18 @@ bool Hal::gaugeNativeRecoveryEvidence(char* out,size_t size){
  };
  hex("reload_v1",e.reload.data(),28);if(ok)hex("fcc_boot_v1",e.cold,48);if(ok)hex("fcc_fix_v1",e.runtime,48);
  if(!ok)return false;
+ // Additional read-only backup of the current normal transaction. The three
+ // historical blobs and their evidence_crc below remain byte-for-byte scoped
+ // exactly as before; malformed/missing current records expose only load codes.
+ const auto mac=GetHAL().getFactoryMac();
+ mosaico_gauge::Journal nominal{};mosaico_gauge::AccessJournal access{};
+ const auto txLoad=gauge_load_journal(nominal,mac.data());
+ const auto accessLoad=gauge_load_access(access,mac.data());
+ if(txLoad==ESP_OK)hex("tx_v1",reinterpret_cast<const uint8_t*>(&nominal),sizeof(nominal));
+ if(accessLoad==ESP_OK)hex("access_v1",reinterpret_cast<const uint8_t*>(&access),sizeof(access));
+ if(!ok)return false;
+ const int extra=std::snprintf(out+used,size-used,"tx_v1_load=%d access_v1_load=%d ",int(txLoad),int(accessLoad));
+ if(extra<0||size_t(extra)>=size-used)return false;used+=size_t(extra);
  const int n=std::snprintf(out+used,size-used,"evidence_crc=%08lx crc_not_auth=1 readonly=1",static_cast<unsigned long>(native_recovery::digest(e)));
  return n>=0&&size_t(n)<size-used;
 }

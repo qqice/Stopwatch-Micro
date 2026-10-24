@@ -49,7 +49,7 @@ static_assert(cases(), "factory SEC2 guards");
    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
  def test_actual_flow_latch_normalize_open_finally_order(self):
   source=self.boot_source()
-  tokens=['gauge_store_reload(latch, mac.data())','gauge_boot_info.attempted = true',
+  tokens=['gauge_load_normal_target(normalTarget)','gauge_boot_info.attempted = true',
    'if (normalizePriorSealed)', 'gaugeAccess(GaugeAccessAction::Restore, normalizeReason',
    '} reloadScope;', 'gaugeAccess(GaugeAccessAction::Open, phaseReason',
    'gaugeSetNominalCapacity(', 'gaugeAccess(GaugeAccessAction::Restore, closeReason']
@@ -57,7 +57,7 @@ static_assert(cases(), "factory SEC2 guards");
   self.assertEqual(offsets,sorted(offsets))
   normalize=source.split('if (normalizePriorSealed)',1)[1].split('struct BootReloadScope',1)[0]
   self.assertEqual(normalize.count('gaugeAccess('),1)
-  self.assertIn('ReloadState::Failed',normalize)
+  self.assertNotIn('gauge_store_reload',normalize)
   self.assertIn('boot_critical_normalize_failed_no_retry',normalize)
   self.assertIn('return finish(Status::Critical, details)',normalize)
   for token in ['configExitAccepted(observedOperation)', 'gauge_identity()',
@@ -69,7 +69,7 @@ static_assert(cases(), "factory SEC2 guards");
   self.assertNotIn('gaugeAccess(',admission)
   self.assertLess(admission.index('keepLearnedNominal('),admission.index('bootFactorySecurityEligible('))
   self.assertLess(admission.index('!sample.valid || !sample.capacityValid'),admission.index('keepLearnedNominal('))
-  for token in ['latch.state != static_cast<uint8_t>(ReloadState::Completed)',
+  for token in ['gauge_load_normal_target(normalTarget)', 'normalTarget!=NominalMah',
    'gauge_load_journal(nominal, mac.data())', 'gauge_load_access(access, mac.data())',
    '!bootHistoryEligible(', '!bootFactorySecurityEligible(', '!gauge_access_preflight(', '!gauge_identity()']:
    self.assertIn(token,admission)
@@ -92,7 +92,7 @@ static_assert(cases(), "factory SEC2 guards");
   # status/engine transport and boot-capture tests. Their global-cache RAII
   # cannot be member-injected into this coordinator-only constexpr fixture.
   start=body.index('    // Capture only initialized pre-write evidence.')
-  end=body.index('    ReloadJournal latch{};',start)
+  end=body.index('    bool normalizePriorSealed = false;',start)
   body=body[:start]+body[end:]
   scope='''struct BootReloadScope {
         BootReloadScope() { boot_factory_reload_scope = true; }
@@ -100,7 +100,8 @@ static_assert(cases(), "factory SEC2 guards");
     } reloadScope;'''
   self.assertIn(scope,body)
   body=body.replace(scope,'struct BootReloadScope {} reloadScope;').replace('std::','mock::')
-  # Dependency injection only: route the new profile reader/coordinator into
+  body=body.replace('NormalGaugeStorageLease lease;', 'MockLease lease{*this};')
+  # Dependency injection only: route the old profile reader/coordinator into
   # this fixture. Its real backend/model are exercised by their own tests.
   body=body.replace('GaugeFccBackend reader;', 'GaugeFccBackend reader(*this);')
   body=body.replace('GaugeFccBackend backend(permission);', 'GaugeFccBackend backend(*this,permission);')
@@ -111,6 +112,8 @@ namespace mock {
 struct mutex {}; struct recursive_mutex {};
 template<class T> struct lock_guard { constexpr lock_guard(T&) {} };
 template<class... T> constexpr int snprintf(char*, size_t, const char*, T...) {return 0;}
+constexpr int strncmp(const char* a,const char* b,size_t n){for(size_t i=0;i<n;++i){if(a[i]!=b[i])return a[i]<b[i]?-1:1;if(!a[i])return 0;}return 0;}
+constexpr int memcmp(const mosaico_gauge::AccessJournal* a,const mosaico_gauge::AccessJournal* b,size_t){return a->state==b->state&&a->unsealAttempted==b->unsealAttempted&&a->fullAttempted==b->fullAttempted?0:1;}
 constexpr void memcpy(uint8_t* to, const uint8_t* from, size_t size) {for(size_t i=0;i<size;++i)to[i]=from[i];}
 }
 constexpr int ESP_OK=0, ESP_ERR_NVS_NOT_FOUND=1;
@@ -132,9 +135,9 @@ struct GaugePair {uint16_t design=3000,fcc=3000;};
 struct Fixture {
  using GaugeBootReloadStatus=Hal::GaugeBootReloadStatus;
  using GaugeAccessAction=Hal::GaugeAccessAction;
- enum Fault {None,NormalizeFail,PrepareFail,OpenAbortFail,OpenAbortSuccess,FinalStoreFail,ReadFail,UnknownHistory,LowVoltage,Config,Cal,Learned,ColdSuccess,ColdFail,RuntimeInvalid,RuntimeUnverified,ColdFinalStoreFail};
+ enum Fault {None,NormalizeFail,PrepareFail,OpenAbortFail,OpenAbortSuccess,FinalStoreFail,ReadFail,UnknownHistory,LowVoltage,Config,Cal,Learned,ColdSuccess,ColdFail,RuntimeInvalid,RuntimeUnverified,ColdFinalStoreFail,Historical,HistoricalBad,PendingLatch,BusyLease,FenceDirty,TargetUnset,TargetCorrupt,ApplyFail,PreflightBlocked,PreflightChanged,AccessUnknown,TxUnresolved};
  Fault fault; bool gauge=true, gauge_access_cleanup_attempted=false,gauge_access_cleanup_succeeded=false;
- bool durable=false,badColdMode=false,seenAttemptedPendingSec3=false; unsigned stores=0,opens=0,restores=0,seals=0,applies=0,coldRuns=0,profileReads=0;
+ bool durable=false,badColdMode=false,seenAttemptedPendingSec3=false; uint16_t normalTarget=65; unsigned targetStores=0,stores=0,opens=0,restores=0,seals=0,applies=0,coldRuns=0,profileReads=0;
  ReloadJournal persisted{}; Journal nominal{}; AccessJournal access{};
  mock::mutex battery_mutex; mock::recursive_mutex gauge_transaction_mutex;
  Hal::GaugeBootReloadInfo gauge_boot_info;
@@ -164,12 +167,22 @@ struct Fixture {
    return mosaico_fcc_limit::Result::Verified;
   }
  };
+ struct MockLease { bool held; constexpr MockLease(Fixture& f):held(f.fault!=BusyLease){} };
+ constexpr bool normal_gauge_fence_locked(){return fault!=FenceDirty;}
+ constexpr int gauge_load_normal_target(uint16_t& t){t=normalTarget;return fault==TargetCorrupt?2:ESP_OK;}
+ constexpr bool gauge_store_normal_target(uint16_t t){++targetStores;if(fault==PrepareFail||(fault==FinalStoreFail&&targetStores>1))return false;normalTarget=t;return true;}
  constexpr Fixture(Fault f,bool sec2=false):fault(f) {
+  if(f==Historical||f==HistoricalBad||f==PendingLatch){
+   durable=true;persisted.state=static_cast<uint8_t>(f==PendingLatch?ReloadState::Pending:ReloadState::Failed);
+  }
   nominal.action=1;nominal.state=static_cast<uint8_t>(State::VerifiedSealedPrior3);
   nominal.targetDesign=nominal.targetFcc=nominal.lastDesign=nominal.lastFcc=65;
   nominal.originalDesign=nominal.originalFcc=3000;nominal.changedFcc=1;
   access.state=static_cast<uint8_t>(AccessState::Restored);access.priorSecurity=access.lastSecurity=3;
   access.unsealAttempted=access.unsealVerified=access.fullAttempted=access.fullVerified=1;
+  if(f==AccessUnknown)access.state=static_cast<uint8_t>(AccessState::Failed);
+  if(f==TxUnresolved)nominal.state=static_cast<uint8_t>(State::Pending);
+  if(f==TargetUnset)normalTarget=0;
   if(sec2)battery_telemetry.operationStatus=0xa4;
   if(f==ReadFail)battery_telemetry.valid=false;
   if(f==Config)battery_telemetry.operationStatus|=0x400;
@@ -187,13 +200,18 @@ struct Fixture {
  constexpr int gauge_load_access(AccessJournal& j,const uint8_t*){j=access;return ESP_OK;}
  constexpr bool gauge_store_journal(Journal& j,const uint8_t*){nominal=j;return true;}
  constexpr void sample_battery_locked(bool){}
- constexpr bool gauge_word(int,uint16_t& op){op=battery_telemetry.operationStatus;return fault!=ReadFail;}
+ constexpr bool gauge_word(int reg,uint16_t& op){op=reg==0x3c?battery_telemetry.designMah:reg==0x12?battery_telemetry.fullMah:battery_telemetry.operationStatus;return fault!=ReadFail;}
  constexpr bool gauge_identity(){return true;}
  constexpr bool gauge_access_preflight(uint16_t& op,GaugePair& p,bool){op=battery_telemetry.operationStatus;p.design=battery_telemetry.designMah;p.fcc=battery_telemetry.fullMah;return fault!=LowVoltage;}
- constexpr bool gaugeAccess(GaugeAccessAction action,char*,size_t) {
+ constexpr bool gaugeAccess(GaugeAccessAction action,char* reason,size_t) {
   gauge_access_cleanup_attempted=gauge_access_cleanup_succeeded=false;
   if(action==GaugeAccessAction::Open){
    ++opens;
+   if(fault==PreflightBlocked||fault==PreflightChanged){
+    constexpr char why[]="blocked_preflight";for(unsigned i=0;i<sizeof(why);++i)reason[i]=why[i];
+    if(fault==PreflightChanged)access.state=static_cast<uint8_t>(AccessState::Pending);
+    return false;
+   }
    if(fault==OpenAbortFail || fault==OpenAbortSuccess){
     gauge_access_cleanup_attempted=true;++seals;
     gauge_access_cleanup_succeeded=fault==OpenAbortSuccess;
@@ -207,50 +225,230 @@ struct Fixture {
   gauge_access_cleanup_succeeded=true;battery_telemetry.operationStatus=0xa6;return true;
  }
  constexpr bool gaugeSetNominalCapacity(uint16_t,uint16_t,bool,char*,size_t){
-  ++applies;battery_telemetry.designMah=battery_telemetry.fullMah=battery_telemetry.remainingMah=65;return true;
+  ++applies;if(fault==ApplyFail)return false;battery_telemetry.designMah=battery_telemetry.fullMah=battery_telemetry.remainingMah=65;return true;
  }
  constexpr GaugeBootReloadStatus run(char* reason=nullptr,size_t reasonSize=0) BODY
 };
 constexpr bool faults(){
  using F=Fixture;using S=Hal::GaugeBootReloadStatus;
- F normalize(F::NormalizeFail,true);if(normalize.run()!=S::Critical || normalize.seals!=1 || normalize.opens || normalize.restores!=1 || normalize.applies || normalize.persisted.state!=static_cast<uint8_t>(ReloadState::Failed))return false;
- F prepare(F::PrepareFail,true);if(prepare.run()!=S::Critical || prepare.seals || prepare.opens || prepare.restores || prepare.applies)return false;
- F abort(F::OpenAbortFail);if(abort.run()!=S::Critical || abort.seals!=1 || abort.restores || abort.opens!=1 || abort.applies || abort.persisted.state!=static_cast<uint8_t>(ReloadState::Failed))return false;
- F closed(F::OpenAbortSuccess);if(closed.run()!=S::Critical || closed.seals!=1 || closed.restores || closed.applies)return false;
- F coldAbort(F::OpenAbortFail,true);if(coldAbort.run()!=S::Critical || coldAbort.seals!=2 || coldAbort.restores!=1 || coldAbort.applies)return false;
- F final(F::FinalStoreFail);if(final.run()!=S::Critical || final.persisted.state!=static_cast<uint8_t>(ReloadState::Pending))return false;
- final.gauge_boot_info={};unsigned openBefore=final.opens;if(final.run()!=S::Critical || final.opens!=openBefore)return false;
- for(auto f:{F::ReadFail,F::UnknownHistory,F::LowVoltage,F::Config,F::Cal,F::Learned}){
-  F readonly(f,true);readonly.run();if(readonly.seals || readonly.opens || readonly.restores || readonly.applies || readonly.stores)return false;
+ F normalize(F::NormalizeFail,true);if(normalize.run()!=S::Critical || normalize.seals!=1 || normalize.opens || normalize.restores!=1 || normalize.applies || normalize.normalTarget!=65)return false;
+ F abort(F::OpenAbortFail);if(abort.run()!=S::Critical || abort.seals!=1 || abort.restores || abort.opens!=1 || abort.applies || abort.normalTarget!=65)return false;
+ F closed(F::OpenAbortSuccess);if(closed.run()!=S::Critical || closed.seals!=1 || closed.restores || closed.applies||closed.normalTarget!=65)return false;
+ F failed(F::ApplyFail);if(failed.run()!=S::Critical||failed.applies!=1||failed.restores!=1||failed.normalTarget!=65)return false;
+ const auto prior=failed.opens;if(failed.run()!=S::Critical||failed.opens!=prior)return false;
+ for(auto f:{F::ReadFail,F::UnknownHistory,F::LowVoltage,F::Config,F::Cal,F::Learned,F::TargetUnset,F::TargetCorrupt,F::BusyLease,F::FenceDirty,F::AccessUnknown,F::TxUnresolved}){
+  F readonly(f,true);readonly.run();if(readonly.seals || readonly.opens || readonly.restores || readonly.applies || readonly.stores||readonly.targetStores)return false;
  }
- F good(F::None,true);return good.run()==S::Applied && good.opens==1 && good.applies==1 && good.seals==2 && good.restores==2;
+ F untouched(F::PreflightBlocked);if(untouched.run()!=S::Deferred||untouched.restores||untouched.applies||untouched.normalTarget!=65||untouched.gauge_boot_info.attempted)return false;
+ F changed(F::PreflightChanged);if(changed.run()!=S::Critical||changed.restores!=1||changed.applies||changed.normalTarget!=65)return false;
+ F good(F::None,true);return good.run()==S::Applied && good.opens==1 && good.applies==1 && good.seals==2 && good.restores==2&&good.normalTarget==65&&!good.targetStores;
 }
-static_assert(faults(), "actual boot coordinator fault injection");
-constexpr bool coldRoutes(){
+static_assert(faults(), "actual normal boot fault injection: target survives deferrals, sameboot failure no replay");
+constexpr bool normalRoutes(){
  using F=Fixture;using S=Hal::GaugeBootReloadStatus;
- F cold(F::ColdSuccess);if(cold.run()!=S::Applied||cold.coldRuns!=1||!cold.seenAttemptedPendingSec3||
-  cold.opens||cold.applies||cold.restores||cold.seals||cold.badColdMode||cold.stores!=2||
-  cold.persisted.state!=static_cast<uint8_t>(ReloadState::Completed))return false;
- if(cold.run()!=S::Applied||cold.coldRuns!=1||cold.stores!=2)return false;
- F sec2(F::ColdSuccess,true);if(sec2.run()!=S::Applied||sec2.coldRuns!=1||!sec2.seenAttemptedPendingSec3||
-  sec2.opens||sec2.applies||sec2.restores!=1||sec2.seals!=1)return false;
- for(auto fault:{F::RuntimeInvalid,F::RuntimeUnverified,F::ColdFail}){
-  F blocked(fault);if(blocked.run()!=S::Critical||blocked.opens||blocked.applies||blocked.restores||blocked.seals||
-   blocked.persisted.state!=static_cast<uint8_t>(ReloadState::Failed)||blocked.stores!=2)return false;
-  if(blocked.coldRuns!=(fault==F::ColdFail?1U:0U))return false;
+ for(auto f:{F::ColdSuccess,F::ColdFail,F::RuntimeInvalid,F::RuntimeUnverified,F::ColdFinalStoreFail,F::Historical,F::HistoricalBad,F::PendingLatch}){
+  F normal(f);if(normal.run()!=S::Applied||normal.coldRuns||normal.profileReads||normal.stores||normal.opens!=1||normal.applies!=1||normal.normalTarget!=65)return false;
+  const auto opens=normal.opens;
+  if(normal.run()!=S::Applied||normal.opens!=opens)return false;
  }
- F ack(F::ColdFinalStoreFail);if(ack.run()!=S::Critical||ack.coldRuns!=1||ack.opens||ack.applies||
-  ack.persisted.state!=static_cast<uint8_t>(ReloadState::Pending))return false;
- ack.gauge_boot_info={};if(ack.run()!=S::Critical||ack.coldRuns!=1)return false;
  return true;
 }
-static_assert(coldRoutes(), "actual cold hook replaces legacy, authenticates permission and finalizes latch");
+static_assert(normalRoutes(), "old failure/profile records not normal authority and never overwritten");
 '''
   with tempfile.TemporaryDirectory() as directory:
    source=Path(directory)/'boot_faults.cpp'
    source.write_text('#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').as_posix()+'"\n#include "'+(ROOT/'main/hal/mosaico/mosaico_fcc_limit_journal_codec.h').as_posix()+'"\n'+harness.replace('BODY',body),encoding='utf8')
    result=subprocess.run([compiler,'-std=c++17','-fsyntax-only',str(source)],capture_output=True,text=True)
    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+ def test_actual_sealed_apply_single_owner_finally(self):
+  compiler=shutil.which('g++') or shutil.which('clang++')
+  if not compiler:
+   found=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+   compiler=str(found[-1]) if found else None
+  if not compiler:self.skipTest('C++ compiler unavailable')
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
+  actual=source.split('bool Hal::gaugeSetNominalCapacity(',1)[1].split('    std::lock_guard<std::mutex> lock(battery_mutex);',1)[0]
+  actual=actual[actual.index('{')+1:].replace('std::','mock::').replace('NormalGaugeStorageLease lease;', 'MockLease lease{*this};').replace('MosaicoOta::busy()', 'otaBusy')
+  harness=r"""
+namespace mock {struct mutex{};struct recursive_mutex{};template<class T>struct lock_guard{constexpr lock_guard(T&){} };template<class...T>constexpr int snprintf(char*,size_t,const char*,T...){return 0;} }
+struct Fixture {
+ enum class GaugeAccessAction {Open,Restore};enum Fault{None,NoKeys,UnknownKeys,WriteFail,CloseFail,ReconcileFail,BusyAfterOpen};
+ Fault fault=None;bool otaBusy=false,stable=true,gauge=true,gauge_access_cleanup_attempted=false,gauge_access_cleanup_succeeded=false;
+ uint16_t op=0xa6,dc=3000,fcc=3000,target=0;unsigned depth=0,opens=0,writes=0,closes=0,seals=0,reconciles=0;bool ownerViolation=false;
+ mock::mutex battery_mutex;mock::recursive_mutex gauge_transaction_mutex;
+ struct MockLease {Fixture& f;bool held;constexpr MockLease(Fixture& v):f(v),held(v.depth||!v.otaBusy){if(held)++f.depth;}constexpr ~MockLease(){if(held)--f.depth;}};
+ constexpr bool normal_gauge_fence_locked(){return stable;}
+ constexpr bool gauge_word(int r,uint16_t& v){v=r==0x3a?op:r==0x3c?dc:fcc;return true;}
+ constexpr bool gaugeAccess(GaugeAccessAction action,char*,size_t){
+  if(!depth)ownerViolation=true;
+  gauge_access_cleanup_attempted=gauge_access_cleanup_succeeded=false;
+  if(action==GaugeAccessAction::Open){++opens;if(fault==NoKeys)return false;
+   if(fault==UnknownKeys){gauge_access_cleanup_attempted=true;++seals;return false;}
+   op=0xa2;if(fault==BusyAfterOpen)otaBusy=true;return true;
+  }
+  ++closes;++seals;if(fault==CloseFail)return false;op=0xa6;return true;
+ }
+ constexpr bool gaugeReconcileNominal(char*,size_t){if(!depth)ownerViolation=true;++reconciles;if(fault==ReconcileFail)return false;target=65;return true;}
+ constexpr bool gaugeSetNominalCapacity(uint16_t expectedOld=3000,uint16_t target65=65,bool restore=false,char* reason=nullptr,size_t reasonSize=0){
+ ACTUAL
+  if(!depth)ownerViolation=true;++writes;if(fault==WriteFail)return false;dc=fcc=65;return true;
+ }
+};
+constexpr bool check(){
+ Fixture good;if(!good.gaugeSetNominalCapacity()||good.opens!=1||good.writes!=1||good.closes!=1||good.seals!=1||good.reconciles!=1||good.target!=65||good.depth||good.ownerViolation)return false;
+ if(!good.gaugeSetNominalCapacity()||good.opens!=1||good.writes!=1||good.closes!=1)return false;
+ Fixture fa;fa.op=0xa2;if(!fa.gaugeSetNominalCapacity()||fa.opens||fa.closes||fa.writes!=1)return false;
+ for(auto fault:{Fixture::NoKeys,Fixture::UnknownKeys,Fixture::WriteFail,Fixture::CloseFail,Fixture::ReconcileFail,Fixture::BusyAfterOpen}){
+  Fixture f;f.fault=fault;if(f.gaugeSetNominalCapacity()||f.depth||f.ownerViolation||f.target)return false;
+  if(fault==Fixture::NoKeys&&(f.writes||f.closes||f.seals))return false;
+  if(fault==Fixture::UnknownKeys&&(f.writes||f.closes||f.seals!=1))return false;
+  if(fault==Fixture::BusyAfterOpen&&(f.writes||f.closes!=1||f.seals!=1))return false;
+  if(fault==Fixture::WriteFail&&(f.writes!=1||f.closes!=1||f.reconciles))return false;
+ }
+ return true;
+}
+static_assert(check(),"actual SEALED wrapper one owner, finally once, no reopen/retry, OTA after Open still seals");
+""".replace('ACTUAL',actual)
+  with tempfile.TemporaryDirectory() as directory:
+   path=Path(directory)/'sealed.cpp';path.write_text('#include <initializer_list>\n#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').as_posix()+'"\n'+harness)
+   result=subprocess.run([compiler,'-std=c++20','-fsyntax-only',str(path)],capture_output=True,text=True)
+   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+ def test_normal_reload_uses_existing_physical_not_soc_gate(self):
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
+  full=source.split('bool gauge_quiet_full(',1)[1].split('bool gauge_write_field(',1)[0]
+  boot=full.split('if (ok && boot_factory_reload_scope',1)[1].split('return ok &&',1)[0]
+  self.assertIn('bootReloadPhysical(operation, mv, temperature',boot)
+  self.assertNotIn('soc >=',boot)
+  access=source.split('bool gauge_access_preflight(',1)[1].split('uint8_t gauge_observed_security()',1)[0]
+  boot=access.split('if (boot_factory_reload_scope || bootReadonlyProbe)',1)[1].split('return mosaico_gauge::quietAccess',1)[0]
+  self.assertIn('bootReloadPhysical(operation, mv, temperature',boot)
+  self.assertNotIn('soc >=',boot)
+  self.assertLess(self.boot_source().index('keepLearnedNominal('),self.boot_source().index('gaugeAccess('))
+ def test_actual_normal_policy_native65(self):
+  compiler=shutil.which('g++') or shutil.which('clang++')
+  if not compiler:
+   found=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+   compiler=str(found[-1]) if found else None
+  if not compiler:self.skipTest('C++ compiler unavailable')
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
+  actual=source.split('Hal::BatteryTelemetry Hal::batteryPolicyTelemetry(bool refresh)',1)[1].strip()
+  self.assertTrue(actual.endswith('}'))
+  actual=actual.replace('std::','mock::')
+  harness=r"""
+namespace mock {struct recursive_mutex{};constexpr int try_to_lock=0;template<class T>struct unique_lock{constexpr unique_lock(T&,int){} constexpr bool owns_lock(){return true;}};}
+struct Fixture {
+ struct BatteryTelemetry {bool valid=true,capacityValid=true,nominalConfigured=true,knownSafetyCalibrationMismatch=false;
+  int16_t currentMa=-25,averageCurrentMa=-25;uint16_t remainingMah=20,fullMah=65,designMah=65,operationStatus=0xa6;};
+ mosaico_gauge_physical::Snapshot<BatteryTelemetry> snap{};
+ bool stable=true,missing=false;uint16_t normal_gauge_target=65;mock::recursive_mutex gauge_transaction_mutex;
+ constexpr auto physicalBatteryTelemetry(bool){return snap;}
+ constexpr bool normal_gauge_fence_locked(){return stable;}
+ constexpr bool scale_journal_missing_locked(){return missing;}
+ constexpr BatteryTelemetry run(bool refresh=false) ACTUAL
+};
+constexpr bool check(){
+ Fixture good;good.snap.context.phase=mosaico_gauge_physical::Phase::Original;
+ auto result=good.run();if(!result.valid||!result.capacityValid||!result.nominalConfigured||result.currentMa!=-25||result.remainingMah!=20)return false;
+ Fixture unset;unset.normal_gauge_target=0;if(unset.run().valid)return false;
+ Fixture old;old.normal_gauge_target=0;old.missing=true;if(!old.run().valid)return false;
+ Fixture active;active.stable=false;if(active.run().valid)return false;
+ Fixture uncertain;uncertain.snap.context.verified=true;if(uncertain.run().valid)return false;
+ Fixture unsafe;unsafe.snap.native.knownSafetyCalibrationMismatch=true;if(unsafe.run().valid)return false;
+ Fixture factory;factory.snap.native.nominalConfigured=false;factory.snap.native.designMah=3000;if(factory.run().valid)return false;
+ return true;
+}
+static_assert(check(),"actual native65 policy supports normal target without publishing unit factor; dirty/unknown/factory rejected");
+""".replace('ACTUAL',actual)
+  with tempfile.TemporaryDirectory() as directory:
+   path=Path(directory)/'policy.cpp';path.write_text('#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').as_posix()+'"\n#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_physical_model.h').as_posix()+'"\n'+harness)
+   result=subprocess.run([compiler,'-std=c++17','-fsyntax-only',str(path)],capture_output=True,text=True)
+   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+ def test_actual_normal_setting_failures(self):
+  compiler=shutil.which('g++') or shutil.which('clang++')
+  if not compiler:
+   found=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+   compiler=str(found[-1]) if found else None
+  if not compiler:self.skipTest('C++ compiler unavailable')
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
+  actual=source[source.index('esp_err_t gauge_load_normal_target('):source.index('bool gauge_rollback(')]
+  actual=actual.replace('esp_err_t gauge_load_normal_target(', 'constexpr esp_err_t gauge_load_normal_target(').replace('bool gauge_store_normal_target(', 'constexpr bool gauge_store_normal_target(')
+  harness=r"""
+using esp_err_t=int;using nvs_handle_t=int;
+constexpr int ESP_OK=0,ESP_FAIL=2,ESP_ERR_NVS_NOT_FOUND=1,NVS_READONLY=0,NVS_READWRITE=1;
+struct Fixture {
+ enum Fault {None,OpenRead,OpenWrite,Get,Set,Commit,WrongReadback};Fault fault=None;
+ uint16_t value=0,normal_gauge_target=0;unsigned sets=0,commits=0;bool wrote=false;
+ constexpr int nvs_open(const char*,int mode,int* h){*h=1;return (fault==OpenRead&&mode==0)||(fault==OpenWrite&&mode==1)?2:0;}
+ constexpr int nvs_get_u16(int,const char*,uint16_t* v){if(fault==Get)return 2;*v=fault==WrongReadback&&wrote?3000:value;return 0;}
+ constexpr int nvs_set_u16(int,const char*,uint16_t v){++sets;if(fault==Set)return 2;value=v;wrote=true;return 0;}
+ constexpr int nvs_commit(int){++commits;return fault==Commit?2:0;}
+ constexpr void nvs_close(int){}
+ ACTUAL
+};
+constexpr bool check(){
+ Fixture f;uint16_t v=999;if(f.gauge_load_normal_target(v)||v)return false;
+ if(!f.gauge_store_normal_target(65)||f.value!=65||f.commits!=1)return false;
+ if(!f.gauge_store_normal_target(0)||f.value)return false;
+ const auto sets=f.sets;if(f.gauge_store_normal_target(3000)||f.sets!=sets)return false;
+ f.value=3000;if(f.gauge_load_normal_target(v)!=ESP_FAIL)return false;
+ for(auto fault:{Fixture::OpenRead,Fixture::OpenWrite,Fixture::Get,Fixture::Set,Fixture::Commit,Fixture::WrongReadback}){
+  Fixture b;b.fault=fault;if(b.gauge_store_normal_target(65))return false;
+ }
+ return true;
+}
+static_assert(check(),"actual normal target strict values, commit/readback and NVS failure rejection");
+""".replace('ACTUAL',actual)
+  with tempfile.TemporaryDirectory() as directory:
+   path=Path(directory)/'target.cpp';path.write_text('#include <initializer_list>\n#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').as_posix()+'"\n'+harness)
+   result=subprocess.run([compiler,'-std=c++17','-fsyntax-only',str(path)],capture_output=True,text=True)
+   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+ def test_actual_storage_lease_scoped(self):
+  compiler=shutil.which('g++') or shutil.which('clang++')
+  if not compiler:
+   found=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+   compiler=str(found[-1]) if found else None
+  if not compiler:self.skipTest('C++ compiler unavailable')
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
+  actual='struct NormalGaugeStorageLease {'+source.split('struct NormalGaugeStorageLease {',1)[1].split('\n};',1)[0]+'\n};'
+  actual=actual.replace('NormalGaugeStorageLease() {','Api& api; constexpr NormalGaugeStorageLease(Api& a):api(a) {').replace('~NormalGaugeStorageLease()', 'constexpr ~NormalGaugeStorageLease()').replace('MosaicoOta::','api.')
+  harness=r"""
+struct Api {bool owner=false,ota=false,health=false,admit=true;unsigned acquired=0,released=0;
+ constexpr bool currentTaskOwnsStorageLease(){return owner;}
+ constexpr bool busy(){return ota;} constexpr bool healthPending(){return health;}
+ constexpr bool tryStorageLease(){++acquired;return admit;}
+ constexpr void releaseStorageLease(){++released;}
+};
+ACTUAL
+constexpr bool check(){
+ Api a;{NormalGaugeStorageLease l(a);if(!l.held||a.acquired!=1||a.released)return false;}if(a.released!=1)return false;
+ for(int i=0;i<3;++i){Api b;b.ota=i==0;b.health=i==1;b.admit=false;{NormalGaugeStorageLease l(b);if(l.held)return false;}
+ if(b.released||b.acquired!=(i==2?1:0))return false;}
+ Api nested;nested.owner=nested.ota=true;{NormalGaugeStorageLease l(nested);if(!l.held||l.acquired)return false;}if(nested.released||nested.acquired)return false;
+ return true;
+}
+static_assert(check(),"production lease is nonblocking, OTA/health gated, exactly released");
+""".replace('ACTUAL',actual)
+  with tempfile.TemporaryDirectory() as directory:
+   path=Path(directory)/'lease.cpp';path.write_text(harness)
+   result=subprocess.run([compiler,'-std=c++20','-fsyntax-only',str(path)],capture_output=True,text=True)
+   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+ def test_normal_storage_and_no_profile_writer(self):
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
+  for name in ['bool Hal::gaugeAccess(', 'bool Hal::gaugeSetNominalCapacity(', 'Hal::GaugeBootReloadStatus Hal::gaugeBootReload(']:
+   block=source.split(name,1)[1].split('\n}',1)[0]
+   self.assertLess(block.index('NormalGaugeStorageLease lease'),block.index('transaction(gauge_transaction_mutex)'))
+   self.assertIn('lease.held',block)
+   self.assertIn('normal_gauge_fence_locked()',block)
+  boot=self.boot_source()
+  for forbidden in ['GaugeFccBackend','mosaico_fcc_limit::Coordinator','coldRuns','0x000C','0x0041','0x929B']:
+   self.assertNotIn(forbidden,boot)
+  self.assertNotIn('gauge_store_reload',boot)
+  self.assertNotIn('gauge_load_reload',boot)
+  self.assertNotIn('gauge_store_normal_target(',boot)
+  helper=source.split('bool normal_gauge_fence_locked()\n{',1)[1].split('bool cold_poll_supervisor()',1)[0]
+  for token in ['fallbackAllowed()', 'protectedState()', 'factory_scale_maintenance_cached_safe_locked()', 'contrast_maintenance_cached_safe_locked()', 'Phase::Original']:
+   self.assertIn(token,helper)
+  self.assertNotIn('scale_boot_fence_locked()',helper)
  def test_access_abort_reports_cleanup_ownership(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
   access=source.split('bool Hal::gaugeAccess(',1)[1].split('void Hal::i2c_init()',1)[0]

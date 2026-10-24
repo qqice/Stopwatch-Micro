@@ -33,6 +33,10 @@ static bool scale_mutation_in_progress=false,busy=false,validApp=true,gate=true,
 static int64_t now=1000000;static int nvsWrites=0,keys=0,paramWrites=0,reads=0,fault=0,wireReads=0;
 static uint16_t op=0xa6,dc=65,fcc=65,rm=50,soc=80,mv=4100,temp=3000;static int16_t current=0,average=0;
 static Evidence disk;
+static mosaico_gauge::Journal normalDisk{};static mosaico_gauge::AccessJournal accessDisk{};
+int gauge_load_journal(mosaico_gauge::Journal& j,const uint8_t* mac){j=normalDisk;return mosaico_gauge::validJournal(j,mac)?0:2;}
+int gauge_load_access(mosaico_gauge::AccessJournal& j,const uint8_t* mac){j=accessDisk;return mosaico_gauge::validAccessJournal(j,mac)?0:2;}
+
 static mosaico_threshold::Values gauge_threshold_cached;static mosaico_calibration::Values gauge_calibration_cached;static mosaico_public_extra::Values gauge_public_extra_cached;
 struct ScaleStorageLease{bool held=lease;};
 bool scale_storage_locked(){return true;}bool scale_reviewed_record(const scale_journal::Record&){return true;}
@@ -53,6 +57,7 @@ const esp_partition_t* esp_ota_get_running_partition(){return &part;}
 int esp_ota_get_state_partition(const esp_partition_t*,esp_ota_img_states_t* s){*s=validApp?ESP_OTA_IMG_VALID:ESP_OTA_IMG_PENDING_VERIFY;return 0;}
 '''
 CASES=r'''
+static bool contains(const char* text,const char* word){for(size_t i=0;text[i];++i){size_t j=0;while(word[j]&&text[i+j]&&text[i+j]==word[j])++j;if(!word[j])return true;}return false;}
 static void reset(){storage={};scale_runtime=&storage;gauge_boot_info={};std::snprintf(gauge_boot_info.reason,128,"boot_critical_failed_no_retry_preserved");historical=gauge_boot_info;
  scale_load_status=scale_journal::Status::Ready;gauge_threshold_cached_generation=7;gauge_public_extra_generation=7;scale_mutation_in_progress=false;busy=false;validApp=true;gate=true;lease=true;fw=true;now=1000000;nvsWrites=keys=paramWrites=reads=fault=wireReads=0;op=0xa6;dc=fcc=65;rm=50;soc=80;mv=4100;temp=3000;current=average=0;
  gauge_threshold_cached={};gauge_threshold_cached.readable=mosaico_threshold::fieldCount;gauge_threshold_cached.anchors=true;gauge_calibration_cached={};gauge_calibration_cached.readable=mosaico_calibration::fieldCount;gauge_public_extra_cached={};gauge_public_extra_cached.complete=true;gauge_public_extra_cached.readable=mosaico_public_extra::fieldCount;
@@ -60,7 +65,12 @@ static void reset(){storage={};scale_runtime=&storage;gauge_boot_info={};std::sn
  r.observed.count=131;r.observed.authenticated=r.observed.sealed=r.observed.cfg0=true;
  for(unsigned n=0;n<131;++n)r.journal.scratch.snapshot.fields[n]=fixture[n];r.journal.scratch.snapshot.count=131;
  auto& s=r.journal.loaded.records[0].snapshot;s.phase=scale_recovery::Phase::Original;s.generation=1;s.epoch=1;
- auto mac=hal.getFactoryMac();mosaico_gauge::ReloadJournal reload{};reload.magic=0x47423635;reload.version=1;reload.deviceType=0x220;reload.unitMah=1;reload.state=2;std::memcpy(reload.mac,mac.data(),6);reload.targetDesign=reload.targetFcc=65;mosaico_gauge::seal(reload);std::memcpy(disk.reload.data(),&reload,28);
+ auto mac=hal.getFactoryMac();
+ normalDisk={};normalDisk.magic=0x47433635;normalDisk.version=1;normalDisk.deviceType=0x220;normalDisk.unitMah=1;normalDisk.state=7;normalDisk.changedFcc=1;normalDisk.action=1;
+ std::memcpy(normalDisk.mac,mac.data(),6);normalDisk.originalDesign=normalDisk.originalFcc=3000;normalDisk.targetDesign=normalDisk.targetFcc=normalDisk.lastDesign=normalDisk.lastFcc=65;normalDisk.operationBefore=0xa2;mosaico_gauge::seal(normalDisk);
+ accessDisk={};accessDisk.magic=0x47414331;accessDisk.version=1;accessDisk.deviceType=0x220;accessDisk.unitMah=1;accessDisk.state=3;accessDisk.priorSecurity=accessDisk.lastSecurity=3;
+ accessDisk.unsealAttempted=accessDisk.unsealVerified=accessDisk.fullAttempted=accessDisk.fullVerified=1;std::memcpy(accessDisk.mac,mac.data(),6);accessDisk.baseDesign=accessDisk.baseFcc=3000;accessDisk.operationBefore=0xa6;mosaico_gauge::seal(accessDisk);
+ mosaico_gauge::ReloadJournal reload{};reload.magic=0x47423635;reload.version=1;reload.deviceType=0x220;reload.unitMah=1;reload.state=2;std::memcpy(reload.mac,mac.data(),6);reload.targetDesign=reload.targetFcc=65;mosaico_gauge::seal(reload);std::memcpy(disk.reload.data(),&reload,28);
  mosaico_fcc_limit::Journal j{};std::memcpy(j.mac,mac.data(),6);j.state=mosaico_fcc_limit::State::Failed;j.backupValid=j.fullAccessVerified=true;j.intents=1951;j.before={0x102a,3000,3000};j.target={0x112a,65,65};mosaico_fcc_limit::encode(j,disk.cold,mosaico_fcc_limit::Mode::ColdFactory);
  j.state=mosaico_fcc_limit::State::Verified;j.intents=927;j.before={0x102a,65,100};mosaico_fcc_limit::encode(j,disk.runtime);
 }
@@ -83,6 +93,10 @@ static int run_case(int id){reset();char output[768];uint32_t crc=digest(disk);
  if(id==0){if(!ok||!storage.nativeResolvedThisBoot||gauge_boot_info.status!=Hal::GaugeBootReloadStatus::Skipped||gauge_boot_info.attempted)return 1;
  if(!hal.gaugeNativeRecoveryResolve(crc,output,sizeof(output)))return 2;
  if(!hal.gaugeNativeRecoveryEvidence(output,sizeof(output)))return 3;
+ if(!contains(output,"tx_v1_byteLen=36 tx_v1_raw=")||!contains(output,"access_v1_byteLen=32 access_v1_raw=")||!contains(output,"tx_v1_load=0 access_v1_load=0"))return 42;
+ normalDisk.crc^=1;accessDisk.crc^=1;
+ if(!hal.gaugeNativeRecoveryEvidence(output,sizeof(output))||contains(output,"tx_v1_raw=")||contains(output,"access_v1_raw=")||!contains(output,"tx_v1_load=2 access_v1_load=2"))return 43;
+ normalDisk.crc^=1;accessDisk.crc^=1;
   native_recovery_check_sample_locked(65,65,0xa6,true);if(!storage.nativeResolvedThisBoot)return 9;
  storage.journal.loaded.records[0].snapshot.phase=scale_recovery::Phase::Applied;storage.appliedVerifiedThisBoot=true;scale_load_locked(true);native_recovery_check_sample_locked(130,130,0xa6,true);if(!storage.nativeResolvedThisBoot)return 15;
  storage.journal.loaded.records[0].snapshot.phase=scale_recovery::Phase::Original;storage.originalVerifiedThisBoot=true;storage.appliedVerifiedThisBoot=false;scale_load_locked(true);native_recovery_check_sample_locked(65,65,0xa6,true);if(!storage.nativeResolvedThisBoot)return 16;scale_mutation_in_progress=true;native_recovery_check_sample_locked(130,130,0xa2,false);native_recovery_revoke_locked();if(!storage.nativeResolvedThisBoot)return 4;scale_mutation_in_progress=false;native_recovery_check_sample_locked(65,66,0xa6,true);if(storage.nativeResolvedThisBoot||gauge_boot_info.status!=Hal::GaugeBootReloadStatus::Critical)return 5;

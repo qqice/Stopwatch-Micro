@@ -374,3 +374,41 @@ receipt still hashes the full reviewed original222 bytes plus the physical MAC,
 known gauge identity, original GCT generation and epoch; this is not a live DM
 read. Normal software build/signature checks and offline mocks do not establish
 that the current device's actual flash/SDK checks have executed successfully.
+
+
+## Normal DC/FCC configuration (not a new experiment)
+
+The normal `gauge-access` / `gauge-nominal` transaction changes only Initial FCC
+(0x929D) and Design Capacity (0x929F) to 65. It retains its original `tx_v1`
+backup and access attempt journal, uses CFG exit 0x0091, verifies readback and
+rolls back failed writes. It does not change 0x929B, gain, OCV, EDV or protection;
+0x000C and RESET 0x0041 are not part of this path. 65 is encodable in the TRM
+field range, but below TI's advertised 100 mAh product minimum: this is not a
+claim of calibrated accuracy or an SOC cure.
+
+A new installation does not automatically configure the chip: missing/zero
+`gaugecal/normal_mah` yields a read-only boot skip. Only explicit
+`gauge-reconcile` after verified target65, SEALED/CFG0/CAL0 and restored access
+persists `normal_mah=65`. Successful normal configuration has no 12-minute
+trial rollback. Later boots preserve an already-nominal/learned pair without
+reinitializing it; only a factory3000 pair with the existing successful,
+MAC/CRC-bound nominal/access history is eligible for normal reload. The normal
+target remains65 across read/preflight/OTA deferrals; it is not a trial permission
+or a one-shot failure latch. Actual unresolved access/tx records still prevent
+blind key/write replay. Explicit successful original restore clears the target.
+
+Stable Original experimental ledgers are retained history, not an active writer.
+Unknown/corrupt or live Pending/Applied/Restoring ledgers still reject normal
+capacity operations. The three historical `reload_v1`/`fcc_*` blobs are neither
+normal-write permission nor overwritten by this path. All normal access,
+capacity, reconciliation and boot reload operations share the actual OTA storage
+lease; new forward work refuses an OTA request, while the existing lease owner
+can still perform protective closure. No board execution is implied by host tests.
+
+The existing `gauge-nominal apply 3000` command also accepts a SEALED start:
+one storage-lease/transaction owner covers Open, the same two-field writer,
+finally protective closure and verified reconciliation. An already-nominal
+SEALED pair does not reopen access or reinitialize the gauge. Existing FA
+callers remain compatible. The existing `gauge-native-recovery evidence` output
+additionally exports CRC/MAC-validated current tx/access raw blobs and load
+codes for host backup; the original three-blob evidence CRC is unchanged.

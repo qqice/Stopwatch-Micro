@@ -12,7 +12,7 @@ class GaugeDelayTests(unittest.TestCase):
     def test_actual_deadline_wait(self):
         if not COMPILERS: self.skipTest('configured cross compiler unavailable')
         source = (ROOT / 'main/hal/mosaico/hal_mosaico.cpp').read_text()
-        block = source.split('void gauge_delay_ms(uint32_t ms)', 1)[1].split('\nbool gauge_read(', 1)[0]
+        block = source.split('void gauge_delay_ms(uint32_t ms)', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
         code = r'''
 #include <algorithm>
 #include <cstdint>
