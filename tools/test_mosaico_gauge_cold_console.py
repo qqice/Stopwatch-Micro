@@ -132,6 +132,7 @@ bool cancel(char* out,size_t n){return invoked(5,out,n);}
 bool evidencePage(uint32_t page,char* out,size_t n){lastPage=page;return invoked(6,out,n);}
 }
 struct SerialDebug {bool _reply_uart=false;bool handleCold(char*);
+ static constexpr size_t DiagnosticCapacity=1024;char diagnostic[DiagnosticCapacity]{};char* diagnosticScratch(){return diagnostic;}
  void result(const char* command,const char* status,const char* details){++resultCount;if(std::strcmp(command,"gauge-cold"))resultCount+=100;copyString(resultStatus,status,sizeof(resultStatus));copyString(resultDetails,details,sizeof(resultDetails));}
 };
 '''

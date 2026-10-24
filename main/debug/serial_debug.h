@@ -58,9 +58,18 @@ private:
     serial_debug_transport::TxRing<UartTxCapacity> _uart_tx;
     uint32_t _format_overflow = 0;
     uint32_t _uart_read_errors = 0;
+    static constexpr std::size_t DiagnosticCapacity=1024;
+#ifdef MOSAICO_BOARD
+    char* _diagnostic_scratch=nullptr;
+    void* _diagnostic_owner=nullptr;
+#endif
+    char* __attribute__((noinline)) diagnosticScratch();
+    void __attribute__((noinline)) releaseDiagnosticScratch();
     void handleLine(char* line);
     void __attribute__((noinline)) pollAsync();
     bool __attribute__((noinline)) handleGaugeTrace(char* line);
+    bool __attribute__((noinline)) handleSleepIo(char* line);
+    void __attribute__((noinline)) dumpStackEvents();
     bool __attribute__((noinline)) handleStackBudget(const char* line);
     bool __attribute__((noinline)) handleCachedRead(const char* line);
     bool __attribute__((noinline)) handleContrast(char* line);

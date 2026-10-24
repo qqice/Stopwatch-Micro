@@ -23,7 +23,7 @@ namespace capsule=mosaico_gauge_cold_capsule;
 namespace trial=mosaico_gauge_cold_trial;
 namespace store=mosaico_gauge_cold_store;
 namespace {
-constexpr const char* Versions[2]={"0.13.95-r21-mosaico-ota","0.13.95-r22-mosaico-ota"};
+constexpr const char* Versions[2]={"0.13.95-r23-mosaico-ota","0.13.95-r24-mosaico-ota"};
 constexpr const char* GctDigest="da8c79bcf2a17f01a3294394d7ca9b527d1a623a45fa1bc04c730a988cd69bdb";
 // One writer publishes an immutable token. Readers never inspect token storage
 // while initialization/failure is in progress; no retry can race publication.

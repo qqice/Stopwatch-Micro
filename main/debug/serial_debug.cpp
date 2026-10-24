@@ -62,6 +62,7 @@ extern "C" esp_err_t ml_derp_patch_selftest(void);
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -82,6 +83,57 @@ namespace {
 
 #if defined(MOSAICO_BOARD) && SOC_WIFI_HE_SUPPORT
 bool twtCycleUart = false; // SerialDebug poll/parser only; never network-thread output.
+#endif
+
+#ifdef MOSAICO_BOARD
+// Main-poll-only attribution. Never copy command text/arguments into this ring.
+enum class ConsoleStackTag:uint8_t {Outside,Other,Budget,SleepIo,Trace,Cold,Contrast,Factory,Status,Network,Power,Tailscale,OtaHealth,OtaStatus,HeapPolicy,Ping,Settings};
+struct ConsoleStackEvent {uint32_t sequence=0,before=0,after=0;ConsoleStackTag tag=ConsoleStackTag::Outside;uint8_t stage=0;bool uart=false;};
+struct ConsoleStackState {ConsoleStackEvent events[16]{};TaskHandle_t owner=nullptr;uint32_t last=0,sequence=0;uint8_t head=0,count=0;};
+ConsoleStackState* consoleStack=nullptr;
+bool consoleStackAttempted=false;
+const char* consoleStackName(ConsoleStackTag tag){
+    static constexpr const char* names[]={"outside_console","other","stack-budget","sleep-io","gauge-trace","gauge-cold","gauge-contrast","gauge-factory-scale","status","network","power","tailscale","ota-health","ota-status","heap-policy","ping","settings"};
+    const auto index=static_cast<unsigned>(tag);
+    return index<sizeof(names)/sizeof(names[0])?names[index]:"other";
+}
+ConsoleStackTag consoleStackCommand(const char* line){
+    if(!line)return ConsoleStackTag::Outside;
+    const char* p=line;while(*p==' '||*p=='\t')++p;
+    const char* root=p;while(*p&&*p!=' '&&*p!='\t')++p;
+    if(!((p-root==5&&!std::strncmp(root,"debug",5))||(p-root==3&&!std::strncmp(root,"dbg",3))))return ConsoleStackTag::Outside;
+    while(*p==' '||*p=='\t')++p;
+    const char* command=p;while(*p&&*p!=' '&&*p!='\t')++p;
+    if(p==command)return ConsoleStackTag::Outside;
+    for(unsigned i=unsigned(ConsoleStackTag::Budget);i<=unsigned(ConsoleStackTag::Settings);++i){
+        const auto tag=static_cast<ConsoleStackTag>(i);const char* name=consoleStackName(tag);
+        if(size_t(p-command)==std::strlen(name)&&!std::strncmp(command,name,size_t(p-command)))return tag;
+    }
+    return ConsoleStackTag::Other;
+}
+void __attribute__((noinline)) consoleStackObserve(ConsoleStackTag tag,uint8_t stage,bool uart){
+    if(!consoleStackAttempted){
+        consoleStackAttempted=true;
+        void* memory=heap_caps_calloc(1,sizeof(ConsoleStackState),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+        if(memory){consoleStack=new(memory) ConsoleStackState{};consoleStack->owner=xTaskGetCurrentTaskHandle();consoleStack->last=uxTaskGetStackHighWaterMark(nullptr);}
+    }
+    if(!consoleStack||consoleStack->owner!=xTaskGetCurrentTaskHandle())return;
+    const uint32_t current=uxTaskGetStackHighWaterMark(nullptr);
+    if(current<consoleStack->last){
+        // Command-after observation happens after output has returned. A budget
+        // output drop is retained for its NEXT read, never recursively printed.
+        {
+            auto& event=consoleStack->events[consoleStack->head];
+            if(consoleStack->sequence!=UINT32_MAX)++consoleStack->sequence;
+            event={consoleStack->sequence,consoleStack->last,current,tag,stage,uart};
+            consoleStack->head=uint8_t((consoleStack->head+1)%16);
+            if(consoleStack->count<16)++consoleStack->count;
+        }
+        consoleStack->last=current;
+    }
+}
+#else
+// Preserve other boards' console behavior and memory footprint.
 #endif
 
 constexpr uint32_t DefaultMicTestMs         = 2000;
@@ -332,6 +384,7 @@ bool SerialDebug::begin()
 
 void SerialDebug::end()
 {
+    releaseDiagnosticScratch();
     if (!_active) {
         return;
     }
@@ -359,6 +412,9 @@ void SerialDebug::poll()
         return;
     }
 
+    #ifdef MOSAICO_BOARD
+    consoleStackObserve(ConsoleStackTag::Outside,0,false);
+    #endif
     drainUart();
     std::array<char, 128> bytes{};
     // One read per source and fixed RX/TX budgets: a flood cannot starve its peer.
@@ -500,7 +556,14 @@ void SerialDebug::consume(char value)
             line[length] = '\0';
             char* command = _reply_uart ? serial_debug_transport::decodeUartLine(line, length) : line;
             if (command) {
-                if (!handleStackBudget(command)&&!handleGaugeTrace(command)&&!handleCachedRead(command)&&!handleMaintenanceRestart(command)&&!handleCold(command)&&!handleContrast(command)&&!handleFactoryScale(command)) handleLine(command);
+#ifdef MOSAICO_BOARD
+                const auto stackTag=consoleStackCommand(command);
+                if(stackTag!=ConsoleStackTag::Outside)consoleStackObserve(stackTag,1,_reply_uart);
+#endif
+                if (!handleStackBudget(command)&&!handleSleepIo(command)&&!handleGaugeTrace(command)&&!handleCachedRead(command)&&!handleMaintenanceRestart(command)&&!handleCold(command)&&!handleContrast(command)&&!handleFactoryScale(command)) handleLine(command);
+#ifdef MOSAICO_BOARD
+                if(stackTag!=ConsoleStackTag::Outside)consoleStackObserve(stackTag,2,_reply_uart);
+#endif
             }
             else result("parse", "FAIL", "reason=uart_crc_frame_required no_changes=1");
         }
@@ -647,6 +710,28 @@ bool __attribute__((noinline)) SerialDebug::handleMaintenanceRestart(const char*
 #endif
 }
 
+char* __attribute__((noinline)) SerialDebug::diagnosticScratch()
+{
+#ifdef MOSAICO_BOARD
+    const auto owner=xTaskGetCurrentTaskHandle();
+    if(_diagnostic_scratch)return _diagnostic_owner==owner?_diagnostic_scratch:nullptr;
+    auto* fresh=static_cast<char*>(heap_caps_malloc(DiagnosticCapacity,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+    if(!fresh)return nullptr;
+    _diagnostic_scratch=fresh;_diagnostic_owner=owner;
+    return fresh;
+#else
+    return nullptr;
+#endif
+}
+void __attribute__((noinline)) SerialDebug::releaseDiagnosticScratch()
+{
+#ifdef MOSAICO_BOARD
+    if(_diagnostic_scratch&&_diagnostic_owner==xTaskGetCurrentTaskHandle()){
+        heap_caps_free(_diagnostic_scratch);_diagnostic_scratch=nullptr;_diagnostic_owner=nullptr;
+    }
+#endif
+}
+
 bool __attribute__((noinline)) SerialDebug::handleCold(char* line)
 {
 #ifdef MOSAICO_BOARD
@@ -689,14 +774,16 @@ bool __attribute__((noinline)) SerialDebug::handleCold(char* line)
     if(!valid||::strtok_r(nullptr," \t",&save)){
         result("gauge-cold","FAIL","reason=expected_status_bind_fragment_CONFIRM_apply_CONFIRM_EXTERNAL_POWER_handoff_CONFIRM_POWER_OFF_30S_recover_or_cancel_CONFIRM_evidence-page_0..4");return true;
     }
-    char details[1024]{};
-    const bool ok=status?MosaicoGaugeCold::status(details,sizeof(details)):
-        bind?MosaicoGaugeCold::bindFragment(argument,details,sizeof(details)):
-        apply?MosaicoGaugeCold::apply(details,sizeof(details)):
-        handoff?MosaicoGaugeCold::handoff(details,sizeof(details)):
-        recover?MosaicoGaugeCold::recover(details,sizeof(details)):
-        cancel?MosaicoGaugeCold::cancel(details,sizeof(details)):
-        MosaicoGaugeCold::evidencePage(index,details,sizeof(details));
+    char* details=diagnosticScratch();
+    if(!details){result("gauge-cold","FAIL","reason=diagnostic_buffer_unavailable no_changes=1");return true;}
+    std::memset(details,0,DiagnosticCapacity);
+    const bool ok=status?MosaicoGaugeCold::status(details,DiagnosticCapacity):
+        bind?MosaicoGaugeCold::bindFragment(argument,details,DiagnosticCapacity):
+        apply?MosaicoGaugeCold::apply(details,DiagnosticCapacity):
+        handoff?MosaicoGaugeCold::handoff(details,DiagnosticCapacity):
+        recover?MosaicoGaugeCold::recover(details,DiagnosticCapacity):
+        cancel?MosaicoGaugeCold::cancel(details,DiagnosticCapacity):
+        MosaicoGaugeCold::evidencePage(index,details,DiagnosticCapacity);
     result("gauge-cold",ok?"PASS":"FAIL",details);return true;
 #else
     (void)line;return false;
@@ -738,13 +825,15 @@ bool __attribute__((noinline)) SerialDebug::handleContrast(char* line)
     if(!valid||::strtok_r(nullptr," \t",&save)){
         result("gauge-contrast","FAIL","reason=expected_status_images_prepare_C_or_B_CONFIRM_apply_CONFIRM_EXTERNAL_POWER_restore_CONFIRM_observed-page_0..4");return true;
     }
-    char details[1024]{};
-    const bool ok=status?GetHAL().gaugeContrastStatus(details,sizeof(details)):
-        images?GetHAL().gaugeContrastImages(argument,details,sizeof(details)):
-        prepare?GetHAL().gaugeContrastPrepare(argument,details,sizeof(details)):
-        apply?GetHAL().gaugeContrastApply(details,sizeof(details)):
-        restore?GetHAL().gaugeContrastRestore(details,sizeof(details)):
-        GetHAL().gaugeContrastObservedPage(index,details,sizeof(details));
+    char* details=diagnosticScratch();
+    if(!details){result("gauge-contrast","FAIL","reason=diagnostic_buffer_unavailable no_changes=1");return true;}
+    std::memset(details,0,DiagnosticCapacity);
+    const bool ok=status?GetHAL().gaugeContrastStatus(details,DiagnosticCapacity):
+        images?GetHAL().gaugeContrastImages(argument,details,DiagnosticCapacity):
+        prepare?GetHAL().gaugeContrastPrepare(argument,details,DiagnosticCapacity):
+        apply?GetHAL().gaugeContrastApply(details,DiagnosticCapacity):
+        restore?GetHAL().gaugeContrastRestore(details,DiagnosticCapacity):
+        GetHAL().gaugeContrastObservedPage(index,details,DiagnosticCapacity);
     result("gauge-contrast",ok?"PASS":"FAIL",details);return true;
 #else
     (void)line;return false;
@@ -786,17 +875,34 @@ bool __attribute__((noinline)) SerialDebug::handleFactoryScale(char* line)
     if(!valid||::strtok_r(nullptr," \t",&save)){
         result("gauge-factory-scale","FAIL","reason=expected_status_prepare_CONFIRM_images_base64_apply_CONFIRM_EXTERNAL_POWER_restore_CONFIRM_observed_0..130_or_observed-page_0..4");return true;
     }
-    char details[1024]{};
-    const bool ok=status?GetHAL().gaugeFactoryScaleStatus(details,sizeof(details)):
-        prepare?GetHAL().gaugeFactoryScalePrepare(details,sizeof(details)):
-        images?GetHAL().gaugeFactoryScaleImages(argument,details,sizeof(details)):
-        apply?GetHAL().gaugeFactoryScaleApply(details,sizeof(details)):
-        restore?GetHAL().gaugeFactoryScaleRestore(details,sizeof(details)):
-        page?GetHAL().gaugeFactoryScaleObservedPage(index,details,sizeof(details)):
-        GetHAL().gaugeFactoryScaleObservedField(index,details,sizeof(details));
+    char* details=diagnosticScratch();
+    if(!details){result("gauge-factory-scale","FAIL","reason=diagnostic_buffer_unavailable no_changes=1");return true;}
+    std::memset(details,0,DiagnosticCapacity);
+    const bool ok=status?GetHAL().gaugeFactoryScaleStatus(details,DiagnosticCapacity):
+        prepare?GetHAL().gaugeFactoryScalePrepare(details,DiagnosticCapacity):
+        images?GetHAL().gaugeFactoryScaleImages(argument,details,DiagnosticCapacity):
+        apply?GetHAL().gaugeFactoryScaleApply(details,DiagnosticCapacity):
+        restore?GetHAL().gaugeFactoryScaleRestore(details,DiagnosticCapacity):
+        page?GetHAL().gaugeFactoryScaleObservedPage(index,details,DiagnosticCapacity):
+        GetHAL().gaugeFactoryScaleObservedField(index,details,DiagnosticCapacity);
     result("gauge-factory-scale",ok?"PASS":"FAIL",details);return true;
 #else
     (void)line;return false;
+#endif
+}
+
+void __attribute__((noinline)) SerialDebug::dumpStackEvents()
+{
+#ifdef MOSAICO_BOARD
+    const bool owned=consoleStack&&consoleStack->owner==xTaskGetCurrentTaskHandle();
+    const unsigned count=owned?consoleStack->count:0;
+    debugPrintf("DBG STACK_ATTR ready=%u events=%u capacity=16 cumulative_only=1 observer_output_deferred=1 readonly=1\r\n",unsigned(owned),count);
+    for(unsigned i=0;i<count;++i){
+        const auto& event=consoleStack->events[(consoleStack->head+16-count+i)%16];
+        debugPrintf("DBG STACK_ATTR_EVENT seq=%lu tag=%s stage=%u uart=%u before_bytes=%lu after_bytes=%lu\r\n",
+            static_cast<unsigned long>(event.sequence),consoleStackName(event.tag),unsigned(event.stage),unsigned(event.uart),
+            static_cast<unsigned long>(event.before),static_cast<unsigned long>(event.after));
+    }
 #endif
 }
 
@@ -821,11 +927,62 @@ bool __attribute__((noinline)) SerialDebug::handleStackBudget(const char* line)
     }
     // Explicit read-only UART whitelist; consume() already checked its CRC.
     // This cumulative current-task watermark is not an instantaneous/cold cost.
+    dumpStackEvents(); // Diagnostics precede the terminal RESULT for host framing.
     debugPrintf("DBG RESULT command=stack-budget status=PASS main_stack_hwm_bytes=%lu main_stack_config_bytes=%lu hwm_scope=cumulative_current_task readonly=1\r\n",
         static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)),
         static_cast<unsigned long>(CONFIG_ESP_MAIN_TASK_STACK_SIZE));
     return true;
 #else
+    (void)line;return false;
+#endif
+}
+
+bool __attribute__((noinline)) SerialDebug::handleSleepIo(char* line)
+{
+#ifdef MOSAICO_BOARD
+    if(!line)return false;
+    const char* p=line;while(*p==' '||*p=='\t')++p;
+    const char* root=p;while(*p&&*p!=' '&&*p!='\t')++p;
+    if(!((p-root==5&&!std::strncmp(root,"debug",5))||(p-root==3&&!std::strncmp(root,"dbg",3))))return false;
+    while(*p==' '||*p=='\t')++p;
+    const char* command=p;while(*p&&*p!=' '&&*p!='\t')++p;
+    if(p-command!=8||std::strncmp(command,"sleep-io",8))return false;
+    if(_reply_uart&&!serial_debug_transport::uartAllowed("sleep-io")){result("sleep-io","FAIL","reason=uart_requires_extended_authorization no_changes=1");return true;}
+#ifdef MOSAICO_NAND_STORE
+    if(GaugeDischargeTrace::NandBackend::busy()){result("sleep-io","FAIL","reason=nand_format_maintenance no_changes=1");return true;}
+#endif
+    // Like the original early readonly branch, this is BEFORE the OTA-busy
+    // mutation gate. It accepts no action/CONFIRM and never changes retention.
+    char* save=nullptr;
+    (void)::strtok_r(line," \t",&save);(void)::strtok_r(nullptr," \t",&save);
+    command="sleep-io";
+
+        if(::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","reason=report_only_no_arguments no_changes=1");return true;}
+        const auto s=GetHAL().sleepIoRetentionInfo();char pins[512]{},normal[448]{};size_t used=0,normalUsed=0;
+        for(const auto& pin:s.pins) if(pin.pin>=0) {
+            const int count=std::snprintf(pins+used,sizeof(pins)-used,"%s%d:%u:%d>%d>%d:%ld/%ld/%ld/%ld",used?",":"",
+                pin.pin,pin.signal,pin.before,pin.after,pin.current,static_cast<long>(pin.beforeRc),static_cast<long>(pin.applyRc),
+                static_cast<long>(pin.afterRc),static_cast<long>(pin.currentRc));
+            if(count<0 || static_cast<size_t>(count)>=sizeof(pins)-used) {result(command,"FAIL","reason=diagnostic_capacity");return true;}
+            used+=static_cast<size_t>(count);
+            const int n=std::snprintf(normal+normalUsed,sizeof(normal)-normalUsed,"%s%d:%010llx/%010llx/%010llx",normalUsed?",":"",
+                pin.pin,static_cast<unsigned long long>(pin.beforeNormal),static_cast<unsigned long long>(pin.afterNormal),
+                static_cast<unsigned long long>(pin.currentNormal));
+            if(n<0 || static_cast<size_t>(n)>=sizeof(normal)-normalUsed) {result(command,"FAIL","reason=diagnostic_capacity");return true;}
+            normalUsed+=static_cast<size_t>(n);
+        }
+        char details[1492]{};
+        static_assert(sizeof(details)+42<=1536,"sleep-io reply including DBG prefix stays bounded");
+        const int count=std::snprintf(details,sizeof(details),
+            "enabled=%d ready=%d schema_error=%d error=%ld target=%016llx unused=%016llx rail=%016llx panel=%016llx before_read=%016llx before_slp_sel=%016llx after_read=%016llx after_slp_sel=%016llx apply_attempted=%016llx apply_rc_error=%016llx apply_ok=%016llx failed=%016llx unsafe=%016llx normal_cfg_same=%016llx current_read=%016llx current_slp_sel=%016llx current_normal_cfg_same=%016llx current_failed=%016llx pin_format=pin:sig:before-after-current:read-apply-after-current_rc pins=%s n_bits=f0-7,s8-23,d24-31,ie32,oe33,pc34,iv35,od36,pu37,pd38 n_valid=read_masks n=%s keep_normal_only=1 gpio60_not_toggled=1 level_readback=not_claimed",
+            s.enabled,s.ready,s.schemaError,static_cast<long>(s.error),
+            static_cast<unsigned long long>(s.target),static_cast<unsigned long long>(s.unused),static_cast<unsigned long long>(s.rail),static_cast<unsigned long long>(s.panel),
+            static_cast<unsigned long long>(s.beforeRead),static_cast<unsigned long long>(s.beforeSelected),static_cast<unsigned long long>(s.afterRead),static_cast<unsigned long long>(s.afterSelected),
+            static_cast<unsigned long long>(s.attempted),static_cast<unsigned long long>(s.applyErrors),static_cast<unsigned long long>(s.applied),static_cast<unsigned long long>(s.failed),static_cast<unsigned long long>(s.unsafe),static_cast<unsigned long long>(s.normalSame),
+            static_cast<unsigned long long>(s.currentRead),static_cast<unsigned long long>(s.currentSelected),static_cast<unsigned long long>(s.currentNormalSame),static_cast<unsigned long long>(s.currentFailed),pins,normal);
+        if(count<0 || static_cast<size_t>(count)>=sizeof(details)) {result(command,"FAIL","reason=diagnostic_capacity");return true;}
+        result(command,s.error?"FAIL":"PASS",details);return true;
+    #else
     (void)line;return false;
 #endif
 }
@@ -936,33 +1093,6 @@ void SerialDebug::handleLine(char* line)
     }
 
 #ifdef MOSAICO_BOARD
-    if(command && !std::strcmp(command,"sleep-io")) {
-        if(::strtok_r(nullptr," \t",&save)) {result(command,"FAIL","reason=report_only_no_arguments no_changes=1");return;}
-        const auto s=GetHAL().sleepIoRetentionInfo();char pins[512]{},normal[448]{};size_t used=0,normalUsed=0;
-        for(const auto& pin:s.pins) if(pin.pin>=0) {
-            const int count=std::snprintf(pins+used,sizeof(pins)-used,"%s%d:%u:%d>%d>%d:%ld/%ld/%ld/%ld",used?",":"",
-                pin.pin,pin.signal,pin.before,pin.after,pin.current,static_cast<long>(pin.beforeRc),static_cast<long>(pin.applyRc),
-                static_cast<long>(pin.afterRc),static_cast<long>(pin.currentRc));
-            if(count<0 || static_cast<size_t>(count)>=sizeof(pins)-used) {result(command,"FAIL","reason=diagnostic_capacity");return;}
-            used+=static_cast<size_t>(count);
-            const int n=std::snprintf(normal+normalUsed,sizeof(normal)-normalUsed,"%s%d:%010llx/%010llx/%010llx",normalUsed?",":"",
-                pin.pin,static_cast<unsigned long long>(pin.beforeNormal),static_cast<unsigned long long>(pin.afterNormal),
-                static_cast<unsigned long long>(pin.currentNormal));
-            if(n<0 || static_cast<size_t>(n)>=sizeof(normal)-normalUsed) {result(command,"FAIL","reason=diagnostic_capacity");return;}
-            normalUsed+=static_cast<size_t>(n);
-        }
-        char details[1492]{};
-        static_assert(sizeof(details)+42<=1536,"sleep-io reply including DBG prefix stays bounded");
-        const int count=std::snprintf(details,sizeof(details),
-            "enabled=%d ready=%d schema_error=%d error=%ld target=%016llx unused=%016llx rail=%016llx panel=%016llx before_read=%016llx before_slp_sel=%016llx after_read=%016llx after_slp_sel=%016llx apply_attempted=%016llx apply_rc_error=%016llx apply_ok=%016llx failed=%016llx unsafe=%016llx normal_cfg_same=%016llx current_read=%016llx current_slp_sel=%016llx current_normal_cfg_same=%016llx current_failed=%016llx pin_format=pin:sig:before-after-current:read-apply-after-current_rc pins=%s n_bits=f0-7,s8-23,d24-31,ie32,oe33,pc34,iv35,od36,pu37,pd38 n_valid=read_masks n=%s keep_normal_only=1 gpio60_not_toggled=1 level_readback=not_claimed",
-            s.enabled,s.ready,s.schemaError,static_cast<long>(s.error),
-            static_cast<unsigned long long>(s.target),static_cast<unsigned long long>(s.unused),static_cast<unsigned long long>(s.rail),static_cast<unsigned long long>(s.panel),
-            static_cast<unsigned long long>(s.beforeRead),static_cast<unsigned long long>(s.beforeSelected),static_cast<unsigned long long>(s.afterRead),static_cast<unsigned long long>(s.afterSelected),
-            static_cast<unsigned long long>(s.attempted),static_cast<unsigned long long>(s.applyErrors),static_cast<unsigned long long>(s.applied),static_cast<unsigned long long>(s.failed),static_cast<unsigned long long>(s.unsafe),static_cast<unsigned long long>(s.normalSame),
-            static_cast<unsigned long long>(s.currentRead),static_cast<unsigned long long>(s.currentSelected),static_cast<unsigned long long>(s.currentNormalSame),static_cast<unsigned long long>(s.currentFailed),pins,normal);
-        if(count<0 || static_cast<size_t>(count)>=sizeof(details)) {result(command,"FAIL","reason=diagnostic_capacity");return;}
-        result(command,s.error?"FAIL":"PASS",details);return;
-    }
     if (command && !std::strcmp(command,"touch-sleep")) {
         const char* action=::strtok_r(nullptr," \t",&save);
         if(!action || (std::strcmp(action,"120") && std::strcmp(action,"off") && std::strcmp(action,"status")) || ::strtok_r(nullptr," \t",&save)) {

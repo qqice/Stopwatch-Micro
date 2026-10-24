@@ -331,3 +331,12 @@ watermark is cumulative, not the stack used exclusively by that export or by the
 cold handler. Native `.su` files may omit variadic functions: include actual ELF
 frames, formatter/libc and UI/RTOS ancestors rather than summing only cold-code
 frames. Insufficient or unexplained margin blocks the experiment, not normal OTA.
+
+The console also retains up to 16 PSRAM-resident stack-watermark observations.
+`debug stack-budget` emits these before its terminal result. Labels are fixed
+command categories or `outside_console`, never command arguments or credentials.
+A drop describes the interval in which a new lifetime low was observed, not a
+proof that the named command caused it. A drop during the observer's own output
+is available on the next query. The observer never resets the RTOS watermark;
+allocation failure disables attribution only. These volatile observations do not
+replace the retained NAND system logs or original gauge records.

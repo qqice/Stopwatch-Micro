@@ -58,6 +58,9 @@ using QueueHandle_t = void*;
 constexpr int UART_NUM_0 = 0;
 constexpr void uart_flush_input(int) {}
 constexpr void xQueueReset(QueueHandle_t) {}
+enum class ConsoleStackTag{Outside,Budget,Other};
+constexpr ConsoleStackTag consoleStackCommand(const char*){return ConsoleStackTag::Other;}
+constexpr void consoleStackObserve(ConsoleStackTag,unsigned,bool){}
 struct SerialDebug {
     enum class AsyncTest { None, Inputs };
     static constexpr std::size_t LineCapacity = 1536;
@@ -82,6 +85,7 @@ struct SerialDebug {
         if(line[6]=='c') _async_test=AsyncTest::None;
         result("stub","PASS","");
     }
+    constexpr bool handleSleepIo(char*) { return false; }
     constexpr bool handleStackBudget(const char*) { return false; }
     constexpr bool handleGaugeTrace(char*) { return false; }
     constexpr bool handleCold(char*) { return false; }

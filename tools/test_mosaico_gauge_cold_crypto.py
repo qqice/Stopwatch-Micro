@@ -81,7 +81,7 @@ constexpr size_t boundedLength(const char* a,size_t n){size_t i=0;while(i<n&&a[i
 constexpr Digest toyHash(const uint8_t* data,size_t size){Digest d{};for(size_t i=0;i<size;++i)d[i%32]=uint8_t((d[i%32]*33)^data[i]^uint8_t(i));return d;}
 constexpr Binding binding(){Binding b{};b.mac={0x24,1,2,3,4,5};b.originalGctGeneration=19;b.originalGctEpoch=19;b.nonce.fill(1);b.slotHashes[0].fill(2);b.slotHashes[1].fill(3);b.source131ReceiptDigest.fill(4);proof::SourceReceiptInput input{};proof::sourceReceiptHashInput(b,mosaico_gauge_contrast::sourceFixture,input);b.source131ReceiptDigest=toyHash(input.data(),input.size());return b;}
 struct Harness {
- static constexpr const char* Versions[2]={"0.13.95-r21-mosaico-ota","0.13.95-r22-mosaico-ota"};
+ static constexpr const char* Versions[2]={"0.13.95-r23-mosaico-ota","0.13.95-r24-mosaico-ota"};
  bool lease=true,hashOk=true,pairOk=true,signatureOk=true,actualOk=true;
  unsigned pairCalls=0,signatureCalls=0,actualCalls=0;bool pairBeforeSession=false;
  constexpr bool ownsLease(){return lease;}
@@ -152,8 +152,8 @@ constexpr bool cases(){const auto r=packet();Harness h;Authenticated out{};const
     def test_actual_gate_separate_lease_both_images_and_changed_binding_clear(self):
         self.compile(self.prefix() + r'''
 constexpr bool cases(){Harness h;Authenticated out{};const char* why=nullptr;const auto r=packet();
- if(!h.allowedVersion("0.13.95-r21-mosaico-ota")||!h.allowedVersion("0.13.95-r22-mosaico-ota"))return false;
- if(h.allowedVersion("0.13.95-r19-mosaico-ota")||h.allowedVersion("0.13.95-r20-mosaico-ota")||h.allowedVersion("0.13.95-r17-mosaico-ota")||h.allowedVersion("0.13.95-r18-mosaico-ota")||h.allowedVersion("0.13.95-r23-mosaico-ota")||h.allowedVersion("0.13.95-r21-cold-draft"))return false;
+ if(!h.allowedVersion("0.13.95-r23-mosaico-ota")||!h.allowedVersion("0.13.95-r24-mosaico-ota"))return false;
+ if(h.allowedVersion("0.13.95-r21-mosaico-ota")||h.allowedVersion("0.13.95-r22-mosaico-ota")||h.allowedVersion("0.13.95-r19-mosaico-ota")||h.allowedVersion("0.13.95-r20-mosaico-ota")||h.allowedVersion("0.13.95-r17-mosaico-ota")||h.allowedVersion("0.13.95-r18-mosaico-ota")||h.allowedVersion("0.13.95-r25-mosaico-ota")||h.allowedVersion("0.13.95-r23-cold-draft"))return false;
  if(!h.authenticate(r,binding().mac,mosaico_gauge_contrast::sourceFixture,out,why)||out.actualImagesVerified)return false;
  const auto good=out;if(!h.verifyActualImages(out,why)||!out.actualImagesVerified||h.actualCalls!=2)return false;
  out=good;h.lease=false;if(h.verifyActualImages(out,why)||out.sessionVerified||out.actualImagesVerified||h.actualCalls!=2)return false;
@@ -244,7 +244,7 @@ constexpr int textCompare(const char* a,const char* b){while(*a&&*a==*b){++a;++b
 constexpr int textCompareN(const char* a,const char* b,size_t n){for(size_t i=0;i<n;++i){if(a[i]!=b[i])return 1;if(!a[i])return 0;}return 0;}
 constexpr int bytesCompare(const uint8_t* a,const uint8_t* b,size_t n){for(size_t i=0;i<n;++i)if(a[i]!=b[i])return 1;return 0;}
 struct Actual {
- static constexpr const char* Versions[2]={"0.13.95-r21-mosaico-ota","0.13.95-r22-mosaico-ota"};
+ static constexpr const char* Versions[2]={"0.13.95-r23-mosaico-ota","0.13.95-r24-mosaico-ota"};
  esp_partition_t part{};int state=ESP_OTA_IMG_VALID;bool ioOk=true,descOk=true,hashOk=true;
  bool badVersion=false,badProject=false,zeroElf=false,subscribed=true;unsigned descOrder[2]={0,1};
  unsigned reads=0,feeds=0,aborts=0;size_t bytes=0;
@@ -322,7 +322,7 @@ constexpr bool cases(){
         self.assertEqual(pair, raw)
         fragment = b'GCS1' + binding + len(sig).to_bytes(2, 'little') + sig
         self.assertLessEqual(len(fragment), 266)
-        self.assertEqual({p['image']['version'] for p in fixture.pairs}, {'0.13.95-r21-mosaico-ota', '0.13.95-r22-mosaico-ota'})
+        self.assertEqual({p['image']['version'] for p in fixture.pairs}, {'0.13.95-r23-mosaico-ota', '0.13.95-r24-mosaico-ota'})
         text = CPP.read_text()
         self.assertIn(capability.GCT_DIGEST, text)
         self.assertIn('mbedtls_pk_verify', text)
