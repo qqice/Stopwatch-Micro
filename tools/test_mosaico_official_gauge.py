@@ -30,7 +30,10 @@ def profiles():
     profiles[0]['gauging_config'] = 0x102a
     config = source.split('static const gauging_config_t cfg = {',2)[2].split('};',1)[0]
     shifts = {'CCT':0,'CSYNC':1,'EDV_CMP':3,'SC':4,'FIXED_EDV0':5,'FCC_LIM':8,'FC_FOR_VDQ':10,'IGNORE_SD':11,'SME0':12}
-    profiles[1]['gauging_config'] = sum(int(v)<<shifts[n] for n,v in re.findall(r'\.(\w+) = (\d+)',config))
+    declared = dict(re.findall(r'\.(\w+) = (\d+)',config))
+    assert all(declared[n] == '0' for n in ('RSVD0', 'RSVD1', 'RSVD2', 'RSVD3'))
+    assert set(declared) == set(shifts) | {'RSVD0', 'RSVD1', 'RSVD2', 'RSVD3'}
+    profiles[1]['gauging_config'] = sum(int(declared[n])<<bit for n,bit in shifts.items())
     return profiles
 
 class OfficialGaugeTests(unittest.TestCase):

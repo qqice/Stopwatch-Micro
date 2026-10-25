@@ -75,13 +75,17 @@ MosaicoOfficialGaugeResult mosaico_official_gauge_apply(i2c_master_dev_handle_t 
     static const gauging_config_t cfg = {
         .CCT = 1,
         .CSYNC = 0,
+        .RSVD0 = 0,
         .EDV_CMP = 0,
         .SC = 1,
         .FIXED_EDV0 = 0,
+        .RSVD1 = 0,
         .FCC_LIM = 1,
+        .RSVD2 = 0,
         .FC_FOR_VDQ = 1,
         .IGNORE_SD = 1,
         .SME0 = 0,
+        .RSVD3 = 0,
     };
 #endif
     // Non-owning device token, NOT an actual managed bus. Wrapper intercepts all use.
