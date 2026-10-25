@@ -2026,6 +2026,15 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
     if (!gauge_quiet_full(operation) || !gauge_pair(recheck) || !same_pair(recheck, before) ||
         !gauge_standard_matches(before)) return report(false, "blocked_preflight_changed_pending");
 
+    if (boot_factory_reload_scope && !restore) {
+        // Applied boot paths replace the early admission snapshot with pre-CFG
+        // evidence. Pair/standard checks above are already cached; these reads
+        // never gate CFG, and rejected paths retain their early BootBefore.
+        gauge_diagnostic_locked(gauge_boot_before,mosaico_gauge_status::BootBefore,
+                                static_cast<uint8_t>(GaugeBootReloadStatus::Applied));
+        gauge_engine_locked(gauge_engine_before,mosaico_gauge_status::BootBefore,
+                            static_cast<uint8_t>(GaugeBootReloadStatus::Applied));
+    }
     const bool enterSent = gauge_control(GaugeCommand::EnterConfig);
     const bool entered = gauge_wait_config(true);
     bool forward = enterSent && entered && gauge_verify_pair(before, false);

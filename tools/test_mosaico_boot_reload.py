@@ -6,6 +6,28 @@ import tempfile
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 class BootIntegrationTests(unittest.TestCase):
+ def test_normal_boot_before_refresh_is_observational_and_immediately_pre_cfg(self):
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
+  writer=source.split('bool Hal::gaugeSetNominalCapacity(',1)[1].split('bool Hal::gaugeReconcileNominal(',1)[0]
+  refresh=writer.split('if (boot_factory_reload_scope && !restore) {',1)[1]
+  capture,tail=refresh.split('\n    }',1)
+  statements='\n'.join(line.strip() for line in capture.splitlines() if not line.strip().startswith('//')).strip()
+  self.assertEqual(statements,'''gauge_diagnostic_locked(gauge_boot_before,mosaico_gauge_status::BootBefore,
+static_cast<uint8_t>(GaugeBootReloadStatus::Applied));
+gauge_engine_locked(gauge_engine_before,mosaico_gauge_status::BootBefore,
+static_cast<uint8_t>(GaugeBootReloadStatus::Applied));''')
+  self.assertTrue(tail.lstrip().startswith('const bool enterSent = gauge_control(GaugeCommand::EnterConfig);'))
+  prefix=writer.split('if (boot_factory_reload_scope && !restore) {',1)[0]
+  self.assertTrue(prefix.rstrip().endswith('return report(false, "blocked_preflight_changed_pending");'))
+  self.assertIn('!gauge_pair(recheck) || !same_pair(recheck, before)',prefix)
+  self.assertIn('!gauge_standard_matches(before)',prefix)
+  # Admission/refusal and final-outcome capture keep their existing locations.
+  boot=self.boot_source()
+  self.assertEqual(boot.count('gauge_diagnostic_locked(gauge_boot_before'),1)
+  self.assertEqual(boot.count('gauge_engine_locked(gauge_engine_before'),1)
+  self.assertLess(boot.index('gauge_diagnostic_locked(gauge_boot_before'),boot.index('struct DiagnosticFinish'))
+  self.assertIn('gauge_engine_locked(gauge_engine_after',boot)
+  self.assertIn('gauge_diagnostic_locked(gauge_boot_after',boot)
  def boot_source(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
   return source.split('Hal::GaugeBootReloadStatus Hal::gaugeBootReload(',1)[1].split('Hal::MosaicoClockDiagnostics',1)[0]
