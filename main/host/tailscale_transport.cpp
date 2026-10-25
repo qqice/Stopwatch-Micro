@@ -146,9 +146,9 @@ void TailnetQuota::start()
         } else finish(StartupDecision::AlreadyStarted);
         return;
     }
-    // Keep the existing 80K total/16K largest guard. Only verified boot-resident
-    // RTC stack and independent NAND DMA bytes normalize the historic budget.
-    // Neither credit is real free DRAM; allocation and selftest still must pass.
+    // Preserve measured free/resident bytes for diagnostics, not admission.
+    // Total-budget estimates must not block OTA; the largest-block check,
+    // selftest and actual MicroLink allocations/start still report real failure.
     diagnostic.actualFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     diagnostic.largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     diagnostic.normalizedBudget=diagnostic.actualFree;
@@ -157,7 +157,6 @@ void TailnetQuota::start()
     diagnostic.nandReservation=MosaicoNandStore::startupInternalReservation();
     diagnostic.normalizedBudget=MosaicoSystemLog::Model::startupBudget(diagnostic.actualFree,diagnostic.rtcReservation,diagnostic.nandReservation);
 #endif
-    if (diagnostic.normalizedBudget < 80 * 1024) { finish(StartupDecision::BudgetRejected); return; }
     if (diagnostic.largest < 16 * 1024) { finish(StartupDecision::LargestRejected); return; }
     const auto selftest=ml_noise_selftest();
     if (selftest != ESP_OK) { finish(StartupDecision::SelftestFailed,selftest); return; }

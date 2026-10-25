@@ -1306,7 +1306,7 @@ index add69c7..ab9fe4e 100644
                              uint32_t dest_ip, uint16_t dest_port);
  #endif
 diff --git a/components/microlink/src/microlink.c b/components/microlink/src/microlink.c
-index 237f039..2e6e8d5 100644
+index 237f039..1dd73f6 100644
 --- a/components/microlink/src/microlink.c
 +++ b/components/microlink/src/microlink.c
 @@ -14,17 +14,94 @@
@@ -1425,6 +1425,15 @@ index 237f039..2e6e8d5 100644
  
      /* Route cJSON to PSRAM */
      cJSON_Hooks hooks = {
+@@ -274,7 +355,7 @@ microlink_t *microlink_init(const microlink_config_t *config) {
+     ml->events = xEventGroupCreate();
+     if (!ml->events) {
+         ESP_LOGE(TAG, "Failed to create event group");
+-        free(ml);
++        microlink_destroy(ml);
+         return NULL;
+     }
+ 
 @@ -285,10 +366,11 @@ microlink_t *microlink_init(const microlink_config_t *config) {
      ml->stun_rx_queue = xQueueCreate(ML_STUN_RX_QUEUE_DEPTH, sizeof(ml_rx_packet_t));
      ml->coord_cmd_queue = xQueueCreate(ML_COORD_CMD_QUEUE_DEPTH, sizeof(ml_coord_cmd_t));
