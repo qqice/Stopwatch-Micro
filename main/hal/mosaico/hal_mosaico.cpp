@@ -293,6 +293,8 @@ bool scale_safety_mismatch_locked();
 // Private, transaction-mutex owned privilege: only a durable boot intent may
 // enable it. Public manual access/nominal/restore retains its strict policy.
 bool boot_factory_reload_scope = false;
+// RAM-only ownership: this boot exit may restore access by Seal, never implicit 0091.
+bool boot_exit_seal_only = false;
 uint16_t normal_gauge_target = 0; // transaction-owned cache of normal_mah, not units proof.
 // Per-call cleanup outcome, exclusively owned by gauge_transaction_mutex.
 // Boot must not repeat an OPEN abort's protective Seal, even if it failed.
@@ -714,7 +716,7 @@ void sample_battery_locked(bool refresh = false)
     }
 }
 
-enum class GaugeCommand : uint16_t { Identity = 0x0001, EnterConfig = 0x0090, ExitReinit = 0x0091 };
+enum class GaugeCommand : uint16_t { Identity = 0x0001, EnterConfig = 0x0090, ExitReinit = 0x0091, ExitNoReinit = 0x0092 };
 
 bool gauge_control(GaugeCommand command)
 {
@@ -724,7 +726,7 @@ bool gauge_control(GaugeCommand command)
     // Closed command set: no seal/unseal, security keys, ROM, OTP, calibration,
     // charger controls or arbitrary command interface.
     if (command != GaugeCommand::Identity && command != GaugeCommand::EnterConfig &&
-        command != GaugeCommand::ExitReinit) return false;
+        command != GaugeCommand::ExitReinit && command != GaugeCommand::ExitNoReinit) return false;
     const uint16_t value = static_cast<uint16_t>(command);
     const uint8_t packet[] = {0, static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8)};
     gauge_feed();
@@ -1101,16 +1103,28 @@ bool gauge_return_access(const mosaico_gauge::AccessJournal& journal)
 {
     uint16_t operation = 0;
     if (!gauge_word(0x3A, operation) || (operation & 1) || ((operation >> 1) & 3) == 0) return false;
+    // The boot 0092 owner must not turn an unknown exit into an implicit 0091.
+    // Even an ACK failure may have reached the device: fresh CFG0/CAL0 permits
+    // Seal only in FA, or a verified prior3 SEALED no-op. Capacity failure stays failed.
+    const auto bootCloseSecurity = [&](uint16_t op) {
+        const uint8_t sec = static_cast<uint8_t>((op >> 1) & 3);
+        return sec == 1 || (sec == 3 && journal.priorSecurity == 3);
+    };
+    if (boot_exit_seal_only && ((operation & 0x0401) || !bootCloseSecurity(operation))) return false;
     // Protective cleanup first. Do not seal a still-active or unknown CFG.
     if ((operation & 0x0400) && !gauge_exit_config()) return false;
-    if (!gauge_word(0x3A, operation) || (operation & 0x0401)) return false;
+    if (!gauge_word(0x3A, operation) || (operation & 0x0401) ||
+        (boot_exit_seal_only && !bootCloseSecurity(operation))) return false;
     const uint8_t current = static_cast<uint8_t>((operation >> 1) & 3);
     if (current == journal.priorSecurity) return gauge_wait_security(journal.priorSecurity);
     // Never self-seal an originally unknown-key UNSEALED/FULL_ACCESS unit.
     // Prior2 OPEN is deliberately refused; prior1 RESTORE can only be a no-op.
     if (journal.priorSecurity != 3) return false;
     gauge_delay_ms(5000); // let any incomplete access-key state machine expire.
-    if (!gauge_word(0x3A, operation) || (operation & 0x0401)) return false;
+    if (!gauge_word(0x3A, operation) || (operation & 0x0401) ||
+        (boot_exit_seal_only && !bootCloseSecurity(operation))) return false;
+    if (boot_exit_seal_only && ((operation >> 1) & 3) == 3)
+        return gauge_wait_security(3); // already protected: verified no-op, never replay Seal.
     gauge_access_word(AccessWord::Seal); // one attempt; readback determines actual protection.
     return gauge_wait_security(3);
 }
@@ -2054,14 +2068,66 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
         rolledBack = gauge_rollback(journal, before, touchedDc, touchedFcc);
     // Attempt safe exit even if enter/status/read/write failed. No security
     // transitions are attempted; unknown or changed security is a hard error.
-    bool exited = gauge_exit_config();
+    const bool noReinit = boot_factory_reload_scope && !restore && forward;
+    bool exited = false;
+    bool usedExitReinitFallback = false;
+    const char* exitReason = "critical_cfg_exit_or_security";
+    if (noReinit) {
+        boot_exit_seal_only = true; // remains active through the outer access finally.
+        uint16_t beforeExit = 0;
+        const bool ready = gauge_word(0x3A, beforeExit) && !(beforeExit & 1) &&
+                           (beforeExit & 0x0400) && ((beforeExit >> 1) & 3) == 1;
+        const bool sent = ready && gauge_control(GaugeCommand::ExitNoReinit);
+        const bool observed = ready && gauge_wait_config(false); // existing TI wait, no retry.
+        uint16_t terminal = 0;
+        const auto freshFa = [&]() {
+            return gauge_word(0x3A, terminal) && !(terminal & 0x0401) && ((terminal >> 1) & 3) == 1;
+        };
+        exitReason = "critical_boot_exit0092_ack_or_state_unknown";
+        if (sent && observed && freshFa()) {
+            exitReason = "critical_boot_exit0092_effect_or_state_unknown";
+            uint16_t dc = 0, fcc = 0, rm = 0, battery = 0;
+            bool native = gauge_word(0x3C, dc);
+            native &= gauge_word(0x12, fcc);
+            native &= gauge_word(0x10, rm);
+            native &= gauge_word(0x0A, battery);
+            gauge_engine_locked(gauge_engine_after,mosaico_gauge_status::BootAfter,
+                                static_cast<uint8_t>(GaugeBootReloadStatus::Applied));
+            const auto& engine = gauge_engine_after;
+            using namespace mosaico_gauge_engine;
+            const bool engineValid = (engine.validMask & (Cedv | Smooth | DefinitionMatch)) ==
+                                     (Cedv | Smooth | DefinitionMatch);
+            if (native && engineValid && freshFa()) {
+                exited = dc == NominalMah && fcc == NominalMah && rm <= NominalMah &&
+                         leWord(engine.rawCedv,0) <= NominalMah && leWord(engine.rawSmooth,0) <= NominalMah &&
+                         (!(battery & 1) || leWord(engine.rawSmooth,14) <= NominalMah);
+                if (!exited) {
+                    // Known CFG0/FA mismatch only: one legacy reinit, no DM replay.
+                    usedExitReinitFallback = true;
+                    const bool fallbackSent = gauge_control(GaugeCommand::EnterConfig);
+                    const bool fallbackEntered = gauge_wait_config(true);
+                    exitReason = "critical_boot_exit0092_fallback_unknown";
+                    if (fallbackSent && fallbackEntered) exited = gauge_exit_config();
+                }
+            }
+        }
+    } else {
+        exited = gauge_exit_config(); // restore/rollback/nonboot retain their old strategy.
+    }
     if (!exited) {
         journal.state = static_cast<uint8_t>(State::ExitFailed);
         gauge_store_journal(journal, mac.data()); // Best effort; original pending backup already exists.
         sample_battery_locked(true);
-        return report(false, "critical_cfg_exit_or_security");
+        return report(false, exitReason);
     }
     if (forward && !gauge_verify_pair(desired, true)) {
+        if (noReinit) {
+            // No implicit rollback/reentry after an uncertain terminal readback.
+            journal.state = static_cast<uint8_t>(State::ExitFailed);
+            gauge_store_journal(journal, mac.data());
+            sample_battery_locked(true);
+            return report(false, "critical_boot_exit0092_terminal_readback");
+        }
         uint16_t finalOperation = 0;
         if (!gauge_word(0x3A, finalOperation) || !configExitAccepted(finalOperation) ||
             ((finalOperation >> 1) & 3) != 1) {
@@ -2099,7 +2165,9 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
     if (!forward && !rolledBack) return report(false, "critical_rollback_readback");
     if (!recorded) return report(false, "critical_final_journal_readback");
     if (!forward) return report(false, "failed_transaction_rolled_back");
-    return report(true, restore ? "restored_original_nominal" : "nominal_set_not_learned");
+    return report(true, noReinit ? (usedExitReinitFallback ? "nominal_set_not_learned_exit0091_fallback" :
+                                    "nominal_set_not_learned_exit0092") :
+                        restore ? "restored_original_nominal" : "nominal_set_not_learned");
 }
 
 bool Hal::gaugeSafetySelfTest() const { return mosaico_gauge::selftest(); }
@@ -2654,7 +2722,7 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
     // this permission; all exits (including finally failures) revoke it.
     struct BootReloadScope {
         BootReloadScope() { boot_factory_reload_scope = true; }
-        ~BootReloadScope() { boot_factory_reload_scope = false; }
+        ~BootReloadScope() { boot_exit_seal_only = false; boot_factory_reload_scope = false; }
     } reloadScope;
     char phaseReason[128]{}, closeReason[128]{};
     const bool opened = gaugeAccess(GaugeAccessAction::Open, phaseReason, sizeof(phaseReason));
@@ -2731,7 +2799,9 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         std::snprintf(details, sizeof(details), "boot_critical_attempt_failed_sealed_no_retry: %.72s", phaseReason);
         return finish(Status::Critical, details);
     }
-    return finish(Status::Applied, "boot_applied65_normal_sealed_verified_once");
+    char appliedReason[128]{};
+    std::snprintf(appliedReason, sizeof(appliedReason), "boot_applied65_normal_sealed_verified_once: %.72s", phaseReason);
+    return finish(Status::Applied, appliedReason);
 }
 
 Hal::MosaicoClockDiagnostics Hal::displayClockDiagnostics() const

@@ -118,7 +118,7 @@ static_assert(cases(), "factory SEC2 guards");
   body=body[:start]+body[end:]
   scope='''struct BootReloadScope {
         BootReloadScope() { boot_factory_reload_scope = true; }
-        ~BootReloadScope() { boot_factory_reload_scope = false; }
+        ~BootReloadScope() { boot_exit_seal_only = false; boot_factory_reload_scope = false; }
     } reloadScope;'''
   self.assertIn(scope,body)
   body=body.replace(scope,'struct BootReloadScope {} reloadScope;').replace('std::','mock::')
