@@ -21,8 +21,8 @@ bool contrast_maintenance_original_cached_locked(){return contrastOriginal;}
             ('original_boot_recovery_reason','contrastOriginal=true;std::snprintf(gauge_boot_info.reason,128,"boot_critical_scale_recovery_required");',True,False),
             ('pending','contrastSafe=false;',False,True),
             ('corrupt','contrastSafe=false;contrastOriginal=false;',False,True),
-            ('wrong_critical_reason','contrastOriginal=true;std::snprintf(gauge_boot_info.reason,128,"unexpected_critical");',False,True),
-            ('attempted_critical','contrastOriginal=true;gauge_boot_info.attempted=true;std::snprintf(gauge_boot_info.reason,128,"boot_critical_scale_recovery_required");',False,True),
+            ('wrong_critical_reason','contrastOriginal=true;std::snprintf(gauge_boot_info.reason,128,"unexpected_critical");',True,False),
+            ('attempted_critical','contrastOriginal=true;gauge_boot_info.attempted=true;std::snprintf(gauge_boot_info.reason,128,"boot_critical_scale_recovery_required");',True,False),
             ('active_factory','factorySafe=false;contrastOriginal=true;',False,True),
             ('untrusted_gauge130','contrastOriginal=true;dc=fcc=finalDc=finalFcc=130;',False,False),
         ]

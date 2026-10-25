@@ -64,7 +64,7 @@ NATIVE_FUNCTIONS
 '''
 RESET=r'''
 static void reset(){maintenance_power_cache={};maintenance_power_bus_lock_busy=0;cacheLocks=0;readFaultMask=0;readError=263;storage={};scale_runtime=&storage;scale_load_status=scale_journal::Status::Ready;scale_mutation_in_progress=calFault=false;gauge=true;gauge_transaction_mutex.available=battery_mutex.available=true;
- wordCalls=identityCalls=nvsReads=nvsOpens=timerCalls=0;readFault=evidenceFault=identityFault=0;op=finalOp=0x26;dc=fcc=finalDc=finalFcc=3000;mv=4200;temp=3000;current=average=0;startedUs=1000000;endedUs=1000100;gauge_boot_info={};std::snprintf(gauge_boot_info.reason,128,"boot_critical_failed_no_retry observed_sec=3 cfg=0 cal=0");historical=gauge_boot_info;
+ wordCalls=identityCalls=nvsReads=nvsOpens=timerCalls=0;readFault=evidenceFault=identityFault=0;op=finalOp=0x26;dc=fcc=finalDc=finalFcc=3000;mv=4200;temp=3000;current=average=0;startedUs=1000000;endedUs=1000100;gauge_boot_info={};gauge_boot_info.attempted=true;std::snprintf(gauge_boot_info.reason,128,"boot_critical_recovery_failed_after_attempt");historical=gauge_boot_info;
  auto mac=hal.getFactoryMac();mosaico_gauge::ReloadJournal reload{};reload.magic=0x47423635;reload.version=1;reload.deviceType=0x220;reload.unitMah=1;reload.state=2;std::memcpy(reload.mac,mac.data(),6);reload.targetDesign=reload.targetFcc=65;mosaico_gauge::seal(reload);std::memcpy(evidenceDisk.reload.data(),&reload,28);
  mosaico_fcc_limit::Journal j{};std::memcpy(j.mac,mac.data(),6);j.state=mosaico_fcc_limit::State::Failed;j.backupValid=j.fullAccessVerified=true;j.intents=1951;j.before={0x102a,3000,3000};j.target={0x112a,65,65};mosaico_fcc_limit::encode(j,evidenceDisk.cold,mosaico_fcc_limit::Mode::ColdFactory);j.state=mosaico_fcc_limit::State::Verified;j.intents=927;j.before={0x102a,65,100};mosaico_fcc_limit::encode(j,evidenceDisk.runtime);
 }
@@ -77,7 +77,7 @@ for name,status in [('io','IoError'),('corrupt','Corrupt'),('ambiguous','Ambiguo
 CASES += [('missing_seen','scale_load_status=scale_journal::Status::Missing;storage.journalEverSeen=true;',False,True),('missing_valid','scale_load_status=scale_journal::Status::Missing;',True,False)]
 for phase in ['Pending','Applied','Restoring']:CASES.append(('phase_'+phase,f'storage.journal.loaded.records[0].snapshot.phase=scale_recovery::Phase::{phase};',False,True))
 for selected in [-1,2]:CASES.append(('selected_'+str(selected),f'storage.journal.loaded.selected={selected};',False,True))
-CASES += [('original_slot1','storage.journal.loaded.selected=1;',True,False),('boot_deferred','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Deferred;',False,True),('critical_attempted','gauge_boot_info.attempted=true;',False,True),('critical_wrong_reason','std::snprintf(gauge_boot_info.reason,128,"boot_critical_scale_recovery_required");',False,True),('critical_prefix_spoof','std::snprintf(gauge_boot_info.reason,128,"boot_critical_failed_no_retry_unknown");',False,True),('normal_skipped','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Skipped;',True,False),('normal_applied','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Applied;',True,False)]
+CASES += [('original_slot1','storage.journal.loaded.selected=1;',True,False),('boot_deferred','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Deferred;',False,True),('critical_legacy_reason','gauge_boot_info.attempted=false;std::snprintf(gauge_boot_info.reason,128,"boot_critical_failed_no_retry observed_sec=3 cfg=0 cal=0");',True,False),('critical_recovery_reason','std::snprintf(gauge_boot_info.reason,128,"boot_critical_scale_recovery_required");',True,False),('critical_unlisted_reason','std::snprintf(gauge_boot_info.reason,128,"boot_critical_failed_no_retry_unknown");',True,False),('normal_skipped','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Skipped;',True,False),('normal_applied','gauge_boot_info.status=Hal::GaugeBootReloadStatus::Applied;',True,False)]
 for i in range(1,6):CASES.append(('evidence_fault_'+str(i),f'evidenceFault={i};',False,True))
 for i in range(3):CASES.append(('cold_invalid_'+str(i),f'alterCold({i});',False,True))
 CASES.append(('new_reload_pending','alterReload();',False,True))
@@ -99,6 +99,17 @@ Hal::MaintenancePowerSnapshot s{};s.operationStatus=0x26;s.designMah=s.fullMah=3
 static_assert(modelCases(),"INITCOMP is bit5, never bit7; paired raw capacity only");
 '''
 class MaintenancePowerTests(unittest.TestCase):
+ def test_actual_provider_active_experiment_guards_rv32(self):
+  global FIXTURE,CASES,RESET,RUN
+  fixture,cases,reset,run=FIXTURE,CASES,RESET,RUN
+  hooks='#define MOSAICO_FACTORY_SCALE_RUNTIME\n#define MOSAICO_GAUGE_CONTRAST_RUNTIME\nstatic bool factoryCachedSafe=true,contrastCachedSafe=true;\nbool factory_scale_maintenance_cached_safe_locked(){return factoryCachedSafe;}\nbool contrast_maintenance_cached_safe_locked(){return contrastCachedSafe;}\n'
+  try:
+   FIXTURE=fixture.replace('#include "mosaico_maintenance_power.inc"',hooks+'\n#include "mosaico_maintenance_power.inc"')
+   CASES=list(cases[:5])+[('active_factory','factoryCachedSafe=false;',False,True),('active_contrast','contrastCachedSafe=false;',False,True)]
+   RESET=reset.replace('cacheLocks=0;','cacheLocks=0;factoryCachedSafe=contrastCachedSafe=true;')
+   RUN=run/'active-experiments'
+   self.test_actual_provider_rv32()
+  finally:FIXTURE,CASES,RESET,RUN=fixture,cases,reset,run
  def test_actual_transport_hooks_rv32(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
   transport='struct MaintenanceGaugeTransportDiagnostic {'+source.split('struct MaintenanceGaugeTransportDiagnostic {',1)[1].split('\nbool gauge_read_diagnostic(',1)[0]
@@ -251,10 +262,7 @@ namespace std{inline unsigned locksHeld=0;struct mutex{bool available=true;};str
   contrast_guard='#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME\n    if (!contrast_maintenance_cached_safe_locked())\n        return maintenance_power_reject("contrast_not_cached_stable_original_or_missing");\n#endif\n'
   self.assertEqual(sections[0].count(contrast_guard),1)
   sections[0]=sections[0].replace(contrast_guard,'')
-  contrast_reason='             (factory_scale_maintenance_original_cached_locked()\n#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME\n             || contrast_maintenance_original_cached_locked()\n#endif\n             ));'
-  self.assertEqual(sections[0].count(contrast_reason),1)
-  sections[0]=sections[0].replace(contrast_reason,'             factory_scale_maintenance_original_cached_locked());')
-  self.assertEqual([hashlib.sha256(s.encode()).hexdigest() for s in sections],['00c19f0000a6010ad6a0885d150b8e0ec69f63ba1d13d737064a0a68a6a2a63d', '9a3010a5aa968237178ae2ba77c2d54dd466723cb984ad87a956083b6e595b2b', 'bfba4e2367e9f90fdce84af933337e734a8feb746cc2b3a1f1b74e3c819b21a8', 'f4acc3a4e99103f900dd4289a0991b178150450c26aaf5d2b904d8e865711831'])
+  self.assertEqual([hashlib.sha256(s.encode()).hexdigest() for s in sections],['e49884920b7cd5b15e71b07cd0c902bffbfb41e6c6089b1b4013609ebd8ecaf8', '9a3010a5aa968237178ae2ba77c2d54dd466723cb984ad87a956083b6e595b2b', 'bfba4e2367e9f90fdce84af933337e734a8feb746cc2b3a1f1b74e3c819b21a8', 'bf8b2b912e65442ba538a263d746d89769784ccd1ddefe565b6ffa3f2715f603'])
   branch=src[src.index('    bool ok = word(0x3a'):src.index('    ok &= word(0x08')]
   self.assertIn('firstError == ESP_ERR_TIMEOUT',branch)
   self.assertIn('MaintenancePowerResult::Busy',branch)
@@ -264,6 +272,9 @@ namespace std{inline unsigned locksHeld=0;struct mutex{bool available=true;};str
   src=INC.read_text();body=src[src.index('bool Hal::'):]
   for token in ['nvs_set','nvs_commit','nvs_erase','gauge_access_word','gauge_control(','scale_boot_fence_locked(','scale_load_locked(','batteryPolicyTelemetry(','batteryTelemetry(','MosaicoOta::busy(','gaugeNativeRecoveryResolve(','gaugeFactoryAuditCapture(']:self.assertNotIn(token,body)
   self.assertIn('std::try_to_lock',body);self.assertIn('native_recovery::exact',body)
+  critical=body.split('if (gauge_boot_info.status == GaugeBootReloadStatus::Critical) {',1)[1].split('    const int64_t started',1)[0]
+  self.assertNotIn('gauge_boot_info.reason',critical);self.assertNotIn('gauge_boot_info.attempted',critical)
+  self.assertIn('native_recovery::digest(evidence)',critical)
   self.assertNotIn('i2c_',body.split('bool Hal::tryMaintenancePowerSnapshot(',1)[0])
   serial=(ROOT/'main/debug/serial_debug.cpp').read_text()
   self.assertIn('char details[1024]{};',serial.split('maintenancePowerStatus(',1)[0][-150:])

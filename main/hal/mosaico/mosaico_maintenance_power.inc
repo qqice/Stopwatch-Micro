@@ -81,22 +81,10 @@ bool Hal::tryMaintenancePowerSnapshot(MaintenancePowerSnapshot& out, Maintenance
     bool historicalCritical = false;
     uint32_t historicalFailedCrc = 0;
     if (gauge_boot_info.status == GaugeBootReloadStatus::Critical) {
-        constexpr char allowed[] = "boot_critical_failed_no_retry";
-        bool knownHistoricalReason = !std::strncmp(gauge_boot_info.reason, allowed, sizeof(allowed) - 1) &&
-            (gauge_boot_info.reason[sizeof(allowed)-1] == 0 || gauge_boot_info.reason[sizeof(allowed)-1] == ' ');
-#ifdef MOSAICO_FACTORY_SCALE_RUNTIME
-        knownHistoricalReason = knownHistoricalReason ||
-            (!std::strcmp(gauge_boot_info.reason,"boot_critical_scale_recovery_required") &&
-             (factory_scale_maintenance_original_cached_locked()
-#ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
-             || contrast_maintenance_original_cached_locked()
-#endif
-             ));
-#endif
-        if (gauge_boot_info.attempted || !knownHistoricalReason)
-            return maintenance_power_reject("critical_not_known_historical_failure");
-        // Allow only the already-inspected historical failure, not unknown key
-        // failures, pending/corrupt journals or scaling recovery errors.
+        // Boot reason/attempted are retained history, not present power proof.
+        // A completed recovery may leave Critical latched until MCU restart.
+        // Require exact native evidence here and fresh raw safety reads below;
+        // the explicit maintenance-restart caller still checks its expected CRC.
         native_recovery::Evidence evidence{};
         const auto mac = getFactoryMac();
         if (!native_evidence_locked(evidence) || !native_recovery::exact(evidence, mac.data()))
