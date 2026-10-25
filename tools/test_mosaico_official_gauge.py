@@ -37,6 +37,11 @@ def profiles():
     return profiles
 
 class OfficialGaugeTests(unittest.TestCase):
+    def test_reference_gauge_i2c_speed(self):
+        source = text(BASE/'hal_mosaico.cpp').split('void Hal::pmic_init()',1)[1].split('bool Hal::pmic_ready()',1)[0]
+        self.assertIn('config.device_address = 0x55;', source)
+        self.assertIn('config.scl_speed_hz = 400000;', source)
+
     def test_vendor_and_board_provenance(self):
         manifest = json.loads(text(VENDOR/'PROVENANCE.json'))
         for name,sha in manifest['files'].items():

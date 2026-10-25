@@ -1927,7 +1927,7 @@ void Hal::pmic_init()
     i2c_device_config_t config{};
     config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
     config.device_address = 0x55;
-    config.scl_speed_hz = 100000;
+    config.scl_speed_hz = 400000; // Same gauge bus speed as the official Mosaico example.
     if (i2c_master_bus_add_device(_i2c_bus, &config, &gauge) != ESP_OK) {
         ESP_LOGW(Tag, "BQ27220 unavailable; battery telemetry disabled");
         return;
