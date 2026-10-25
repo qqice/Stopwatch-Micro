@@ -1708,7 +1708,7 @@ bool Hal::gaugeNearFull(const char* action,uint16_t expected,uint16_t target,cha
     if(opened){
         std::lock_guard<std::mutex> battery(battery_mutex);
         near_before_known=near_snapshot(near_snapshots[0]);
-        const uint16_t before=near_before_known?near_snapshots[0][index]:0;
+        const uint16_t before=near_before_known?near_snapshots[0][mosaico_near::index]:0;
         if(restore){target=200;expected=before;}
         if(!near_before_known||!allowed(before)||before!=expected||(loaded==ESP_ERR_NVS_NOT_FOUND&&before!=200))result="failed_before_or_expected_no_write";
         else {
@@ -1724,7 +1724,7 @@ bool Hal::gaugeNearFull(const char* action,uint16_t expected,uint16_t target,cha
                 // DM evidence is captured here in CFG, never after exit/reopen.
                 near_after_known=entered&&near_snapshot(near_snapshots[1]);
                 const bool otherDelta=near_after_known&&!unchanged(near_snapshots[0],near_snapshots[1]);
-                const bool onlyOwn=written&&near_after_known&&near_snapshots[1][index]==target&&!otherDelta;
+                const bool onlyOwn=written&&near_after_known&&near_snapshots[1][mosaico_near::index]==target&&!otherDelta;
                 // Unknown I/O is never replayed. Only one known-before rollback,
                 // and never change any of the other 130 observed fields.
                 const bool rollback=entered&&!onlyOwn&&near_rollbackOwn(before,target);
