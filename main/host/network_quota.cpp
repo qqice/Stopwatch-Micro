@@ -1813,9 +1813,9 @@ void NetworkQuota::run()
         setCpu(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
         if (!_wifi_running) {
 #ifdef MOSAICO_BOARD
-            // Same lease as gauge mutation: no start/readiness race after a
-            // phase2 admission but before the Pending intent becomes visible.
-            struct RadioStartLease {bool held=MosaicoOta::tryStorageLease();~RadioStartLease(){if(held)MosaicoOta::releaseStorageLease();}} radioLease;
+            // Same mutex as gauge mutation, but queued OTA must be able to
+            // start its own network. Real gauge Pending remains checked below.
+            struct RadioStartLease {bool held=MosaicoOta::tryNetworkStartLease();~RadioStartLease(){if(held)MosaicoOta::releaseStorageLease();}} radioLease;
             if(!radioLease.held||GetHAL().gaugeScaleTrialActive()){wait(100);continue;}
 #endif
             if (esp_wifi_start() != ESP_OK) {

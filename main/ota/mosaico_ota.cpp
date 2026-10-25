@@ -460,6 +460,17 @@ bool tryStorageLease() {
     storageLeaseOwner.store(task,std::memory_order_release);
     return true;
 }
+// Only the network owner's radio-start scope uses this admission. A queued
+// OTA needs that radio to consume its request; mutex ownership still excludes
+// gauge/NAND work. General storage admission keeps its busy() refusal above.
+bool tryNetworkStartLease() {
+    if(!storageLeaseMutex.try_lock())return false;
+    const auto task=xTaskGetCurrentTaskHandle();
+    if(!task||storageLeaseDepth==UINT32_MAX){storageLeaseMutex.unlock();return false;}
+    ++storageLeaseDepth;
+    storageLeaseOwner.store(task,std::memory_order_release);
+    return true;
+}
 bool currentTaskOwnsStorageLease() {
     const auto task=xTaskGetCurrentTaskHandle();
     return task&&storageLeaseOwner.load(std::memory_order_acquire)==task;
@@ -852,6 +863,7 @@ bool requestCheck()
         ui.stage == UiStage::ReadyInstall || ui.stage == UiStage::ReadyReboot ||
         (ui.stage == UiStage::WaitingPower && imageReady.load())) return false;
     requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
+    cachedRunning.store(esp_ota_get_running_partition()); // Diagnostic cache before busy queue publication.
     checkQueued.store(true); mosaico_rx_ingress::request(false);
     StandbySleep::otaActivity(); return true;
 }

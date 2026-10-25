@@ -62,9 +62,12 @@ struct HealthDiagnostic {
 void copyHealthDiagnostic(HealthDiagnostic& out);
 // Same-task, nonblocking lease; successful caller must release after NAND I/O.
 bool tryStorageLease();
+// Network-owner radio start only: same mutex/owner/depth, permits queued OTA.
+// Successful caller releases with releaseStorageLease; not gauge/NAND admission.
+bool tryNetworkStartLease();
 void releaseStorageLease();
 // Atomic RAM-only task identity: true only for a successful outstanding
-// tryStorageLease by this exact task, including recursive nesting.
+// lease by this exact task, including recursive nesting.
 bool currentTaskOwnsStorageLease();
 uint32_t requestAgeMs();
 bool request(); // Existing local bypass: explicit external-power confirmation AND active connected USB.
