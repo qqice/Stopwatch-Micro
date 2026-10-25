@@ -135,8 +135,9 @@ static_assert(faults());
   self.assertEqual(setter.count('near_write(target)'),1)
  def test_noninterference_and_protocol(self):
   boot=body('Hal::GaugeBootReloadStatus Hal::gaugeBootReload(')
-  self.assertEqual(boot.count('near_boot_finish(success)'),1)
-  self.assertLess(boot.index('const bool success ='),boot.index('near_boot_finish(success)'))
+  self.assertNotIn('near_boot_finish(',boot)
+  self.assertNotIn('near_boot_apply(',boot)
+  self.assertEqual(boot.count('mosaico_official_gauge_apply(gauge)'),1)
   nominal=body('bool Hal::gaugeSetNominalCapacity(')
   self.assertEqual(nominal.count('near_boot_apply()'),1)
   self.assertIn('if (forward && boot_factory_reload_scope && !restore) near_boot_apply();',nominal)

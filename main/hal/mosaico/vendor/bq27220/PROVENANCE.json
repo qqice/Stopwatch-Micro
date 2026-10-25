@@ -1,0 +1,19 @@
+{
+  "component": "espressif/bq27220",
+  "version": "0.1.3",
+  "source": ".artifacts/references/espressif-bq27220-0.1.3/source/bq27220",
+  "files": {
+    "bq27220.c": "7e4c98eb6804a0395f6a8c9d06f1b334178d0db46dc7487d202593d2c6a25c10",
+    "bq27220.h": "5f9c9e65fbc164ddcb2f6c9dee8afc8046b3ed94a17481c956dfb0b6d431ba4f",
+    "bq27220_data_memory.c": "5e9370d92d15a5c6b4c8945eaa8fe43e4d668d7d3a91e3337cae2494fb6a325b",
+    "license.txt": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "priv_include/bq27220_data_memory.h": "1b146e6eba44f077fa5039b6d2457494969896d5e30ea0f594eabc08cc2f26e3",
+    "priv_include/bq27220_reg.h": "b416e1a2ec8446eb4cfb47645e8a7749617444494644a7ba9f39bd17ad89baf4"
+  },
+  "board_profile_source": ".artifacts/references/esp-mosaico-claw/boards/esp_mosaico/setup_battery_monitor.c",
+  "board_profile_sha256": "ebdb677343af336a59fc093985dbabde02d602adc56496add756048501010a23",
+  "previous_profile_sources": {
+    ".artifacts/private/mosaico/near-full-a200-postmeasure-audit-001/postmeasure-public131.json": "b498cfd4f02982170810c919d2751af765d46d40d36d52a1dd5274603058253f",
+    ".artifacts/private/mosaico/near-full-b5-postmeasure-audit-001/comparison.json": "d63633736a9b2190bb9902558a7339cb1b82a59d919680c734229a5a0899716b"
+  }
+}

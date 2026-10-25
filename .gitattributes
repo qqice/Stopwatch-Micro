@@ -4,3 +4,6 @@ patches/*.patch -whitespace
 
 # Keep exact mixed-EOL vendor patch bytes reproducible on Windows and Linux.
 patches/microlink-idf61.patch -text
+
+# The official BQ27220 source is hash-pinned byte-for-byte, including line endings.
+main/hal/mosaico/vendor/bq27220/** -text

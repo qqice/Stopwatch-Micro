@@ -610,3 +610,35 @@ font, state or transition changes.
 The optional `gaugecal/near_v1` record contains only the necessary original/target/state, device type, physical eFuse MAC and CRC. No record or an invalid record does not block normal65 startup or OTA. An explicit Active override is written once during the existing normal65 factory reload; A200 and B5 use the same 0090/0091, access and readback paths. A boot that retained65 and skipped reload is a normal control, not evidence that the cold candidate ran.
 
 Before/after checks permit only the 0x926B delta; gains, OCV/EDV, protection thresholds and SOC writes are not part of this operation. 0091 can naturally recalculate SOC, so judge sustained native RM/CEDV movement against RawCC, not an instantaneous percentage jump. Keep full host backups and stop/revert on unknown I/O or unexpected other-field changes; never overwrite those other fields to make a comparison pass.
+
+### Official BQ27220 baseline (2026-10)
+
+The Mosaico boot path now uses Espressif `bq27220` 0.1.3 with the complete
+ESP-Mosaico board example profile: 65 mAh, Near Full 5 mAh, configuration
+`0x0d11`, and its 26 configured fields, including the example's DOD/EDV model.
+The vendor files are byte-identical and hash-pinned in
+`main/hal/mosaico/vendor/bq27220/PROVENANCE.json`. This replaces the old boot-only
+DC/FCC reload and optional Near Full replay; those legacy maintenance functions
+are not part of normal boot initialization.
+
+Only the I2C transport is adapted: the wrapper borrows the existing HAL device
+handle, never creates a second bus and never deletes the HAL-owned device.
+The upstream driver decides whether the profile matches, preserves learned FCC
+on its skip path, and performs its own configuration/update/seal sequence.
+Initialization diagnostics continue to be recorded to NAND. A failed attempt is
+reported without retrying the profile writer or blocking the UI/USB OTA path.
+Failure cleanup does not replay an exit/seal command whose ACK is unknown.
+
+This is a reproducible **reference baseline**, not a claim that the supplied
+cell has been individually characterized: the board example comments describe
+an 80 mAh characterization while its board configuration supplies 65 mAh.
+No gain, charge controller, system low-voltage protection, OTP, direct SOC, or
+forced OCV command is programmed by this integration.
+
+`-DMOSAICO_GAUGE_USE_PREVIOUS_PROFILE=ON` builds a recovery image that uses the
+same driver to restore the previous 26-field image (`0x102a`, still Near Full 5).
+Its constants are checked against the preserved parameter backup. Keep this
+image signed and separately retained before deploying a new baseline. Returning
+to an older application alone does **not** restore the model values already
+written to the gauge. Use the parameter-recovery image only for a required
+rollback, not merely because the reference baseline also reproduces the fault.

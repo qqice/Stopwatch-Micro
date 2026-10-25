@@ -23,7 +23,9 @@ if(MOSAICO_BOARD)
         "hal/ble/codex_micro_ble.cpp" "hal/ble/hid_gatt_compat.cpp"
         "hal/utils/button/Button_Class.cpp" "hal/utils/settings/settings.cc")
     list(APPEND APP_SRCS "hal/mosaico/mosaico_factory_scale_journal.cpp" "hal/mosaico/mosaico_gauge_contrast_journal.cpp"
-        "hal/mosaico/mosaico_gauge_cold_crypto.cpp")
+        "hal/mosaico/mosaico_gauge_cold_crypto.cpp"
+        "hal/mosaico/mosaico_official_gauge.cpp" "hal/mosaico/mosaico_official_gauge_driver.c"
+        "hal/mosaico/vendor/bq27220/bq27220_data_memory.c")
 else()
 set(PLATFORM_SRCS
     "hal/hal.cpp"
@@ -67,6 +69,10 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
 )
 
 if(MOSAICO_BOARD)
+    target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/hal/mosaico/vendor/bq27220")
+    if(MOSAICO_GAUGE_USE_PREVIOUS_PROFILE)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE MOSAICO_GAUGE_USE_PREVIOUS_PROFILE=1)
+    endif()
     target_compile_definitions(${COMPONENT_LIB} PUBLIC MOSAICO_BOARD=1 MOSAICO_NAND_STORE=1)
     if(CONFIG_IDF_TARGET_ESP32S31 AND CONFIG_IDF_TARGET_ARCH_RISCV)
         target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler"

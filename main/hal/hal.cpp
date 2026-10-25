@@ -52,8 +52,7 @@ void Hal::init()
     display_init();
     BootTimingMark(BootTiming::Display);
     display_boot_splash();
-    // No LVGL, touch, motion or radios yet. Restore
-    // only this unit's authenticated RAM profile under the HAL safety policy.
+    // No LVGL, touch, motion or radios yet. Apply/verify the official board gauge baseline.
     char gaugeReason[128]{};
     BootTimingMark(BootTiming::GaugeStart);
     const auto gaugeReload = gaugeBootReload(gaugeReason, sizeof(gaugeReason));

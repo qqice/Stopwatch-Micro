@@ -6,8 +6,9 @@
  * Board wiring and stock CO5300/CST9217 setup adapted from
  * OpenFrameTap-Mosaico/firmware/esp_mosaico/main/oft_board.c (MIT),
  * referencing espressif/esp_boards 0.6.1 ESP-Mosaico V1.0.
- * Nominal-capacity transaction references oft_gauge.c and TI SLUUBD4A;
- * no virtual-capacity/gain/EDV correction, camera, charger or NAND functionality.
+ * Boot CEDV profile uses the pinned Espressif BQ27220 driver and board values.
+ * Legacy nominal transactions reference oft_gauge.c and TI SLUUBD4A.
+ * No virtual-capacity/gain correction or charger programming.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -29,6 +30,7 @@
 #include "../legacy_factory_mac.h"
 #include "../utils/settings/settings.h"
 #include "mosaico_gauge_model.h"
+#include "mosaico_official_gauge.h"
 #include "mosaico_fcc_limit_journal_codec.h"
 #include "mosaico_ocv_diagnostic_model.h"
 #include "mosaico_threshold_audit_model.h"
@@ -875,7 +877,7 @@ bool gauge_wait_config(bool enter)
     return false;
 }
 
-bool gauge_exit_config()
+bool gauge_exit_config(bool officialCleanup = false)
 {
     uint16_t operation = 0;
     if (!gauge_word(0x3A, operation) || (operation & 1)) return false;
@@ -884,7 +886,10 @@ bool gauge_exit_config()
     if (((operation >> 1) & 3) != 1) return false; // CFG writes/recovery STILL require existing FA.
     // Reinitialize the nominal capacity registers using the documented CFG
     // exit command; do not reset hardware, change security, or program OTP.
-    const bool sent = gauge_control(GaugeCommand::ExitReinit);
+    // Official baseline cleanup does not inherit the retired cold-runtime gate.
+    const uint8_t exit[] = {0x00, 0x91, 0x00};
+    const bool sent = officialCleanup ? i2c_master_transmit(gauge, exit, sizeof(exit), 100) == ESP_OK :
+                                       gauge_control(GaugeCommand::ExitReinit);
     const bool exited = gauge_wait_config(false);
     return sent && exited;
 }
@@ -2710,7 +2715,6 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         return gauge_boot_info.status;
     }
     if(!lease.held)return finish(Status::Deferred,"boot_deferred_ota_storage_lease");
-    if(!normal_gauge_fence_locked())return finish(Status::Critical,"boot_critical_scale_recovery_required");
     // Capture only initialized pre-write evidence. Deferred retries may refresh
     // it while no reload has been attempted; diagnostic failure never gates reload.
     {
@@ -2736,173 +2740,52 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
                                     static_cast<uint8_t>(gauge_boot_info.status));
         }
     } diagnosticFinish;
-    bool normalizePriorSealed = false;
-    AccessJournal accessBefore{};
-    const auto mac = getFactoryMac();
-    {
-        // Release the nonrecursive battery mutex BEFORE calling public methods.
-        // The outer recursive transaction mutex remains held across every step.
-        std::lock_guard<std::mutex> battery(battery_mutex);
-        if (!gauge || !selftest()) return finish(Status::Skipped, "boot_skip_unknown_gauge_or_model");
-        uint16_t normalTarget=0;
-        const esp_err_t targetLoaded=gauge_load_normal_target(normalTarget);
-        if(targetLoaded!=ESP_OK&&targetLoaded!=ESP_ERR_NVS_NOT_FOUND)
-            return finish(Status::Critical,"boot_critical_normal_target_invalid");
-        Journal nominal{};
-        AccessJournal access{};
-        if(normalTarget!=NominalMah) {
-            // Small existing gauge-boot reason fields, no extra diagnostic API.
-            const auto txLoad=gauge_load_journal(nominal,mac.data());
-            const auto accessLoad=gauge_load_access(access,mac.data());
-            char details[128]{};
-            std::snprintf(details,sizeof(details),"boot_skip_normal_unset tx_load=%d tx_state=%u orig_dc=%u orig_fcc=%u access_load=%d access_state=%u",
-                int(txLoad),unsigned(txLoad==ESP_OK?nominal.state:0),unsigned(txLoad==ESP_OK?nominal.originalDesign:0),
-                unsigned(txLoad==ESP_OK?nominal.originalFcc:0),int(accessLoad),unsigned(accessLoad==ESP_OK?access.state:0));
-            return finish(Status::Skipped,details);
-        }
-        if (gauge_load_journal(nominal, mac.data()) != ESP_OK || gauge_load_access(access, mac.data()) != ESP_OK)
-            return finish(Status::Deferred, "boot_deferred_unknown_or_invalid_unit_history");
-        if (!bootHistoryEligible(nominal, access))
-            return finish(Status::Skipped, "boot_skip_history_not_verified_sealed_prior3");
-        accessBefore=access;
-        sample_battery_locked(true);
-        const auto sample = battery_telemetry;
-        if (!sample.valid || !sample.capacityValid) return finish(Status::Deferred, "boot_deferred_readonly_telemetry");
-        if (keepLearnedNominal(sample.designMah, sample.fullMah))
-            return finish(Status::Skipped, "boot_skip_already65_preserve_learned_fcc");
-        if (!bootFactoryPairEligible(nominal, sample.designMah, sample.fullMah))
-            return finish(Status::Skipped, "boot_skip_nonfactory_or_backup_mismatch_no_writes");
-        if (!bootFactorySecurityEligible(nominal, access, sample.designMah, sample.fullMah, sample.operationStatus))
-            return finish(Status::Deferred, "boot_deferred_not_idle_known_factory_sec2_or3");
-        uint16_t operation = 0;
-        GaugePair profile;
-        if (!gauge_access_preflight(operation, profile, true) ||
-            !bootFactorySecurityEligible(nominal, access, profile.design, profile.fcc, operation) ||
-            ((operation >> 1) & 3) != ((sample.operationStatus >> 1) & 3))
-            return finish(Status::Deferred, "boot_deferred_reload_voltage_temperature_load");
-        if (!gauge_identity()) return finish(Status::Deferred, "boot_deferred_readonly_identity");
-        normalizePriorSealed = ((operation >> 1) & 3) == 2;
-        // access_v1 persists attempt flags BEFORE each access word; tx_v1
-        // persists original backup/Pending BEFORE CFG. Do not rewrite the
-        // unrelated historical reload_v1/fcc_* records.
-
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    gauge_boot_info.attempted = true; // Exactly one official attempt, no journal-driven retries.
+    if (!gauge || !selftest()) return finish(Status::Skipped, "boot_official_failed_unknown_gauge_or_model");
+    const auto official = mosaico_official_gauge_apply(gauge);
+    const bool applied = official.success;
+    uint16_t operation=0, dc=0, fcc=0;
+    bool capacityRead = gauge_word(0x3c, dc) && gauge_word(0x12, fcc);
+    const bool observed = gauge_word(0x3a, operation);
+#if MOSAICO_GAUGE_USE_PREVIOUS_PROFILE
+    const bool capacityValid = capacityRead && dc == 65 && reasonableFcc(fcc);
+#else
+    // Official skip deliberately preserves learned FCC; FCC_LIM bounds it to DC.
+    const bool capacityValid = capacityRead && dc == 65 && fcc > 0 && fcc <= 65;
+#endif
+    const bool verified = applied && observed && configExitAccepted(operation) &&
+                          ((operation >> 1) & 3) == 3 && capacityValid;
+    if (verified) {
+        // Equivalent runtime selection only: do not write NVS or revive old gates.
+        normal_gauge_target = 65;
+        return finish(Status::Applied, "boot_official_profile_verified_sealed_native_capacity");
     }
-    gauge_boot_info.attempted = true; // one attempt per boot, even when OPEN later refuses/aborts.
-    if (normalizePriorSealed) {
-        // Existing CRC-bound prior access and attempted precede protective Seal. Reuse
-        // only the known journal's RESTORE, outside the nonrecursive battery
-        // lock. A failed normalization must NOT reach OPEN or finally Seal.
-        char normalizeReason[128]{};
-        bool normalized = gaugeAccess(GaugeAccessAction::Restore, normalizeReason, sizeof(normalizeReason));
-        uint16_t observedOperation = 0;
-        bool observed = false;
-        {
-            std::lock_guard<std::mutex> battery(battery_mutex);
-            GaugePair recheck;
-            observed = gauge_word(0x3A, observedOperation);
-            normalized = normalized && observed && configExitAccepted(observedOperation) &&
-                         ((observedOperation >> 1) & 3) == 3 && gauge_identity() &&
-                         gauge_access_preflight(observedOperation, recheck, true) &&
-                         ((observedOperation >> 1) & 3) == 3 &&
-                         recheck.design == FactoryMah && recheck.fcc == FactoryMah;
-
-        }
-        if (!normalized) {
-            char details[128]{};
-            if (observed) std::snprintf(details, sizeof(details),
-                "boot_critical_normalize_failed_no_retry observed_sec=%u cfg=%u cal=%u",
-                (observedOperation >> 1) & 3, !!(observedOperation & 0x0400), !!(observedOperation & 1));
-            else std::snprintf(details, sizeof(details), "boot_critical_normalize_failed_no_retry_security_unreadable");
-            return finish(Status::Critical, details);
-        }
+    // Official create failure may leave access open. Do not repeat profile apply,
+    // use old cold/tx gates, or write SOC. Cleanup only when status proves need.
+    bool cleanup = observed;
+    if (observed && (operation & 0x0400)) {
+        // A failed/unknown vendor exit ACK is still an attempt: never resend.
+        cleanup = !official.exitAttempted && gauge_exit_config(true);
     }
-    // Normal capacity reload is DC/FCC only. Historical fcc_fix_v1 and
-    // fcc_boot_v1 are retained evidence, never a CFG-bit/profile writer here.
-    // Permission begins only AFTER normal target + history/factory checks.
-    // The existing public writers persist their own intents before any keys/CFG.
-    // The recursive transaction lock above prevents any manual caller sharing
-    // this permission; all exits (including finally failures) revoke it.
-    struct BootReloadScope {
-        BootReloadScope() { boot_factory_reload_scope = true; }
-        ~BootReloadScope() { boot_factory_reload_scope = false; }
-    } reloadScope;
-    char phaseReason[128]{}, closeReason[128]{};
-    const bool opened = gaugeAccess(GaugeAccessAction::Open, phaseReason, sizeof(phaseReason));
-    const bool openCleanupAttempted = gauge_access_cleanup_attempted;
-    const bool openCleanupSucceeded = gauge_access_cleanup_succeeded;
-    if(!opened&&!openCleanupAttempted&&!std::strncmp(phaseReason,"blocked_",8)) {
-        std::lock_guard<std::mutex> battery(battery_mutex);
-        AccessJournal unchanged{};
-        uint16_t operation=0,dc=0,fcc=0;
-        if(gauge_load_access(unchanged,mac.data())==ESP_OK&&
-           std::memcmp(&unchanged,&accessBefore,sizeof(unchanged))==0&&
-           gauge_word(0x3a,operation)&&configExitAccepted(operation)&&((operation>>1)&3)==3&&
-           gauge_word(0x3c,dc)&&gauge_word(0x12,fcc)&&dc==FactoryMah&&fcc==FactoryMah) {
-            gauge_boot_info.attempted=false;
-            return finish(Status::Deferred,"boot_deferred_untouched_access_preflight_or_ota");
-        }
+    uint16_t cleanupOperation=0;
+    const bool cleanupObserved = gauge_word(0x3a, cleanupOperation);
+    cleanup = cleanup && cleanupObserved;
+    if (cleanupObserved && (cleanupOperation & (0x0400 | 1))) cleanup = false;
+    if (cleanupObserved && !(cleanupOperation & (0x0400 | 1)) && ((cleanupOperation >> 1) & 3) != 3 &&
+        !official.sealAttempted) {
+        const uint8_t seal[] = {0x00, 0x30, 0x00};
+        const bool sent = i2c_master_transmit(gauge, seal, sizeof(seal), 100) == ESP_OK;
+        gauge_delay_ms(2000);
+        cleanup = sent && gauge_word(0x3a, cleanupOperation) && configExitAccepted(cleanupOperation) &&
+                  ((cleanupOperation >> 1) & 3) == 3 && cleanup;
     }
-    const bool applied = opened && gaugeSetNominalCapacity(FactoryMah, NominalMah, false, phaseReason, sizeof(phaseReason));
-    // After OPEN, exactly one owner performs cleanup. Failed OPEN may already
-    // have attempted protective Seal internally: never repeat that attempt,
-    // successful or not. Its result plus the readonly audit below closes this
-    // boot attempt; existing access/tx failure records prevent unknown replay.
-    const bool closed = !opened && openCleanupAttempted ? openCleanupSucceeded :
-                        gaugeAccess(GaugeAccessAction::Restore, closeReason, sizeof(closeReason));
-    bool safelySealed = false;
-    uint16_t finalOperation = 0;
-    bool finalStatusRead = false;
-    {
-        std::lock_guard<std::mutex> battery(battery_mutex);
-        finalStatusRead = gauge_word(0x3A, finalOperation);
-        safelySealed = finalStatusRead && configExitAccepted(finalOperation) && ((finalOperation >> 1) & 3) == 3;
-    }
-    bool reconciled = false;
-    if (opened && applied && closed && safelySealed) {
-        // Boot-owned closure only: applied==true in THIS serialized transaction
-        // authorizes closing its successful Committed result after finally Seal.
-        // Do not broaden the public interrupted-operation reconcile whitelist.
-        std::lock_guard<std::mutex> battery(battery_mutex);
-        Journal terminal{};
-        AccessJournal access{};
-        reconciled = gauge_load_journal(terminal, mac.data()) == ESP_OK &&
-                     gauge_load_access(access, mac.data()) == ESP_OK && terminal.action == 1 &&
-                     (terminal.state == static_cast<uint8_t>(State::Committed) ||
-                      terminal.state == static_cast<uint8_t>(State::VerifiedSealedPrior3)) &&
-                     terminal.targetDesign == NominalMah && terminal.targetFcc == NominalMah &&
-                     terminal.lastDesign == terminal.targetDesign && terminal.lastFcc == terminal.targetFcc &&
-                     access.state == static_cast<uint8_t>(AccessState::Restored) && access.priorSecurity == 3 &&
-                     access.lastSecurity == 3 && access.unsealVerified && access.fullVerified && !failedDefaultAttempt(access);
-        for (unsigned read = 0; read < 2 && reconciled; ++read) {
-            reconciled = gauge_identity();
-            sample_battery_locked(true);
-            const auto& sample = battery_telemetry;
-            reconciled = reconciled && sample.valid && sample.capacityValid && configExitAccepted(sample.operationStatus) &&
-                         ((sample.operationStatus >> 1) & 3) == 3 && sample.designMah == terminal.targetDesign &&
-                         sample.fullMah == terminal.targetFcc && sample.remainingMah <= sample.fullMah;
-        }
-        if (reconciled) {
-            terminal.state = static_cast<uint8_t>(State::VerifiedSealedPrior3);
-            reconciled = gauge_store_journal(terminal, mac.data());
-        }
-        if (!reconciled) std::snprintf(phaseReason, sizeof(phaseReason), "boot_owned_terminal_closure_failed");
-    }
-    const bool success = opened && applied && closed && safelySealed && reconciled;
-    near_boot_finish(success);
-    if (!closed || !safelySealed) {
-        char details[128]{};
-        if (finalStatusRead) std::snprintf(details, sizeof(details),
-            "boot_critical_final_cleanup observed_sec=%u cfg=%u cal=%u", (finalOperation >> 1) & 3,
-            !!(finalOperation & 0x0400), !!(finalOperation & 1));
-        else std::snprintf(details, sizeof(details), "boot_critical_final_cleanup_security_unreadable");
-        return finish(Status::Critical, details);
-    }
-    if (!success) {
-        char details[128]{};
-        std::snprintf(details, sizeof(details), "boot_critical_attempt_failed_sealed_no_retry: %.72s", phaseReason);
-        return finish(Status::Critical, details);
-    }
-    return finish(Status::Applied, "boot_applied65_normal_sealed_verified_once");
+    if (cleanupObserved && ((cleanupOperation >> 1) & 3) != 3) cleanup = false;
+    char details[128]{};
+    std::snprintf(details, sizeof(details), "boot_official_failed_no_retry apply=%u cleanup=%u op=%04x dc=%u fcc=%u exit_try=%u seal_try=%u",
+                  applied, cleanup, cleanupOperation, dc, fcc, official.exitAttempted, official.sealAttempted);
+    // Failure is visible in the reason, but must not gate UI or OTA recovery.
+    return finish(Status::Skipped, details);
 }
 
 Hal::MosaicoClockDiagnostics Hal::displayClockDiagnostics() const
