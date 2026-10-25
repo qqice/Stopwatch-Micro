@@ -87,6 +87,9 @@ inline bool uartAllowed(const char* command) {
     if (!command) return true;
     if (!std::strcmp(command, "gauge-near-full")) return true;
 #ifdef MOSAICO_BOARD
+    // Same staged UI operations; parser SHA binding and OTA power checks remain.
+    if (!std::strcmp(command, "ota-check") || !std::strcmp(command, "ota-download") ||
+        !std::strcmp(command, "ota-install") || !std::strcmp(command, "ota-reboot")) return true;
     if (!std::strcmp(command, "gauge-cold")) return true;
     if (!std::strcmp(command, "ota-health")) return true;
     if (!std::strcmp(command, "heap-policy")) return true;

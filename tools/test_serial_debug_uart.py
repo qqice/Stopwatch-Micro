@@ -26,6 +26,22 @@ def method(name):
     return 'constexpr ' + SOURCE[start:end]
 
 class UartTests(unittest.TestCase):
+    def test_mosaico_staged_ota_uses_existing_parser_and_safety(self):
+        if not COMPILERS: self.skipTest('cross compiler unavailable')
+        header = HEADER.read_text().replace('inline bool uartAllowed', 'constexpr bool uartAllowed')
+        commands = ('ota-check', 'ota-download', 'ota-install', 'ota-reboot')
+        checks = ''.join('static_assert(serial_debug_transport::uartAllowed("'+cmd+'"));\n'
+                         'static_assert(!serial_debug_transport::uartAllowed("'+cmd+'-extra"));\n'
+                         for cmd in commands)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)/'staged.cpp'
+            p.write_text('#define MOSAICO_BOARD 1\n'+header+'\n'+checks)
+            result = subprocess.run([str(COMPILERS[-1]),'-std=c++20','-fsyntax-only',str(p)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('MosaicoOta::approveUpdate(sha)', SOURCE)
+        self.assertIn('MosaicoOta::approveInstall(sha)', SOURCE)
+        self.assertIn('safety_gates_retained=1', SOURCE)
+
     def test_mosaico_bounded_bank_command_permission(self):
         if not COMPILERS: self.skipTest('cross compiler unavailable')
         header = HEADER.read_text().replace('inline bool uartAllowed', 'constexpr bool uartAllowed')
