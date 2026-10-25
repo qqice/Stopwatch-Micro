@@ -255,6 +255,7 @@ std::recursive_mutex gauge_transaction_mutex;
 bool scale_boot_fence_locked();
 // Normal capacity maintenance never dispatches an experimental auto-restore.
 bool normal_gauge_fence_locked();
+void gauge_legacy_cache_init_locked();
 struct NormalGaugeStorageLease {
     bool held=false,acquired=false;
     NormalGaugeStorageLease() {
@@ -2709,6 +2710,9 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
         return status;
     };
+    // Classify every old ledger before a lease/Original branch can short-circuit.
+    // These loaders read metadata only; they do not replay an experiment.
+    gauge_legacy_cache_init_locked();
     // Only Deferred readonly probes may be revisited by the caller's scheduler.
     if (gauge_boot_info.attempted || gauge_boot_info.status != Status::Deferred) {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", gauge_boot_info.reason);
@@ -2740,8 +2744,10 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
                                     static_cast<uint8_t>(gauge_boot_info.status));
         }
     } diagnosticFinish;
-    std::lock_guard<std::mutex> battery(battery_mutex);
     gauge_boot_info.attempted = true; // Exactly one official attempt, no journal-driven retries.
+    if (gaugeScaleTrialActive())
+        return finish(Status::Skipped, "boot_official_active_or_unknown_experiment_no_write");
+    std::lock_guard<std::mutex> battery(battery_mutex);
     if (!gauge || !selftest()) return finish(Status::Skipped, "boot_official_failed_unknown_gauge_or_model");
     const auto official = mosaico_official_gauge_apply(gauge);
     const bool applied = official.success;
@@ -3495,6 +3501,13 @@ bool Hal::setDisplayOrientation(uint16_t degrees)
 namespace {
 // Read-only ledger classification. A stable Original is history, not an active
 // capacity owner. Unknown/corrupt/Pending/Applied/Restoring never get ignored.
+void gauge_legacy_cache_init_locked()
+{
+    (void)scale_load_locked();
+    (void)factory_scale_load_locked();
+    (void)contrast_load_locked();
+}
+
 bool normal_gauge_fence_locked()
 {
     if(!MosaicoGaugeCold::fallbackAllowed()||MosaicoGaugeCold::protectedState())return false;

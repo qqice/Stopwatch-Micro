@@ -537,6 +537,7 @@ void Hal::gaugeScalePoll(){
 #endif
     std::unique_lock<std::recursive_mutex> transaction(gauge_transaction_mutex,std::try_to_lock);
     if(!transaction.owns_lock())return;
+    gauge_legacy_cache_init_locked();
 #ifdef MOSAICO_GAUGE_CONTRAST_RUNTIME
     if(contrast_poll_locked())return;
 #endif
