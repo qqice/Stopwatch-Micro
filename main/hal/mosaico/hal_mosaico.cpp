@@ -34,6 +34,7 @@
 #include "mosaico_threshold_audit_model.h"
 #include "mosaico_gauge_calibration_read_model.h"
 #include "mosaico_gauge_public_extra_read_model.h"
+#include "mosaico_near_full.h"
 #include "mosaico_gauge_cold_runtime.h"
 #include <host/network_quota.h>
 #include <hal/ble/codex_micro_ble.h>
@@ -1590,7 +1591,175 @@ struct GaugeThresholdBackend {
     }
 };
 
+// Optional normal-profile setting; no record is created by boot/status.
+mosaico_near::Snapshot* near_snapshots=nullptr;
+bool near_before_known=false,near_after_known=false,near_boot_known=false,near_boot_pending=false;
+uint16_t near_boot_value=0;
+bool near_physical_mac(uint8_t (&mac)[6]) {
+    // S31 default eFuse helper writes eight bytes; this SDK selector returns
+    // the physical six-byte factory identity, not the retained legacy domain.
+    return esp_read_mac(mac,ESP_MAC_EFUSE_FACTORY)==ESP_OK;
+}
+esp_err_t near_load(mosaico_near::Record& r) {
+    uint8_t mac[6]{};if(!near_physical_mac(mac))return ESP_FAIL;
+    nvs_handle_t h=0;auto e=nvs_open("gaugecal",NVS_READONLY,&h);if(e!=ESP_OK)return e;
+    size_t n=r.size();e=nvs_get_blob(h,"near_v1",r.data(),&n);nvs_close(h);
+    return e==ESP_OK&&(n!=r.size()||!mosaico_near::valid(r,mac))?ESP_FAIL:e;
+}
+bool near_save(mosaico_near::Record& r) {
+    uint8_t mac[6]{};if(!near_physical_mac(mac))return false;
+    mosaico_near::seal(r);if(!mosaico_near::valid(r,mac))return false;
+    nvs_handle_t h=0;if(nvs_open("gaugecal",NVS_READWRITE,&h)!=ESP_OK)return false;
+    gauge_feed();auto e=nvs_set_blob(h,"near_v1",r.data(),r.size());if(e==ESP_OK)e=nvs_commit(h);nvs_close(h);gauge_feed();
+    mosaico_near::Record readback{};return e==ESP_OK&&near_load(readback)==ESP_OK&&r==readback;
+}
+bool near_read(uint16_t& value) {
+    uint8_t b[36]{};if(!gauge_threshold_read(mosaico_threshold::Selector::NearFull,b))return false;
+    value=(uint16_t(b[2])<<8)|b[3];return true;
+}
+bool near_write(uint16_t value) {
+    uint16_t op=0;if(!mosaico_near::allowed(value)||!gauge_identity()||!gauge_word(0x3a,op)||
+        ((op>>1)&3)!=1||!(op&0x0400)||(op&1))return false;
+    const uint8_t packet[]={0x3e,0x6b,0x92,uint8_t(value>>8),uint8_t(value)};
+    gauge_feed();if(i2c_master_transmit(gauge,packet,sizeof(packet),20)!=ESP_OK)return false;
+    gauge_delay_ms(1);
+    const uint8_t commit[]={0x60,mosaico_gauge::macChecksum(packet+1,4),6};
+    if(i2c_master_transmit(gauge,commit,sizeof(commit),20)!=ESP_OK)return false;
+    gauge_delay_ms(20);
+    for(unsigned i=0;i<2;++i){uint16_t actual=0;if(!near_read(actual)||actual!=value)return false;}return true;
+}
+bool near_rollbackOwn(uint16_t before,uint16_t desired) {
+    uint16_t op=0,a=0,b=0;
+    if(!mosaico_near::allowed(before)||!mosaico_near::allowed(desired)||!gauge_identity()||
+        !gauge_word(0x3a,op)||((op>>1)&3)!=1||!(op&0x0400)||(op&1)||
+        !near_read(a)||!near_read(b)||a!=b)return false;
+    if(a==before)return true; // Verified no-op, including A200's unknown ACK.
+    if(a!=desired||before==desired)return false;
+    return near_write(before); // Only the owned desired value authorizes ONE rollback.
+}
+bool near_snapshot(mosaico_near::Snapshot& out) {
+    // Existing pure authenticated double-read functions, independent of old audit journals.
+    uint16_t profile[3]{};const char* why="";
+    mosaico_threshold::Values t{};mosaico_calibration::Values c{};mosaico_public_extra::Values e{};
+    if(!gauge_profile_read_stable(gauge_mac_read,profile,why)||profile[1]!=65||profile[2]!=65||
+        !mosaico_threshold::readStable(gauge_threshold_read,profile[0],t)||
+        !mosaico_calibration::readStable(gauge_calibration_read,c)||!mosaico_public_extra::readStable(gauge_public_extra_read,e))return false;
+    for(size_t i=0;i<59;++i){const auto f=mosaico_near::field(i);out[i]=f.width==1?t.raw[i]>>8:t.raw[i];}
+    for(size_t i=0;i<7;++i)out[i+59]=mosaico_calibration::rawWord(c,i);
+    for(size_t i=0;i<65;++i)out[i+66]=e.raw[i];
+    return true;
+}
+void near_boot_apply() {
+    using namespace mosaico_near;Record r{};const auto loaded=near_load(r);
+    if(loaded!=ESP_OK){if(loaded!=ESP_ERR_NVS_NOT_FOUND)ESP_LOGW(Tag,"near_full invalid record; normal65 unchanged");return;}
+    if(r[3]!=Active){ESP_LOGW(Tag,"near_full inactive phase=%u; no replay",r[3]);return;}
+    r[3]=Pending;if(!near_save(r)){ESP_LOGW(Tag,"near_full intent failed; no write");return;}
+    near_boot_pending=true;
+    uint16_t before=0,again=0;
+    if(!near_read(before)||!near_read(again)||before!=again||!allowed(before)){
+        r[3]=Failed;(void)near_save(r);ESP_LOGW(Tag,"near_full unknown before; no write/retry");return;
+    }
+    const bool written=near_write(target(r)); // A=200 and B=5 both write exactly once.
+    near_boot_known=written;if(written)near_boot_value=target(r);
+    const bool rollback=!written&&near_rollbackOwn(before,target(r));
+    if(!written)ESP_LOGW(Tag,"near_full cold failed rollback=%d; pending until final seal",rollback);
+}
+void near_boot_finish(bool safelySealedNative65) {
+    if(!near_boot_pending)return;
+    near_boot_pending=false;mosaico_near::Record r{};
+    if(near_load(r)!=ESP_OK||r[3]!=mosaico_near::Pending){near_boot_known=false;return;}
+    r[3]=safelySealedNative65&&near_boot_known?mosaico_near::Active:mosaico_near::Failed;
+    if(!near_save(r)){near_boot_known=false;ESP_LOGW(Tag,"near_full final commit failed; no replay");}
+    if(!safelySealedNative65)near_boot_known=false;
+}
 } // namespace
+
+bool Hal::gaugeNearFull(const char* action,uint16_t expected,uint16_t target,char* details,size_t size)
+{
+    using namespace mosaico_near;
+    const bool status=!std::strcmp(action,"status"),restore=!std::strcmp(action,"restore");
+    NormalGaugeStorageLease lease;
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    Record r{};auto loaded=near_load(r);
+    const auto report=[&](bool ok,const char* why){
+        loaded=near_load(r);
+        char raw[49]{};for(size_t i=0;i<r.size();++i)std::snprintf(raw+2*i,3,"%02x",r[i]);
+        std::snprintf(details,size,"source=near_full mac_binding=physical_efuse reason=%s record_load=%d original_policy=200 original_known=%d target=%u phase=%u active=%d raw=%s boot-readback=%u boot_capture_stage=cfg_before_exit known=%d before=%d after=%d",
+            why,int(loaded),loaded==ESP_OK,mosaico_near::target(r),r[3],loaded==ESP_OK&&r[3]==Active,raw,near_boot_value,near_boot_known,near_before_known,near_after_known);
+        return ok;
+    };
+    if(status)return report(true,"readonly_no_gauge_access");
+    if((std::strcmp(action,"set")&&!restore)||(!restore&&(!allowed(expected)||!allowed(target))))return report(false,"blocked_arguments");
+    uint8_t physicalMac[6]{};if(!near_physical_mac(physicalMac))return report(false,"blocked_physical_mac");
+    if(!lease.held||!normal_gauge_fence_locked())return report(false,"blocked_storage_or_recovery");
+    if((loaded!=ESP_OK&&loaded!=ESP_ERR_NVS_NOT_FOUND)||(restore&&loaded!=ESP_OK)||
+        (!restore&&loaded==ESP_OK&&r[3]!=Active&&r[3]!=Restored))return report(false,"blocked_record_no_retry");
+    {
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        GaugeThresholdBackend gate;gate.normalTarget65=true;uint8_t mac[6]{};
+        if(!gate.preflight(mac))return report(false,"blocked_normal65_physical_history");
+    }
+    if(!near_snapshots)near_snapshots=static_cast<Snapshot*>(heap_caps_calloc(2,sizeof(Snapshot),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+    if(!near_snapshots)return report(false,"blocked_psram");
+    near_before_known=near_after_known=false;
+    char why[128]{},closeWhy[128]{};
+    const bool opened=gaugeAccess(GaugeAccessAction::Open,why,sizeof(why));
+    bool ok=false;const char* result="failed_open_no_parameter_write";
+    if(opened){
+        std::lock_guard<std::mutex> battery(battery_mutex);
+        near_before_known=near_snapshot(near_snapshots[0]);
+        const uint16_t before=near_before_known?near_snapshots[0][index]:0;
+        if(restore){target=200;expected=before;}
+        if(!near_before_known||!allowed(before)||before!=expected||(loaded==ESP_ERR_NVS_NOT_FOUND&&before!=200))result="failed_before_or_expected_no_write";
+        else {
+            if(loaded==ESP_ERR_NVS_NOT_FOUND)r=make(physicalMac,target,Pending);
+            r[3]=Pending;r[12]=target;r[13]=target>>8;
+            if(!near_save(r))result="failed_backup_commit_no_write";
+            else {
+                GaugeThresholdBackend gate;uint16_t operation=0;
+                const bool admitted=gate.runtimeGate()&&gauge_word(0x3a,operation)&&gauge_quiet_full(operation)&&gauge_identity();
+                const bool entered=admitted&&gauge_control(GaugeCommand::EnterConfig)&&gauge_wait_config(true);
+                const bool written=entered&&near_write(target);
+                // 0091 can automatically SEALED the gauge: all authenticated
+                // DM evidence is captured here in CFG, never after exit/reopen.
+                near_after_known=entered&&near_snapshot(near_snapshots[1]);
+                const bool otherDelta=near_after_known&&!unchanged(near_snapshots[0],near_snapshots[1]);
+                const bool onlyOwn=written&&near_after_known&&near_snapshots[1][index]==target&&!otherDelta;
+                // Unknown I/O is never replayed. Only one known-before rollback,
+                // and never change any of the other 130 observed fields.
+                const bool rollback=entered&&!onlyOwn&&near_rollbackOwn(before,target);
+                const bool exited=gauge_exit_config();
+                ok=onlyOwn&&exited;
+                result=ok?"single_field_verified":otherDelta?(rollback?"failed_other_fields_preserved_own_rollback":"failed_other_fields_preserved_unknown_own"):
+                    rollback?"failed_known_before_rolled_back":"failed_unknown_no_retry";
+            }
+        }
+    }
+    const bool closed=opened?gaugeAccess(GaugeAccessAction::Restore,closeWhy,sizeof(closeWhy)):
+        (!gauge_access_cleanup_attempted||gauge_access_cleanup_succeeded);
+    bool native65=false;
+    if(closed&&opened){std::lock_guard<std::mutex> battery(battery_mutex);uint16_t op=0,dc=0,fcc=0;
+        native65=gauge_word(0x3a,op)&&mosaico_gauge::configExitAccepted(op)&&((op>>1)&3)==3&&
+            gauge_word(0x3c,dc)&&gauge_word(0x12,fcc)&&dc==65&&fcc==65&&gauge_identity();}
+    ok=ok&&closed&&native65;
+    if(!closed||!native65)result="critical_final_seal_or_native65";
+    if(opened&&r[0]=='N'&&r[3]==Pending){
+        r[3]=ok?(restore?Restored:Active):Failed;
+        if(!near_save(r)){ok=false;result="failed_final_record_no_retry";}
+    }
+    ESP_LOGI(Tag,"near_full %s target=%u success=%d",result,target,ok);
+    return report(ok,result);
+}
+bool Hal::gaugeNearFullField(bool after,size_t i,char* details,size_t size)
+{
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    if(i>=mosaico_near::count||!near_snapshots||!(after?near_after_known:near_before_known)){
+        std::snprintf(details,size,"source=near_full cached=0");return false;
+    }
+    const auto f=mosaico_near::field(i);
+    std::snprintf(details,size,"source=near_full stage=%s capture_stage=%s cached=1 index=%u count=131 address=%04x type=%s width=%u rawBE=%0*lx ram_only=1",
+        after?"after":"before",after?"cfg_after_write":"fa_before_cfg",unsigned(i),f.address,f.type,f.width,int(f.width*2),static_cast<unsigned long>(near_snapshots[after?1:0][i]));return true;
+}
 
 bool Hal::gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize)
 {
@@ -2049,6 +2218,7 @@ bool Hal::gaugeSetNominalCapacity(uint16_t expectedOld, uint16_t target65, bool 
         forward = gauge_write_field(journal, Field::InitialFcc, desired.fcc);
     }
     if (forward) forward = gauge_verify_pair(desired, false);
+    if (forward && boot_factory_reload_scope && !restore) near_boot_apply();
     bool rolledBack = false;
     if (!forward && (touchedDc || touchedFcc))
         rolledBack = gauge_rollback(journal, before, touchedDc, touchedFcc);
@@ -2718,6 +2888,7 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         if (!reconciled) std::snprintf(phaseReason, sizeof(phaseReason), "boot_owned_terminal_closure_failed");
     }
     const bool success = opened && applied && closed && safelySealed && reconciled;
+    near_boot_finish(success);
     if (!closed || !safelySealed) {
         char details[128]{};
         if (finalStatusRead) std::snprintf(details, sizeof(details),

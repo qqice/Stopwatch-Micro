@@ -23,6 +23,9 @@ static_cast<uint8_t>(GaugeBootReloadStatus::Applied));''')
   self.assertIn('!gauge_standard_matches(before)',prefix)
   # Admission/refusal and final-outcome capture keep their existing locations.
   boot=self.boot_source()
+  self.assertEqual(boot.count('near_boot_finish(success);'),1)
+  self.assertLess(boot.index('const bool success = opened && applied && closed && safelySealed && reconciled;'),
+                  boot.index('near_boot_finish(success);'))
   self.assertEqual(boot.count('gauge_diagnostic_locked(gauge_boot_before'),1)
   self.assertEqual(boot.count('gauge_engine_locked(gauge_engine_before'),1)
   self.assertLess(boot.index('gauge_diagnostic_locked(gauge_boot_before'),boot.index('struct DiagnosticFinish'))
@@ -212,6 +215,9 @@ struct Fixture {
   if(f==Learned){battery_telemetry.designMah=65;battery_telemetry.fullMah=62;battery_telemetry.remainingMah=20;}
  }
  constexpr std::array<uint8_t,6> getFactoryMac(){return {};}
+ // Optional NearFull finalizer is covered by test_mosaico_near_full; no
+ // record exists in this legacy normal65 coordinator-only fixture.
+ constexpr void near_boot_finish(bool) {}
  constexpr bool selftest(){return true;}
  constexpr int gauge_load_reload(ReloadJournal& j,const uint8_t*){j=persisted;return durable?ESP_OK:ESP_ERR_NVS_NOT_FOUND;}
  constexpr bool gauge_store_reload(ReloadJournal& j,const uint8_t*) {

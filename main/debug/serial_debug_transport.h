@@ -85,6 +85,7 @@ constexpr bool settingsInteger(const char* text, uint32_t maximum, uint32_t& val
 }
 inline bool uartAllowed(const char* command) {
     if (!command) return true;
+    if (!std::strcmp(command, "gauge-near-full")) return true;
 #ifdef MOSAICO_BOARD
     if (!std::strcmp(command, "gauge-cold")) return true;
     if (!std::strcmp(command, "ota-health")) return true;

@@ -95,7 +95,7 @@ static_assert(faults(),"all boundaries ACK/NVS failures, no replay, one key atte
 ''')
  def test_normal65_observed_profile_config_and_failure_closed(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
-  backend=source.split('struct GaugeThresholdBackend {',1)[1].split('\n} // namespace',1)[0]
+  backend=source.split('struct GaugeThresholdBackend {',1)[1].split('\n};',1)[0]+'\n};'
   read='constexpr bool readThresholds(){'+backend.split('    bool readThresholds(){',1)[1].split('    // Existing schema-2 journal',1)[0]
   self.compile(r'''
 #include "mosaico_threshold_audit_model.h"
@@ -207,7 +207,7 @@ static_assert(cases(),"actual selector ACK plus strict full length/checksum/echo
 ''')
  def test_actual_guarded_close_never_seals_cfg_unknown(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
-  close='constexpr bool close() {'+source.split('struct GaugeThresholdBackend {',1)[1].split('    bool close() {',1)[1].split('\n};\n\n} // namespace',1)[0]
+  close='constexpr bool close() {'+source.split('struct GaugeThresholdBackend {',1)[1].split('    bool close() {',1)[1].split('\n};',1)[0]
   self.compile(r'''
 #include <cstdint>
 enum class AccessWord{Seal};
@@ -347,7 +347,7 @@ static_assert(cases(),"actual separate journal commit/reopen CRC/MAC/schema/byte
 ''')
  def test_actual_threshold_backend_public_method_compile_and_boundaries(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
-  backend='struct GaugeThresholdBackend {'+source.split('struct GaugeThresholdBackend {',1)[1].split('\n} // namespace',1)[0]
+  backend='struct GaugeThresholdBackend {'+source.split('struct GaugeThresholdBackend {',1)[1].split('\n};',1)[0]+'\n};'
   method='bool Hal::gaugeThresholdAudit('+source.split('bool Hal::gaugeThresholdAudit(',1)[1].split('// Closed standard-command snapshot',1)[0]
   self.compile(r'''
 #include <cstdint>
@@ -395,7 +395,15 @@ template<class Reader>bool gauge_profile_read_stable(Reader,uint16_t (&)[3],cons
   self.assertIn('gauge_threshold_cached={};gauge_threshold_cached_generation=0;',method)
   serial=(ROOT/'main/debug/serial_debug.cpp').read_text()
   cmd=serial.split('if (std::strcmp(command,"gauge-thresholds")==0)',1)[1].split('if (std::strcmp(command, "gauge-ocv")',1)[0]
-  self.assertIn('privileged&&_writer&&_writer->_reply_uart',cmd)
+  # Both local transports may request this parameter-read-only audit. CRC UART
+  # remains checked by the shared transport parser, and CONFIRM is still exact.
+  self.assertNotIn('_reply_uart',cmd)
+  self.assertIn('action&&confirm&&!std::strcmp(action,"audit")&&!std::strcmp(confirm,"CONFIRM")',cmd)
+  self.assertIn(r'(action&&!privileged)||::strtok_r(nullptr," \t",&save)',cmd)
+  self.assertIn('GetHAL().gaugeThresholdAudit(privileged,details,sizeof(details))',cmd)
+  self.assertIn('local_cdc_or_crc_uart=1',cmd)
+  for forbidden in ('gauge_control(', 'gauge_write_field(', 'gaugeNearFull(', 'gaugeAccess('):self.assertNotIn(forbidden,cmd)
+  self.assertIn('"gauge-thresholds"',(ROOT/'main/debug/serial_debug_transport.h').read_text())
   trace=serial.split('SerialDebug::handleGaugeTrace(char* line)',1)[1].split('\nvoid SerialDebug::',1)[0]
   for token in ('armConfirm()','clearConfirm()','exportRows(','status(','queued=1 persisted=0 check_status_pending0=1'):self.assertIn(token,trace)
 if __name__=='__main__':unittest.main()

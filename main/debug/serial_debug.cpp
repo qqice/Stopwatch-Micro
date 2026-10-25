@@ -2227,8 +2227,8 @@ void SerialDebug::handleLine(char* line)
         const char* action=::strtok_r(nullptr," \t",&save);
         const char* confirm=action?::strtok_r(nullptr," \t",&save):nullptr;
         const bool privileged=action&&confirm&&!std::strcmp(action,"audit")&&!std::strcmp(confirm,"CONFIRM");
-        if((action&&!privileged)||(privileged&&_writer&&_writer->_reply_uart)||::strtok_r(nullptr," \t",&save)) {
-            result("gauge-thresholds","FAIL","expected=noargs_or_audit_CONFIRM privileged_cdc_only=1");return;
+        if((action&&!privileged)||::strtok_r(nullptr," \t",&save)) {
+            result("gauge-thresholds","FAIL","expected=noargs_or_audit_CONFIRM local_cdc_or_crc_uart=1");return;
         }
         char details[1420]{};
         const bool ok=GetHAL().gaugeThresholdAudit(privileged,details,sizeof(details));
@@ -2308,6 +2308,26 @@ void SerialDebug::handleLine(char* line)
         GetHAL().delay(250);
         GetHAL().reboot();
         return;
+    }
+    if (std::strcmp(command, "gauge-near-full") == 0) {
+        const char* mode=::strtok_r(nullptr," \t",&save);
+        const char* a=::strtok_r(nullptr," \t",&save);
+        const char* b=::strtok_r(nullptr," \t",&save);
+        const char* c=::strtok_r(nullptr," \t",&save);
+        uint32_t expected=0,target=0;bool valid=false,ok=false;char details[400]{};
+        if(mode&&!std::strcmp(mode,"status")&&!a){valid=true;ok=GetHAL().gaugeNearFull(mode,0,0,details,sizeof(details));}
+        else if(mode&&!std::strcmp(mode,"field")&&a&&b&&!c&&
+            (!std::strcmp(a,"before")||!std::strcmp(a,"after"))&&serial_debug_transport::settingsInteger(b,130,target)){
+            valid=true;ok=GetHAL().gaugeNearFullField(!std::strcmp(a,"after"),target,details,sizeof(details));
+        }else if(mode&&!std::strcmp(mode,"restore")&&a&&!std::strcmp(a,"CONFIRM")&&!b){
+            valid=true;ok=GetHAL().gaugeNearFull(mode,0,0,details,sizeof(details));
+        }else if(mode&&!std::strcmp(mode,"set")&&a&&b&&c&&!std::strcmp(c,"CONFIRM")&&
+            !::strtok_r(nullptr," \t",&save)&&serial_debug_transport::settingsInteger(a,200,expected)&&
+            serial_debug_transport::settingsInteger(b,200,target)&&(expected==200||expected==5)&&(target==200||target==5)){
+            valid=true;ok=GetHAL().gaugeNearFull(mode,expected,target,details,sizeof(details));
+        }
+        result(command,valid?(ok?"PASS":"FAIL"):"FAIL",valid?details:
+            "expected=status_or_set_200or5_200or5_CONFIRM_or_restore_CONFIRM_or_field_before|after_0..130");return;
     }
     if (std::strcmp(command, "gauge-selftest") == 0) {
         result("gauge-selftest", GetHAL().gaugeSafetySelfTest() ? "PASS" : "FAIL",
@@ -2745,6 +2765,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP commands=ping,status,selftest,controls,protocol,debug-transport\r\n");
 #ifdef MOSAICO_BOARD
     debugPrintf("DBG HELP gauge-fcc-status no_arguments=1 readonly=1 journal_existence_explicit=1\r\n");
+    debugPrintf("DBG HELP gauge-near-full status | set <200|5> <200|5> CONFIRM | restore CONFIRM | field <before|after> <0..130>\r\n");
     debugPrintf("DBG HELP nand-dma no_arguments=1 readonly_ram=1 no_storage_io=1\r\n");
     debugPrintf("DBG HELP gauge-native-recovery evidence | resolve CONFIRM <8hexCRC> explicit_ram_only=1 failed_records_preserved=1\r\n");
     debugPrintf("DBG HELP gauge-factory-audit status | revalidate-status | revalidate-field <0..130> | revalidate CONFIRM (CDC_only) | capture CONFIRM (CDC_only) | field <0..130> read_only_parameters=1 separate_backup=1\r\n");
@@ -2754,7 +2775,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP gauge-fcc-limit apply CONFIRM cdc_only=1 runtime_only=1 no_automatic_replay=1\r\n");
     debugPrintf("DBG HELP gauge-trace status | arm CONFIRM | stop | export | clear CONFIRM | checkpoint CONFIRM queued_not_persisted=1 gauge_parameter_writes=0\r\n");
     debugPrintf("DBG HELP gauge-public-extra-field index_0..64 readonly_cached=1 raw_only=1\r\n");
-    debugPrintf("DBG HELP gauge-thresholds [audit CONFIRM] default_readonly=1 privileged_cdc_only=1 no_cfg_or_parameter_writes=1\r\n");
+    debugPrintf("DBG HELP gauge-thresholds [audit CONFIRM] default_readonly=1 local_cdc_or_crc_uart=1 no_cfg_or_parameter_writes=1\r\n");
     debugPrintf("DBG HELP gauge-ocv measure CONFIRM cdc_only=1 quiet120s_post5s=1 ram_one_attempt=1 sent_is_wire_attempt=1 no_calibration_claim=1\r\n");
     debugPrintf("DBG HELP gauge-charge no_arguments=1 readonly=1 standard_registers_only=1\r\n");
     debugPrintf("DBG HELP gauge-profile no_arguments=1 readonly=1 closed_dm_selectors=1 no_unseal=1\r\n");

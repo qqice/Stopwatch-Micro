@@ -250,6 +250,8 @@ public:
     // FULL_ACCESS. Unknown-key prior UNSEALED is refused to preserve a return path.
     // RESTORE uses a separate unit/CRC-bound prior-security journal.
     bool gaugeAccess(GaugeAccessAction action, char* reason, size_t reasonSize);
+    bool gaugeNearFull(const char* action, uint16_t expected, uint16_t target, char* details, size_t size);
+    bool gaugeNearFullField(bool after, size_t index, char* details, size_t size);
     // Explicit read-only gauge audit + NVS-only journal reconciliation. Never
     // sends access keys, CFG controls or capacity/configuration data.
     bool gaugeReconcileNominal(char* reason, size_t reasonSize);
@@ -355,6 +357,10 @@ public:
         return false;
     }
     bool gaugeSafetySelfTest() const { return false; }
+    bool gaugeNearFull(const char*, uint16_t, uint16_t, char* details, size_t size)
+    { if(details&&size)std::snprintf(details,size,"unsupported_not_mosaico");return false; }
+    bool gaugeNearFullField(bool, size_t, char* details, size_t size)
+    { if(details&&size)std::snprintf(details,size,"unsupported_not_mosaico");return false; }
     bool gaugeAccess(GaugeAccessAction, char* reason, size_t reasonSize)
     {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "unsupported: not Mosaico");
