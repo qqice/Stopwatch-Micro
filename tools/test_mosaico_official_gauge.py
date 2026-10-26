@@ -1,6 +1,7 @@
 """Official profile provenance/contracts and constexpr tests of actual transport.
 No firmware build, hardware, network, or shared build directory is used.
 """
+import difflib
 import hashlib
 import json
 import os
@@ -44,10 +45,40 @@ class OfficialGaugeTests(unittest.TestCase):
 
     def test_vendor_and_board_provenance(self):
         manifest = json.loads(text(VENDOR/'PROVENANCE.json'))
+        self.assertEqual(set(manifest['files']), set(manifest['upstream_files']))
+        self.assertEqual(len(manifest['files']), 6)
+        before = b'#define BQ27220_CFG_UPDATE_ENTER_DELAY_MS 1100'
+        after = b'#define BQ27220_CFG_UPDATE_ENTER_DELAY_MS 2000'
+        old_call = b'delay_ms(BQ27220_CFG_UPDATE_ENTER_DELAY_MS);'
+        new_call = b'vTaskDelay(pdMS_TO_TICKS(BQ27220_CFG_UPDATE_ENTER_DELAY_MS) + 1);'
         for name,sha in manifest['files'].items():
-            self.assertEqual(hashlib.sha256((VENDOR/name).read_bytes()).hexdigest(),sha)
+            current = (VENDOR/name).read_bytes()
+            self.assertEqual(hashlib.sha256(current).hexdigest(),sha)
+            if name == 'bq27220.c':
+                self.assertEqual(current.count(after), 1)
+                self.assertNotIn(before, current)
+                self.assertEqual(current.count(new_call), 1)
+                self.assertNotIn(old_call, current)
+                upstream = current.replace(after, before, 1).replace(new_call, old_call, 1)
+                expected_patch = ''.join(difflib.unified_diff(
+                    upstream.decode().splitlines(True), current.decode().splitlines(True),
+                    fromfile='a/main/hal/mosaico/vendor/bq27220/bq27220.c',
+                    tofile='b/main/hal/mosaico/vendor/bq27220/bq27220.c', n=3))
+                self.assertEqual(manifest['upstream_files'][name],
+                    '7e4c98eb6804a0395f6a8c9d06f1b334178d0db46dc7487d202593d2c6a25c10')
+            else:
+                upstream = current
+                self.assertEqual(sha, manifest['upstream_files'][name])
+            # Clean clones validate the exact inverse patch without private references.
+            self.assertEqual(hashlib.sha256(upstream).hexdigest(), manifest['upstream_files'][name])
             original=ROOT/manifest['source']/name
-            if original.exists(): self.assertEqual((VENDOR/name).read_bytes(),original.read_bytes())
+            if original.exists(): self.assertEqual(upstream,original.read_bytes())
+        self.assertEqual(len(manifest['local_patches']), 1)
+        patch = manifest['local_patches'][0]
+        self.assertEqual(patch['file'], 'bq27220.c')
+        self.assertEqual(patch['upstream_sha256'], manifest['upstream_files']['bq27220.c'])
+        self.assertEqual(patch['patched_sha256'], manifest['files']['bq27220.c'])
+        self.assertEqual(text(ROOT/patch['patch']), expected_patch)
         for name,sha in manifest['previous_profile_sources'].items():
             if (ROOT/name).exists(): self.assertEqual(hashlib.sha256((ROOT/name).read_bytes()).hexdigest(),sha)
         board = ROOT/manifest['board_profile_source']
@@ -67,6 +98,20 @@ class OfficialGaugeTests(unittest.TestCase):
             self.assertEqual(board_values,expected)
         self.assertEqual(official,expected)
         self.assertEqual(len(official),26)
+
+    def test_enter_cfg_update_settles_before_first_poll_and_write(self):
+        source = text(VENDOR/'bq27220.c')
+        delay = re.findall(r'^#define BQ27220_CFG_UPDATE_ENTER_DELAY_MS (\d+)$', source, re.M)
+        self.assertEqual(len(delay), 1)
+        self.assertGreaterEqual(int(delay[0]), 2000)
+        # One extra tick covers tick-boundary truncation (SDK tick = 1000 Hz).
+        # This guarantees at least 2 s, not a hard-exact 2 s duration.
+        # These adjacent statements prove the successful ENTER path delays before
+        # the first CFGUPDATE poll, and only writes parameters after that poll.
+        self.assertRegex(source, r'ESP_GOTO_ON_ERROR\(bq27220_control\(handle, CONTROL_ENTER_CFG_UPDATE\), err, TAG, "Failed to request CONFIG UPDATE mode"\);\s+'
+            r'vTaskDelay\(pdMS_TO_TICKS\(BQ27220_CFG_UPDATE_ENTER_DELAY_MS\) \+ 1\);\s+'
+            r'ESP_GOTO_ON_ERROR\(bq27220_wait_cfg_update\(handle, true\), exit_cfg_update, TAG, "Failed to enter CONFIG UPDATE mode"\);\s+'
+            r'ESP_GOTO_ON_ERROR\(bq27220_write_profile\(handle, config\), exit_cfg_update, TAG, "Battery profile write failed"\);')
 
     def test_previous_audit_bytes_and_5same21different(self):
         previous,official=profiles()

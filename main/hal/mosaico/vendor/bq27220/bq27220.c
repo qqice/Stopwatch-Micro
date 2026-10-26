@@ -21,7 +21,7 @@ static const char *TAG = "bq27220";
 // device id
 #define BQ27220_DEVICE_ID 0x0220
 #define delay_ms(x) vTaskDelay(pdMS_TO_TICKS(x))
-#define BQ27220_CFG_UPDATE_ENTER_DELAY_MS 1100
+#define BQ27220_CFG_UPDATE_ENTER_DELAY_MS 2000
 #define BQ27220_CFG_UPDATE_EXIT_SETTLE_MS 2000
 #define BQ27220_CFG_UPDATE_POLL_MS 20
 #define BQ27220_CFG_UPDATE_POLL_COUNT 100
@@ -462,7 +462,7 @@ bq27220_handle_t bq27220_create(const bq27220_config_t *config)
     ESP_LOGW(TAG, "Start updating battery profile");
     ESP_GOTO_ON_ERROR(bq27220_enter_full_access(handle), err, TAG, "Failed to enter full access");
     ESP_GOTO_ON_ERROR(bq27220_control(handle, CONTROL_ENTER_CFG_UPDATE), err, TAG, "Failed to request CONFIG UPDATE mode");
-    delay_ms(BQ27220_CFG_UPDATE_ENTER_DELAY_MS);
+    vTaskDelay(pdMS_TO_TICKS(BQ27220_CFG_UPDATE_ENTER_DELAY_MS) + 1);
     ESP_GOTO_ON_ERROR(bq27220_wait_cfg_update(handle, true), exit_cfg_update, TAG, "Failed to enter CONFIG UPDATE mode");
     ESP_GOTO_ON_ERROR(bq27220_write_profile(handle, config), exit_cfg_update, TAG, "Battery profile write failed");
     ESP_GOTO_ON_ERROR(bq27220_verify_profile(handle, config, true), exit_cfg_update, TAG, "Battery profile immediate verification failed");
