@@ -2842,6 +2842,7 @@ void capacity_test_poll()
 
 bool Hal::gaugeCapacityTest(const char* action,char* details,size_t size)
 {
+    using namespace mosaico_gauge;
     NormalGaugeStorageLease lease;
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     const bool status=!std::strcmp(action,"status");

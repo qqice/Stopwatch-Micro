@@ -44,6 +44,7 @@ class Capacity130Tests(unittest.TestCase):
         active=function((HAL.parent/'mosaico_gauge_scale_trial.inc').read_text(), 'bool Hal::gaugeScaleTrialActive()')
         self.assertNotIn('capacity_test',active)
         command=function(source,'bool Hal::gaugeCapacityTest(')
+        self.assertIn('using namespace mosaico_gauge;',command)
         self.assertNotIn('gauge_official_apply_locked(',command.split('if(std::strcmp(action,"arm130"))',1)[1])
         boot=function(source,'Hal::GaugeBootReloadStatus Hal::gaugeBootReload(')
         for a,b in [('gauge_boot_info.attempted = true','if (gaugeScaleTrialActive())'),
