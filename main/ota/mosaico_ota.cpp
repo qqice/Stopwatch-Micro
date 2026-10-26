@@ -11,6 +11,7 @@
 #include <hal/hal.h>
 #include <hal/mosaico/usb_console.h>
 #include <host/standby_sleep.h>
+#include <host/network_quota.h>
 #include <host/touch_sleep.h>
 #ifdef MOSAICO_NAND_STORE
 #include <host/gauge_trace_nand_backend.h>
@@ -345,6 +346,7 @@ bool requestLocked(bool automatic, bool preserveAge = false, bool maintenance = 
     active.store(true);
     mosaico_rx_ingress::request(false); // Admission invalidates pending RX generations.
     StandbySleep::otaActivity();
+    GetNetworkQuota().notifyOtaQueued();
     return true;
 }
 bool validateDescriptor(const char* json, Descriptor& out, const char*& error)
@@ -680,7 +682,9 @@ bool approveUpdate(const char* expectedSha)
     std::memcpy(approvedHash, ui.sha256, 65);
     requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
     approvedRequest.store(true); mosaico_rx_ingress::request(false);
-    StandbySleep::otaActivity(); return true;
+    StandbySleep::otaActivity();
+    GetNetworkQuota().notifyOtaQueued();
+    return true;
 }
 void deferUpdate()
 {
@@ -865,7 +869,9 @@ bool requestCheck()
     requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
     cachedRunning.store(esp_ota_get_running_partition()); // Diagnostic cache before busy queue publication.
     checkQueued.store(true); mosaico_rx_ingress::request(false);
-    StandbySleep::otaActivity(); return true;
+    StandbySleep::otaActivity();
+    GetNetworkQuota().notifyOtaQueued();
+    return true;
 }
 bool takeCheckRequest()
 {

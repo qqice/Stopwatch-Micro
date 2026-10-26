@@ -159,6 +159,16 @@ void NetworkQuota::refreshWhileLocked()
     _force_refresh = true;
     if (_task_handle) xTaskNotifyGive(_task_handle);
 }
+#ifdef MOSAICO_BOARD
+void NetworkQuota::notifyOtaQueued()
+{
+    // Queue state is already published. The owner rechecks existing OTA/idle
+    // gates; do not manufacture a refresh or extend any network deadline.
+    // Initialization can fail and delete its task, leaving a stale handle.
+    // Pre-ready queues need no notification: the first owner iteration sees them.
+    if (_ota_owner_ready.load(std::memory_order_acquire) && _task_handle) xTaskNotifyGive(_task_handle);
+}
+#endif
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
 bool NetworkQuota::requestLanTcp(const MosaicoLanTcp::Request& request)
 {
@@ -1611,6 +1621,9 @@ void NetworkQuota::run()
 #endif
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
     _hw_rx_owner_ready.store(true); // All startup gates have completed.
+#endif
+#ifdef MOSAICO_BOARD
+    _ota_owner_ready.store(true, std::memory_order_release); // No return/delete after this permanent-loop admission.
 #endif
     while (true) {
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31

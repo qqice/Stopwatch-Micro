@@ -45,6 +45,7 @@ public:
     void setPowerProfile(uint8_t profile);
     void refreshWhileLocked();
 #ifdef MOSAICO_BOARD
+    void notifyOtaQueued(); // Wake owner only; no radio, refresh-window or lock-state changes.
 #if CONFIG_IDF_TARGET_ESP32S31
     bool requestLanTcp(const MosaicoLanTcp::Request& request);
     void cancelLanTcp() { _lan_tcp.cancel(); }
@@ -204,6 +205,9 @@ private:
     void recordWifiRunning(bool running);
     void setPhase(uint8_t phase);
     TaskHandle_t _task_handle = nullptr;
+#ifdef MOSAICO_BOARD
+    std::atomic<bool> _ota_owner_ready{false}; // Published only by the permanent owner loop.
+#endif
     std::atomic<bool> _locked{false}, _wifi_running{false}, _force_refresh{false};
     std::atomic<uint8_t> _power_profile{2}, _power_phase{0};
 #ifdef MOSAICO_BOARD
