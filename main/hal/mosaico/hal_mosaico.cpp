@@ -39,6 +39,10 @@
 #include "mosaico_near_full.h"
 #include "mosaico_gauge_cold_runtime.h"
 #include <host/network_quota.h>
+#include <host/mosaico_system_log.h>
+#ifndef MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS
+#define MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS 0
+#endif
 #include <hal/ble/codex_micro_ble.h>
 #include <ota/mosaico_ota.h>
 #include "mosaico_boot_splash_model.h"
@@ -592,12 +596,25 @@ void gauge_engine_locked(Hal::GaugeEngineSnapshot& out,uint8_t phase,uint8_t out
     out={};out.sampledUs=esp_timer_get_time();out.phase=phase;out.outcome=outcome;
     const auto units=scale_unit_context_locked();
     out.units={units.factor,units.unitEpoch,units.generation,units.verified,uint8_t(units.phase)};
+    if(mosaico_gauge_engine::startupDeferred(MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS,
+                                            uint64_t(out.sampledUs)/1000)){
+        out.validMask=mosaico_gauge_engine::StartupDeferred;
+        return; // No sleep, MAC transmit, or diagnostic retry; preserve phase/time/units.
+    }
     if(!gauge)return;
+    // Serialized by gauge_transaction_mutex. Mark only the first actual group
+    // in the deferred variant, not skipped calls or NAND collection/flush time.
+    static bool firstEngineDiagnosticSent=false;
     struct EngineTransport {
+        bool markFirst=false,started=false;
         MaintenanceGaugeTransportDiagnostic* diagnostic = nullptr;
         bool transmit(const uint8_t* p,size_t n){
             gauge_feed();
             if(!gauge)return false;
+            if(markFirst&&!started){
+                started=true;
+                MosaicoSystemLog::engineDiagnosticEvent(true,0,uint64_t(esp_timer_get_time())/1000);
+            }
             const esp_err_t result=i2c_master_transmit(gauge,p,n,20);
             if(diagnostic)diagnostic->record(result,n?p[0]:0,2);
             return result==ESP_OK;
@@ -616,7 +633,12 @@ void gauge_engine_locked(Hal::GaugeEngineSnapshot& out,uint8_t phase,uint8_t out
         }
     } transport;
     transport.diagnostic=diagnostic;
-    mosaico_gauge_engine::read(transport,out);
+    transport.markFirst=MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS&&!firstEngineDiagnosticSent;
+    const bool ok=mosaico_gauge_engine::read(transport,out);
+    if(transport.started){
+        firstEngineDiagnosticSent=true;
+        MosaicoSystemLog::engineDiagnosticEvent(false,ok?1:2,uint64_t(esp_timer_get_time())/1000);
+    }
 }
 
 // Requires gauge_transaction_mutex -> battery_mutex. This adapter is closed:

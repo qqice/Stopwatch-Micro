@@ -10,7 +10,7 @@ from serial_debug_test import DebugClient
 
 PAGE_MAGIC=0x31474c4d
 TYPES={1:'boot',2:'gauge',3:'gauge_boot',4:'network',5:'power',6:'ota',7:'heap',
-       8:'warning_fingerprint',9:'loss',10:'gauge_boot_outcome',11:'panic',12:'tcp',13:'gauge_engine',14:'gauge_unit_context'}
+       8:'warning_fingerprint',9:'loss',10:'gauge_boot_outcome',11:'panic',12:'tcp',13:'gauge_engine',14:'gauge_unit_context',15:'engine_diagnostic_event'}
 
 def fields(result):
     return dict(x.split('=',1) for x in result.details.split() if '=' in x)
@@ -35,6 +35,10 @@ def decode_page(data,expected):
         typ,flags,ms,epoch,*a=struct.unpack_from('<HHQQ11I',data,60+i*64)
         r=dict(page_seq=seq,page_boot=boot,index=i,type=TYPES.get(typ,'unknown'),type_id=typ,
                flags=flags,monotonic_ms=ms,epoch=epoch,args=a)
+        if typ==15:
+            r['engine_diagnostic_event']=dict(stage={1:'begin',2:'end'}.get(a[0],'unknown'),
+                result={0:'pending',1:'pass',2:'fail'}.get(a[1],'unknown'),
+                timestamp_ms=a[2]|(a[3]<<32),first_group=True)
         if typ==14:
             factor=a[0]|(a[1]<<32)
             r['unit_context']={'factor':factor-(1<<64) if factor&(1<<63) else factor,
@@ -52,6 +56,7 @@ def decode_page(data,expected):
             e=dict(valid_mask=v,phase=(a[0]>>16)&255,outcome=a[0]>>24,
                    cedv_valid=bool(v&1),smooth_valid=bool(v&2),identity_valid=bool(v&4),
                    definition_match=bool(v&8),raw73=raw[:23].hex(),raw76=raw[23:].hex(),units='raw_not_calibration')
+            if v&32768:e.update(startup_deferred=True,reason='startup_engine_diagnostics_deferred',defer_until_ms=300000)
             if v&8:
                 if v&1:e.update(CEDVRemCap=struct.unpack_from('<H',raw,0)[0],EDVThreshold=struct.unpack_from('<H',raw,16)[0])
                 if v&2:

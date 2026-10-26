@@ -7,7 +7,9 @@
 namespace mosaico_gauge_engine {
 enum Valid : uint16_t { Cedv=1, Smooth=2, Identity=4, DefinitionMatch=8,
  CedvTx=16, CedvEcho=32, CedvData=64, SmoothTx=128, SmoothEcho=256, SmoothData=512,
- IdentityTx=1024, IdentityEcho=2048, IdentityData=4096 };
+ IdentityTx=1024, IdentityEcho=2048, IdentityData=4096, StartupDeferred=32768 };
+constexpr uint64_t StartupDeferUntilMs=300000;
+constexpr bool startupDeferred(bool enabled,uint64_t uptimeMs){return enabled&&uptimeMs<StartupDeferUntilMs;}
 struct Snapshot {
  uint64_t sampledUs;
  uint16_t validMask,echo73,echo76,echo02;

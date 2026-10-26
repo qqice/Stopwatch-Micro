@@ -125,3 +125,25 @@ TX/echo-read/data-read success for CEDV, smooth and identity. Echo-read success
 alone does **not** imply selector match. Record flags bit 0 remains epoch-valid
 only and is cleared for cached boot records. Existing type 2/3 schemas and the
 48-byte standard diagnostic snapshot are unchanged.
+
+## Optional startup-engine timing comparison
+
+The Mosaico build option `MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS` defaults to
+`OFF`. When enabled, the shared engine-read entry sends none of its optional
+`0002/0073/0076` group before uptime 300000 ms. It returns immediately: the UI,
+standard register samples, public `0056` qualification samples, gauge parameters
+and configuration-exit sequence are unchanged. Required identity reads in the
+battery driver are not suppressed.
+
+Type 13 valid-mask bit 15 (`StartupDeferred`) means intentionally not acquired,
+not I/O failure or a valid zero. Cached startup snapshots stay missing; later
+reads must not be backfilled with fake startup timestamps. The decoder adds
+`startup_deferred` only when this flag is present. The existing `gauge-engine`
+command returns `SKIP` with the deadline while deferred.
+
+Type 15 marks the first actual group submission and its return (pass or fail).
+Its timestamp is software submission/return time, not a logic-analyzer bus edge.
+Markers use the existing ordinary queue/flush cadence, without forcing a new
+NAND-load edge. Existing loss counters apply: missing markers do not prove no
+MAC was sent. Compare the fresh standard samples around these markers and
+retain load/radio/qualification changes as possible concurrent explanations.

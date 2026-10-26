@@ -10,6 +10,8 @@ struct ChunkMetadata {
 // begin is RAM only, safe before HAL.init. service releases worker after HAL.init.
 void begin(uint32_t bootId);
 void service();
+// RAM queue only; first optional engine group, actual send/return timestamps.
+void engineDiagnosticEvent(bool begin,uint8_t result,uint64_t timestampMs);
 size_t startupInternalReservation(); // Verified resident RTC stack only, <=8192.
 bool requestFlush();
 void probe(); // Explicit operator-only static-format fingerprint test.

@@ -70,6 +70,9 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
 
 if(MOSAICO_BOARD)
     target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/hal/mosaico/vendor/bq27220")
+    if(MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS=1)
+    endif()
     if(MOSAICO_GAUGE_USE_PREVIOUS_PROFILE)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE MOSAICO_GAUGE_USE_PREVIOUS_PROFILE=1)
     endif()

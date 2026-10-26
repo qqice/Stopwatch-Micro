@@ -2104,6 +2104,9 @@ void SerialDebug::handleLine(char* line)
             static_cast<Output*>(heap_caps_calloc(1,sizeof(Output),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT))};
         if(!buffer.p){result(command,"FAIL","reason=diagnostic_psram_alloc readonly=1");return;}
         auto& s=buffer.p->sample;const bool ok=GetHAL().gaugeEngineSample(s);
+        if(s.validMask&mosaico_gauge_engine::StartupDeferred){
+            result(command,"SKIP","readonly=1 reason=startup_engine_diagnostics_deferred defer_until_ms=300000");return;
+        }
         auto& cedv=buffer.p->cedv;auto& smooth=buffer.p->smooth;auto& identity=buffer.p->identity;
         for(size_t i=0;i<23;++i)std::snprintf(cedv+i*2,3,"%02x",s.rawCedv[i]);
         for(size_t i=0;i<17;++i)std::snprintf(smooth+i*2,3,"%02x",s.rawSmooth[i]);

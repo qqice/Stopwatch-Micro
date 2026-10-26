@@ -98,6 +98,40 @@ constexpr bool modelCases(){using namespace mosaico_maintenance_power;
 Hal::MaintenancePowerSnapshot s{};s.operationStatus=0x26;s.designMah=s.fullMah=3000;s.voltageMv=3900;s.temperatureDeciK=2832;s.currentMa=-130;s.averageCurrentMa=130;if(!safe(s)||!safeOperation(0xa6)||safeOperation(0x86)||safeOperation(6)||safeOperation(0x426)||safeOperation(0x27))return false;s.designMah=s.fullMah=65;if(!safe(s))return false;s.designMah=s.fullMah=130;if(safe(s))return false;s.designMah=65;s.fullMah=3000;return !safe(s);}
 static_assert(modelCases(),"INITCOMP is bit5, never bit7; paired raw capacity only");
 '''
+def transport_fixture(source):
+ transport='struct MaintenanceGaugeTransportDiagnostic {'+source.split('struct MaintenanceGaugeTransportDiagnostic {',1)[1].split('\nbool gauge_read_diagnostic(',1)[0]
+ strip=lambda s: re.sub(r'^\s*#(?:include|pragma)[^\n]*','',s,flags=re.M)
+ prefix='\n'.join(strip(base.HEADERS[name]) for name in ('cstdint','cstddef','type_traits'))
+ prefix+='\n'+strip((INC.parent/'mosaico_gauge_unit_tag.h').read_text())
+ prefix+='\n'+strip((INC.parent/'mosaico_gauge_engine_model.h').read_text())
+ prefix+=r'''
+#define MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS 0
+namespace MosaicoSystemLog {static void engineDiagnosticEvent(bool,uint8_t,uint64_t){}}
+using esp_err_t=int;constexpr int ESP_OK=0;
+struct Hal{using GaugeEngineSnapshot=mosaico_gauge_engine::Snapshot;};
+static bool gauge=true;static int feedCalls,delayCalls,txCalls,rxCalls,bad,failTx,failRx,selector;
+static unsigned lastTimeout,lastReg,lastSize,delayMsCalls;static unsigned char rxRegs[64],rxSizes[64],selectors[4];
+static int64_t esp_timer_get_time(){return 100;}
+struct Units {int64_t factor;uint64_t unitEpoch,generation;bool verified;uint8_t phase;};
+static Units scale_unit_context_locked(){return {1,2,3,true,0};}
+static void gauge_feed(){++feedCalls;}
+static void gauge_delay_ms(unsigned ms){if(ms!=20)++bad;++delayMsCalls;}
+static void esp_rom_delay_us(unsigned us){if(us!=100)++bad;++delayCalls;}
+static int i2c_master_transmit(bool,const uint8_t* p,size_t n,unsigned timeout){
+if(n!=3||p[0]!=0||p[2]!=0||timeout!=20)++bad;selector=p[1];selectors[txCalls]=selector;
+return ++txCalls==failTx?271:0;}
+static int i2c_master_transmit_receive(bool,const uint8_t* reg,size_t rn,uint8_t* out,size_t n,unsigned timeout){
+if(rn!=1||timeout!=20)++bad;lastTimeout=timeout;lastReg=*reg;lastSize=n;rxRegs[rxCalls]=*reg;rxSizes[rxCalls]=n;
+if(++rxCalls==failRx)return 272;for(unsigned i=0;i<n;++i)out[i]=0;
+if(*reg==0x3e)out[0]=selector;
+else if(selector==2){const uint8_t identity[11]={2,0x20,0,3,0,4,0,0,0,0,0};for(unsigned i=0;i<n;++i)out[i]=identity[*reg-0x40+i];}
+else if(*reg==8){out[0]=0x34;out[1]=0x12;}
+return 0;}
+'''+transport
+ for signature in ('bool gauge_read_diagnostic(', 'bool gauge_read(', 'bool gauge_word_diagnostic(', 'bool gauge_word(', 'void gauge_engine_locked('):
+  prefix+='\n'+rv32.function(source,signature)
+ return prefix
+
 class MaintenancePowerTests(unittest.TestCase):
  def test_actual_provider_active_experiment_guards_rv32(self):
   global FIXTURE,CASES,RESET,RUN
@@ -112,35 +146,7 @@ class MaintenancePowerTests(unittest.TestCase):
   finally:FIXTURE,CASES,RESET,RUN=fixture,cases,reset,run
  def test_actual_transport_hooks_rv32(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text()
-  transport='struct MaintenanceGaugeTransportDiagnostic {'+source.split('struct MaintenanceGaugeTransportDiagnostic {',1)[1].split('\nbool gauge_read_diagnostic(',1)[0]
-  strip=lambda s: re.sub(r'^\s*#(?:include|pragma)[^\n]*','',s,flags=re.M)
-  prefix='\n'.join(strip(base.HEADERS[name]) for name in ('cstdint','cstddef','type_traits'))
-  prefix+='\n'+strip((INC.parent/'mosaico_gauge_unit_tag.h').read_text())
-  prefix+='\n'+strip((INC.parent/'mosaico_gauge_engine_model.h').read_text())
-  prefix+=r'''
-using esp_err_t=int;constexpr int ESP_OK=0;
-struct Hal{using GaugeEngineSnapshot=mosaico_gauge_engine::Snapshot;};
-static bool gauge=true;static int feedCalls,delayCalls,txCalls,rxCalls,bad,failTx,failRx,selector;
-static unsigned lastTimeout,lastReg,lastSize,delayMsCalls;static unsigned char rxRegs[64],rxSizes[64],selectors[4];
-static int64_t esp_timer_get_time(){return 100;}
-struct Units {int64_t factor;uint64_t unitEpoch,generation;bool verified;uint8_t phase;};
-static Units scale_unit_context_locked(){return {1,2,3,true,0};}
-static void gauge_feed(){++feedCalls;}
-static void gauge_delay_ms(unsigned ms){if(ms!=20)++bad;++delayMsCalls;}
-static void esp_rom_delay_us(unsigned us){if(us!=100)++bad;++delayCalls;}
-static int i2c_master_transmit(bool,const uint8_t* p,size_t n,unsigned timeout){
- if(n!=3||p[0]!=0||p[2]!=0||timeout!=20)++bad;selector=p[1];selectors[txCalls]=selector;
- return ++txCalls==failTx?271:0;}
-static int i2c_master_transmit_receive(bool,const uint8_t* reg,size_t rn,uint8_t* out,size_t n,unsigned timeout){
- if(rn!=1||timeout!=20)++bad;lastTimeout=timeout;lastReg=*reg;lastSize=n;rxRegs[rxCalls]=*reg;rxSizes[rxCalls]=n;
- if(++rxCalls==failRx)return 272;for(unsigned i=0;i<n;++i)out[i]=0;
- if(*reg==0x3e)out[0]=selector;
- else if(selector==2){const uint8_t identity[11]={2,0x20,0,3,0,4,0,0,0,0,0};for(unsigned i=0;i<n;++i)out[i]=identity[*reg-0x40+i];}
- else if(*reg==8){out[0]=0x34;out[1]=0x12;}
- return 0;}
-'''+transport
-  for signature in ('bool gauge_read_diagnostic(', 'bool gauge_read(', 'bool gauge_word_diagnostic(', 'bool gauge_word(', 'void gauge_engine_locked('):
-   prefix+='\n'+rv32.function(source,signature)
+  prefix=transport_fixture(source)
   cases=r'''
 static int run_case(int id){feedCalls=delayCalls=txCalls=rxCalls=bad=failTx=failRx=selector=0;delayMsCalls=0;
  MaintenanceGaugeTransportDiagnostic diagnostic{};uint16_t v=99;

@@ -130,6 +130,13 @@ void flush(uint64_t now){
 }
 void worker(void*){unsigned marker=0;workerStackRtc=esp_ptr_in_rtc_dram_fast(&marker);for(;;){ulTaskNotifyTake(pdTRUE,portMAX_DELAY);const auto now=nowMs();dmaLargest=heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA|MALLOC_CAP_8BIT);if(!consumeDurable())continue;collect(now);processRead(now);flush(now);}}
 }
+void engineDiagnosticEvent(bool begin,uint8_t result,uint64_t timestampMs){
+ auto r=record(Type::EngineDiagnosticEvent,timestampMs);
+ r.args={begin?1U:2U,result,uint32_t(timestampMs),uint32_t(timestampMs>>32),0,0,0,0,0,0,0};
+ // Keep the existing flush cadence; the marker must not add a NAND load edge.
+ enqueue(r);
+}
+
 void begin(uint32_t id){
  if(initialized.exchange(true))return;
  bootId=id;
@@ -154,7 +161,7 @@ void status(char* out,size_t len){if(out&&len)std::snprintf(out,len,"ready=%u ta
 }
 #else
 namespace MosaicoSystemLog {
-void begin(uint32_t){} void service(){} size_t startupInternalReservation(){return 0;} bool requestFlush(){return false;} void probe(){} void status(char* out,size_t n){if(out&&n)out[0]=0;} bool requestRead(uint64_t){return false;} ReadStatus readStatus(){return ReadStatus::Idle;} bool readChunk(uint64_t,uint16_t,uint8_t*,size_t,ChunkMetadata&){return false;}
+void engineDiagnosticEvent(bool,uint8_t,uint64_t){} void begin(uint32_t){} void service(){} size_t startupInternalReservation(){return 0;} bool requestFlush(){return false;} void probe(){} void status(char* out,size_t n){if(out&&n)out[0]=0;} bool requestRead(uint64_t){return false;} ReadStatus readStatus(){return ReadStatus::Idle;} bool readChunk(uint64_t,uint16_t,uint8_t*,size_t,ChunkMetadata&){return false;}
 }
 #endif
 

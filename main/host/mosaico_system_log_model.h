@@ -36,13 +36,16 @@ using Bytes=std::array<uint8_t,RecordBytes>;
 // valid (TX + echo IO + matching selector + complete data); bit3 identity
 // 0220/fw0003/build0004. Bits4/5/6 CEDV TX/echoIO/dataIO, bits7/8/9
 // smooth TX/echoIO/dataIO, bits10/11/12 identity TX/echoIO/dataIO.
+// bit15=StartupDeferred (no optional MAC reads; not an I/O failure).
 // Echo values and identity bytes are not persisted. flags bit0=epoch-valid only.
+// EngineDiagnosticEvent: args0=begin(1)/end(2), args1=result(0 begin,1 pass,2 fail),
+// args2/3=actual timestampMs low/high. Only first actual group; loss counters apply.
 // Temperatures use conservative integer deci-K bounds: ceil(2831.5)..floor(3181.5).
 // UnitContext applies ONLY to the immediately following Gauge/GaugeBoot/Engine
 // record (same monotonic timestamp), never to arbitrary older raw history.
 // args: factor lo/hi, unitEpoch lo/hi, generation lo/hi, verified, phase,
 // next-record-only=1, reserved[2]. Unknown context remains explicit factor=0.
-enum class Type:uint16_t { Boot=1,Gauge=2,GaugeBoot=3,Network=4,Power=5,Ota=6,Heap=7,Warning=8,Loss=9,Outcome=10,Panic=11,Tcp=12,GaugeEngine=13,UnitContext=14 };
+enum class Type:uint16_t { Boot=1,Gauge=2,GaugeBoot=3,Network=4,Power=5,Ota=6,Heap=7,Warning=8,Loss=9,Outcome=10,Panic=11,Tcp=12,GaugeEngine=13,UnitContext=14,EngineDiagnosticEvent=15 };
 struct Record {Type type=Type::Boot;uint16_t flags=0;uint64_t monotonicMs=0,epoch=0;std::array<uint32_t,11> args{};};
 template<size_t N> constexpr void put(std::array<uint8_t,N>& b,size_t p,uint64_t v,size_t n){for(size_t i=0;i<n;++i)b[p+i]=uint8_t(v>>(8*i));}
 template<size_t N> constexpr uint64_t get(const std::array<uint8_t,N>& b,size_t p,size_t n){uint64_t v=0;for(size_t i=0;i<n;++i)v|=uint64_t(b[p+i])<<(8*i);return v;}
