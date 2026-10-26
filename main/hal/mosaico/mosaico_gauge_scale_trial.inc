@@ -532,6 +532,7 @@ bool Hal::gaugeScaleTrialActive() const {
     return scale_trial_protection.load(std::memory_order_acquire);
 }
 void Hal::gaugeScalePoll(){
+    capacity_test_poll(); // Before every legacy early return, independent of old trial gates.
 #ifdef MOSAICO_GAUGE_COLD_RUNTIME
     if(cold_poll_supervisor())return;
 #endif

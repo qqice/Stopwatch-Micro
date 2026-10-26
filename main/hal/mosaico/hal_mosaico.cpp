@@ -63,6 +63,7 @@
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include <host/standby_sleep.h>
 #include <host/touch_sleep.h>
 #include "esp_clk_tree.h"
@@ -2690,6 +2691,192 @@ bool Hal::gaugeModeAudit(char* out, size_t len)
     return ok && (sample.validMask & mosaico_gauge_status::ModeValid);
 }
 
+namespace {
+bool gauge_official_apply_locked(uint16_t capacity, char* details, size_t size, bool strictFcc = false)
+{
+    using namespace mosaico_gauge;
+    const auto official = mosaico_official_gauge_apply(gauge, capacity);
+    const bool applied = official.success;
+    uint16_t operation=0, dc=0, fcc=0;
+    bool capacityRead = gauge_word(0x3c, dc) && gauge_word(0x12, fcc);
+    const bool observed = gauge_word(0x3a, operation);
+#if MOSAICO_GAUGE_USE_PREVIOUS_PROFILE
+    const bool capacityValid = capacityRead && dc == 65 && reasonableFcc(fcc);
+#else
+    // Official skip deliberately preserves learned FCC; FCC_LIM bounds it to DC.
+    const bool capacityValid = capacityRead && dc == capacity && fcc > 0 && fcc <= capacity;
+#endif
+    const bool verified = applied && observed && configExitAccepted(operation) &&
+                          ((operation >> 1) & 3) == 3 && capacityValid && (!strictFcc || fcc == capacity);
+    if (verified) {
+        // Equivalent runtime selection only: do not write NVS or revive old gates.
+        if (capacity == 65) normal_gauge_target = 65;
+        return true;
+    }
+    // Official create failure may leave access open. Do not repeat profile apply,
+    // use old cold/tx gates, or write SOC. Cleanup only when status proves need.
+    bool cleanup = observed;
+    if (observed && (operation & 0x0400)) {
+        // A failed/unknown vendor exit ACK is still an attempt: never resend.
+        cleanup = !official.exitAttempted && gauge_exit_config(true);
+    }
+    uint16_t cleanupOperation=0;
+    const bool cleanupObserved = gauge_word(0x3a, cleanupOperation);
+    cleanup = cleanup && cleanupObserved;
+    if (cleanupObserved && (cleanupOperation & (0x0400 | 1))) cleanup = false;
+    if (cleanupObserved && !(cleanupOperation & (0x0400 | 1)) && ((cleanupOperation >> 1) & 3) != 3 &&
+        !official.sealAttempted) {
+        const uint8_t seal[] = {0x00, 0x30, 0x00};
+        const bool sent = i2c_master_transmit(gauge, seal, sizeof(seal), 100) == ESP_OK;
+        gauge_delay_ms(2000);
+        cleanup = sent && gauge_word(0x3a, cleanupOperation) && configExitAccepted(cleanupOperation) &&
+                  ((cleanupOperation >> 1) & 3) == 3 && cleanup;
+    }
+    if (cleanupObserved && ((cleanupOperation >> 1) & 3) != 3) cleanup = false;
+
+    std::snprintf(details, size, "boot_official_failed_no_retry apply=%u cleanup=%u op=%04x dc=%u fcc=%u exit_try=%u seal_try=%u",
+                  applied, cleanup, cleanupOperation, dc, fcc, official.exitAttempted, official.sealAttempted);
+    // Failure is visible in the reason, but must not gate UI or OTA recovery.
+    return false;
+}
+struct CapacityTestState {
+    bool possiblyChanged=false, restoreAttempted=false;
+    std::atomic<bool> restorePending{false};
+    int64_t deadlineUs=0;
+    const char* outcome="idle";
+} capacity_test;
+
+esp_err_t capacity_arm_read(uint8_t& armed)
+{
+    armed=0;
+    nvs_handle_t h=0;
+    esp_err_t e=nvs_open("gaugecal",NVS_READONLY,&h);
+    if(e==ESP_ERR_NVS_NOT_FOUND)return ESP_OK;
+    if(e!=ESP_OK)return e;
+    e=nvs_get_u8(h,"cap130_once",&armed);
+    nvs_close(h);
+    if(e==ESP_ERR_NVS_NOT_FOUND){armed=0;return ESP_OK;}
+    return e==ESP_OK&&armed>1?ESP_FAIL:e;
+}
+bool capacity_arm_write(uint8_t armed)
+{
+    nvs_handle_t h=0;
+    if(nvs_open("gaugecal",NVS_READWRITE,&h)!=ESP_OK)return false;
+    esp_err_t e=nvs_set_u8(h,"cap130_once",armed);
+    if(e==ESP_OK)e=nvs_commit(h);
+    nvs_close(h);
+    uint8_t observed=2;
+    return e==ESP_OK&&capacity_arm_read(observed)==ESP_OK&&observed==armed;
+}
+// Consume once even on non-POWERON resets and read failures. Never dispatch an
+// arm whose durable cancellation could not be confirmed.
+bool capacity_consume_once()
+{
+    uint8_t armed=0;
+    const bool read=capacity_arm_read(armed)==ESP_OK;
+    // Missing/zero is already disarmed; avoid a flash commit on ordinary boots.
+    if(read&&armed==0)return false;
+    const bool cleared=capacity_arm_write(0);
+    if(!read||!cleared){capacity_test.outcome="consume_failed_default65";return false;}
+    const bool poweron=esp_reset_reason()==ESP_RST_POWERON;
+    if(armed&&!poweron)capacity_test.outcome="arm_consumed_non_poweron_default65";
+    if(armed&&poweron)capacity_test.outcome="arm_consumed_poweron";
+    return armed==1&&poweron;
+}
+// Shared readonly admission: never send fresh access keys after an unknown exit,
+// active CFG/CAL, unreadable security, or a prior unsealed/full-access state.
+bool gauge_official_sealed_locked(uint16_t& operation)
+{
+    return gauge && gauge_word(0x3a,operation) && mosaico_gauge::configExitAccepted(operation) &&
+        ((operation>>1)&3)==3;
+}
+bool capacity_safe_locked(uint16_t& dc,uint16_t& fcc)
+{
+    uint16_t op=0,mv=0,temp=0,current=0,average=0;
+    return gauge_official_sealed_locked(op) && gauge_word(0x08,mv) && gauge_word(0x06,temp) &&
+        gauge_word(0x0c,current) && gauge_word(0x14,average) && gauge_word(0x3c,dc) && gauge_word(0x12,fcc) &&
+        ((op>>1)&3)==3 && mosaico_gauge::bootReloadPhysical(op,mv,temp,
+            static_cast<int16_t>(current),static_cast<int16_t>(average));
+}
+
+// Caller owns storage lease and transaction. Admission failures never spend
+// the one hardware attempt. Unknown CFG/exit state never receives fresh keys.
+bool capacity_restore_locked(char* details,size_t size)
+{
+    if(capacity_test.restoreAttempted){std::snprintf(details,size,"restore_already_attempted_no_retry");return false;}
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    uint16_t dc=0,fcc=0;
+    if(!capacity_safe_locked(dc,fcc)) {
+        capacity_test.outcome="restore_pending_unsafe_or_unknown_no_keys";
+        std::snprintf(details,size,"%s",capacity_test.outcome);return false;
+    }
+    if(dc==65&&fcc==65) {
+        capacity_test.restorePending=false;
+        capacity_test.possiblyChanged=false;
+        capacity_test.outcome="already65_sealed_no_write";
+        normal_gauge_target=65;
+        std::snprintf(details,size,"%s",capacity_test.outcome);return true;
+    }
+    capacity_test.restoreAttempted=true;
+    const bool ok=gauge_official_apply_locked(65,details,size,true);
+    capacity_test.restorePending=!ok;
+    if(ok)capacity_test.possiblyChanged=false;
+    capacity_test.outcome=ok?"restored65_verified":"restore65_failed_no_retry";
+    if(ok)std::snprintf(details,size,"%s",capacity_test.outcome);
+    return ok;
+}
+void capacity_test_poll()
+{
+    if(!capacity_test.restorePending.load(std::memory_order_acquire))return;
+    NormalGaugeStorageLease lease;
+    if(!lease.held)return;
+    std::unique_lock<std::recursive_mutex> transaction(gauge_transaction_mutex,std::try_to_lock);
+    if(!transaction.owns_lock()||!capacity_test.restorePending||capacity_test.restoreAttempted)return;
+    if(esp_timer_get_time()<capacity_test.deadlineUs)return;
+    // Old unknown trial ownership is never overridden, including explicit restore.
+    if(GetHAL().gaugeScaleTrialActive())return;
+    char details[128]{};
+    (void)capacity_restore_locked(details,sizeof(details));
+}
+} // namespace
+
+bool Hal::gaugeCapacityTest(const char* action,char* details,size_t size)
+{
+    NormalGaugeStorageLease lease;
+    std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
+    const bool status=!std::strcmp(action,"status");
+    if(!lease.held){std::snprintf(details,size,"storage_lease_busy arm_canceled=0 hardware_restore=not_attempted");return false;}
+    if(status) {
+        uint8_t armed=0;const bool read=capacity_arm_read(armed)==ESP_OK;
+        std::snprintf(details,size,"arm_read=%u armed=%u possibly_changed=%u restore_pending=%u restore_attempted=%u deadline_us=%lld outcome=%s physical_soc_trusted=0",
+            read,armed,capacity_test.possiblyChanged,capacity_test.restorePending.load(),capacity_test.restoreAttempted,
+            static_cast<long long>(capacity_test.deadlineUs),capacity_test.outcome);
+        return read;
+    }
+    const bool restore=!std::strcmp(action,"restore65");
+    if(restore) {
+        // Cancellation is independent of any later hardware admission/failure.
+        const bool canceled=capacity_arm_write(0);
+        if(!canceled){std::snprintf(details,size,"arm_canceled=0 hardware_restore=not_attempted cancel_readback_failed");return false;}
+        if(gaugeScaleTrialActive()){std::snprintf(details,size,"arm_canceled=1 hardware_restore=not_attempted old_trial_hold");return false;}
+        char phase[128]{};
+        const bool ok=capacity_restore_locked(phase,sizeof(phase));
+        std::snprintf(details,size,"arm_canceled=1 hardware_restore=%s %s",ok?"verified65":"pending_or_failed",phase);
+        return ok;
+    }
+    if(std::strcmp(action,"arm130")){std::snprintf(details,size,"unknown_action");return false;}
+#if MOSAICO_GAUGE_USE_PREVIOUS_PROFILE
+    std::snprintf(details,size,"previous_profile_refuses130");return false;
+#else
+    if(gaugeScaleTrialActive()||capacity_test.possiblyChanged||capacity_test.restorePending){std::snprintf(details,size,"old_trial_or_restore_pending");return false;}
+    std::lock_guard<std::mutex> battery(battery_mutex);
+    uint16_t dc=0,fcc=0;
+    if(!gauge||!selftest()||!capacity_safe_locked(dc,fcc)||dc!=65||fcc!=65){std::snprintf(details,size,"arm_preflight_requires_safe_sealed65_pair");return false;}
+    const bool ok=capacity_arm_write(1);
+    std::snprintf(details,size,"arm_confirmed=%u bq_writes=0 requires=poweron",ok);return ok;
+#endif
+}
+
 Hal::GaugeBootReloadInfo Hal::gaugeBootReloadInfo() const
 {
     // No I2C/NVS and no triggering work. Waiting here prevents a runtime-reset
@@ -2745,53 +2932,41 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         }
     } diagnosticFinish;
     gauge_boot_info.attempted = true; // Exactly one official attempt, no journal-driven retries.
+    // This key belongs only to this experiment, never to the old trial. Clear
+    // it even when an old hold forbids all gauge work on this boot.
+    const bool armed130=capacity_consume_once();
     if (gaugeScaleTrialActive())
         return finish(Status::Skipped, "boot_official_active_or_unknown_experiment_no_write");
     std::lock_guard<std::mutex> battery(battery_mutex);
     if (!gauge || !selftest()) return finish(Status::Skipped, "boot_official_failed_unknown_gauge_or_model");
-    const auto official = mosaico_official_gauge_apply(gauge);
-    const bool applied = official.success;
-    uint16_t operation=0, dc=0, fcc=0;
-    bool capacityRead = gauge_word(0x3c, dc) && gauge_word(0x12, fcc);
-    const bool observed = gauge_word(0x3a, operation);
+    uint16_t admissionOperation=0;
+    if(!gauge_official_sealed_locked(admissionOperation))
+        return finish(Status::Skipped,"boot_official_security_unknown_or_not_idle_sealed_no_keys");
+    uint16_t capacity=65;
+    if(armed130) {
 #if MOSAICO_GAUGE_USE_PREVIOUS_PROFILE
-    const bool capacityValid = capacityRead && dc == 65 && reasonableFcc(fcc);
+        capacity_test.outcome="previous_profile_refused130_default65";
 #else
-    // Official skip deliberately preserves learned FCC; FCC_LIM bounds it to DC.
-    const bool capacityValid = capacityRead && dc == 65 && fcc > 0 && fcc <= 65;
+        uint16_t dc=0,fcc=0;
+        // Cold gauge RAM may have returned to its known factory pair. The
+        // arm command required65; cold admission accepts only these two pairs.
+        if(capacity_safe_locked(dc,fcc)&&((dc==65&&fcc==65)||
+           (dc==FactoryMah&&fcc==FactoryMah)))capacity=130;
+        else capacity_test.outcome="arm_preflight_failed_default65";
 #endif
-    const bool verified = applied && observed && configExitAccepted(operation) &&
-                          ((operation >> 1) & 3) == 3 && capacityValid;
-    if (verified) {
-        // Equivalent runtime selection only: do not write NVS or revive old gates.
-        normal_gauge_target = 65;
-        return finish(Status::Applied, "boot_official_profile_verified_sealed_native_capacity");
     }
-    // Official create failure may leave access open. Do not repeat profile apply,
-    // use old cold/tx gates, or write SOC. Cleanup only when status proves need.
-    bool cleanup = observed;
-    if (observed && (operation & 0x0400)) {
-        // A failed/unknown vendor exit ACK is still an attempt: never resend.
-        cleanup = !official.exitAttempted && gauge_exit_config(true);
+    if(capacity==130) {
+        // Mark before the first potentially submitted write, including failures.
+        capacity_test.possiblyChanged=true;
+        capacity_test.restorePending=true;
+        capacity_test.restoreAttempted=false;
+        capacity_test.deadlineUs=esp_timer_get_time()+600000000LL;
     }
-    uint16_t cleanupOperation=0;
-    const bool cleanupObserved = gauge_word(0x3a, cleanupOperation);
-    cleanup = cleanup && cleanupObserved;
-    if (cleanupObserved && (cleanupOperation & (0x0400 | 1))) cleanup = false;
-    if (cleanupObserved && !(cleanupOperation & (0x0400 | 1)) && ((cleanupOperation >> 1) & 3) != 3 &&
-        !official.sealAttempted) {
-        const uint8_t seal[] = {0x00, 0x30, 0x00};
-        const bool sent = i2c_master_transmit(gauge, seal, sizeof(seal), 100) == ESP_OK;
-        gauge_delay_ms(2000);
-        cleanup = sent && gauge_word(0x3a, cleanupOperation) && configExitAccepted(cleanupOperation) &&
-                  ((cleanupOperation >> 1) & 3) == 3 && cleanup;
-    }
-    if (cleanupObserved && ((cleanupOperation >> 1) & 3) != 3) cleanup = false;
     char details[128]{};
-    std::snprintf(details, sizeof(details), "boot_official_failed_no_retry apply=%u cleanup=%u op=%04x dc=%u fcc=%u exit_try=%u seal_try=%u",
-                  applied, cleanup, cleanupOperation, dc, fcc, official.exitAttempted, official.sealAttempted);
-    // Failure is visible in the reason, but must not gate UI or OTA recovery.
-    return finish(Status::Skipped, details);
+    const bool verified=gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130);
+    if(capacity==130)capacity_test.outcome=verified?"applied130_restore_pending":"apply130_failed_restore_pending";
+    return finish(verified?Status::Applied:Status::Skipped,
+                  verified?(capacity==130?"boot_capacity130_verified_restore_pending":"boot_official_profile_verified_sealed_native_capacity"):details);
 }
 
 Hal::MosaicoClockDiagnostics Hal::displayClockDiagnostics() const

@@ -2258,6 +2258,18 @@ void SerialDebug::handleLine(char* line)
         result("gauge-charge",ok?"PASS":"FAIL",details);
         return;
     }
+    if (std::strcmp(command,"gauge-capacity-test")==0) {
+        const char* action=::strtok_r(nullptr," \t",&save);
+        const char* confirm=::strtok_r(nullptr," \t",&save);
+        const bool status=action&&!std::strcmp(action,"status");
+        const bool mutation=action&&(!std::strcmp(action,"arm130")||!std::strcmp(action,"restore65"));
+        if((!status&&!mutation)||(status&&confirm)||(mutation&&(!confirm||std::strcmp(confirm,"CONFIRM")))||::strtok_r(nullptr," \t",&save)) {
+            result("gauge-capacity-test","FAIL","expected=status|arm130 CONFIRM|restore65 CONFIRM");return;
+        }
+        char details[384]{};
+        const bool ok=GetHAL().gaugeCapacityTest(action,details,sizeof(details));
+        result("gauge-capacity-test",ok?"PASS":"FAIL",details);return;
+    }
     if (std::strcmp(command, "gauge-profile") == 0) {
         if (::strtok_r(nullptr, " \t", &save)) {
             result("gauge-profile", "FAIL", "expected=no_arguments readonly=1");
@@ -2778,6 +2790,7 @@ void SerialDebug::printHelp()
     debugPrintf("DBG HELP gauge-thresholds [audit CONFIRM] default_readonly=1 local_cdc_or_crc_uart=1 no_cfg_or_parameter_writes=1\r\n");
     debugPrintf("DBG HELP gauge-ocv measure CONFIRM cdc_only=1 quiet120s_post5s=1 ram_one_attempt=1 sent_is_wire_attempt=1 no_calibration_claim=1\r\n");
     debugPrintf("DBG HELP gauge-charge no_arguments=1 readonly=1 standard_registers_only=1\r\n");
+    debugPrintf("DBG HELP gauge-capacity-test status|arm130 CONFIRM|restore65 CONFIRM one_shot_poweron=1 timeout_s=600\r\n");
     debugPrintf("DBG HELP gauge-profile no_arguments=1 readonly=1 closed_dm_selectors=1 no_unseal=1\r\n");
     debugPrintf("DBG HELP ota=ota-status,ota-update_CONFIRM_EXTERNAL_POWER,ota-rollback-test_CONFIRM\r\n");
 #endif

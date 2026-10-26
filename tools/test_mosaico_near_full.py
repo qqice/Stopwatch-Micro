@@ -137,7 +137,7 @@ static_assert(faults());
   boot=body('Hal::GaugeBootReloadStatus Hal::gaugeBootReload(')
   self.assertNotIn('near_boot_finish(',boot)
   self.assertNotIn('near_boot_apply(',boot)
-  self.assertEqual(boot.count('mosaico_official_gauge_apply(gauge)'),1)
+  self.assertEqual(boot.count('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130)'),1)
   nominal=body('bool Hal::gaugeSetNominalCapacity(')
   self.assertEqual(nominal.count('near_boot_apply()'),1)
   self.assertIn('if (forward && boot_factory_reload_scope && !restore) near_boot_apply();',nominal)

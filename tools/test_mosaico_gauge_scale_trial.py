@@ -163,7 +163,7 @@ static_assert(test());
   # compile the REAL trial restore/diagnostic definitions below exactly once.
   stale='namespace {void native_recovery_revoke_locked(){}bool scale_trial_boot_restore_locked(){return false;}bool scale_append_trial_diagnostics(char*,size_t){return true;}}'
   self.assertIn(stale,fixture)
-  fixture=fixture.replace(stale,'namespace {void native_recovery_revoke_locked(){}}')
+  fixture=fixture.replace(stale,'namespace {void native_recovery_revoke_locked(){} void capacity_test_poll(){} void gauge_legacy_cache_init_locked(){}}')
   fixture=fixture.replace('#include <cstdio>','#include <cstdio>\n#include <algorithm>\n#include "mosaico_gauge_model.h"')
   fixture=fixture.replace('namespace std {struct mutex{};struct recursive_mutex{};template<class T>struct lock_guard{explicit lock_guard(T&){};};}',r'''namespace std {struct mutex{};struct recursive_mutex{};
 struct try_to_lock_t{};inline constexpr try_to_lock_t try_to_lock{};
@@ -185,6 +185,8 @@ bool mockThreshold(mosaico_threshold::Selector,uint8_t*);
 bool mockCalibration(mosaico_calibration::Selector,uint8_t*);
 bool mockExtra(mosaico_public_extra::Selector,uint8_t*);
 namespace {
+void capacity_test_poll();
+void gauge_legacy_cache_init_locked();
 enum class AccessWord:uint16_t {UnsealFirst,UnsealSecond,Full,Seal};
 enum class GaugeCommand:uint16_t {EnterConfig};
 bool gauge_access_word(AccessWord){return mockGaugeIdentity();}

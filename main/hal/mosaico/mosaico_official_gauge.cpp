@@ -11,8 +11,12 @@ extern "C" unsigned mosaico_bq_get_attempts(void);
 #ifndef MOSAICO_GAUGE_USE_PREVIOUS_PROFILE
 #define MOSAICO_GAUGE_USE_PREVIOUS_PROFILE 0
 #endif
-MosaicoOfficialGaugeResult mosaico_official_gauge_apply(i2c_master_dev_handle_t device)
+MosaicoOfficialGaugeResult mosaico_official_gauge_apply(i2c_master_dev_handle_t device, uint16_t capacity)
 {
+    if (capacity != 65 && capacity != 130) return {false, false, false};
+#if MOSAICO_GAUGE_USE_PREVIOUS_PROFILE
+    if (capacity != 65) return {false, false, false};
+#endif
 #if MOSAICO_GAUGE_USE_PREVIOUS_PROFILE
     static const parameter_cedv_t cedv = {
         .full_charge_cap = 65,
@@ -88,8 +92,11 @@ MosaicoOfficialGaugeResult mosaico_official_gauge_apply(i2c_master_dev_handle_t 
         .RSVD3 = 0,
     };
 #endif
+    parameter_cedv_t selected = cedv;
+    selected.full_charge_cap = capacity;
+    selected.design_cap = capacity;
     // Non-owning device token, NOT an actual managed bus. Wrapper intercepts all use.
-    const bq27220_config_t config = {static_cast<void*>(device), &cfg, &cedv};
+    const bq27220_config_t config = {static_cast<void*>(device), &cfg, &selected};
     mosaico_bq_reset_attempts();
     bq27220_handle_t handle = bq27220_create(&config);
     const unsigned attempts = mosaico_bq_get_attempts();

@@ -46,7 +46,7 @@ static_assert(safeOriginal());static_assert(realPending());
         source=HAL.read_text(encoding='utf8')
         boot=source.split('Hal::GaugeBootReloadStatus Hal::gaugeBootReload(',1)[1].split('Hal::MosaicoClockDiagnostics',1)[0]
         self.assertLess(boot.index('gauge_legacy_cache_init_locked();'),boot.index('if(!lease.held)'))
-        self.assertLess(boot.index('if (gaugeScaleTrialActive())'),boot.index('mosaico_official_gauge_apply(gauge)'))
+        self.assertLess(boot.index('if (gaugeScaleTrialActive())'),boot.index('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130)'))
         self.assertIn('boot_official_active_or_unknown_experiment_no_write',boot)
         poll=POLL.read_text(encoding='utf8').split('void Hal::gaugeScalePoll()',1)[1]
         self.assertLess(poll.index('gauge_legacy_cache_init_locked();'),poll.index('contrast_poll_locked()'))

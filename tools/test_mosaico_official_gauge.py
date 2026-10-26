@@ -109,13 +109,15 @@ class OfficialGaugeTests(unittest.TestCase):
     def test_boot_single_owner_no_legacy_replay(self):
         source=text(BASE/'hal_mosaico.cpp')
         boot=source.split('Hal::GaugeBootReloadStatus Hal::gaugeBootReload(',1)[1].split('Hal::MosaicoClockDiagnostics',1)[0]
-        self.assertEqual(boot.count('mosaico_official_gauge_apply(gauge)'),1)
+        self.assertEqual(boot.count('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130)'),1)
         for retired in ['gaugeSetNominalCapacity(', 'gaugeAccess(', 'near_boot_apply(', 'near_boot_finish(', 'gauge_load_journal(', 'normal_gauge_fence_locked(', 'MosaicoGaugeCold::']:
             self.assertNotIn(retired,boot)
         self.assertIn('gauge_boot_info.attempted = true',boot)
-        self.assertIn('fcc > 0 && fcc <= 65',boot)
-        self.assertIn('!official.exitAttempted && gauge_exit_config(true)',boot)
-        self.assertIn('!official.sealAttempted',boot)
+        helper=source.split('bool gauge_official_apply_locked(',1)[1].split('struct CapacityTestState',1)[0]
+        self.assertEqual(helper.count('mosaico_official_gauge_apply(gauge, capacity)'),1)
+        self.assertIn('fcc > 0 && fcc <= capacity',helper)
+        self.assertIn('!official.exitAttempted && gauge_exit_config(true)',helper)
+        self.assertIn('!official.sealAttempted',helper)
         self.assertNotIn('finish(Status::Critical',boot)
         self.assertIn('gauge_diagnostic_locked(gauge_boot_before',boot)
         self.assertIn('gauge_diagnostic_locked(gauge_boot_after',boot)
@@ -128,7 +130,7 @@ class OfficialGaugeTests(unittest.TestCase):
         adapter=adapter.replace('static i2c_bus_device_handle_t','constexpr i2c_bus_device_handle_t')
         adapter=adapter.replace('static esp_err_t','constexpr esp_err_t').replace('memcpy(','copy_bytes(')
         hal=text(BASE/'hal_mosaico.cpp')
-        cleanup=hal.split('    bool cleanup = observed;',1)[1].split('    char details[128]{};',1)[0]
+        cleanup=hal.split('    bool cleanup = observed;',1)[1].split('    std::snprintf(details, size,',1)[0]
         code='''#include <cstddef>
 #include <cstdint>
 #include <initializer_list>

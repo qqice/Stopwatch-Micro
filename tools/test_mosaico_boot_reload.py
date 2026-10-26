@@ -24,7 +24,7 @@ static_cast<uint8_t>(GaugeBootReloadStatus::Applied));''')
   # Admission/refusal and final-outcome capture keep their existing locations.
   boot=self.boot_source()
   self.assertNotIn('near_boot_finish(',boot)
-  self.assertEqual(boot.count('mosaico_official_gauge_apply(gauge)'),1)
+  self.assertEqual(boot.count('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130)'),1)
   self.assertEqual(boot.count('gauge_diagnostic_locked(gauge_boot_before'),1)
   self.assertEqual(boot.count('gauge_engine_locked(gauge_engine_before'),1)
   self.assertLess(boot.index('gauge_diagnostic_locked(gauge_boot_before'),boot.index('struct DiagnosticFinish'))
@@ -33,6 +33,9 @@ static_cast<uint8_t>(GaugeBootReloadStatus::Applied));''')
  def boot_source(self):
   source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
   return source.split('Hal::GaugeBootReloadStatus Hal::gaugeBootReload(',1)[1].split('Hal::MosaicoClockDiagnostics',1)[0]
+ def helper_source(self):
+  source=(ROOT/'main/hal/mosaico/hal_mosaico.cpp').read_text(encoding='utf8')
+  return source.split('bool gauge_official_apply_locked(',1)[1].split('struct CapacityTestState',1)[0]
  def test_factory_sec2_policy_compiled(self):
   compiler=shutil.which('g++') or shutil.which('clang++')
   if not compiler:
@@ -73,15 +76,16 @@ static_assert(cases(), "factory SEC2 guards");
    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
  def test_actual_flow_latch_official_apply_cleanup_order(self):
   source=self.boot_source()
-  tokens=['gauge_boot_info.attempted = true','mosaico_official_gauge_apply(gauge)',
-          'const bool verified =','if (verified)', 'bool cleanup = observed;']
-  offsets=[source.index(token) for token in tokens]
+  self.assertLess(source.index('gauge_boot_info.attempted = true'),source.index('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130)'))
+  helper=self.helper_source()
+  tokens=['mosaico_official_gauge_apply(gauge, capacity)', 'const bool verified =','if (verified)', 'bool cleanup = observed;']
+  offsets=[helper.index(token) for token in tokens]
   self.assertEqual(offsets,sorted(offsets))
   for retired in ['gauge_load_normal_target(', 'gaugeAccess(', 'gaugeSetNominalCapacity(', 'near_boot_apply(', 'near_boot_finish(']:
-   self.assertNotIn(retired,source)
-  self.assertIn('!official.exitAttempted && gauge_exit_config(true)',source)
-  self.assertIn('!official.sealAttempted',source)
-  self.assertIn('return finish(Status::Skipped, details)',source)
+   self.assertNotIn(retired,source+helper)
+  self.assertIn('!official.exitAttempted && gauge_exit_config(true)',helper)
+  self.assertIn('!official.sealAttempted',helper)
+  self.assertIn('return finish(verified?Status::Applied:Status::Skipped',source)
  def test_actual_readonly_guards_precede_all_access(self):
   source=self.boot_source()
   admission=source.split('gauge_boot_info.attempted = true',1)[0]
@@ -89,7 +93,7 @@ static_assert(cases(), "factory SEC2 guards");
   self.assertIn('if(!lease.held)',admission)
   self.assertNotIn('mosaico_official_gauge_apply(',admission)
   self.assertIn('gauge_diagnostic_locked(gauge_boot_before',admission)
-  self.assertLess(source.index('if (!gauge || !selftest())'),source.index('mosaico_official_gauge_apply(gauge)'))
+  self.assertLess(source.index('if (!gauge || !selftest())'),source.index('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130)'))
   model=(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').read_text(encoding='utf8')
   exit_policy=model.split('bool configExitAccepted(',1)[1].split('inline bool capacityPolicy',1)[0]
   self.assertIn('security == 1 || security == 3',exit_policy)
@@ -103,10 +107,12 @@ static_assert(cases(), "factory SEC2 guards");
   if not compiler:self.skipTest('C++ compiler unavailable')
   body=self.boot_source();body=body[body.index('{'):].strip()
   start=body.index('    // Capture only initialized pre-write evidence.')
-  end=body.index('    std::lock_guard<std::mutex> battery(battery_mutex);',body.index('    } diagnosticFinish;'))
+  end=body.index('    } diagnosticFinish;')+len('    } diagnosticFinish;')
   body=body[:start]+body[end:]
   body=re.sub(r'std::lock_guard<[^;]+;', '', body)
   body=body.replace('std::snprintf','mock::snprintf').replace('NormalGaugeStorageLease lease;','NormalGaugeStorageLease lease{leaseAvailable};')
+  helper='constexpr bool gauge_official_apply_locked('+self.helper_source().strip()
+  helper=helper.replace('std::snprintf','mock::snprintf')
   harness=r"""
 #include <cstdint>
 #include <cstddef>
@@ -120,12 +126,20 @@ struct Sim {
  struct Result {bool success=true,exitAttempted=false,sealAttempted=false;} result;
  bool leaseAvailable=true,gauge=true,model=true,readable=true;unsigned applies=0,exits=0,seals=0;
  uint16_t dc=65,fcc=65,op=0x26,normal_gauge_target=0;
+ struct {bool possiblyChanged=false,restorePending=false,restoreAttempted=false;long long deadlineUs=0;const char* outcome="idle";} capacity_test;
+ constexpr bool capacity_consume_once(){return false;}
+ constexpr bool capacity_safe_locked(uint16_t&,uint16_t&){return false;}
+ constexpr bool gauge_official_sealed_locked(uint16_t& value){value=op;return readable&&mosaico_gauge::configExitAccepted(op)&&((op>>1)&3)==3;}
+ constexpr long long esp_timer_get_time(){return 0;}
+ constexpr bool gaugeScaleTrialActive(){return false;}
+ constexpr void gauge_legacy_cache_init_locked(){}
  constexpr bool selftest(){return model;}
- constexpr Result mosaico_official_gauge_apply(bool){++applies;return result;}
+ constexpr Result mosaico_official_gauge_apply(bool,uint16_t){++applies;return result;}
  constexpr bool gauge_word(uint8_t reg,uint16_t& out){out=reg==0x3a?op:reg==0x3c?dc:fcc;return readable;}
  constexpr bool gauge_exit_config(bool){++exits;return false;}
  constexpr int i2c_master_transmit(bool,const uint8_t*,size_t,int){++seals;return 1;}
  constexpr void gauge_delay_ms(unsigned){}
+ HELPER
  constexpr GaugeBootReloadStatus run(char* reason=nullptr,size_t reasonSize=0) BODY
 };
 constexpr bool cases(){using S=Sim::GaugeBootReloadStatus;
@@ -135,13 +149,13 @@ constexpr bool cases(){using S=Sim::GaugeBootReloadStatus;
  for(unsigned fcc:{0U,66U}){Sim s;s.fcc=fcc;if(s.run()!=S::Skipped||s.normal_gauge_target||s.applies!=1)return false;if(s.run()!=S::Skipped||s.applies!=1)return false;}
  {Sim s;s.result={false,true,false};s.op=0x402;if(s.run()!=S::Skipped||s.exits||s.seals||s.normal_gauge_target)return false;}
  {Sim s;s.result={false,false,true};s.op=0x22;if(s.run()!=S::Skipped||s.seals||s.normal_gauge_target)return false;}
- {Sim s;s.result.success=false;s.op=0x402;if(s.run()!=S::Skipped||s.exits!=1||s.seals)return false;}
+ {Sim s;s.result.success=false;s.op=0x402;if(s.run()!=S::Skipped||s.applies||s.exits||s.seals)return false;}
  {Sim s;s.readable=false;if(s.run()!=S::Skipped||s.exits||s.seals)return false;}
  {Sim s;s.gauge=false;if(s.run()!=S::Skipped||s.applies)return false;}
  return true;
 }
 static_assert(cases(),"official boot once, preserve learned FCC, failure visible without OTA gate, no ambiguous cleanup retry");
-""".replace('BODY',body)
+""".replace('BODY',body).replace('HELPER',helper)
   with tempfile.TemporaryDirectory() as directory:
    path=Path(directory)/'official_boot.cpp';path.write_text('#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').as_posix()+'"\n'+harness)
    result=subprocess.run([compiler,'-std=c++20','-fsyntax-only',str(path)],capture_output=True,text=True)
@@ -210,7 +224,7 @@ static_assert(check(),"actual SEALED wrapper one owner, finally once, no reopen/
   self.assertIn('bootReloadPhysical(operation, mv, temperature',boot)
   self.assertNotIn('soc >=',boot)
   self.assertNotIn('gaugeAccess(',self.boot_source())
-  self.assertIn('fcc > 0 && fcc <= 65',self.boot_source())
+  self.assertIn('fcc > 0 && fcc <= capacity',self.helper_source())
  def test_actual_normal_policy_native65(self):
   compiler=shutil.which('g++') or shutil.which('clang++')
   if not compiler:
@@ -248,9 +262,9 @@ constexpr bool check(){
 }
 static_assert(check(),"actual native65 policy supports normal target without publishing unit factor; dirty/unknown/factory rejected");
 """.replace('ACTUAL',actual)
-  success=self.boot_source().split('if (verified) {',1)[1].split('return finish',1)[0]
-  cache=success[success.index('normal_gauge_target ='):].strip()
-  self.assertEqual(cache,'normal_gauge_target = 65;')
+  success=self.helper_source().split('if (verified) {',1)[1].split('return true;',1)[0]
+  self.assertIn('if (capacity == 65) normal_gauge_target = 65;',success)
+  cache='normal_gauge_target = 65;'
   harness=harness.replace('BOOTCACHE',cache)
   with tempfile.TemporaryDirectory() as directory:
    path=Path(directory)/'policy.cpp' ;path.write_text('#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').as_posix()+'"\n#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_physical_model.h').as_posix()+'"\n'+harness)

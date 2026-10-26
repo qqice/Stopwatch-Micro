@@ -256,6 +256,7 @@ public:
     // sends access keys, CFG controls or capacity/configuration data.
     bool gaugeReconcileNominal(char* reason, size_t reasonSize);
     // Caller owns startup/radio-off scheduling. No task/timer is created here.
+    bool gaugeCapacityTest(const char* action, char* details, size_t size);
     GaugeBootReloadStatus gaugeBootReload(char* reason, size_t reasonSize);
     // Snapshot only, no I2C/NVS. Waits for any transaction to finish before a
     // caller uses it to permit a runtime restart.
@@ -371,6 +372,7 @@ public:
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "unsupported: not Mosaico");
         return false;
     }
+    bool gaugeCapacityTest(const char*, char*, size_t) { return false; }
     GaugeBootReloadStatus gaugeBootReload(char* reason, size_t reasonSize)
     {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "unsupported: not Mosaico");
