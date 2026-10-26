@@ -5,7 +5,9 @@ endif()
 set(IDF_TARGET "esp32s31" CACHE STRING "Mosaico chip target")
 get_filename_component(STOPWATCH_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 set(MOSAICO_BOARD ON)
-option(MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS "Defer optional engine diagnostics until boot uptime 5 minutes" OFF)
+# Keep optional MAC diagnostics away from cold-start capacity initialization.
+# Explicit OFF remains available only for a deliberate timing comparison.
+option(MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS "Defer optional engine diagnostics until boot uptime 5 minutes" ON)
 set(EXTRA_COMPONENT_DIRS
  "${STOPWATCH_ROOT}/components/mooncake"
  "${STOPWATCH_ROOT}/components/mooncake_log"

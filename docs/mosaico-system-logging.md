@@ -126,14 +126,24 @@ alone does **not** imply selector match. Record flags bit 0 remains epoch-valid
 only and is cleared for cached boot records. Existing type 2/3 schemas and the
 48-byte standard diagnostic snapshot are unchanged.
 
-## Optional startup-engine timing comparison
+## Startup-engine diagnostic isolation
 
 The Mosaico build option `MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS` defaults to
-`OFF`. When enabled, the shared engine-read entry sends none of its optional
+`ON`. This retains the R47 mitigation that showed coherent capacity counting in
+two cold-start observations. It is not proof of a particular private-command
+side effect or of calibrated physical capacity. When enabled, the shared
+engine-read entry sends none of its optional
 `0002/0073/0076` group before uptime 300000 ms. It returns immediately: the UI,
 standard register samples, public `0056` qualification samples, gauge parameters
 and configuration-exit sequence are unchanged. Required identity reads in the
 battery driver are not suppressed.
+
+Keep this option enabled in release builds. An existing CMake cache containing
+`OFF` is not changed by a new default: explicitly configure
+`-DMOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS=ON` when reusing such a build tree.
+Explicit `OFF` is retained for deliberate diagnostic timing controls, not as a
+recommended operating configuration. No new firmware installation is required
+on a device already running the verified R47 image with this option enabled.
 
 Type 13 valid-mask bit 15 (`StartupDeferred`) means intentionally not acquired,
 not I/O failure or a valid zero. Cached startup snapshots stay missing; later
@@ -147,3 +157,23 @@ Markers use the existing ordinary queue/flush cadence, without forcing a new
 NAND-load edge. Existing loss counters apply: missing markers do not prove no
 MAC was sent. Compare the fresh standard samples around these markers and
 retain load/radio/qualification changes as possible concurrent explanations.
+
+### Why isolate these reads during startup?
+
+The optional group is not passive bus traffic: it writes the `0002`, `0073`,
+and `0076` selectors to Control, waits 20 ms per selector, then reads the shared
+MAC echo/data window. It does not write data-memory payloads or commit a
+capacity change. Calls are serialized with configuration work by the existing
+transaction mutex; no host-side interleaving or buffer overrun was found in the
+reviewed path. The official driver's required firmware-version query remains.
+
+The group used to run immediately around configuration reload, as well as in
+later periodic sampling. Delaying only the optional group was followed by
+coherent RawCC/RM changes in two actual 3000-to-65 mAh cold reloads; counting
+continued after the group resumed. This supports startup-sensitive observation
+interference, not a claim that all MAC queries stop counting. A device-internal
+interaction versus altered startup timing/load is still unresolved. In
+particular, no undocumented freeze/unfreeze meaning is assigned to `0073` or
+`0076`. The [TI technical reference manual](https://www.ti.com/lit/ug/sluubd4a/sluubd4a.pdf)
+documents public Control/MAC access, but does not establish that private
+diagnostics are safe during this specific reinitialization window.

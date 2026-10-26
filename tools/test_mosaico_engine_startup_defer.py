@@ -134,6 +134,9 @@ static_assert(cases());
         command=(ROOT/'main/debug/serial_debug.cpp').read_text().split('if (std::strcmp(command, "gauge-engine")',1)[1].split('if (std::strcmp(command, "gauge-mode")',1)[0]
         for token in ('tryStorageLease()', 'healthPending()', '"SKIP"', 'defer_until_ms=300000'):
             self.assertIn(token,command)
-        self.assertIn('DIAGNOSTICS "Defer optional engine diagnostics until boot uptime 5 minutes" OFF)',(ROOT/'boards/mosaico/CMakeLists.txt').read_text())
+        self.assertIn('DIAGNOSTICS "Defer optional engine diagnostics until boot uptime 5 minutes" ON)',(ROOT/'boards/mosaico/CMakeLists.txt').read_text())
+        self.assertIn('#ifndef MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS\n#define MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS 1',hal)
+        cmake=(ROOT/'main/CMakeLists.txt').read_text()
+        self.assertIn('else()\n        target_compile_definitions(${COMPONENT_LIB} PRIVATE MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS=0)',cmake)
 
 if __name__=='__main__':unittest.main()

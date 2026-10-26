@@ -41,7 +41,7 @@
 #include <host/network_quota.h>
 #include <host/mosaico_system_log.h>
 #ifndef MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS
-#define MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS 0
+#define MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS 1
 #endif
 #include <hal/ble/codex_micro_ble.h>
 #include <ota/mosaico_ota.h>
