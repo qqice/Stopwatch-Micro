@@ -175,3 +175,15 @@ clock guarantee for unrelated owner/socket scheduling. Real validation must run
 with diagnostic observation disabled and must preserve failure counts as well
 as successful fresh quota responses. These changes do not establish that every
 possible direct/DERP path failure has the same cause.
+
+WireGuard readiness must also match transport-data admission, not merely a
+current/previous key's `valid` bit. The query uses the same current-key selection
+(including the unconfirmed-responder previous-key fallback), confirmation,
+existing rejection age, and message-counter limit as the sender. A receive-only
+previous key or a next key awaiting confirmation cannot make outgoing TCP ready.
+This is a read-only check: it neither deletes keys nor changes expiry constants.
+If preparation finds a recent local initiation already pending, the DERP connect
+entry retains that initiation and its index for the existing retry interval;
+pending does not become a false "up" result or an unconditional new handshake.
+The entry still clears the data endpoint for its existing DERP fallback
+semantics; only initiation replacement is deferred, not the endpoint switch.

@@ -529,10 +529,23 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -947,7 +1165,19 @@
+@@ -947,11 +1165,36 @@
  	return result;
  }
  
++/* Match output_to_peer's TX admission without modifying keys or peer state.
++ * An unconfirmed responder current key may select previous; an invalid current
++ * key does not. "valid" alone is not enough to send transport data. */
++static bool wireguardif_peer_can_tx(const struct wireguard_peer *peer) {
++    const struct wireguard_keypair *keypair = &peer->curr_keypair;
++    if (keypair->valid && !keypair->initiator && keypair->last_rx == 0) {
++        keypair = &peer->prev_keypair;
++    }
++    return keypair->valid && (keypair->initiator || keypair->last_rx != 0) &&
++           !wireguard_expired(keypair->keypair_millis, REJECT_AFTER_TIME) &&
++           keypair->sending_counter < REJECT_AFTER_MESSAGES;
++}
++
 +typedef struct { struct netif *netif; u8_t peer_index; ip_addr_t *current_ip; u16_t *current_port; err_t result; } wireguardif_peer_is_up_owner_ctx;
 +err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *current_ip, u16_t *current_port);
 +static void wireguardif_peer_is_up_owner_cb(void *arg) {
@@ -549,7 +562,12 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -966,7 +1196,19 @@
+-		if ((peer->curr_keypair.valid) || (peer->prev_keypair.valid)) {
++		if (wireguardif_peer_can_tx(peer)) {
+ 			result = ERR_OK;
+ 		} else {
+ 			result = ERR_CONN;
+@@ -966,7 +1209,19 @@
  	return result;
  }
  
@@ -569,7 +587,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -977,7 +1219,20 @@
+@@ -977,7 +1232,20 @@
  	return result;
  }
  
@@ -590,7 +608,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	if (!netif || !netif->state) {
  		return;
  	}
-@@ -988,7 +1243,19 @@
+@@ -988,7 +1256,19 @@
  	sys_untimeout(wireguardif_tmr, device);
  }
  
@@ -610,7 +628,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -1000,7 +1267,19 @@
+@@ -1000,7 +1280,19 @@
  }
  
  
@@ -630,7 +648,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	LWIP_ASSERT("p != NULL", (p != NULL));
-@@ -1159,7 +1438,20 @@
+@@ -1159,7 +1451,20 @@
  	}
  }
  
@@ -651,7 +669,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	if (!netif || !netif->state) {
  		return;
  	}
-@@ -1209,7 +1501,19 @@
+@@ -1209,7 +1514,19 @@
  	}
  }
  
@@ -671,7 +689,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	err_t result;
  	struct wireguardif_init_data *init_data;
  	struct wireguard_device *device;
-@@ -1355,7 +1659,20 @@
+@@ -1355,7 +1672,20 @@
  	peer->preshared_key = NULL;
  }
  
@@ -692,7 +710,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1365,7 +1682,20 @@
+@@ -1365,7 +1695,20 @@
  	}
  }
  
@@ -713,7 +731,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1376,7 +1706,20 @@
+@@ -1376,7 +1719,20 @@
  	}
  }
  
@@ -734,7 +752,7 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	LWIP_ASSERT("netif != NULL", (netif != NULL));
  	LWIP_ASSERT("state != NULL", (netif->state != NULL));
  	struct wireguard_device *device = (struct wireguard_device *)netif->state;
-@@ -1386,7 +1729,19 @@
+@@ -1386,18 +1742,36 @@
  	}
  }
  
@@ -754,7 +772,28 @@ diff --git a/components/microlink/components/wireguard_lwip/src/wireguardif.c b/
  	struct wireguard_peer *peer;
  	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
  	if (result == ERR_OK) {
-@@ -1408,8 +1763,21 @@
++		// CRITICAL: Clear endpoint IP/port to force DERP relay output!
++		// Without this, wireguardif_peer_output() will try UDP to old endpoint
++		ip_addr_set_any(false, &peer->ip);
++		peer->port = 0;
++        /* Demote the endpoint even with an in-flight initiation, but keep
++         * that initiation and its receiver index intact while callers wait. */
++        if (peer->handshake.valid && peer->handshake.initiator &&
++            !wireguard_expired(peer->last_initiation_tx, REKEY_TIMEOUT)) {
++            return ERR_OK;
++        }
+ 		// Mark peer as active so timer will initiate handshakes
+ 		peer->active = true;
+ 		// Force immediate handshake by setting send_handshake flag
+ 		peer->send_handshake = true;
+-		// CRITICAL: Clear endpoint IP/port to force DERP relay output!
+-		// Without this, wireguardif_peer_output() will try UDP to old endpoint
+-		ip_addr_set_any(false, &peer->ip);
+-		peer->port = 0;
+ 		// Force immediate handshake - clear last_initiation_tx to bypass REKEY_TIMEOUT
+ 		// This is safe because DISCO has confirmed the path works
+ 		peer->last_initiation_tx = 0;
+@@ -1408,8 +1782,21 @@
  	return result;
  }
  
