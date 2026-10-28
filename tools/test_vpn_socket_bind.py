@@ -92,6 +92,7 @@ static int64_t now_us;
 static int tunnel_ready, async_connect, select_error, select_errno, select_interrupt;
 static int64_t ready_at_us, select_duration_us, handshake_us;
 static int restore_error, flags_by_fd[4], getsock_error;
+static int handshakes, cmms, select_calls, first_select_only, peer_down_at_connect;
 static int fcntl(int fd,int op,...){
  if(op==F_GETFL)return flags_by_fd[fd];
  va_list v;va_start(v,op);int flags=va_arg(v,int);va_end(v);
@@ -100,6 +101,8 @@ static int fcntl(int fd,int op,...){
 static int select(int nf,void*r,fd_set*w,fd_set*e,struct timeval*tv){
  (void)nf;(void)r;(void)w;(void)e;
  int64_t budget=(int64_t)tv->tv_sec*1000000+tv->tv_usec;assert(budget>0);
+ ++select_calls;
+ if(first_select_only && select_calls>1){if(first_select_only==2){errno=ECONNREFUSED;return -1;}return 1;}
  if(select_interrupt){--select_interrupt;now_us+=1000;errno=EINTR;return -1;}
  if(select_duration_us>=budget){now_us+=budget;return 0;}
  now_us+=select_duration_us;
@@ -137,9 +140,9 @@ static int setsockopt(int fd,int level,int opt,const void *v,size_t len){
  return 0;
 }
 static int bind(int fd,const struct sockaddr *v,size_t len){assert(!owner&&pinned[fd]==wg.index);assert(len==sizeof(struct sockaddr_in));assert(((const struct sockaddr_in*)v)->sin_addr.s_addr==wg.ip_addr.addr);++binds;if(bind_fail==binds){errno=EADDRNOTAVAIL;return -1;}return 0;}
-static int connect(int fd,const struct sockaddr *v,size_t len){(void)v;(void)len;assert(!owner);++connects;if(down_at_connect)wg.up=0;if(!pinned[fd])++physical;assert(pinned[fd]==wg.index);if(async_connect){errno=EINPROGRESS;return -1;}if((connect_fail==connects||connect_fail==-1)||!wg.up){errno=ENETUNREACH;return -1;}return 0;}
-static void ml_wg_mgr_trigger_handshake(microlink_t *m,uint32_t ip){(void)m;(void)ip;now_us+=handshake_us;}
-static void ml_wg_mgr_send_cmm(microlink_t *m,uint32_t ip){(void)m;(void)ip;}
+static int connect(int fd,const struct sockaddr *v,size_t len){(void)v;(void)len;assert(!owner);++connects;if(peer_down_at_connect)tunnel_ready=0;if(down_at_connect)wg.up=0;if(!pinned[fd])++physical;assert(pinned[fd]==wg.index);if(async_connect){errno=EINPROGRESS;return -1;}if((connect_fail==connects||connect_fail==-1)||!wg.up){errno=ENETUNREACH;return -1;}return 0;}
+static void ml_wg_mgr_trigger_handshake(microlink_t *m,uint32_t ip){(void)m;(void)ip;++handshakes;now_us+=handshake_us;}
+static void ml_wg_mgr_send_cmm(microlink_t *m,uint32_t ip){(void)m;(void)ip;++cmms;}
 static bool ml_wg_mgr_peer_is_up(microlink_t *m,uint32_t ip){(void)m;(void)ip;return tunnel_ready || (ready_at_us && now_us>=ready_at_us);}
 static void vTaskDelay(unsigned t){now_us+=(int64_t)t*portTICK_PERIOD_MS*1000;}
 static int64_t esp_timer_get_time(void){return now_us;}
@@ -147,6 +150,7 @@ static int64_t esp_timer_get_time(void){return now_us;}
 void mosaico_wg_tx_trace(uint32_t stage,uint32_t receiver,uint32_t lo,uint32_t hi,uint32_t sp,uint32_t dp,uint32_t seq,int32_t result){assert(stage==8&&!receiver&&!sp&&dp==80&&seq==0x64400002);assert(lo<=2);++notes;last_result=result;last_flags=hi;errno=EDOM;}
 ''' + ctx + helpers + r'''
 static microlink_t reset(void){
+ handshakes=cmms=select_calls=first_select_only=peer_down_at_connect=0;
  now_us=0;tunnel_ready=1;async_connect=select_error=select_errno=select_interrupt=0;
  ready_at_us=select_duration_us=handshake_us=0;restore_error=getsock_error=0;memset(flags_by_fd,0,sizeof(flags_by_fd));
  dev=(struct wireguard_device){.valid=true};dev.peers[0].valid=true;dev.peers[0].curr_keypair.valid=true;

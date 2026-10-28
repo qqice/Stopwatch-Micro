@@ -35,20 +35,44 @@ int main(void){
  /* Sub-tick budget never sleeps one tick beyond it or creates a socket. */
  m=reset();tunnel_ready=0;assert(!microlink_tcp_connect(&m,0x64400002,80,1)&&errno==ETIMEDOUT&&!sockets&&now_us==0);
  /* Handshake's own time consumes the shared deadline. */
- m=reset();handshake_us=7000000;assert(!microlink_tcp_connect(&m,0x64400002,80,7000)&&!sockets);completed(ML_TCP_CONNECT_WG_WAIT,ETIMEDOUT,7000);
+ m=reset();tunnel_ready=0;handshake_us=7000000;assert(!microlink_tcp_connect(&m,0x64400002,80,7000)&&!sockets);completed(ML_TCP_CONNECT_WG_WAIT,ETIMEDOUT,7000);
  m=reset();async_connect=1;select_duration_us=20000000;
- assert(!microlink_tcp_connect(&m,0x64400002,80,7000)&&errno==ETIMEDOUT&&closed==1&&sockets==1);
- completed(ML_TCP_CONNECT_FIRST,ETIMEDOUT,7000);assert(snapshot().first_error==ETIMEDOUT&&!snapshot().retry_error&&snapshot().wg_ready_before&&snapshot().wg_ready_after);
+ assert(!microlink_tcp_connect(&m,0x64400002,80,7000)&&errno==ETIMEDOUT&&closed==2&&sockets==2&&pins==2&&binds==2&&now_us==7000000);
+ completed(ML_TCP_CONNECT_RETRY,ETIMEDOUT,7000);assert(snapshot().first_error==ETIMEDOUT&&snapshot().retry_error==ETIMEDOUT&&snapshot().wg_ready_before&&snapshot().wg_ready_after);
  /* WG wait + TCP share 7s, not each their own 7s. */
  m=reset();tunnel_ready=0;ready_at_us=2000000;async_connect=1;select_duration_us=20000000;
- assert(!microlink_tcp_connect(&m,0x64400002,80,7000)&&closed==1&&sockets==1);assert(now_us==7000000&&snapshot().wg_wait_ms==2000);
- /* Retry backoff is truncated at deadline; no second socket. */
- m=reset();connect_fail=1;assert(!microlink_tcp_connect(&m,0x64400002,80,1000)&&errno==ETIMEDOUT&&closed==1&&sockets==1);
- completed(ML_TCP_CONNECT_RETRY_WAIT,ETIMEDOUT,1000);assert(snapshot().first_error==ENETUNREACH);
- /* First failure, bounded backoff and successful second socket. */
- m=reset();connect_fail=1;microlink_tcp_socket_t *s=microlink_tcp_connect(&m,0x64400002,80,7000);
- assert(s&&sockets==2&&closed==1&&pins==2&&binds==2&&now_us==3000000&&!flags_by_fd[2]);
+ assert(!microlink_tcp_connect(&m,0x64400002,80,7000)&&closed==2&&sockets==2&&pins==2&&binds==2);assert(now_us==7000000&&snapshot().wg_wait_ms==2000&&snapshot().first_error==ETIMEDOUT&&snapshot().retry_error==ETIMEDOUT);
+ /* First timeout consumes only half of the TCP phase, not the full request. */
+ m=reset();async_connect=1;select_duration_us=20000000;first_select_only=1;
+ microlink_tcp_socket_t *s=microlink_tcp_connect(&m,0x64400002,80,7000);
+ assert(s&&now_us==3500000&&sockets==2&&pins==2&&binds==2&&closed==1&&!physical);
+ completed(ML_TCP_CONNECT_SUCCESS,0,7000);assert(snapshot().first_error==ETIMEDOUT&&!snapshot().retry_error&&!handshakes&&!cmms);close(s->fd);free(s);
+ /* A distinct second failure retains both errno values and closes both fds. */
+ m=reset();async_connect=1;select_duration_us=20000000;first_select_only=2;
+ assert(!microlink_tcp_connect(&m,0x64400002,80,7000)&&errno==ECONNREFUSED&&closed==2&&pins==2&&binds==2&&now_us==3500000);
+ completed(ML_TCP_CONNECT_RETRY,ECONNREFUSED,7000);assert(snapshot().first_error==ETIMEDOUT&&snapshot().retry_error==ECONNREFUSED);
+ /* WG preparation uses 2s; only the remaining 5s is split for TCP. */
+ m=reset();tunnel_ready=0;ready_at_us=2000000;async_connect=1;select_duration_us=20000000;first_select_only=1;
+ s=microlink_tcp_connect(&m,0x64400002,80,7000);assert(s&&now_us==4500000&&snapshot().wg_wait_ms==2000&&handshakes==1&&cmms==1&&pins==2&&binds==2);close(s->fd);free(s);
+ /* Tiny TCP budgets deliberately remain single-attempt, never zero waits. */
+ m=reset();async_connect=1;select_duration_us=20000000;
+ assert(!microlink_tcp_connect(&m,0x64400002,80,1)&&errno==ETIMEDOUT&&closed==1&&sockets==1&&now_us==1000&&!snapshot().retry_error);
+ m=reset();async_connect=1;select_duration_us=20000000;
+ assert(!microlink_tcp_connect(&m,0x64400002,80,19)&&closed==1&&sockets==1&&now_us==19000);
+ m=reset();async_connect=1;select_duration_us=20000000;
+ assert(!microlink_tcp_connect(&m,0x64400002,80,20)&&closed==2&&sockets==2&&now_us==20000);
+ /* A peer that actually went down still gets bounded preparation, never
+  * a fixed delay past the request deadline or an unpinned fallback socket. */
+ m=reset();connect_fail=1;peer_down_at_connect=1;
+ assert(!microlink_tcp_connect(&m,0x64400002,80,1000)&&errno==ETIMEDOUT&&sockets==1&&closed==1&&now_us==1000000&&handshakes==1&&cmms==1);
+ completed(ML_TCP_CONNECT_RETRY_WAIT,ETIMEDOUT,1000);assert(snapshot().first_error==ENETUNREACH&&!snapshot().retry_error&&!physical);
+ /* Immediate retriable failures on an up peer need no backoff or rekey. */
+ m=reset();connect_fail=1;s=microlink_tcp_connect(&m,0x64400002,80,7000);
+ assert(s&&sockets==2&&closed==1&&pins==2&&binds==2&&now_us==0&&!flags_by_fd[2]&&!handshakes&&!cmms);
  completed(ML_TCP_CONNECT_SUCCESS,0,7000);assert(snapshot().first_error==ENETUNREACH&&!snapshot().retry_error);close(s->fd);free(s);
+ /* Healthy established sessions cause zero extra handshake or CMM traffic. */
+ m=reset();handshake_us=7000000;s=microlink_tcp_connect(&m,0x64400002,80,7000);
+ assert(s&&!handshakes&&!cmms&&now_us==0&&sockets==1&&pins==1&&binds==1);close(s->fd);free(s);
  /* Retry errno retained independently; no Linux errno numeric assumptions. */
  m=reset();connect_fail=-1;assert(!microlink_tcp_connect(&m,0x64400002,80,7000)&&errno==ENETUNREACH&&closed==2);
  completed(ML_TCP_CONNECT_RETRY,ENETUNREACH,7000);assert(snapshot().retry_error==ENETUNREACH);

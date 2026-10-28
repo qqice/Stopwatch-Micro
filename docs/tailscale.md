@@ -151,3 +151,27 @@ Allow control-plane propagation and at least one full polling interval; cached
 values alone are not proof. Always restore `force-prefer-derp 0` in a finally/cleanup
 step. `debug display-lock`, `debug power-refresh`, and `debug power` verify the
 separate sleep/reconnect lifecycle after restoring automatic selection.
+
+### TCP timeout recovery without rebooting
+
+`TCP_CONNECT` stage 2 means waiting for the target WireGuard peer; stage 5
+means the first TCP connect timed out after the peer check passed. Neither is
+an HTTP response timeout. `TAIL_FETCH` reports its separate connect stage.
+The currently unpopulated peer snapshot fields must not be interpreted as
+evidence that a peer is absent.
+
+The connect API retains one overall deadline (normally 7 seconds). Once peer
+preparation finishes, sufficient remaining TCP time is divided between at most
+two independently pinned/bound sockets. Previously, the first select consumed
+the entire deadline, so a natural timeout could never reach the intended retry.
+Very short budgets remain single-attempt. Established sessions no longer get
+an unsolicited handshake/CallMeMaybe on every successful connection; preparation
+is retained for a peer that is not up. This does not force DERP, extend the
+overall timeout, or restart the device or network stack.
+
+A split budget may reject a single unusually slow connect that previously used
+the whole interval. Tests verify the bounded control flow, not a strict wall
+clock guarantee for unrelated owner/socket scheduling. Real validation must run
+with diagnostic observation disabled and must preserve failure counts as well
+as successful fresh quota responses. These changes do not establish that every
+possible direct/DERP path failure has the same cause.

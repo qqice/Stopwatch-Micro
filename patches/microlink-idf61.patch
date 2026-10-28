@@ -3818,7 +3818,7 @@ diff --git a/components/microlink/src/ml_tcp.c b/components/microlink/src/ml_tcp
  
  static const char *TAG = "ml_tcp";
  
-@@ -31,180 +35,269 @@
+@@ -31,180 +35,279 @@
      bool connected;
  };
  
@@ -4049,7 +4049,7 @@ diff --git a/components/microlink/src/ml_tcp.c b/components/microlink/src/ml_tcp
 -        wait_ms += 500;
 -
 +    d.wg_ready_before = tunnel_up;
-+    if (ml_tcp_remaining_us(deadline)) {
++    if (!tunnel_up && ml_tcp_remaining_us(deadline)) {
 +        ml_wg_mgr_trigger_handshake(ml, dest_ip);
 +        if (ml_tcp_remaining_us(deadline)) ml_wg_mgr_send_cmm(ml, dest_ip);
 +    }
@@ -4065,10 +4065,8 @@ diff --git a/components/microlink/src/ml_tcp.c b/components/microlink/src/ml_tcp
 +        if (!tunnel_up && esp_timer_get_time() >= next_handshake && ml_tcp_remaining_us(deadline)) {
              ml_wg_mgr_trigger_handshake(ml, dest_ip);
 -            ml_wg_mgr_send_cmm(ml, dest_ip);
-+            if (ml_tcp_remaining_us(deadline)) ml_wg_mgr_send_cmm(ml, dest_ip);
-+            next_handshake = esp_timer_get_time() + 5000000;
-         }
-     }
+-        }
+-    }
 -
 -    if (tunnel_up) {
 -        ESP_LOGI(TAG, "WG tunnel up after %lums", (unsigned long)wait_ms);
@@ -4099,21 +4097,7 @@ diff --git a/components/microlink/src/ml_tcp.c b/components/microlink/src/ml_tcp
 -            char src_str[16];
 -            microlink_ip_to_str(ml->vpn_ip, src_str);
 -            ESP_LOGI(TAG, "TCP socket bound to VPN IP %s", src_str);
-+    d.wg_wait_ms = (uint32_t)((esp_timer_get_time() - start) / 1000);
-+    d.wg_ready_after = tunnel_up;
-+    if (!tunnel_up || !ml_tcp_remaining_us(deadline)) { error = ETIMEDOUT; goto done; }
-+
-+    struct sockaddr_in dest = { .sin_family = AF_INET, .sin_port = htons(dest_port),
-+                               .sin_addr.s_addr = htonl(dest_ip) };
-+    for (int attempt = 0; attempt < 2; ++attempt) {
-+        if (!ml_tcp_remaining_us(deadline)) { error = ETIMEDOUT; goto done; }
-+        d.stage = ML_TCP_CONNECT_SOCKET;
-+        fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-+        if (fd < 0) { error = errno; goto done; }
-+        d.stage = ML_TCP_CONNECT_BIND;
-+        if (!ml_tcp_bind_vpn(fd, ml, dest_ip, dest_port, &d.netif_index)) {
-+            error = errno; fd = -1; goto done; /* helper already closed */
-         }
+-        }
 -    }
 -
 -    /* Set connect/send timeout */
@@ -4122,17 +4106,46 @@ diff --git a/components/microlink/src/ml_tcp.c b/components/microlink/src/ml_tcp
 -        .tv_sec = remaining / 1000,
 -        .tv_usec = (remaining % 1000) * 1000,
 -    };
++            if (ml_tcp_remaining_us(deadline)) ml_wg_mgr_send_cmm(ml, dest_ip);
++            next_handshake = esp_timer_get_time() + 5000000;
++        }
++    }
++    d.wg_wait_ms = (uint32_t)((esp_timer_get_time() - start) / 1000);
++    d.wg_ready_after = tunnel_up;
++    if (!tunnel_up || !ml_tcp_remaining_us(deadline)) { error = ETIMEDOUT; goto done; }
++
++    struct sockaddr_in dest = { .sin_family = AF_INET, .sin_port = htons(dest_port),
++                               .sin_addr.s_addr = htonl(dest_ip) };
++    /* Reserve half of the remaining TCP budget for a real retry, including
++     * its fresh fail-closed pin/bind. Tiny budgets get one attempt, not a
++     * zero-timeout select (which can mean an unbounded wait in other APIs). */
++    int64_t tcp_budget = ml_tcp_remaining_us(deadline);
++    bool retry_allowed = tcp_budget >= (int64_t)portTICK_PERIOD_MS * 2000;
++    int64_t first_deadline = retry_allowed ? deadline - tcp_budget / 2 : deadline;
++    for (int attempt = 0; attempt < 2; ++attempt) {
++        if (!ml_tcp_remaining_us(deadline)) { error = ETIMEDOUT; goto done; }
++        d.stage = ML_TCP_CONNECT_SOCKET;
++        fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++        if (fd < 0) { error = errno; goto done; }
++        d.stage = ML_TCP_CONNECT_BIND;
++        if (!ml_tcp_bind_vpn(fd, ml, dest_ip, dest_port, &d.netif_index)) {
++            error = errno; fd = -1; goto done; /* helper already closed */
++        }
 +        d.stage = attempt ? ML_TCP_CONNECT_RETRY : ML_TCP_CONNECT_FIRST;
-+        if (ml_tcp_connect_until(fd, &dest, deadline) == 0) break;
++        if (ml_tcp_connect_until(fd, &dest, attempt ? deadline : first_deadline) == 0) break;
 +        error = errno;
 +        if (attempt) d.retry_error = error; else d.first_error = error;
 +        ml_tcp_close_error(fd, error); fd = -1;
-+        if (attempt || (error != EHOSTUNREACH && error != ENETUNREACH && error != ETIMEDOUT)) goto done;
++        if (attempt || !retry_allowed || (error != EHOSTUNREACH && error != ENETUNREACH && error != ETIMEDOUT)) goto done;
 +        if (!ml_tcp_remaining_us(deadline)) { error = ETIMEDOUT; goto done; }
 +        d.stage = ML_TCP_CONNECT_RETRY_WAIT;
-+        ml_wg_mgr_trigger_handshake(ml, dest_ip);
-+        if (ml_tcp_remaining_us(deadline)) ml_wg_mgr_send_cmm(ml, dest_ip);
-+        if (!ml_tcp_delay(deadline, 3000)) { error = ETIMEDOUT; goto done; }
++        /* An established peer needs neither a rekey nor a fixed backoff that
++         * would consume the reserved retry window. Prepare only a down peer. */
++        if (!ml_wg_mgr_peer_is_up(ml, dest_ip)) {
++            ml_wg_mgr_trigger_handshake(ml, dest_ip);
++            if (ml_tcp_remaining_us(deadline)) ml_wg_mgr_send_cmm(ml, dest_ip);
++            if (!ml_tcp_delay(deadline, 3000)) { error = ETIMEDOUT; goto done; }
++        }
 +    }
 +    if (!ml_tcp_remaining_us(deadline)) { error = ETIMEDOUT; goto done; }
 +    /* Restore ordinary blocking send/recv semantics only after bounded connect. */
