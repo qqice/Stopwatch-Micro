@@ -261,5 +261,108 @@ static_assert(test());
         for api in ['device_create','device_delete','read_bytes','write_bytes']:
             self.assertIn('#undef i2c_bus_'+api,source)
 
+    def test_actual_boot_admission_and_one_attempt(self):
+        source=text(BASE/'hal_mosaico.cpp')
+        boot=source.split('Hal::GaugeBootReloadStatus Hal::gaugeBootReload(',1)[1].split('Hal::MosaicoClockDiagnostics',1)[0]
+        boot='constexpr Status boot('+boot
+        # Diagnostics and mutexes do not decide admission. Keep the actual HAL
+        # control flow, arm consumption, latch and final verification code.
+        boot=boot.split('    // Capture only initialized',1)[0]+'    // Terminal refusals'+boot.split('    // Terminal refusals',1)[1]
+        boot=re.sub(r'^\s*std::lock_guard<[^\n]+\n','\n',boot,flags=re.M)
+        boot=boot.replace('using Status = GaugeBootReloadStatus;', '')
+        boot=boot.replace('std::snprintf','format').replace('selftest()','model_ok')
+        helper='constexpr bool gauge_official_apply_locked('+source.split('bool gauge_official_apply_locked(',1)[1].split('struct CapacityTestState',1)[0]
+        helper=helper.replace('std::snprintf','format')
+        code='''#include <cstdint>
+#include <cstddef>
+#include "mosaico_gauge_model.h"
+#define MOSAICO_GAUGE_USE_PREVIOUS_PROFILE 0
+enum class Status {Deferred,Skipped,Applied,Critical};
+namespace mosaico_gauge { };
+struct Harness {
+ using GaugeBootReloadStatus=Status;
+ struct {Status status=Status::Deferred;bool attempted=false;char reason[128]={};} gauge_boot_info;
+ struct NormalGaugeStorageLease {bool held=true;};
+ struct {bool possiblyChanged=false,restorePending=false,restoreAttempted=false;int64_t deadlineUs=0;const char* outcome="idle";} capacity_test;
+ bool model_ok=true,hold=false,armed=false,identity=true,applySuccess=true;
+ unsigned consumes=0,vendorWrites=0,identityReads=0;int failReg=-1;
+ uint16_t op=0xa4,dc=3000,fcc=3000,mv=4000,temp=2982,current=0,average=0;
+ uint16_t finalOp=0xa6,finalDc=65,finalFcc=65,normal_gauge_target=0;
+ uintptr_t gauge=7;
+ template<class... Args> constexpr void format(Args...) {}
+ constexpr void gauge_legacy_cache_init_locked() {}
+ constexpr bool gaugeScaleTrialActive(){return hold;}
+ constexpr bool capacity_consume_once(){++consumes;bool a=armed;armed=false;return a;}
+ constexpr bool gauge_identity(){++identityReads;return identity;}
+ constexpr bool gauge_word(unsigned reg,uint16_t& out){
+  if(int(reg)==failReg)return false;
+  switch(reg){case 0x3a:out=vendorWrites?finalOp:op;break;
+   case 0x3c:out=vendorWrites?finalDc:dc;break;case 0x12:out=vendorWrites?finalFcc:fcc;break;
+   case 8:out=mv;break;case 6:out=temp;break;case 0xc:out=current;break;case 0x14:out=average;break;
+   default:return false;}return true;
+ }
+ struct Result {bool success,exitAttempted,sealAttempted;};
+ constexpr Result mosaico_official_gauge_apply(uintptr_t,uint16_t){++vendorWrites;return {applySuccess&&gauge_boot_info.attempted,true,true};}
+ constexpr bool capacity_safe_locked(uint16_t& d,uint16_t& f){d=dc;f=fcc;return ((op>>1)&3)==3;}
+ constexpr int64_t esp_timer_get_time(){return 0;}
+ constexpr bool gauge_exit_config(bool){return false;}
+ constexpr int i2c_master_transmit(uintptr_t,const uint8_t*,size_t,int){return -1;}
+ constexpr void gauge_delay_ms(unsigned){}
+ static constexpr int ESP_OK=0;
+'''+helper+boot+'''
+};
+constexpr bool tests(){
+ {Harness h;if(h.boot(nullptr,0)!=Status::Applied||h.vendorWrites!=1||!h.gauge_boot_info.attempted||h.identityReads!=1)return false;
+  h.boot(nullptr,0);if(h.vendorWrites!=1||h.consumes!=1)return false;}
+ {Harness h;h.op=0xb4;if(h.boot(nullptr,0)!=Status::Applied)return false;}
+ {Harness h;h.mv=3499;h.armed=true;
+  if(h.boot(nullptr,0)!=Status::Deferred||h.vendorWrites||h.consumes||h.gauge_boot_info.attempted||!h.armed)return false;
+  h.mv=4200;h.armed=false;if(h.boot(nullptr,0)!=Status::Applied||h.vendorWrites!=1)return false;}
+ {Harness h;h.mv=3500;h.temp=2832;h.current=uint16_t(-130);h.average=130;
+  if(h.boot(nullptr,0)!=Status::Applied)return false;}
+ {Harness h;h.mv=4350;h.temp=3181;h.current=130;h.average=uint16_t(-130);
+  if(h.boot(nullptr,0)!=Status::Applied)return false;}
+ {Harness h;h.op=0xa6;h.mv=0;h.identity=false;h.dc=65;h.fcc=62;
+  if(h.boot(nullptr,0)!=Status::Applied||h.identityReads)return false;}
+ for(unsigned reg:{0x3aU,0x3cU,0x12U,8U,6U,0xcU,0x14U}){
+  Harness h;h.failReg=reg;h.armed=true;
+  if(h.boot(nullptr,0)!=Status::Deferred||h.vendorWrites||h.gauge_boot_info.attempted||h.consumes||!h.armed)return false;
+  h.failReg=-1;h.armed=false;if(h.boot(nullptr,0)!=Status::Applied||h.vendorWrites!=1)return false;
+ }
+ {Harness h;h.op=0x84;if(h.boot(nullptr,0)!=Status::Deferred||h.vendorWrites||h.consumes||h.gauge_boot_info.attempted)return false;
+  h.op=0xa4;if(h.boot(nullptr,0)!=Status::Applied)return false;}
+ for(int bad=0;bad<8;++bad){Harness h;
+  switch(bad){case 0:h.mv=3499;break;case 1:h.mv=4351;break;case 2:h.temp=2831;break;case 3:h.temp=3182;break;
+   case 4:h.current=131;break;case 5:h.current=uint16_t(-131);break;case 6:h.average=131;break;case 7:h.average=uint16_t(-131);break;}
+  if(h.boot(nullptr,0)!=Status::Deferred||h.vendorWrites||h.consumes||h.gauge_boot_info.attempted)return false;
+ }
+ {Harness h;h.identity=false;if(h.boot(nullptr,0)!=Status::Deferred||h.vendorWrites||h.consumes||h.gauge_boot_info.attempted)return false;}
+ for(uint16_t op:{0xa0,0xa2,0x4a4,0xa5,0x4a6,0xa7}){Harness h;h.op=op;
+  h.armed=true;if(h.boot(nullptr,0)!=Status::Skipped||h.vendorWrites||h.consumes!=1||h.armed||h.gauge_boot_info.attempted)return false;}
+ for(uint16_t dc:{65,130}){Harness h;h.dc=dc;h.armed=true;
+  if(h.boot(nullptr,0)!=Status::Skipped||h.vendorWrites||h.consumes!=1||h.armed)return false;}
+ {Harness h;h.fcc=65;h.armed=true;if(h.boot(nullptr,0)!=Status::Skipped||h.vendorWrites||h.consumes!=1||h.armed)return false;}
+ for(int bad=0;bad<2;++bad){Harness h;h.armed=true;if(bad)h.model_ok=false;else h.gauge=0;
+  if(h.boot(nullptr,0)!=Status::Skipped||h.vendorWrites||h.consumes!=1||h.armed)return false;}
+ for(int failure=0;failure<6;++failure){Harness h;
+  switch(failure){case 0:h.applySuccess=false;break;case 1:h.finalOp=0xa4;break;case 2:h.finalOp=0x4a6;break;
+   case 3:h.finalOp=0x86;break;case 4:h.finalDc=3000;break;case 5:h.finalFcc=66;break;}
+  if(h.boot(nullptr,0)!=Status::Skipped||!h.gauge_boot_info.attempted||h.vendorWrites!=1)return false;
+  h.boot(nullptr,0);if(h.vendorWrites!=1||h.consumes!=1)return false;
+ }
+ {Harness h;h.hold=true;h.armed=true;if(h.boot(nullptr,0)!=Status::Skipped||h.consumes!=1||h.armed||h.vendorWrites)return false;}
+ return true;
+}
+static_assert(tests());
+'''
+        code=code.replace('#include <cstddef>','#include <cstddef>\n#include <initializer_list>')
+        compilers=list(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+        compiler=os.environ.get('CXX') or (str(compilers[-1]) if compilers else None)
+        if not compiler:self.skipTest('set CXX or install target compiler for constexpr checks')
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            path=Path(directory)/'boot.cpp';path.write_text(code,encoding='utf-8')
+            result=subprocess.run([compiler,'-std=c++20','-fsyntax-only','-I',str(BASE),str(path)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+
 if __name__=='__main__':unittest.main()
 

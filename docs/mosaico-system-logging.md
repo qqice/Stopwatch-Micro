@@ -177,3 +177,18 @@ particular, no undocumented freeze/unfreeze meaning is assigned to `0073` or
 `0076`. The [TI technical reference manual](https://www.ti.com/lit/ug/sluubd4a/sluubd4a.pdf)
 documents public Control/MAC access, but does not establish that private
 diagnostics are safe during this specific reinitialization window.
+
+### Gauge power-loss recovery
+
+After actual gauge power loss, RAM configuration can revert to the factory
+3000 mAh pair and the access state defaults to UNSEALED (SEC=2). Normal startup
+accepts this identified, idle factory state using the existing physical bounds,
+then invokes the same official 65 mAh configuration routine. It still requires
+65 mAh design capacity, bounded FCC, idle configuration state and SEALED access
+in the final readback. No SOC reset or alternate cell profile is used.
+
+Read/initialization/physical readiness failures before an attempt stay Deferred
+for the existing idle-worker revisit; they do not consume the one hardware
+attempt. Once the vendor routine starts, its outcome is latched and failed
+writes are not automatically replayed. Unknown security, FULL_ACCESS, active
+CFG/CAL, or a non-factory UNSEALED pair are not treated as normal power loss.

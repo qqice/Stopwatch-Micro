@@ -47,7 +47,8 @@ class Capacity130Tests(unittest.TestCase):
         self.assertIn('using namespace mosaico_gauge;',command)
         self.assertNotIn('gauge_official_apply_locked(',command.split('if(std::strcmp(action,"arm130"))',1)[1])
         boot=function(source,'Hal::GaugeBootReloadStatus Hal::gaugeBootReload(')
-        for a,b in [('gauge_boot_info.attempted = true','if (gaugeScaleTrialActive())'),
+        for a,b in [('if (gaugeScaleTrialActive())','gauge_boot_info.attempted = true'),
+                    ('gauge_boot_info.attempted = true','gauge_official_apply_locked('),
                     ('capacity_consume_once()','if (gaugeScaleTrialActive())'),
                     ('capacity_consume_once()','if (!gauge || !selftest())'),
                     ('capacity_test.restorePending=true','gauge_official_apply_locked('),
@@ -123,6 +124,7 @@ struct Fixture {
  constexpr int esp_reset_reason(){return reset;}
  constexpr int64_t esp_timer_get_time(){return now;}
  constexpr bool selftest(){return model;}
+ constexpr bool gauge_identity(){return readable;}
  constexpr bool gaugeScaleTrialActive(){return oldTrial;}
  constexpr void gauge_legacy_cache_init_locked(){}
  constexpr bool gauge_word(int reg,uint16_t& value){
@@ -168,14 +170,21 @@ constexpr bool cases(){
  {Fixture f;f.armed=1;f.oldTrial=true;if(f.boot(nullptr,0)!=S::Skipped||f.sets!=1||f.commits!=1||f.applies||f.armed)return false;}
  {Fixture f;f.armed=1;f.gauge=false;if(f.boot(nullptr,0)!=S::Skipped||f.armed||f.applies)return false;}
  {Fixture f;f.armed=1;f.leaseAvailable=false;if(f.boot(nullptr,0)!=S::Deferred||f.sets||f.gauge_boot_info.attempted)return false;}
- // No profile/key dispatch from CFG, CAL, FULL_ACCESS, UNSEALED or unreadable state.
+ // No profile/key dispatch from CFG, CAL, FULL_ACCESS or nonfactory UNSEALED.
  for(unsigned state:{0x426u,0x27u,0x22u,0x24u,0u})for(unsigned armed:{0u,1u}){
   Fixture f;f.armed=armed;f.op=state;
   if(f.boot(nullptr,0)!=S::Skipped||f.applies||f.exits||f.seals||f.armed)return false;
  }
  for(unsigned armed:{0u,1u}){Fixture f;f.armed=armed;f.readable=false;
-  if(f.boot(nullptr,0)!=S::Skipped||f.applies||f.exits||f.seals||f.armed)return false;
+  if(f.boot(nullptr,0)!=S::Deferred||f.applies||f.exits||f.seals||f.armed!=armed||f.sets||f.gauge_boot_info.attempted)return false;
  }
+ // Factory SEC2 may recover65, but cannot dispatch the SEALED-only130 trial.
+ {Fixture f;f.armed=1;f.op=0xa4;f.dc=f.fcc=3000;
+  if(f.boot(nullptr,0)!=S::Applied||f.lastCapacity!=65||f.armed||f.applies!=1)return false;}
+ // Deferred physical/INIT readiness preserves the one-shot until a decision.
+ for(unsigned mode:{0u,1u}){Fixture f;f.armed=1;f.op=mode?0x84:0xa4;f.dc=f.fcc=3000;if(!mode)f.mv=3499;
+  if(f.boot(nullptr,0)!=S::Deferred||f.armed!=1||f.sets||f.applies||f.gauge_boot_info.attempted)return false;
+  f.op=0xa4;f.mv=4100;if(f.boot(nullptr,0)!=S::Applied||f.armed||f.lastCapacity!=65||f.applies!=1)return false;}
  // Arm has no profile writer; cancel is durable even when restore admission fails.
  {Fixture f;char d[384]{};if(!f.command("arm130",d,sizeof d)||f.armed!=1||f.applies)return false;
   f.op=0x426;if(f.command("restore65",d,sizeof d)||f.armed||f.applies)return false;}

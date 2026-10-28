@@ -2915,6 +2915,9 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
     NormalGaugeStorageLease lease;
     std::lock_guard<std::recursive_mutex> transaction(gauge_transaction_mutex);
     const auto finish = [&](Status status, const char* why) {
+        // Terminal admission refusals cancel this boot's one-shot experiment.
+        // Only Deferred probes may retain it; never dispatch from this cleanup.
+        if(status==Status::Skipped&&!gauge_boot_info.attempted)(void)capacity_consume_once();
         gauge_boot_info.status = status;
         std::snprintf(gauge_boot_info.reason, sizeof(gauge_boot_info.reason), "%s", why);
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "%s", why);
@@ -2954,17 +2957,37 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
                                     static_cast<uint8_t>(gauge_boot_info.status));
         }
     } diagnosticFinish;
-    gauge_boot_info.attempted = true; // Exactly one official attempt, no journal-driven retries.
-    // This key belongs only to this experiment, never to the old trial. Clear
-    // it even when an old hold forbids all gauge work on this boot.
-    const bool armed130=capacity_consume_once();
-    if (gaugeScaleTrialActive())
+    // Terminal refusals also cancel the one-shot arm through finish().
+    if (gaugeScaleTrialActive()) {
         return finish(Status::Skipped, "boot_official_active_or_unknown_experiment_no_write");
+    }
     std::lock_guard<std::mutex> battery(battery_mutex);
     if (!gauge || !selftest()) return finish(Status::Skipped, "boot_official_failed_unknown_gauge_or_model");
     uint16_t admissionOperation=0;
-    if(!gauge_official_sealed_locked(admissionOperation))
-        return finish(Status::Skipped,"boot_official_security_unknown_or_not_idle_sealed_no_keys");
+    if(!gauge_word(0x3a,admissionOperation))
+        return finish(Status::Deferred,"boot_official_deferred_operation_read");
+    const unsigned security=(admissionOperation>>1)&3;
+    if((security!=2&&security!=3)||(admissionOperation&0x0401))
+        return finish(Status::Skipped,"boot_official_security_unknown_or_not_idle_no_keys");
+    if(!(admissionOperation&0x0020))
+        return finish(Status::Deferred,"boot_official_deferred_initcomp");
+    if(security==2) {
+        // Cold POR defaults to UNSEALED. Admit only the identified factory RAM
+        // pair, never arbitrary open access or a partially configured profile.
+        uint16_t dc=0,fcc=0,mv=0,temp=0,current=0,average=0;
+        if(!gauge_word(0x3c,dc)||!gauge_word(0x12,fcc))
+            return finish(Status::Deferred,"boot_official_deferred_factory_pair_read");
+        if(dc!=FactoryMah||fcc!=FactoryMah)
+            return finish(Status::Skipped,"boot_official_unsealed_nonfactory_no_keys");
+        if(!gauge_word(0x08,mv)||!gauge_word(0x06,temp)||!gauge_word(0x0c,current)||!gauge_word(0x14,average)||
+           !bootReloadPhysical(admissionOperation,mv,temp,static_cast<int16_t>(current),static_cast<int16_t>(average)))
+            return finish(Status::Deferred,"boot_official_deferred_factory_physical");
+        if(!gauge_identity())
+            return finish(Status::Deferred,"boot_official_deferred_factory_identity");
+    }
+    // Deferred probes neither consume the experimental arm nor spend the one
+    // hardware attempt. SEALED keeps its existing normal admission policy.
+    const bool armed130=capacity_consume_once();
     uint16_t capacity=65;
     if(armed130) {
 #if MOSAICO_GAUGE_USE_PREVIOUS_PROFILE
@@ -2986,6 +3009,7 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         capacity_test.deadlineUs=esp_timer_get_time()+600000000LL;
     }
     char details[128]{};
+    gauge_boot_info.attempted = true; // Latch before vendor can submit its first write; never replay failures.
     const bool verified=gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130);
     if(capacity==130)capacity_test.outcome=verified?"applied130_restore_pending":"apply130_failed_restore_pending";
     return finish(verified?Status::Applied:Status::Skipped,
