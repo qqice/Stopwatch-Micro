@@ -176,7 +176,7 @@ class MaintenanceTests(unittest.TestCase):
          contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):m.main()
     opener.assert_not_called()
  def test_maintenance_only_options_rejected_in_ordinary_mode_before_open(self):
-  for extra in (['--confirm-usb-power'],['--expected-version',VERSION],['--maintenance-ttl','600'],['--maintenance-ttl','30']):
+  for extra in (['--prepare-link'],['--prepare-link','--bypass'],['--confirm-usb-power'],['--expected-version',VERSION],['--maintenance-ttl','600'],['--maintenance-ttl','30']):
    args=['mosaico_ota_update.py','--port','COM8','--uart','--confirm-external-power']+extra
    with self.subTest(extra=extra),patch.object(sys,'argv',args),patch.object(m,'open_client') as opener, \
         patch.object(m.list_ports,'comports') as inventory,contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
@@ -192,6 +192,106 @@ class MaintenanceTests(unittest.TestCase):
   self.assertFalse(m.transport_matches(SimpleNamespace(vid=0x10c4,pid=0xea60,serial_number='meter'),True))
   self.assertTrue(m.transport_matches(SimpleNamespace(vid=0x1366,pid=0x0105,serial_number='pinned'),True,'pinned'))
   self.assertFalse(m.transport_matches(SimpleNamespace(vid=0x1366,pid=0x0105,serial_number='other'),True,'pinned'))
+
+
+class PrepareClient(Client):
+ def __init__(self,mode):
+  super().__init__();self.prepare_mode=mode;self.samples=0
+ def command(self,text,expected,*args):
+  if text!='debug network':return super().command(text,expected,*args)
+  self.commands.append(text);self.samples+=1
+  if self.prepare_mode=='disconnect':raise OSError('synthetic disconnected')
+  if self.prepare_mode=='missing':return SimpleNamespace(status='PASS',details='connected=1')
+  fresh=self.samples>1 and self.prepare_mode!='stale'
+  accepted=4+(fresh and self.prepare_mode=='accepted')
+  failures=2+(fresh and self.prepare_mode!='accepted')
+  if self.prepare_mode!='accepted':
+   print('DBG TAIL_FETCH path=0 stage=12 http=200 result=1')
+  print('private-token-must-not-be-retained')
+  return SimpleNamespace(status='PASS',details=f'connected=1 accepted={accepted} failures={failures} available=0 remaining=0')
+
+
+class PrepareLinkTests(unittest.TestCase):
+ argv=MaintenanceTests.argv
+ # Exercise opt-in actual main; the default/unknown-ACK tests above remain intact.
+ def prepare_case(self,mode,uart=True):
+  prep=PrepareClient(mode);ota=Client();clock=Clock();opened=[]
+  port=SimpleNamespace(device='COM8',vid=0x1366 if uart else 0x303a,
+                       pid=0x0105 if uart else 0x4001,serial_number='board')
+  def opener(device,use_uart):
+   opened.append((device,use_uart,clock.now))
+   if len(opened)==1:return prep
+   self.assertTrue(prep.closed)
+   return ota
+  with tempfile.TemporaryDirectory(prefix='.ota-prepare-test-',dir=ROOT) as td:
+   log=Path(td)/'evidence.jsonl';argv=self.argv(log)+['--prepare-link']
+   if not uart:argv.remove('--uart')
+   with patch.object(sys,'argv',argv),patch.object(m.list_ports,'comports',return_value=[port]), \
+        patch.object(m,'open_client',side_effect=opener),patch.object(m.time,'monotonic',clock.monotonic), \
+        patch.object(m.time,'sleep',clock.sleep),contextlib.redirect_stdout(io.StringIO()):
+    m.main()
+   contents=log.read_text();events=[json.loads(row) for row in contents.splitlines()]
+  self.assertEqual([(d,u) for d,u,_ in opened],[('COM8',uart),('COM8',uart)])
+  self.assertTrue(prep.closed and ota.closed)
+  self.assertEqual(ota.commands.count(REQUEST),1)
+  self.assertEqual(ota.commands[:3],['debug ota-status','debug display-wake',REQUEST])
+  self.assertEqual(set(prep.commands)-{'debug display-wake','debug network'},set())
+  self.assertEqual(prep.handshakes,[30])
+  self.assertNotIn('private-token',contents)
+  self.assertTrue(events[-1]['accepted'])
+  result=next(e for e in events if e['event']=='prepare_link_result')
+  self.assertFalse(result['admission_gate'])
+  self.assertLess(events.index(result),next(i for i,e in enumerate(events) if e['event']=='maintenance_preflight'))
+  self.assertLess(opened[1][2]-result['prepare_elapsed_s'],0.2)
+  return prep,result,events,opened
+ def test_http200_without_quota_still_requests_same_hash(self):
+  prep,result,_,_=self.prepare_case('http')
+  self.assertTrue(result['fresh_http_confirmed']);self.assertTrue(result['temporary_display_wake'])
+  self.assertEqual(prep.samples,2)
+ def test_accepted_delta_alone_is_positive_evidence(self):
+  _,result,_,_=self.prepare_case('accepted');self.assertTrue(result['fresh_http_confirmed'])
+ def test_stale_cached_http_is_not_new_gate(self):
+  _,result,_,opened=self.prepare_case('stale')
+  self.assertFalse(result['fresh_http_confirmed']);self.assertGreaterEqual(opened[1][2],120)
+  self.assertLess(opened[1][2],121)
+ def test_disconnected_handle_closed_then_original_attempt(self):
+  _,result,events,_=self.prepare_case('disconnect')
+  self.assertFalse(result['fresh_http_confirmed'])
+  self.assertTrue(any(e['event']=='prepare_link_unavailable' for e in events))
+ def test_cdc_transport_reused(self):self.prepare_case('http',uart=False)
+ def test_missing_diagnostics_do_not_block_original_request(self):
+  _,result,_,_=self.prepare_case('missing');self.assertFalse(result['fresh_http_confirmed'])
+ def test_keep_locked_conflict_rejected_before_any_device_action(self):
+  with tempfile.TemporaryDirectory(prefix='.ota-prepare-args-',dir=ROOT) as td:
+   argv=self.argv(Path(td)/'evidence.jsonl')+['--prepare-link','--keep-locked']
+   with patch.object(sys,'argv',argv),patch.object(m,'open_client') as opener, \
+        patch.object(m.list_ports,'comports') as inventory,contextlib.redirect_stderr(io.StringIO()), \
+        self.assertRaises(SystemExit):m.main()
+   opener.assert_not_called();inventory.assert_not_called()
+ def test_log_creation_failure_or_race_does_not_prepare_or_open_device(self):
+  original_open=Path.open
+  port=SimpleNamespace(device='COM8',vid=0x1366,pid=0x0105,serial_number='board')
+  for failure in ('permission','race'):
+   with self.subTest(failure=failure),tempfile.TemporaryDirectory(prefix='.ota-prepare-log-',dir=ROOT) as td:
+    log=Path(td)/'evidence.jsonl';argv=self.argv(log)+['--prepare-link']
+    def fail_open(path,mode='r',*args,**kwargs):
+     if path==log and mode=='xb':
+      if failure=='permission':raise PermissionError('synthetic unwritable log')
+      with original_open(path,'wb') as competing:competing.write(b'immutable competing evidence')
+     return original_open(path,mode,*args,**kwargs)
+    with patch.object(sys,'argv',argv),patch.object(m.list_ports,'comports',return_value=[port]), \
+         patch.object(Path,'open',fail_open),patch.object(m,'open_client') as opener, \
+         patch.object(m,'prepare_link') as prepare,self.assertRaises(OSError):m.main()
+    opener.assert_not_called();prepare.assert_not_called()
+    if failure=='race':self.assertEqual(log.read_bytes(),b'immutable competing evidence')
+ def test_single_reserved_log_handle_closed_after_prepare_and_request(self):
+  original_open=Path.open;handles=[]
+  def track_open(path,mode='r',*args,**kwargs):
+   handle=original_open(path,mode,*args,**kwargs)
+   if mode=='xb':handles.append(handle)
+   return handle
+  with patch.object(Path,'open',track_open):self.prepare_case('http')
+  self.assertEqual(len(handles),1);self.assertTrue(handles[0].closed)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

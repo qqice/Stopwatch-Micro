@@ -22,6 +22,61 @@ def prepare_display(client, keep_locked=False):
  # Do not fake wake success or alter settings: the caller must prepare the state.
  state=client.command('debug power','power',10)
  return state.status=='PASS' and fields(state).get('locked')=='1'
+
+def prepare_link(args):
+ """Best-effort freshness evidence, never an additional OTA admission gate."""
+ started=time.monotonic();deadline=started+120;client=None;events=[];initial=None
+ confirmed=False;woken=False
+ def record(event, **data):
+  events.append(dict(event=event,prepare_elapsed_s=round(time.monotonic()-started,3),**data))
+ def command(text, expected):
+  output=io.StringIO()
+  with contextlib.redirect_stdout(output):
+   reply=client.command(text,expected,max(0.1,min(10,deadline-time.monotonic())))
+  return reply,output.getvalue()
+ def snapshot():
+  reply,raw=command('debug network','network')
+  values=fields(reply) if reply is not None and reply.status=='PASS' else {}
+  # Store numeric diagnostics only, not arbitrary runtime output or credentials.
+  counts={k:int(values[k]) for k in ('accepted','failures','connected')
+          if re.fullmatch(r'\d+',values.get(k,''))}
+  tails=[dict(p.split('=',1) for p in line.split() if '=' in p)
+         for line in re.findall(r'DBG TAIL_FETCH [^\r\n]*',raw)]
+  tail=next((d for d in reversed(tails) if d.get('path')=='0'),{})
+  http={k:int(tail[k]) for k in ('path','stage','http','result')
+        if re.fullmatch(r'-?\d+',tail.get(k,''))}
+  record('prepare_link_sample',counts=counts,http=http)
+  return counts,http
+ try:
+  record('prepare_link_started',port=args.port,uart=args.uart,timeout_s=120,
+         started_unix_s=round(time.time(),3))
+  client=open_client(args.port,args.uart)
+  with contextlib.redirect_stdout(io.StringIO()):client.handshake(30)
+  initial,_=snapshot()
+  while time.monotonic()<deadline:
+   reply,_=command('debug display-wake','display-wake')
+   woken=woken or (reply is not None and reply.status=='PASS')
+   time.sleep(max(0,min(10,deadline-time.monotonic())))
+   if time.monotonic()>=deadline:break
+   counts,http=snapshot()
+   delta={k:counts[k]-initial[k] for k in ('accepted','failures') if k in counts and k in initial}
+   # Counter movement ties the cached fetch result to this preparation window.
+   # Quota/account availability and JSON parsing are intentionally irrelevant.
+   confirmed=counts.get('connected')==1 and (delta.get('accepted',0)>0 or
+       (any(v>0 for v in delta.values()) and http.get('http')==200 and
+        http.get('stage')==12 and http.get('result')==1))
+   if confirmed:
+    record('prepare_link_fresh_http',delta=delta,http=http);break
+ except (OSError,TimeoutError) as exc:
+  record('prepare_link_unavailable',error_type=type(exc).__name__)
+ finally:
+  if client is not None:
+   try:client.close()
+   except (OSError,TimeoutError) as exc:
+    record('prepare_link_close_error',error_type=type(exc).__name__)
+  record('prepare_link_result',fresh_http_confirmed=confirmed,temporary_display_wake=woken,
+         initial_counts=initial,finished_unix_s=round(time.time(),3),admission_gate=False)
+  args._prepare_link_events=events
 def maintenance_update(args, serial_number):
  """One explicit grant/request; thereafter read-only observation, never renew."""
  client=None;request_ack_unknown=False;requested=False;accepted=False
@@ -58,6 +113,11 @@ def maintenance_update(args, serial_number):
   old_client=client;client=None
   if old_client is not None:old_client.close()
  try:
+  # Reserve the one exclusive evidence handle before any optional preparation
+  # touches the device. The same lifecycle owns preparation and the request.
+  if getattr(args,'prepare_link',False):prepare_link(args)
+  for evidence in getattr(args,'_prepare_link_events',[]):
+   evidence=dict(evidence);event=evidence.pop('event');record(event,**evidence)
   record('maintenance_preflight',port=args.port,uart=args.uart,serial_number=serial_number,
          sha=args.maintenance_sha,ttl_s=args.maintenance_ttl,expected_version=args.expected_version,
          external_power_human_attestation=True,usb_sole_5v_human_attestation=True,
@@ -190,6 +250,7 @@ def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--port',required=True);p.add_argument('--confirm-external-power',action='store_true');p.add_argument('--timeout',type=int,default=900);p.add_argument('--initial-observation-delay',type=int,default=0);mode=p.add_mutually_exclusive_group();mode.add_argument('--bypass',action='store_true',help='Use the 0.7+ USB screen-confirmation bypass; safety checks remain enforced');mode.add_argument('--maintenance-sha',help='Explicit maintenance OTA immutable image SHA256; requires stable sole-USB power attestation')
  p.add_argument('--log',type=Path,help='Optional local serial evidence file; keep private because runtime logs may contain sensitive data')
  p.add_argument('--keep-locked',action='store_true',help='Require an already locked display; do not wake it before requesting OTA')
+ p.add_argument('--prepare-link',action='store_true',help='Maintenance only: temporarily wake and observe fresh HTTP for at most 120s; missing evidence does not block the authorized request')
  p.add_argument('--uart',action='store_true',help='Use CRC-framed JLink/FT4232 UART instead of board CDC; requires explicit --port')
  p.add_argument('--boot-status-probe',action='store_true',help='One read-only status snapshot during boot health verification; never changes health gates')
  p.add_argument('--maintenance-ttl',type=int,default=None,help='Legacy maintenance argument (30..600); firmware keeps the confirmed USB transaction live until disconnect/completion')
@@ -205,16 +266,18 @@ def main():
   if args.maintenance_ttl is None:args.maintenance_ttl=600
   if not 30<=args.maintenance_ttl<=600:p.error('maintenance TTL must be30..600 seconds')
   if args.boot_status_probe or args.initial_observation_delay!=0:p.error('maintenance does not support --boot-status-probe or nonzero --initial-observation-delay')
+  if args.prepare_link and args.keep_locked:p.error('--prepare-link cannot be combined with --keep-locked')
   if not args.confirm_usb_power:p.error('maintenance requires --confirm-usb-power human attestation')
   if not args.expected_version or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,30}',args.expected_version):p.error('maintenance requires an exact --expected-version')
   if args.log is None:p.error('maintenance requires a new --log evidence file')
   if args.log.exists():p.error('maintenance log already exists; evidence must not be overwritten')
- elif args.confirm_usb_power or args.expected_version is not None or args.maintenance_ttl is not None:
+ elif args.prepare_link or args.confirm_usb_power or args.expected_version is not None or args.maintenance_ttl is not None:
   p.error('maintenance power/version/TTL options require --maintenance-sha')
  entries=[x for x in list_ports.comports() if x.device.upper()==args.port.upper() and transport_matches(x,args.uart)]
  if len(entries)!=1:raise SystemExit('Explicit port does not match the selected CDC/UART transport')
  serial_number=entries[0].serial_number
- if args.maintenance_sha is not None:return maintenance_update(args,serial_number)
+ if args.maintenance_sha is not None:
+  return maintenance_update(args,serial_number)
  client=None;captured=io.StringIO();boot_status_probed=False
  try:
   client=open_client(args.port,args.uart)
