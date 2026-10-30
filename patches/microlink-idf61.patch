@@ -5001,11 +5001,10 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
      if (ml->wg_netif && ml->vpn_ip != 0) {
          struct netif *netif = (struct netif *)ml->wg_netif;
          uint8_t a = (ml->vpn_ip >> 24) & 0xFF;
-@@ -345,6 +415,102 @@
- /* ============================================================================
+@@ -346,6 +416,127 @@
   * Peer Management (owned exclusively by this task)
   * ========================================================================== */
-+
+ 
 +typedef struct {
 +    struct netif *netif;
 +    u8_t index;
@@ -5024,6 +5023,31 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
 +static bool wg_peer_key_matches(struct netif *netif, u8_t index, const uint8_t *key) {
 +    wg_peer_owner_ctx c = { .netif = netif, .index = index, .key = key };
 +    return wireguardif_owner_call(wg_peer_state_in_owner, &c) == ERR_OK && c.key_match;
++}
++
++/* Identity replacement retires only the cached route, in the WG owner.
++ * Do not touch session keys, counters, initiation state, timers or active. */
++typedef struct {
++    struct netif *netif;
++    int index;
++    uint8_t expected_key[32];
++} wg_retire_route_ctx;
++static void wg_retire_route_in_owner(void *arg) {
++    wg_retire_route_ctx *c = (wg_retire_route_ctx *)arg;
++    if (!c->netif || !c->netif->state || c->index < 0 || c->index >= WIREGUARD_MAX_PEERS) return;
++    struct wireguard_device *dev = (struct wireguard_device *)c->netif->state;
++    struct wireguard_peer *peer = &dev->peers[c->index];
++    if (!peer->valid || memcmp(peer->public_key, c->expected_key, 32) != 0) return;
++    ip_addr_set_any(false, &peer->ip);
++    ip_addr_set_any(false, &peer->connect_ip);
++    peer->port = 0;
++    peer->connect_port = 0;
++}
++static void wg_retire_route(struct netif *netif, int index, const uint8_t *key) {
++    wg_retire_route_ctx c = { .netif = netif, .index = index };
++    memcpy(c.expected_key, key, 32);
++    if (wireguardif_owner_call(wg_retire_route_in_owner, &c) != ERR_OK)
++        peer_path_count(&ml_peer_path_diag.owner_error);
 +}
 +
 +/* Serialize PONG path promotion with all WireGuard state changes. A direct
@@ -5101,10 +5125,38 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
 +        ESP_LOGI(TAG, "WG one-shot handshake to %s (first direct path)", p->hostname);
 +    }
 +}
- 
++
  static int find_peer_by_key(microlink_t *ml, const uint8_t *pubkey) {
      for (int i = 0; i < ml->peer_count; i++) {
-@@ -415,6 +581,7 @@
+         if (ml->peers[i].active && memcmp(ml->peers[i].public_key, pubkey, 32) == 0) {
+@@ -382,6 +573,26 @@
+ 
+     /* Check if peer already exists */
+     int idx = find_peer_by_key(ml, update->public_key);
++    bool existing = idx >= 0;
++    bool same_identity = existing && ml->peers[idx].vpn_ip == update->vpn_ip &&
++        memcmp(ml->peers[idx].disco_key, update->disco_key, 32) == 0;
++    /* Identity equality preserves tracking, but cold NVS/rebuild state and
++     * newly advertised endpoints still need the existing immediate discovery. */
++    bool initial_discovery = !same_identity;
++    if (same_identity) {
++        const ml_peer_t *old = &ml->peers[idx];
++        bool live_discovery = old->wg_peer_index >= 0 &&
++            (old->has_direct_path || old->best_ip || old->trust_until_ms ||
++             old->last_ping_sent_ms || old->last_pong_recv_ms || old->last_send_ms ||
++             old->last_upgrade_ms || old->tried_initial_handshake);
++        bool endpoints_changed = old->endpoint_count != update->endpoint_count;
++        for (int i = 0; !endpoints_changed && i < update->endpoint_count && i < ML_MAX_ENDPOINTS; ++i) {
++            endpoints_changed = old->endpoints[i].ip != update->endpoints[i].ip ||
++                old->endpoints[i].port != update->endpoints[i].port ||
++                old->endpoints[i].is_ipv6 != update->endpoints[i].is_ipv6;
++        }
++        initial_discovery = !live_discovery || endpoints_changed;
++    }
+     if (idx >= 0) {
+         ESP_LOGI(TAG, "Updating existing peer %s (idx=%d)", update->hostname, idx);
+     } else {
+@@ -415,6 +626,7 @@
                  microlink_ip_to_str(ml->peers[evict_idx].vpn_ip, evict_ip);
                  ESP_LOGW(TAG, "Evicting LRU peer %s (%s) for priority peer %s",
                           ml->peers[evict_idx].hostname, evict_ip, update->hostname);
@@ -5112,24 +5164,42 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
                  if (ml->peers[evict_idx].wg_peer_index >= 0 && ml->wg_netif) {
                      wireguardif_remove_peer((struct netif *)ml->wg_netif,
                                              ml->peers[evict_idx].wg_peer_index);
-@@ -434,6 +601,8 @@
+@@ -434,6 +646,8 @@
          }
      }
  
-+    /* Full add also reconfigures existing peers: retire old discovery state. */
-+    disco_cancel_peer_probes(idx);
++    /* Repeated full maps are metadata refreshes, not identity replacements. */
++    if (!same_identity) disco_cancel_peer_probes(idx);
      ml_peer_t *p = &ml->peers[idx];
      p->vpn_ip = update->vpn_ip;
      memcpy(p->public_key, update->public_key, 32);
-@@ -457,6 +626,7 @@
-     p->trust_until_ms = 0;
-     p->last_send_ms = 0;
-     p->last_upgrade_ms = 0;
-+    p->tried_initial_handshake = false;
-     p->has_direct_path = false;
-     p->best_ip = 0;
-     p->best_port = 0;
-@@ -464,10 +634,8 @@
+@@ -451,23 +665,24 @@
+         p->endpoints[i].is_ipv6 = update->endpoints[i].is_ipv6;
+     }
+ 
+-    /* Initialize DISCO rate limiting state */
+-    p->last_ping_sent_ms = 0;
+-    p->last_pong_recv_ms = 0;
+-    p->trust_until_ms = 0;
+-    p->last_send_ms = 0;
+-    p->last_upgrade_ms = 0;
+-    p->has_direct_path = false;
+-    p->best_ip = 0;
+-    p->best_port = 0;
+-    p->wg_peer_index = -1;
++    if (!same_identity) {
++        /* Initialize DISCO rate limiting state */
++        p->last_ping_sent_ms = 0;
++        p->last_pong_recv_ms = 0;
++        p->trust_until_ms = 0;
++        p->last_send_ms = 0;
++        p->last_upgrade_ms = 0;
++        p->tried_initial_handshake = false;
++        p->has_direct_path = false;
++        p->best_ip = 0;
++        p->best_port = 0;
++        p->wg_peer_index = -1;
++    }
  
      char ip_str[16];
      microlink_ip_to_str(update->vpn_ip, ip_str);
@@ -5142,8 +5212,12 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
  
      /* Add to wireguard-lwip */
      if (ml->wg_netif) {
-@@ -519,15 +687,10 @@
+@@ -517,17 +732,14 @@
+ 
+         if (wg_err == ERR_OK && wg_peer_idx != WIREGUARDIF_INVALID_INDEX) {
              p->wg_peer_index = wg_peer_idx;
++            if (existing && !same_identity)
++                wg_retire_route(netif, wg_peer_idx, p->public_key);
  
              /* Verify the WG internal peer key matches what we passed */
 -            struct wireguard_device *dev = (struct wireguard_device *)netif->state;
@@ -5162,7 +5236,34 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
              }
  
              /* DON'T initiate handshakes to all peers on add.
-@@ -590,6 +753,8 @@
+@@ -539,7 +751,7 @@
+             ESP_LOGI(TAG, "WG peer ready (passive), waiting for peer-initiated handshake");
+         } else {
+             ESP_LOGW(TAG, "wireguardif_add_peer failed: %d", wg_err);
+-            p->wg_peer_index = -1;
++            if (!same_identity) p->wg_peer_index = -1;
+         }
+     }
+ 
+@@ -549,7 +761,7 @@
+     /* Send CallMeMaybe to trigger peer-initiated handshake (NAT traversal).
+      * Skip on cellular: our endpoints are behind carrier-grade NAT and
+      * unreachable — all traffic goes through DERP relay. */
+-    if (!ml_at_socket_is_ready()) {
++    if (initial_discovery && !ml_at_socket_is_ready()) {
+         disco_send_call_me_maybe(ml, idx);
+     }
+ 
+@@ -558,7 +770,7 @@
+      * the periodic probe (every 15s) will handle the rest.
+      * Skip on cellular: direct probes fill DERP TX queue (~0.6s each on AT socket),
+      * blocking time-critical WG handshake responses. */
+-    if (!ml_at_socket_is_ready()) {
++    if (initial_discovery && !ml_at_socket_is_ready()) {
+         static uint64_t last_burst_ms = 0;
+         static int burst_count = 0;
+         uint64_t add_now = ml_get_time_ms();
+@@ -590,6 +802,8 @@
  static void remove_peer(microlink_t *ml, const ml_peer_update_t *update) {
      int idx = find_peer_by_key(ml, update->public_key);
      if (idx < 0) return;
@@ -5171,7 +5272,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
  
      /* Remove from wireguard-lwip */
      if (ml->wg_netif && ml->peers[idx].wg_peer_index >= 0) {
-@@ -647,6 +812,25 @@
+@@ -647,6 +861,25 @@
      }
  }
  
@@ -5197,7 +5298,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
  /* ============================================================================
   * DISCO Protocol
   * ========================================================================== */
-@@ -689,6 +873,7 @@
+@@ -689,6 +922,7 @@
          if (!pending_probes[i].active) {
              memcpy(pending_probes[i].txid, txid, DISCO_TXID_LEN);
              pending_probes[i].peer_index = peer_idx;
@@ -5205,7 +5306,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
              pending_probes[i].sent_ms = ml_get_time_ms();
              pending_probes[i].active = true;
              registered = true;
-@@ -907,11 +1092,24 @@
+@@ -907,11 +1141,24 @@
  
          int peer_idx = pending_probes[i].peer_index;
          if (peer_idx < 0 || peer_idx >= ml->peer_count) {
@@ -5230,7 +5331,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
          uint64_t rtt_ms = now - pending_probes[i].sent_ms;
  
          ESP_LOGI(TAG, "DISCO PONG from %s: RTT=%llu ms (via %s)",
-@@ -927,69 +1125,8 @@
+@@ -927,69 +1174,8 @@
              p->has_direct_path = true;
              p->trust_until_ms = now + ML_DISCO_TRUST_DURATION_MS;
  
@@ -5301,7 +5402,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
              }
          }
  
-@@ -1018,9 +1155,8 @@
+@@ -1018,9 +1204,8 @@
      /* Verify DISCO magic */
      if (memcmp(pkt->data, DISCO_MAGIC, 6) != 0) return;
  
@@ -5313,7 +5414,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
  
      /* Extract sender's disco public key */
      const uint8_t *sender_disco_key = pkt->data + 6;
-@@ -1145,11 +1281,13 @@
+@@ -1145,11 +1330,13 @@
   * ========================================================================== */
  
  static void process_wg_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
@@ -5327,7 +5428,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
          free(pkt->data);
          return;
      }
-@@ -1157,17 +1295,19 @@
+@@ -1157,17 +1344,19 @@
      struct netif *netif = (struct netif *)ml->wg_netif;
      void *device = netif->state;
      if (!device) {
@@ -5348,7 +5449,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
          free(pkt->data);
          return;
      }
-@@ -1304,18 +1444,10 @@
+@@ -1304,18 +1493,10 @@
  
  /* On-demand WG handshake trigger (called from TCP/UDP API when session needed).
   *
@@ -5371,7 +5472,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
  esp_err_t ml_wg_mgr_trigger_handshake(microlink_t *ml, uint32_t dest_vpn_ip) {
      if (!ml || !ml->wg_netif) return ESP_ERR_INVALID_STATE;
  
-@@ -1331,26 +1463,35 @@
+@@ -1331,26 +1512,35 @@
      err_t is_up = wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index, NULL, NULL);
      if (is_up == ERR_OK) return ESP_OK;
  
@@ -5419,7 +5520,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
      }
  
      return ESP_OK;
-@@ -1368,17 +1509,12 @@
+@@ -1368,17 +1558,12 @@
      bool up = wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index, &cur_ip, &cur_port) == ERR_OK;
      if (up) {
          /* Verify WG internal peer key matches our DISCO peer */
@@ -5441,7 +5542,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
          }
      }
      return up;
-@@ -1518,8 +1654,7 @@
+@@ -1518,8 +1703,7 @@
  
      if (wait_bits & ML_EVT_SHUTDOWN_REQUEST) {
          ESP_LOGI(TAG, "Shutdown requested before registration, exiting");
@@ -5451,7 +5552,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
      }
  
      ESP_LOGI(TAG, "Coord registered, initializing WireGuard...");
-@@ -1530,6 +1665,7 @@
+@@ -1530,6 +1714,7 @@
      } else {
          /* Update VPN IP if coord already set it */
          wg_update_vpn_ip(ml);
@@ -5459,7 +5560,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
          xEventGroupSetBits(ml->events, ML_EVT_WG_READY);
      }
  
-@@ -1612,9 +1748,9 @@
+@@ -1612,9 +1797,9 @@
          }
  
          /* Run WireGuard periodic processing (handshakes, keepalives, rekeys).
@@ -5472,7 +5573,7 @@ diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_
          uint64_t now = ml_get_time_ms();
          if (ml->wg_netif && now - last_wg_periodic_ms >= 400) {
              uint64_t t0 = now;
-@@ -1639,18 +1775,33 @@
+@@ -1639,18 +1824,33 @@
          vTaskDelay(pdMS_TO_TICKS(10));
      }
  
