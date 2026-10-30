@@ -45,6 +45,8 @@ public:
     void setPowerProfile(uint8_t profile);
     void refreshWhileLocked();
 #ifdef MOSAICO_BOARD
+    struct StartupTimings { uint32_t validMask=0; uint32_t markMs[10]{}; };
+    StartupTimings startupTimings() const; // First marks this boot; read-only RAM diagnostics.
     void notifyOtaQueued(); // Wake owner only; no radio, refresh-window or lock-state changes.
 #if CONFIG_IDF_TARGET_ESP32S31
     bool requestLanTcp(const MosaicoLanTcp::Request& request);
@@ -141,6 +143,7 @@ private:
     mutable portMUX_TYPE _hw_rx_mux = portMUX_INITIALIZER_UNLOCKED;
     MosaicoHwRx::Snapshot _hw_rx_cache;
 #endif
+    void noteStartup(unsigned stage); // Never wakes the owner or changes networking.
     void updateFirmware();
     void serviceWifiSettings();
     void publishWifiProfiles();

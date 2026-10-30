@@ -199,3 +199,17 @@ handshake immediately. The existing WireGuard retry interval, TCP deadline,
 key expiry, and confirmation rules remain unchanged. This fixes a reproducible
 path-selection starvation sequence; counters from a single field run do not
 prove it explains every historical timeout or a separate DERP forwarding fault.
+
+Startup phase diagnostics are fixed-size, first-boot RAM timestamps returned by
+`debug network` (`STARTUP_APP` and `STARTUP_COORD`), not new tasks, settings or
+admission gates. Their masks distinguish a missing event from a valid zero-ms
+mark. APP records first owner entry, Wi-Fi initialized, scan dispatched, connect
+requested, GOT_IP event, TLS clock gate satisfied, tailnet start requested,
+connected observed by owner, first quota call, and first quota accepted.
+COORD records its first attempt only: begin, STUN dispatch, control TCP, Noise
+plus proactive frames, HTTP/2 preface, registration, initial map, conditional
+DERP wait, endpoint publication, and connected publication. Failure/cleanup
+freezes that attempt, so reconnects cannot splice later phases into it. Getter
+calls do not start work or reset these marks. Wi-Fi/clock stages may overlap;
+never sum all stage differences as independent serial work. These timestamps
+are uptime, not account snapshot age; absent phases remain explicitly unknown.

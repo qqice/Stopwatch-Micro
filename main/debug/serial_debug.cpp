@@ -1696,6 +1696,23 @@ void SerialDebug::handleLine(char* line)
                       static_cast<unsigned long>(network.historyAccepted()),
                       static_cast<unsigned long>(network.historyFailures()));
 #ifdef MOSAICO_BOARD
+        const auto appTiming=network.startupTimings();
+        debugPrintf("DBG STARTUP_APP version=1 mask=0x%lx run=%lu wifi=%lu scan=%lu connect=%lu got_ip=%lu clock=%lu tailnet=%lu ready_seen=%lu quota_begin=%lu quota_ok=%lu first_boot_only=1 cached_only=1\r\n",
+            static_cast<unsigned long>(appTiming.validMask),
+            static_cast<unsigned long>(appTiming.markMs[0]),static_cast<unsigned long>(appTiming.markMs[1]),
+            static_cast<unsigned long>(appTiming.markMs[2]),static_cast<unsigned long>(appTiming.markMs[3]),
+            static_cast<unsigned long>(appTiming.markMs[4]),static_cast<unsigned long>(appTiming.markMs[5]),
+            static_cast<unsigned long>(appTiming.markMs[6]),static_cast<unsigned long>(appTiming.markMs[7]),
+            static_cast<unsigned long>(appTiming.markMs[8]),static_cast<unsigned long>(appTiming.markMs[9]));
+        microlink_startup_timing_t coordTiming{};
+        microlink_startup_timing_get(&coordTiming);
+        debugPrintf("DBG STARTUP_COORD version=%lu mask=0x%lx begin=%lu stun=%lu tcp=%lu noise=%lu h2=%lu register=%lu map=%lu derp_wait=%lu publish=%lu connected=%lu first_boot_only=1 cached_only=1\r\n",
+            static_cast<unsigned long>(coordTiming.version),static_cast<unsigned long>(coordTiming.valid_mask),
+            static_cast<unsigned long>(coordTiming.mark_ms[0]),static_cast<unsigned long>(coordTiming.mark_ms[1]),
+            static_cast<unsigned long>(coordTiming.mark_ms[2]),static_cast<unsigned long>(coordTiming.mark_ms[3]),
+            static_cast<unsigned long>(coordTiming.mark_ms[4]),static_cast<unsigned long>(coordTiming.mark_ms[5]),
+            static_cast<unsigned long>(coordTiming.mark_ms[6]),static_cast<unsigned long>(coordTiming.mark_ms[7]),
+            static_cast<unsigned long>(coordTiming.mark_ms[8]),static_cast<unsigned long>(coordTiming.mark_ms[9]));
         microlink_derp_stack_diag_t derpStack{};
         microlink_derp_stack_get_diagnostics(&derpStack);
         debugPrintf("DBG DERP_STACK version=%lu requested_bytes=%lu selected_pool=%lu marker=0x%lx marker_rtc=%lu marker_internal=%lu marker_dma=%lu create_failures=%lu external_joins=%lu cumulative_boot=1 cached_only=1\r\n",

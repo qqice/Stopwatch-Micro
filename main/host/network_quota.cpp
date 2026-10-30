@@ -58,6 +58,10 @@ static_assert(sizeof(esp_test_hw_rx_statistics_t) >= 86, "S31 getter writes thro
 namespace {
 NetworkQuota instance;
 #ifdef MOSAICO_BOARD
+portMUX_TYPE startupTimingMux=portMUX_INITIALIZER_UNLOCKED;
+NetworkQuota::StartupTimings startupTiming{};
+#endif
+#ifdef MOSAICO_BOARD
 // Startup is the sole allocator; only the network owner's OTA path acquires.
 struct OtaBufferAllocator {
     uint8_t* allocate(MosaicoOtaBuffer::Kind kind,size_t capacity) {
@@ -481,6 +485,27 @@ void NetworkQuota::serviceHwRxSnapshot()
 }
 #endif
 
+#ifdef MOSAICO_BOARD
+void NetworkQuota::noteStartup(unsigned stage)
+{
+    if (stage >= 10) return;
+    const uint32_t now=static_cast<uint32_t>(esp_timer_get_time()/1000);
+    portENTER_CRITICAL(&startupTimingMux);
+    const uint32_t bit=uint32_t(1)<<stage;
+    if (!(startupTiming.validMask&bit)) {
+        startupTiming.markMs[stage]=now;
+        startupTiming.validMask|=bit;
+    }
+    portEXIT_CRITICAL(&startupTimingMux);
+}
+NetworkQuota::StartupTimings NetworkQuota::startupTimings() const
+{
+    portENTER_CRITICAL(&startupTimingMux);
+    const auto copy=startupTiming;
+    portEXIT_CRITICAL(&startupTimingMux);
+    return copy;
+}
+#endif
 void NetworkQuota::wait(uint32_t milliseconds)
 {
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
@@ -657,6 +682,7 @@ bool NetworkQuota::selectWifiCandidate(bool, int64_t now)
             if(!_wifi_scan_handler || esp_wifi_scan_start(&scan,false)!=ESP_OK) {
                 _wifi_scan_started=false; esp_wifi_clear_ap_list(); _wifi_scan_complete=true; return false;
             }
+            noteStartup(2); // Successful first scan dispatch.
             _wifi_scan_deadline=now+4000000;
             return false;
         }
@@ -1506,6 +1532,9 @@ void NetworkQuota::task(void* arg)
 void NetworkQuota::run()
 {
 #ifdef MOSAICO_BOARD
+    noteStartup(0);
+#endif
+#ifdef MOSAICO_BOARD
     // app_main sampled SDK pending before begin(). Only a pending boot is held;
     // its existing health loop/timer must run independently of network startup.
     if (MosaicoOta::healthPending()) {
@@ -1585,12 +1614,20 @@ void NetworkQuota::run()
 #endif
 #ifdef MOSAICO_BOARD
     recordWifiRunning(!GetHAL().gaugeScaleTrialActive());
+    noteStartup(1);
+    // Timing only: preserve existing polling/wake behavior for the baseline.
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+        [](void* arg,const char*,int32_t,void*) { static_cast<NetworkQuota*>(arg)->noteStartup(4); },this);
 #else
     recordWifiRunning(true);
 #endif
     esp_sntp_config_t timeConfig = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
 #ifdef MOSAICO_BOARD
-    timeConfig.sync_cb = MosaicoClock::onSntpTime;
+    timeConfig.sync_cb = [](timeval* tv) {
+        MosaicoClock::onSntpTime(tv);
+        if (tv && tv->tv_sec>=1735689600) GetNetworkQuota().noteStartup(5);
+    };
+    if (std::time(nullptr)>=1735689600) noteStartup(5); // Clock retained across a warm boot.
 #endif
     const esp_err_t timeInit = esp_netif_sntp_init(&timeConfig);
     if (timeInit != ESP_OK) ESP_LOGW("SystemClock", "SNTP init failed: %s", esp_err_to_name(timeInit));
@@ -1879,6 +1916,9 @@ void NetworkQuota::run()
             wifiRetry.attempted(retryNow, locked);
             }
 #endif
+#ifdef MOSAICO_BOARD
+            noteStartup(3);
+#endif
             esp_wifi_connect();
             wait(5000);
             continue;
@@ -1907,6 +1947,9 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
             sampleNetworkHeap("tailnet_start_before", MosaicoHeapProbeStage::TailnetBefore, tailnetHeapBefore);
 #endif
+#ifdef MOSAICO_BOARD
+            noteStartup(6);
+#endif
             GetTailnetQuota().start();
 #ifdef MOSAICO_BOARD
             sampleNetworkHeap("tailnet_start_after", MosaicoHeapProbeStage::TailnetAfter, tailnetHeapAfter);
@@ -1920,6 +1963,7 @@ void NetworkQuota::run()
             continue;
         }
 #ifdef MOSAICO_BOARD
+        if (GetTailnetQuota().enabled()) noteStartup(7);
         // Reuse an already-online quota window. Do not wake radios just for OTA.
         if (MosaicoOta::takeCheckRequest() || MosaicoOta::automaticCheckDue()) {
             mosaico_rx_observer::request(false);
@@ -1977,9 +2021,13 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
         const MosaicoQuota::RequestPolicy requestPolicy{displayLocked()};
 #endif
+#ifdef MOSAICO_BOARD
+        noteStartup(8);
+#endif
         const bool quotaOk = fetch();
         if (quotaOk) {
 #ifdef MOSAICO_BOARD
+            noteStartup(9);
             if (_accepted == 0)
                 ESP_LOGI("QuotaStartup", "reason=first_quota_accepted boot_elapsed_ms=%llu",
                     static_cast<unsigned long long>(esp_timer_get_time() / 1000));
