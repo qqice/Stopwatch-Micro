@@ -213,3 +213,12 @@ freezes that attempt, so reconnects cannot splice later phases into it. Getter
 calls do not start work or reset these marks. Wi-Fi/clock stages may overlap;
 never sum all stage differences as independent serial work. These timestamps
 are uptime, not account snapshot age; absent phases remain explicitly unknown.
+
+Measured first-boot poll gaps are avoided by notifying the existing permanent
+network owner after GOT_IP, successful clock synchronization, or control-plane
+CONNECTED. Notifications are sent only before its first successful quota fetch;
+after that the existing periodic/locked policy is unchanged. No callback opens a
+radio window or performs network I/O, and the owner still rechecks authoritative
+lock, deadline, OTA and gauge state. The original five-second fallback remains
+in place if an event is unavailable. This is not a shorter protocol timeout or
+a bypass of clock/certificate verification or image-health observation.

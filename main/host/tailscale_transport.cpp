@@ -14,6 +14,7 @@
 #include <cctype>
 #include <initializer_list>
 #ifdef MOSAICO_BOARD
+#include "network_quota.h"
 #include "mosaico_system_log.h"
 #include "mosaico_system_log_model.h"
 #include <hal/mosaico/mosaico_nand_store.h>
@@ -178,6 +179,12 @@ void TailnetQuota::start()
     config.priority_peer_ip = _peer;
     _client                 = microlink_init(&config);
     if (!_client) { finish(StartupDecision::InitFailed,ESP_FAIL); return; }
+#ifdef MOSAICO_BOARD
+    microlink_set_state_callback(_client,
+        [](microlink_t*, microlink_state_t state, void*) {
+            if (state == ML_STATE_CONNECTED) GetNetworkQuota().notifyStartupProgress();
+        }, nullptr);
+#endif
     const auto started=microlink_start(_client);
     _pause_requested = started != ESP_OK;
     finish(started==ESP_OK?StartupDecision::Started:StartupDecision::StartFailed,started);

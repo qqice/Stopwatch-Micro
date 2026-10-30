@@ -164,6 +164,10 @@ void NetworkQuota::refreshWhileLocked()
     if (_task_handle) xTaskNotifyGive(_task_handle);
 }
 #ifdef MOSAICO_BOARD
+void NetworkQuota::notifyStartupProgress()
+{
+    if (_accepted.load() == 0) notifyOtaQueued();
+}
 void NetworkQuota::notifyOtaQueued()
 {
     // Queue state is already published. The owner rechecks existing OTA/idle
@@ -1615,9 +1619,13 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
     recordWifiRunning(!GetHAL().gaugeScaleTrialActive());
     noteStartup(1);
-    // Timing only: preserve existing polling/wake behavior for the baseline.
+    // Wake the permanent owner on startup progress; keep its timeout fallback.
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-        [](void* arg,const char*,int32_t,void*) { static_cast<NetworkQuota*>(arg)->noteStartup(4); },this);
+        [](void* arg,const char*,int32_t,void*) {
+            auto* quota = static_cast<NetworkQuota*>(arg);
+            quota->noteStartup(4);
+            quota->notifyStartupProgress();
+        },this);
 #else
     recordWifiRunning(true);
 #endif
@@ -1625,7 +1633,10 @@ void NetworkQuota::run()
 #ifdef MOSAICO_BOARD
     timeConfig.sync_cb = [](timeval* tv) {
         MosaicoClock::onSntpTime(tv);
-        if (tv && tv->tv_sec>=1735689600) GetNetworkQuota().noteStartup(5);
+        if (tv && tv->tv_sec>=1735689600) {
+            GetNetworkQuota().noteStartup(5);
+            GetNetworkQuota().notifyStartupProgress();
+        }
     };
     if (std::time(nullptr)>=1735689600) noteStartup(5); // Clock retained across a warm boot.
 #endif

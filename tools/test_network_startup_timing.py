@@ -38,7 +38,7 @@ class StartupAppTests(unittest.TestCase):
    rv.RUN=ROOT/'.artifacts/private/mosaico/startup-app-tests-001'
    self.assertEqual(rv.execute(s,'app-current',6),(0,)*6)
   finally:rv.fixture,rv.RUN=oldf,oldr
- def test_passive_baseline_hooks(self):
+ def test_hooks_preserve_poll_fallback(self):
   s=SOURCE.read_text(encoding='utf8');h=(ROOT/'main/host/network_quota.h').read_text(encoding='utf8')
   self.assertIn('uint32_t markMs[10]',h)
   cb=s.split('esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,',1)[1].split('esp_netif_sntp_init',1)[0]

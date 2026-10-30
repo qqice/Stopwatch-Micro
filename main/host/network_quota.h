@@ -48,6 +48,7 @@ public:
     struct StartupTimings { uint32_t validMask=0; uint32_t markMs[10]{}; };
     StartupTimings startupTimings() const; // First marks this boot; read-only RAM diagnostics.
     void notifyOtaQueued(); // Wake owner only; no radio, refresh-window or lock-state changes.
+    void notifyStartupProgress(); // Wake only until the first accepted quota response.
 #if CONFIG_IDF_TARGET_ESP32S31
     bool requestLanTcp(const MosaicoLanTcp::Request& request);
     void cancelLanTcp() { _lan_tcp.cancel(); }
