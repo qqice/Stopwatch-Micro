@@ -187,3 +187,15 @@ entry retains that initiation and its index for the existing retry interval;
 pending does not become a false "up" result or an unconditional new handshake.
 The entry still clears the data endpoint for its existing DERP fallback
 semantics; only initiation replacement is deferred, not the endpoint switch.
+
+A connected relay is not evidence that a WireGuard handshake to a particular
+peer is making progress. On-demand preparation prefers a still-trusted direct
+endpoint learned from an authenticated matching DISCO PONG, even while DERP is
+connected. Otherwise relay fallback retains its existing behavior. This avoids
+repeatedly demoting an already-discovered direct path during cold startup.
+Switching the requested route while a local initiation is recent must retain
+that initiation's index and retry timestamp; it must not generate a second
+handshake immediately. The existing WireGuard retry interval, TCP deadline,
+key expiry, and confirmation rules remain unchanged. This fixes a reproducible
+path-selection starvation sequence; counters from a single field run do not
+prove it explains every historical timeout or a separate DERP forwarding fault.
