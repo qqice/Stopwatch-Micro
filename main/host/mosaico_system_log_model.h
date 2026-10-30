@@ -45,8 +45,26 @@ using Bytes=std::array<uint8_t,RecordBytes>;
 // record (same monotonic timestamp), never to arbitrary older raw history.
 // args: factor lo/hi, unitEpoch lo/hi, generation lo/hi, verified, phase,
 // next-record-only=1, reserved[2]. Unknown context remains explicit factor=0.
-enum class Type:uint16_t { Boot=1,Gauge=2,GaugeBoot=3,Network=4,Power=5,Ota=6,Heap=7,Warning=8,Loss=9,Outcome=10,Panic=11,Tcp=12,GaugeEngine=13,UnitContext=14,EngineDiagnosticEvent=15 };
+enum class Type:uint16_t { Boot=1,Gauge=2,GaugeBoot=3,Network=4,Power=5,Ota=6,Heap=7,Warning=8,Loss=9,Outcome=10,Panic=11,Tcp=12,GaugeEngine=13,UnitContext=14,EngineDiagnosticEvent=15,DerpCandidate=16,DerpCandidateName=17,DerpCandidateLoss=18 };
 struct Record {Type type=Type::Boot;uint16_t flags=0;uint64_t monotonicMs=0,epoch=0;std::array<uint32_t,11> args{};};
+// v1 numeric candidate + ordered bounded name chunks. Existing 64-byte/page
+// format is unchanged. Hostname bytes are data, never variadic log formats.
+template<class E> constexpr size_t derpCandidateRecords(const E& e,std::array<Record,5>& out){
+ if(e.version!=1||e.candidate_len>127||e.stage<1||e.stage>4||e.source<1||e.source>3||
+    (e.family!=0&&e.family!=4&&e.family!=6))return 0;
+ out={};auto& h=out[0];h.type=Type::DerpCandidate;h.monotonicMs=e.monotonic_ms;h.flags=0x100;
+ const uint32_t flags=(e.errno_valid?1U:0U)|(e.candidate_truncated?2U:0U);
+ h.args={e.seq,e.attempt_id,uint32_t(e.region)|(uint32_t(e.port)<<16),
+   uint32_t(e.node_index)|(uint32_t(e.family)<<16)|(uint32_t(e.source)<<20)|(uint32_t(e.stage)<<24)|(flags<<28),
+   uint32_t(e.result),uint32_t(e.error),e.elapsed_ms,0,0,0,0};
+ for(size_t i=0;i<16;++i)h.args[7+i/4]|=uint32_t(e.address[i])<<((i%4)*8);
+ const size_t chunks=e.candidate_len?(e.candidate_len+31)/32:1;
+ for(size_t c=0;c<chunks;++c){auto& n=out[c+1];n.type=Type::DerpCandidateName;n.flags=0x100;n.monotonicMs=e.monotonic_ms;
+  n.args[0]=e.seq;n.args[1]=uint32_t(c);n.args[2]=e.candidate_len|(e.candidate_truncated?0x10000U:0U);
+  for(size_t j=0;j<32&&c*32+j<e.candidate_len;++j)n.args[3+j/4]|=uint32_t(uint8_t(e.candidate[c*32+j]))<<((j%4)*8);
+ }
+ return chunks+1;
+}
 template<size_t N> constexpr void put(std::array<uint8_t,N>& b,size_t p,uint64_t v,size_t n){for(size_t i=0;i<n;++i)b[p+i]=uint8_t(v>>(8*i));}
 template<size_t N> constexpr uint64_t get(const std::array<uint8_t,N>& b,size_t p,size_t n){uint64_t v=0;for(size_t i=0;i<n;++i)v|=uint64_t(b[p+i])<<(8*i);return v;}
 constexpr Bytes encode(const Record& r){Bytes b{};put(b,0,uint16_t(r.type),2);put(b,2,r.flags,2);put(b,4,r.monotonicMs,8);put(b,12,r.epoch,8);for(size_t i=0;i<11;++i)put(b,20+i*4,r.args[i],4);return b;}
@@ -58,6 +76,11 @@ constexpr uint32_t hash(const char* s){uint32_t h=2166136261U;if(s)for(size_t i=
 struct Queue {
  std::array<Bytes,Capacity> data{};size_t head=0,count=0;uint32_t dropped=0;
  constexpr bool push(const Record& r){if(count==Capacity){++dropped;return false;}data[(head+count)%Capacity]=encode(r);++count;return true;}
+ template<size_t N> constexpr bool pushGroup(const std::array<Record,N>& records,size_t n){
+  if(!n||n>N||count>Capacity||n>Capacity-count)return false;
+  for(size_t i=0;i<n;++i){push(records[i]);}
+  return true;
+ }
  constexpr size_t copy(uint8_t* out,size_t maximum)const{const size_t n=count<maximum?count:maximum;for(size_t i=0;i<n;++i)for(size_t j=0;j<RecordBytes;++j)out[i*RecordBytes+j]=data[(head+i)%Capacity][j];return n;}
  constexpr bool consume(size_t n){if(n>count)return false;head=(head+n)%Capacity;count-=n;return true;}
 };
@@ -100,5 +123,3 @@ struct PostExitCapture {
 constexpr bool powerGate(bool otaIdle,bool imageValid,bool policy2,bool telemetryValid,bool temperatureValid,uint16_t mv,uint16_t deciK){return otaIdle&&imageValid&&policy2&&telemetryValid&&temperatureValid&&mv>=3300&&deciK>=2832&&deciK<=3181;}
 constexpr bool chunkBounds(uint16_t index,size_t capacity){return index<16&&capacity>=ChunkBytes;}
 } // namespace
-
-

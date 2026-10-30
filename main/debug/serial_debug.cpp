@@ -1713,6 +1713,22 @@ void SerialDebug::handleLine(char* line)
             static_cast<unsigned long>(coordTiming.mark_ms[4]),static_cast<unsigned long>(coordTiming.mark_ms[5]),
             static_cast<unsigned long>(coordTiming.mark_ms[6]),static_cast<unsigned long>(coordTiming.mark_ms[7]),
             static_cast<unsigned long>(coordTiming.mark_ms[8]),static_cast<unsigned long>(coordTiming.mark_ms[9]));
+        microlink_derp_candidate_stats_t candidateStats{};
+        microlink_derp_candidate_get_stats(&candidateStats);
+        debugPrintf("DBG DERP_CANDIDATES version=%lu capacity=%lu pending=%lu produced=%lu dropped=%lu attempts=%lu allocation_failures=%lu metadata_only=1 cached_only=1\r\n",
+            (unsigned long)candidateStats.version,(unsigned long)candidateStats.capacity,(unsigned long)candidateStats.pending,
+            (unsigned long)candidateStats.produced,(unsigned long)candidateStats.dropped,(unsigned long)candidateStats.attempts,(unsigned long)candidateStats.allocation_failures);
+        microlink_derp_candidate_t failure{};
+        if(microlink_derp_candidate_get_last_failure(&failure)) {
+            char candidateHex[257]{};char addressHex[33]{};constexpr char hex[]="0123456789abcdef";
+            const size_t length=std::min<size_t>(failure.candidate_len,127);
+            for(size_t j=0;j<length;++j){const auto b=uint8_t(failure.candidate[j]);candidateHex[j*2]=hex[b>>4];candidateHex[j*2+1]=hex[b&15];}
+            for(size_t j=0;j<16;++j){addressHex[j*2]=hex[failure.address[j]>>4];addressHex[j*2+1]=hex[failure.address[j]&15];}
+            debugPrintf("DBG DERP_LAST_FAILURE seq=%lu attempt=%lu ms=%llu region=%u node=%u port=%u family=%u source=%u stage=%u result=%ld errno=%ld errno_valid=%u elapsed_ms=%lu address_hex=%s candidate_hex=%s candidate_truncated=%u metadata_only=1\r\n",
+                (unsigned long)failure.seq,(unsigned long)failure.attempt_id,(unsigned long long)failure.monotonic_ms,
+                failure.region,failure.node_index,failure.port,failure.family,failure.source,failure.stage,
+                (long)failure.result,(long)failure.error,failure.errno_valid,(unsigned long)failure.elapsed_ms,addressHex,candidateHex,failure.candidate_truncated);
+        }
         microlink_derp_stack_diag_t derpStack{};
         microlink_derp_stack_get_diagnostics(&derpStack);
         debugPrintf("DBG DERP_STACK version=%lu requested_bytes=%lu selected_pool=%lu marker=0x%lx marker_rtc=%lu marker_internal=%lu marker_dma=%lu create_failures=%lu external_joins=%lu cumulative_boot=1 cached_only=1\r\n",

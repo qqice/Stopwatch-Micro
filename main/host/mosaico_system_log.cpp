@@ -30,7 +30,7 @@ namespace MosaicoSystemLog {
 namespace {
 using namespace Model;
 namespace NL=MosaicoNandStore::LogModel;
-struct Storage {Queue queue;MosaicoNandStore::LogPage page{},readPage{};MosaicoNandStore::LogState state{};Record power{},ota{},network{},tcp{};MosaicoOta::UiSnapshot otaUi{};};
+struct Storage {Queue queue;MosaicoNandStore::LogPage page{},readPage{};MosaicoNandStore::LogState state{};Record power{},ota{},network{},tcp{},derpLoss{};MosaicoOta::UiSnapshot otaUi{};};
 Storage* storage=nullptr;
 std::atomic_flag queueLock=ATOMIC_FLAG_INIT,readLock=ATOMIC_FLAG_INIT,hookLock=ATOMIC_FLAG_INIT;
 std::atomic<TaskHandle_t> workerHandle{nullptr};
@@ -93,7 +93,32 @@ bool engine(const Hal::GaugeEngineSnapshot& s){
  return enqueueWithUnits(s.units,r,s.phase!=mosaico_gauge_status::Explicit);
 }
 void changed(Record& prior,const Record& next,bool critical=false){if(prior.args!=next.args){enqueue(next,critical);prior=next;}}
+bool enqueueDerpGroup(const std::array<Record,5>& group,size_t count,bool critical){
+ if(!storage||!count||count>group.size()||queueLock.test_and_set(std::memory_order_acquire))return false;
+ if(!storage->queue.pushGroup(group,count)){queueLock.clear(std::memory_order_release);return false;}
+ queued=storage->queue.count;queueLock.clear(std::memory_order_release);if(critical)urgent=true;return true;
+}
+void collectDerpCandidates(){
+ // One existing worker consumes; CLI reads only the independent failure cache.
+ // Do not consume producer entries until the complete name group is in RAM.
+ for(unsigned i=0;i<8;++i){microlink_derp_candidate_t e{};if(!microlink_derp_candidate_peek(&e))break;
+  std::array<Record,5> group{};const auto count=derpCandidateRecords(e,group);
+  if(!count){++drops;if(!microlink_derp_candidate_consume(e.seq))break;continue;}
+  const auto current=record(Type::DerpCandidate,e.monotonic_ms);
+  for(size_t j=0;j<count;++j){group[j].epoch=current.epoch;group[j].flags|=current.flags;}
+  const bool failed=(e.stage==1?e.result!=0:(e.stage==2||e.stage==4)&&e.result<0);
+  if(!enqueueDerpGroup(group,count,failed))break;
+  if(!microlink_derp_candidate_consume(e.seq)){++drops;break;}
+ }
+ microlink_derp_candidate_stats_t d{};microlink_derp_candidate_get_stats(&d);
+ if(d.dropped!=storage->derpLoss.args[1]||d.allocation_failures!=storage->derpLoss.args[2]){
+  auto r=record(Type::DerpCandidateLoss);r.flags|=0x100;
+  r.args={d.produced,d.dropped,d.allocation_failures,d.pending,d.attempts,d.capacity,0,0,0,0,0};
+  if(enqueue(r,true))storage->derpLoss=r;
+ }
+}
 void collect(uint64_t now){
+ collectDerpCandidates();
  if(!postExitCapture.complete){Hal::GaugeDiagnosticSnapshot standard{};Hal::GaugeEngineSnapshot e{};const auto info=GetHAL().gaugeBootReloadInfo();GetHAL().gaugeBootPostExit(standard,e);postExitCapture.update(standard,e,static_cast<uint8_t>(info.status),[](const Hal::GaugeDiagnosticSnapshot& s){return gauge(s);},[](const Hal::GaugeEngineSnapshot& s){return engine(s);});}
  if(!bootCapture.complete){Hal::GaugeDiagnosticSnapshot before{},after{};GetHAL().gaugeBootDiagnostic(before,after);const auto info=GetHAL().gaugeBootReloadInfo();bootCapture.update(before,after,info.attempted,[](const Hal::GaugeDiagnosticSnapshot& s){return gauge(s);},[](uint8_t outcome,bool attempted){auto r=record(Type::Outcome);r.args[0]=outcome;r.args[1]=attempted;return enqueue(r,true);});}
  if(!engineBootCapture.complete){Hal::GaugeEngineSnapshot before{},after{};GetHAL().gaugeBootEngine(before,after);engineBootCapture.update(before,after,false,[](const Hal::GaugeEngineSnapshot& s){return engine(s);},[](uint8_t,bool){return true;});}

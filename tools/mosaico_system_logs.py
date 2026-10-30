@@ -4,13 +4,13 @@
 Each immutable page is read once into the board's RAM cache, then fetched in
 128-byte idempotent chunks. A failed/incomplete page is never called exported.
 """
-import argparse,base64,contextlib,hashlib,io,json,struct,time,zlib
+import argparse,base64,contextlib,hashlib,io,json,struct,time,zlib,ipaddress
 from pathlib import Path
 from serial_debug_test import DebugClient
 
 PAGE_MAGIC=0x31474c4d
 TYPES={1:'boot',2:'gauge',3:'gauge_boot',4:'network',5:'power',6:'ota',7:'heap',
-       8:'warning_fingerprint',9:'loss',10:'gauge_boot_outcome',11:'panic',12:'tcp',13:'gauge_engine',14:'gauge_unit_context',15:'engine_diagnostic_event'}
+       8:'warning_fingerprint',9:'loss',10:'gauge_boot_outcome',11:'panic',12:'tcp',13:'gauge_engine',14:'gauge_unit_context',15:'engine_diagnostic_event',16:'derp_candidate',17:'derp_candidate_name',18:'derp_candidate_loss'}
 
 def fields(result):
     return dict(x.split('=',1) for x in result.details.split() if '=' in x)
@@ -35,6 +35,18 @@ def decode_page(data,expected):
         typ,flags,ms,epoch,*a=struct.unpack_from('<HHQQ11I',data,60+i*64)
         r=dict(page_seq=seq,page_boot=boot,index=i,type=TYPES.get(typ,'unknown'),type_id=typ,
                flags=flags,monotonic_ms=ms,epoch=epoch,args=a)
+        if typ==16 and ((flags>>8)&255)==1:
+            meta=a[3];family=(meta>>16)&15;stage=(meta>>24)&15
+            address=struct.pack('<4I',*a[7:11])
+            r['derp_candidate']=dict(seq=a[0],attempt_id=a[1],region=a[2]&65535,port=a[2]>>16,
+                node_index=meta&65535,family=family,source=(meta>>20)&15,stage=stage,
+                result=a[4]-(1<<32) if a[4]&(1<<31) else a[4],
+                error=a[5]-(1<<32) if a[5]&(1<<31) else a[5],errno_valid=bool(meta&(1<<28)),
+                elapsed_ms=a[6],address_hex=address.hex(),
+                address=str(ipaddress.ip_address(address[:4] if family==4 else address)) if family in (4,6) and stage>=2 else None,
+                candidate_truncated=bool(meta&(1<<29)),candidate_complete=False)
+        if typ==18 and ((flags>>8)&255)==1:
+            r['derp_loss']=dict(produced=a[0],dropped=a[1],allocation_failures=a[2],pending=a[3],attempts=a[4],capacity=a[5])
         if typ==15:
             r['engine_diagnostic_event']=dict(stage={1:'begin',2:'end'}.get(a[0],'unknown'),
                 result={0:'pending',1:'pass',2:'fail'}.get(a[1],'unknown'),
@@ -123,6 +135,34 @@ def attach_unit_contexts(rows):
         previous=row
     return rows
 
+def attach_derp_candidates(rows):
+    """Attach only contiguous, same-boot/ms, sequence-bound name chunks.
+
+    Partial export ranges remain explicit, not fabricated names. Raw records
+    and bytes are retained for independent replay, including invalid UTF-8.
+    """
+    for i,row in enumerate(rows):
+        d=row.get('derp_candidate')
+        if not d:continue
+        d.pop('candidate',None);d.pop('candidate_hex',None);d['candidate_complete']=False
+        if i+1>=len(rows):continue
+        first=rows[i+1];a=first['args']
+        if first['type_id']!=17 or a[0]!=d['seq'] or a[1]!=0:continue
+        length=a[2]&65535;truncated=bool(a[2]&65536)
+        if length>127 or truncated!=d['candidate_truncated']:continue
+        chunks=max(1,(length+31)//32);parts=[]
+        for j in range(chunks):
+            if i+j+1>=len(rows):break
+            n=rows[i+j+1];b=n['args']
+            if (n['type_id']!=17 or ((n['flags']>>8)&255)!=1 or n['page_boot']!=row['page_boot']
+                or n['monotonic_ms']!=row['monotonic_ms'] or b[0]!=d['seq'] or b[1]!=j or b[2]!=a[2]):break
+            parts.append(struct.pack('<8I',*b[3:11]))
+        if len(parts)!=chunks:continue
+        raw=b''.join(parts)
+        if any(raw[length:]):continue
+        raw=raw[:length];d['candidate_hex']=raw.hex();d['candidate']=raw.decode('utf8',errors='backslashreplace');d['candidate_complete']=True
+    return rows
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--port',required=True);p.add_argument('--uart',action='store_true')
@@ -155,6 +195,7 @@ def main():
             rows.extend(decode_page(data,seq))
             print(f'PAGE_VERIFIED seq={seq} records={len(rows)}',flush=True)
         attach_unit_contexts(rows)
+        attach_derp_candidates(rows)
         with (args.output/'records.jsonl').open('x',encoding='utf8') as f:
             for row in rows:f.write(json.dumps(row,separators=(',',':'))+'\n')
         manifest['complete']=True

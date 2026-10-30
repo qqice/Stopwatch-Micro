@@ -232,3 +232,24 @@ A valid retained clock does not suppress background synchronization. The same
 NTP host, randomized startup delay, retry timings and TLS time gate are retained.
 This ordering addresses a measured 26.5-second IP-to-clock interval without
 claiming that every NTP delay has a single cause or reducing safety timeouts.
+
+### DERP entry candidate evidence
+
+The existing `debug network` command includes a bounded candidate FIFO status
+and a separate last-failure cache. Every lookup result, socket result, connect
+begin and connect result records the selected region/node, original candidate,
+resolved IPv4/IPv6 address, port, return value, valid errno and elapsed time.
+Resolver EAI codes are not relabeled as errno. Success does not erase a previous
+failure, and BEGIN without RESULT exposes an unfinished synchronous connect.
+This metadata is always recorded, without enabling packet observation or TWT.
+
+A one-time PSRAM-only allocation on S31 backs a 16-entry drop-new FIFO; failure
+to allocate or retain diagnostics never blocks network or OTA. Getters do not
+allocate/reset it. The existing NAND worker copies a complete versioned header
+and bounded name-chunk group into its queue before consuming the producer entry.
+Types 16/17/18 extend the existing 64-byte records without erasing or changing
+old page geometry; producer loss/allocation failures remain explicit. Name bytes
+are hex in serial output and safely escaped in JSON, never executable log text.
+Only the selected endpoint's connection metadata is recorded, not credentials,
+keys, certificates, HTTP bodies or unrelated peer lists. Queue/volatile loss is
+possible and reported; a partial export must not fabricate a missing name.
