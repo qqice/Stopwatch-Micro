@@ -1631,6 +1631,7 @@ void NetworkQuota::run()
 #endif
     esp_sntp_config_t timeConfig = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
 #ifdef MOSAICO_BOARD
+    timeConfig.start = false; // Start only after the owner observes a usable IPv4 address.
     timeConfig.sync_cb = [](timeval* tv) {
         MosaicoClock::onSntpTime(tv);
         if (tv && tv->tv_sec>=1735689600) {
@@ -1642,6 +1643,9 @@ void NetworkQuota::run()
 #endif
     const esp_err_t timeInit = esp_netif_sntp_init(&timeConfig);
     if (timeInit != ESP_OK) ESP_LOGW("SystemClock", "SNTP init failed: %s", esp_err_to_name(timeInit));
+#ifdef MOSAICO_BOARD
+    bool sntpStarted = false;
+#endif
     bool hadConnection = false;
     bool wasLocked = false, updateWindow = false;
     auto closeWindow = [&](MosaicoTwt::CycleReason reason) {
@@ -1947,6 +1951,11 @@ void NetworkQuota::run()
         // negotiation forbids blocking work while its response is pending.
         if (_twt.state.stage == MosaicoTwt::Stage::Negotiating) {
             wait(50); continue;
+        }
+#endif
+#ifdef MOSAICO_BOARD
+        if (timeInit == ESP_OK && !sntpStarted) {
+            if (esp_netif_sntp_start() == ESP_OK) sntpStarted = true;
         }
 #endif
         if (GetTailnetQuota().enabled()) {

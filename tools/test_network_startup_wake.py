@@ -105,11 +105,19 @@ class StartupWakeTests(unittest.TestCase):
     def test_r52_authoritative_owner_wait_and_ota_logic_unchanged(self):
         # Frozen R52 HEAD 35656c2 digests: no timeout/window/idle/OTA owner changes.
         s, h = NETWORK.read_text(encoding='utf8'), HEADER.read_text(encoding='utf8')
+        # R54's reviewed once-start block is separately exercised by
+        # test_network_sntp_startup. Strip exactly it, never bless a new whole-body SHA.
+        sntp_once = ("#ifdef MOSAICO_BOARD\n"
+                     "        if (timeInit == ESP_OK && !sntpStarted) {\n"
+                     "            if (esp_netif_sntp_start() == ESP_OK) sntpStarted = true;\n"
+                     "        }\n#endif\n")
+        self.assertEqual(s.count(sntp_once), 1)
+        owner_baseline = s.replace(sntp_once, "", 1)
         bodies = (
             (rv.function(s, 'void NetworkQuota::wait('), 'eff5d22c8cf0b42ee53428af984db4f4f1f1d3dda4e590f010102a4481ebd507'),
             (rv.function(s, 'void NetworkQuota::notifyOtaQueued('), 'b02dd4426c536261aeba08439ed4e83885193fbfc54288ad43b17e7f8a2b9420'),
             (rv.function(h, '    bool idleLocked('), '70e319ebe61a7b215afb25913f95cd7dc3a8c2efaf3eca5fbc0857e1e1fcd0f4'),
-            (s.split('    bool hadConnection = false;', 1)[1], '4d6cf0301fa6c5503e27c3959e71353980b87c0078d5114109398989e6351a17'),
+            (owner_baseline.split('    bool hadConnection = false;', 1)[1], '4d6cf0301fa6c5503e27c3959e71353980b87c0078d5114109398989e6351a17'),
         )
         for body, expected in bodies:
             self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), expected)

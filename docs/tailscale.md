@@ -222,3 +222,13 @@ radio window or performs network I/O, and the owner still rechecks authoritative
 lock, deadline, OTA and gauge state. The original five-second fallback remains
 in place if an event is unavailable. This is not a shorter protocol timeout or
 a bypass of clock/certificate verification or image-health observation.
+
+SNTP initialization on Mosaico now creates the service with `start=false`;
+the existing network owner starts it once after observing a usable IPv4 address.
+This prevents startup DNS/NTP work from running before association/DHCP. A failed
+start is not latched as success and can be retried by the normal owner loop;
+subsequent five-minute radio windows do not repeatedly restart the service.
+A valid retained clock does not suppress background synchronization. The same
+NTP host, randomized startup delay, retry timings and TLS time gate are retained.
+This ordering addresses a measured 26.5-second IP-to-clock interval without
+claiming that every NTP delay has a single cause or reducing safety timeouts.
