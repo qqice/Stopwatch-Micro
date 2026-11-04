@@ -17,6 +17,17 @@ SOURCE = (VIEW / "dot_widgets.cpp").read_text(encoding="utf-8")
 
 
 class DotWidgetsTests(unittest.TestCase):
+    def test_prolite_uses_large_pro100_badge(self):
+        ui = (VIEW/'view_mosaico.cpp').read_text(encoding='utf8')
+        branch = ui.split('const char* proBadge = nullptr;', 1)[1].split('const size_t validWindows', 1)[0]
+        self.assertIn('std::strcmp(bucket.id, "codex") == 0', branch)
+        self.assertIn('std::strcmp(bucket.plan, "pro") == 0) proBadge = "Pro200";', branch)
+        self.assertIn('std::strcmp(bucket.plan, "prolite") == 0) proBadge = "PRO100";', branch)
+        self.assertIn('if (proBadge)', branch)
+        self.assertIn('lv_obj_add_flag(_cardTitles[i], LV_OBJ_FLAG_HIDDEN)', branch)
+        self.assertIn('lv_obj_remove_flag(_cardBadges[i], LV_OBJ_FLAG_HIDDEN)', branch)
+        self.assertIn('setText(_cardBadges[i], proBadge, 0xE9EDF2)', branch)
+
     def test_credit_unit_is_credits_and_keeps_bounded_label(self):
         ui=(VIEW/'view_mosaico.cpp').read_text(encoding='utf8')
         self.assertIn('"%s Credits"', ui)
@@ -36,7 +47,9 @@ class DotWidgetsTests(unittest.TestCase):
     def test_source_glyphs(self):
         glyphs = dict((key, tuple(map(int, rows.split(","))))
                       for key, rows in re.findall(r"\{'(.)',\{([\d,]+)\}\}", HEADER))
-        self.assertTrue(set("0123456789.%-?+CKMBTPdhmro ") <= glyphs.keys())
+        self.assertTrue(set("0123456789.%-?+CKMBTPROdhmro ") <= glyphs.keys())
+        for char in 'PRO100':
+            self.assertNotEqual(glyphs[char], glyphs['?'])
         for rows in glyphs.values():
             self.assertEqual(len(rows), 7)
             self.assertTrue(all(0 <= row < 32 for row in rows))

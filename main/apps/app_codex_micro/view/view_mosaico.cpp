@@ -1600,10 +1600,14 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         const auto& bucket = _quota->buckets[i];
         std::snprintf(buf, sizeof(buf), "%s%s%s", bucket.name[0] ? bucket.name : bucket.id, bucket.plan[0] ? " / " : "", bucket.plan);
         lv_label_set_text(_cardTitles[i], buf);
-        const bool proAlias = std::strcmp(bucket.id, "codex") == 0 && std::strcmp(bucket.plan, "pro") == 0;
-        if (proAlias) {
+        const char* proBadge = nullptr;
+        if (std::strcmp(bucket.id, "codex") == 0) {
+            if (std::strcmp(bucket.plan, "pro") == 0) proBadge = "Pro200";
+            else if (std::strcmp(bucket.plan, "prolite") == 0) proBadge = "PRO100";
+        }
+        if (proBadge) {
             lv_obj_add_flag(_cardTitles[i], LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_cardBadges[i], LV_OBJ_FLAG_HIDDEN);
-            setText(_cardBadges[i], "Pro200", 0xE9EDF2);
+            setText(_cardBadges[i], proBadge, 0xE9EDF2);
         } else { lv_obj_remove_flag(_cardTitles[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_cardBadges[i], LV_OBJ_FLAG_HIDDEN); }
         const size_t validWindows = static_cast<size_t>(bucket.windows[0].available) + static_cast<size_t>(bucket.windows[1].available);
         if (!validWindows) { lv_obj_remove_flag(_cardValues[i], LV_OBJ_FLAG_HIDDEN); place(_cardValues[i], 54, 48); lv_obj_set_width(_cardValues[i], 368); setTextPitch(_cardValues[i], 8); setText(_cardValues[i], "--", Gray); lv_obj_add_flag(_secondValues[i], LV_OBJ_FLAG_HIDDEN); }
