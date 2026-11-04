@@ -2300,6 +2300,7 @@ void NetworkQuota::updateFirmware()
         char path[192];
         const int n=std::snprintf(path,sizeof(path),"/v1/ota/plan?base=%s&target=%s",baseSha,imageHash);
         MosaicoDelta::Plan plan{};
+        MosaicoOta::recordWorkPhase(MosaicoOta::WorkPhase::Negotiating);
         if(n>0&&n<static_cast<int>(sizeof(path))&&requestJson(path,body,BodyCapacity,used)&&
            MosaicoDelta::parsePlan(body,static_cast<size_t>(used),baseImage,signedTarget,plan)) {
             std::unique_ptr<uint8_t,PsramFree> patch(static_cast<uint8_t*>(
@@ -2336,6 +2337,7 @@ void NetworkQuota::updateFirmware()
         }
     }
     savedManifest.reset();
+    if(!deltaCompleted) MosaicoOta::recordTransferProgress(false,0,size);
     for (uint32_t offset = 0; !deltaCompleted && offset < size;) {
         MosaicoOtaBreadcrumb(4, offset); // probe before allocating HTTP/JSON
         if ((offset % 65536U) == 0 && ![&]() { MosaicoHeapProbeScope probe(MosaicoHeapProbeStage::DownloadChunkBoundary); return heap_caps_check_integrity_all(true); }()) {

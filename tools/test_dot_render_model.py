@@ -41,6 +41,31 @@ constexpr bool iconTests() {
  if(!render::glyphPixel('R',4,6) || !render::glyphPixel('R',0,6))return false;
  return render::iconGrid(render::Accent::Refresh)==15 && render::iconGrid(render::Accent::Coin)==13;
 }
+constexpr bool activityTests() {
+ const auto icon=render::Accent::Refresh;
+ for(int phase=0;phase<360;++phase) {
+  Sink a,b,off;render::sampleIcon(icon,88,88,phase,true,0xd18c37,a);
+  render::sampleIcon(icon,88,88,(phase+1)%360,true,0xd18c37,b);
+  render::sampleIcon(icon,88,88,phase,false,0xd18c37,off);
+  bool changed=false,base=false,highlight=false;
+  for(int i=0;i<a.count;++i) {
+   const auto d=a.dots[i];
+   if(d.x<0 || d.y<0 || d.x+d.d>88 || d.y+d.d>88 || d.x!=b.dots[i].x || d.y!=b.dots[i].y)return false;
+   changed=changed || d.color!=b.dots[i].color;
+   base=base || d.color==0xd18c37;highlight=highlight || d.color!=0xd18c37;
+   if(off.dots[i].color!=0xd18c37)return false;
+  }
+  if(!base || !highlight || !changed || !render::iconChanged(icon,88,88,phase,true,(phase+1)%360,true,0xd18c37))return false;
+  if(render::iconChanged(icon,88,88,phase,false,(phase+1)%360,false,0xd18c37))return false;
+  if(render::iconChanged(icon,88,88,phase,true,phase+360,true,0xd18c37))return false;
+  for(auto other:{render::Accent::Quota,render::Accent::Coin,render::Accent::ResetCard}) {
+   Sink normal;render::sampleIcon(other,32,32,phase,true,0xd18c37,normal);
+   for(int i=0;i<normal.count;++i)if(normal.dots[i].color!=0xd18c37)return false;
+  }
+ }
+ return !render::iconChanged(icon,1,1,0,true,60,true,0xd18c37);
+}
+static_assert(activityTests(),"all-phase stationary comet, exact changed predicate, disabled/static colours and wrap");
 constexpr bool meterTests() {
  for(auto style:{render::SweepStyle::StrongDark,render::SweepStyle::MildDark})for(uint32_t base:{0x67e7aeU,0x68c9d6U,0xd18c37U,0xe87575U}) {
   int previous=256;
@@ -89,28 +114,33 @@ static_assert(meterTests(),"stationary geometry, exact fill, white core, truly d
 '''
         with tempfile.TemporaryDirectory() as d:
             source=Path(d)/'samplers.cpp';source.write_text(code,encoding='utf8')
-            result=subprocess.run([str(compilers[-1]),'-std=c++17','-fsyntax-only',str(source)],capture_output=True,text=True)
+            result=subprocess.run([str(compilers[-1]),'-std=c++17','-fconstexpr-ops-limit=100000000','-fsyntax-only',str(source)],capture_output=True,text=True)
             (OUT/'dot-model-0123-tests.log').write_text(result.stdout+result.stderr,encoding='utf8')
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
     def test_export_shared_header_hash_and_primitive_only_rasterizer(self):
-        manifest=json.loads((OUT/'dot-model-0123-final-preview.json').read_text())
+        preview=OUT/'ota-activity-preview-001'
+        manifest=json.loads((preview/'assets.json').read_text())
         def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
         self.assertEqual(manifest['model_sha256'],sha(V/'dot_render_model.h'))
         self.assertEqual(manifest['geometry_sha256'],sha(V/'dot_patterns.h'))
-        self.assertEqual(manifest['preview_binary_sha256'],sha(OUT/'dot-model-0123-final-preview.bin'))
-        data=(OUT/'dot-model-0123-final-preview.bin').read_bytes()
+        self.assertEqual(manifest['preview_binary_sha256'],sha(preview/'assets.bin'))
+        data=(preview/'assets.bin').read_bytes()
         magic,count=struct.unpack_from('<II',data)
-        self.assertEqual(magic,0x444f5433);self.assertEqual(count,len(manifest['specs']))
+        self.assertEqual(magic,0x4f544131);self.assertEqual(count,len(manifest['specs']))
         self.assertEqual(len(data),8+count*3080)
-        # Positions are exported from the same compiler, not calculated by Pillow.
-        simulator=(R/'tools/preview_dot_model.py').read_text(encoding='utf8')
-        self.assertIn('render::sampleIcon(',simulator);self.assertIn('render::sampleMeter(',simulator)
+        # The narrow simulator exports only six phases plus two real wordmarks.
+        self.assertEqual(count,8)
+        self.assertEqual(manifest['glyph_source_sha256'],sha(V/'dot_widgets.cpp'))
+        simulator=(R/'tools/preview_ota_activity.py').read_text(encoding='utf8')
+        self.assertIn('render::sampleIcon(',simulator)
+        self.assertIn('detail::textLayout(',simulator)
+        self.assertIn('glyph=uiGlyph(word[i])',simulator)
         raster=simulator.split('def raster(',1)[1].split('def generate()',1)[0]
-        self.assertIn('for x,y,d,color in primitives',raster)
+        self.assertIn('for x, y, d, color in primitives',raster)
         for forbidden in ('sin(', 'cos(', 'iconPixel','sweepMix','mask','remaining'):
             self.assertNotIn(forbidden,raster)
-        source=(OUT/'dot-model-0123-final-preview.cpp').read_text()
+        source=(preview/'assets.cpp').read_text()
         self.assertIn(str(V/'dot_render_model.h').replace('\\','/'),source)
 
 if __name__=='__main__':unittest.main()

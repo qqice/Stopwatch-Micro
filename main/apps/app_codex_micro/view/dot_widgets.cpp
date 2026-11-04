@@ -60,14 +60,15 @@ constexpr detail::Glyph otaGlyphs[] = {
     {'H',{17,17,17,31,17,17,17}}, {'W',{17,17,17,21,21,21,10}},
     {'N',{17,25,25,21,19,19,17}}, {'L',{16,16,16,16,16,16,31}},
     {'B',{30,17,17,30,17,17,30}}, {'C',{14,17,16,16,16,17,14}},
-    {'K',{17,18,20,24,20,18,17}}, {'P',{30,17,17,30,16,16,16}}
+    {'K',{17,18,20,24,20,18,17}}, {'P',{30,17,17,30,16,16,16}},
+    {'F',{31,16,16,30,16,16,16}}
 };
 constexpr const detail::Glyph& uiGlyph(char c) {
     for (const auto& g : otaGlyphs) if (g.key == c) return g;
     return detail::glyph(c);
 }
 constexpr bool actionGlyphsTest() {
-    for (const char* text : {"CHECK", "DOWNLOAD", "UPGRADE", "REBOOT"})
+    for (const char* text : {"CHECK", "DOWNLOAD", "UPGRADE", "REBOOT", "DELTA", "FULL"})
         for (const char* c = text; *c; ++c) if (uiGlyph(*c).key != *c) return false;
     return true;
 }

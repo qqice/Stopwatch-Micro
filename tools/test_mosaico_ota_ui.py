@@ -6,6 +6,7 @@ V = R / 'main/apps/app_codex_micro/view'
 CPP = (V / 'view_mosaico.cpp').read_text(encoding='utf8')
 HDR = (V / 'view_mosaico.h').read_text(encoding='utf8')
 DOT = (V / 'dot_widgets.cpp').read_text(encoding='utf8')
+MODEL = (V / 'ota_presentation_model.h').read_text(encoding='utf8')
 
 class OtaUiTests(unittest.TestCase):
     def test_ota_wave_is_left_to_right_only(self):
@@ -87,50 +88,32 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         self.assertIn('if (otaBusy()) return;',CPP)
         self.assertNotIn('setAutomaticInstall',CPP)
     def test_honest_progress_and_verification(self):
-        self.assertIn('static_cast<uint64_t>(transferReceived) * 10000 / transferSize',CPP)
-        self.assertIn('_ota.progressBasisPoints',CPP)
-        self.assertIn('const bool numericProgress = download || _ota.stage == S::BootChecking',CPP)
-        self.assertIn('if (!discovery && numericProgress)',CPP)
+        self.assertIn('m.done=s.received;m.total=s.size;',MODEL)
+        self.assertIn('m.bp=s.progressBasisPoints',MODEL)
+        self.assertIn('show(_otaPercent,view.numeric);show(_otaMeter,view.numeric)',CPP)
         self.assertNotIn('setText(_otaPercent, "--"',CPP)
-        self.assertIn('else for (auto* obj : {_otaPercent, _otaMeter}) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN)',CPP)
-        self.assertIn('_ota.imageVerified ? Green : Gold',CPP)
-        self.assertIn('_ota.signatureVerified ? Green : Gold',CPP)
-        for phase in ('DOWNLOADING','VERIFYING','READY','INSTALLING','BOOT CHECK','VERIFIED 100%','FAILED'):
-            self.assertIn('"'+phase+'"',CPP)
-        self.assertIn('SHA %.12s',CPP); self.assertIn('SIG %.8s',CPP)
+        self.assertIn('m.heading="VERIFYING"',MODEL)
+        for phase in ('DOWNLOADING','MERGING','DELTA PLAN','VERIFYING','READY','INSTALLING','BOOT CHECK','VERIFIED','FAILED'):
+            self.assertIn('"'+phase+'"',MODEL)
+        self.assertIn('SHA %.12s',CPP);self.assertIn('SIG %.8s',CPP)
         self.assertIn('char safe[25]',CPP)
+        self.assertIn('_ota.imageVerified?Green:Gold',CPP)
+        self.assertIn('_ota.signatureVerified?Green:Gold',CPP)
     def test_delta_progress_uses_network_bytes_without_changing_target(self):
-        block = CPP.split('    const uint32_t transferSize =', 1)[1].split('    // Byte/health progress', 1)[0]
-        code = '#include <algorithm>\n#include <cstdint>\n'
-        code += 'struct Snapshot { bool deltaTransfer; uint32_t transferSize, transferReceived, size, received; uint16_t progressBasisPoints; };\n'
-        code += 'constexpr uint16_t progress(Snapshot _ota, bool download) { const uint32_t transferSize =' + block + '\nreturn bp; }\n'
-        code += '''
-static_assert(progress({false,100,50,1000,250,0},true)==2500);
-static_assert(progress({true,100,50,1000,0,0},true)==5000);
-static_assert(progress({true,100,101,1000,0,0},true)==10000);
-static_assert(progress({true,0,0,1000,0,0},true)==0);
-static_assert(progress({true,100,100,1000,0,7500},false)==7500);
-'''
-        compilers=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
-        self.assertTrue(compilers)
-        with tempfile.TemporaryDirectory(dir=R/'.artifacts') as directory:
-            path=Path(directory)/'delta_progress.cpp';path.write_text(code,encoding='utf8')
-            result=subprocess.run([str(compilers[-1]),'-std=c++17','-fsyntax-only',str(path)],capture_output=True,text=True)
-            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-        self.assertIn('_ota.deltaTransfer ? "DELTA " : ""',CPP)
-        self.assertIn('const uint32_t shownSize = download ? transferSize : _ota.size;',CPP)
-        self.assertIn('place(_otaBytes, 0, stageIcon ? 194 : 162)',CPP)
+        # The shared production model now independently checks network, merge,
+        # opaque verification and boot progress; no copied progress formula.
+        from test_ota_presentation import OtaPresentationTests
+        OtaPresentationTests().test_actual_model_progress_visibility_and_all_rectangles()
+        self.assertIn('m.done=s.deltaTransfer?s.transferReceived:s.received',MODEL)
+        self.assertIn('m.done=s.received;m.total=s.size',MODEL)
+        self.assertIn('_ota.deltaTransfer?"DELTA":"FULL"',CPP)
     def test_meaningful_stage_icon_and_terminal_version(self):
-        self.assertIn('createIcon(_otaPage, Icon::Refresh, 88, Gold); place(_otaStageIcon, 176, 106)',CPP)
-        self.assertTrue(176+88<=440 and 106+88<=194 and 58+48<=106)
-        self.assertIn('_ota.stage == S::ReadyInstall || _ota.stage == S::Installing',CPP)
-        self.assertIn('_ota.stage == S::Installing ? Icon::Refresh : Icon::Check',CPP)
-        self.assertIn('setMotion(_otaStageIcon, meterPhase, _page == Page::OTA && _ota.stage == S::Installing)',CPP)
-        self.assertNotIn('"%s", phase',CPP)
-        self.assertIn('if (!discovery && (download || _ota.size))',CPP)
-        self.assertIn('case S::Available: phase = "UPDATE"',CPP)
-        self.assertIn('_ota.stage == S::Complete ? _ota.currentVersion : _ota.targetVersion',CPP)
-        self.assertIn('if (discovery && _ota.stage != S::Complete)',CPP)
+        self.assertIn('box(_otaStageIcon,view.activity)',CPP)
+        self.assertIn('view.loader?Icon::Refresh:Icon::Check',CPP)
+        self.assertIn('setMotion(_otaStageIcon, loadingPhase, _page == Page::OTA && _otaLoader',CPP)
+        self.assertIn('m.targetIsCurrent=true',MODEL)
+        self.assertIn('view.targetIsCurrent?_ota.currentVersion:_ota.targetVersion',CPP)
+        self.assertIn('Screen::Complete',MODEL)
     def test_pending_response_releases_local_guard(self):
         refresh=CPP.split('void CodexMicroView::refreshOta(',1)[1].split('void CodexMicroView::renderOta()',1)[0]
         self.assertIn('_otaApproved = false;',refresh)
@@ -139,15 +122,11 @@ static_assert(progress({true,100,100,1000,0,7500},false)==7500);
         self.assertIn('S::Checking',busy)
         self.assertIn('lv_obj_add_state(_otaButton, LV_STATE_DISABLED)',CPP)
     def test_same_running_slot_has_no_fake_transition(self):
-        self.assertIn('_ota.currentSlot >= 0 && _ota.currentSlot == _ota.targetSlot',CPP)
-        self.assertIn('_ota.currentSlot >= 0 && _ota.targetSlot >= 0 && !sameSlot',CPP)
-        self.assertIn('sameSlot ? (i ? "VERIFY" : "ACTIVE")',CPP)
-        self.assertIn('if (slotTransition) lv_obj_remove_flag(_otaArrow, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaArrow, LV_OBJ_FLAG_HIDDEN);',CPP)
-        for current,target in ((0,0),(1,1),(-1,1),(0,-1)):
-            transition=current>=0 and target>=0 and current!=target
-            self.assertFalse(transition)
-        for current,target in ((0,1),(1,0)):
-            self.assertTrue(current>=0 and target>=0 and current!=target)
+        # All (-1/0/1) current/target cases are compiled in test_ota_presentation.
+        self.assertIn('s.currentSlot!=s.targetSlot',MODEL)
+        self.assertIn('show(_otaArrow,view.slots==2)',CPP)
+        self.assertIn('if(m.slots==1)',MODEL)
+        self.assertNotIn('"VERIFY" : "ACTIVE"',CPP)
     def test_vector_assets_and_animation_gates(self):
         rows=[tuple(map(int,m.split(','))) for m in re.findall(r'\{([\d,]+)\}',DOT.split('constexpr uint16_t masks[][9] = {')[1].split('};')[0])]
         self.assertEqual(len(rows),18)
@@ -179,19 +158,11 @@ static_assert(progress({true,100,100,1000,0,7500},false)==7500);
         setpage=CPP.split('bool CodexMicroView::setPageForDebug(',1)[1].split('void CodexMicroView::togglePage()',1)[0]
         self.assertIn('if (_page != Page::OTA) _otaReturn = _page;',setpage)
     def test_idle_has_only_running_image_information(self):
-        render=CPP.split('void CodexMicroView::renderOta()',1)[1].split('void CodexMicroView::touchEvent(',1)[0]
-        self.assertIn('const bool idle = _ota.stage == S::Idle || _ota.stage == S::Checking ||',render)
-        self.assertIn('phase = _otaSeen ? "NO UPDATE" : "CHECKING"',render)
-        self.assertIn('_ota.currentVersion[0] ? _ota.currentVersion : "READING VERSION"',render)
-        self.assertIn('if (idle) lv_obj_add_flag(_otaTarget, LV_OBJ_FLAG_HIDDEN)',render)
-        self.assertIn('const bool hashKnown = !idle &&',render)
-        self.assertIn('const bool signatureKnown = !idle &&',render)
-        self.assertIn('const bool slotTransition = !idle &&',render)
-        self.assertIn('idle ? 127 : (i ? 254 : 0)',render)
-        self.assertIn('if (idle && (i || !_otaSeen || _ota.currentSlot < 0))',render)
-        for seen,current in ((True,0),(True,1),(False,0),(True,-1)):
-            visible=[not (i or not seen or current<0) for i in range(2)]
-            self.assertEqual(visible,[seen and current>=0,False])
+        self.assertIn('case Screen::Current:m.target=false;',MODEL)
+        self.assertIn('m.screen!=Screen::Current',MODEL)
+        self.assertIn('show(_otaHash,view.hash)',CPP)
+        self.assertIn('show(_otaSignature,view.signature)',CPP)
+        self.assertIn('known(s.currentVersion)',MODEL)
     def test_staged_action_gate_and_always_visible_dashed_style(self):
         action=CPP.split('void CodexMicroView::renderOtaAction()',1)[1].split('void CodexMicroView::otaBorderEvent(',1)[0]
         self.assertNotIn('LV_OBJ_FLAG_HIDDEN', action)
@@ -228,7 +199,7 @@ static_assert(progress({true,100,100,1000,0,7500},false)==7500);
         self.assertIn('self->_ota.imageVerified ? MosaicoOta::approveInstall(self->_ota.sha256)',callback)
         self.assertIn('self->otaHasDownloadOffer() ? MosaicoOta::approveUpdate(self->_ota.sha256) : MosaicoOta::requestCheck()',callback)
         render=CPP.split('void CodexMicroView::renderOta()',1)[1].split('void CodexMicroView::touchEvent(',1)[0]
-        self.assertIn('_ota.imageVerified ? "USB POWER" : otaHasDownloadOffer() ? "DOWNLOAD BLOCKED" : "CHECK REQUIRED"',render)
+        self.assertIn('case Stage::WaitingPower:return s.imageVerified ? Screen::Ready : s.signatureVerified&&known(s.sha256) ? Screen::Offer : Screen::Current;',MODEL)
         for image,sig,sha,expected in ((True,True,'a'*64,'UPGRADE'),(False,True,'a'*64,'DOWNLOAD'),
                                      (False,False,'','CHECK'),(False,True,'','CHECK'),(False,True,'-','CHECK')):
             offer=sig and bool(sha) and sha!='-'
@@ -279,57 +250,18 @@ static_assert(progress({true,100,100,1000,0,7500},false)==7500);
         self.assertIn('cancelPageSlide();',forced)
         self.assertIn('_touchTracking = false;',forced)
     def test_all_stage_geometry_and_singleline_bounds(self):
-        self.assertIn('place(_otaBytes, 0, stageIcon ? 194 : 162)', CPP)
-        self.assertIn('place(_otaHash, 36, 222)', CPP); self.assertIn('place(_otaSignature, 272, 222)',CPP)
-        self.assertIn('lv_obj_set_width(_otaHash, 184)', CPP); self.assertIn('lv_obj_set_width(_otaSignature, 168)',CPP)
-        self.assertIn('&lv_font_montserrat_14', CPP)
-        self.assertIn('lv_obj_set_height(obj, 24); lv_label_set_long_mode(obj, LV_LABEL_LONG_MODE_CLIP)',CPP)
-        self.assertIn('lv_obj_set_height(_otaSlots[i], 72)', CPP)
-        self.assertIn('lv_obj_set_height(_otaSlotNumbers[i], 52)', CPP)
-        self.assertIn('setTextPitch(_otaSlotNumbers[i], 7)', CPP)
-        self.assertIn('place(_otaChips[i], 16, 24)', CPP)
-        self.assertIn('_otaPercent = createText(_otaPage, 440, 52, 7)',CPP)
-        self.assertLessEqual(222+24,252); self.assertLessEqual(220+28,252)
-        self.assertLessEqual(252+72,334); self.assertLessEqual(334+64,402)
-        self.assertLessEqual(36+184,236); self.assertLessEqual(236+28,272);self.assertEqual(272+168,440)
-        self.assertLessEqual(16+52,72); self.assertLessEqual(24+36,72);self.assertLessEqual(7*7,52)
-        self.assertLessEqual(106+52,162); self.assertLessEqual(162+24,194)
-        self.assertLessEqual(106+88,194); self.assertLessEqual(194+24,220)
-        # Read actual geometry from constructor/setter source, not desired hardcoded boxes.
-        def match(pattern):
-            found=re.search(pattern,CPP);self.assertIsNotNone(found,pattern)
-            return tuple(map(int,found.groups()))
-        pw,ph,pp=match(r'_otaPercent = createText\(_otaPage, (\d+), (\d+), (\d+)\)')
-        px,py=match(r'place\(_otaPercent, (\d+), (\d+)\)')
-        bx,by1,by2=match(r'place\(_otaBytes, (\d+), stageIcon \? (\d+) : (\d+)\)')
-        bh,=match(r'lv_obj_set_height\(_otaBytes, (\d+)\)')
-        mw,mh,mrows=match(r'_otaMeter = createMeter\(_otaPage, (\d+), (\d+), (\d+)\)')
-        mx,my=match(r'place\(_otaMeter, (\d+), (\d+)\)')
-        ix,iy=match(r'place\(_otaStageIcon, (\d+), (\d+)\)')
-        ih,=match(r'createIcon\(_otaPage, Icon::Refresh, (\d+), Gold\)')
-        hx,hy=match(r'place\(_otaHash, (\d+), (\d+)\)')
-        metaH,=match(r'lv_obj_set_height\(obj, (\d+)\); lv_label_set_long_mode\(obj, LV_LABEL_LONG_MODE_CLIP\)')
-        sy,=match(r'place\(_otaSlots\[i\], idle \? 127 : \(i \? 254 : 0\), (\d+)\)')
-        sh,=match(r'lv_obj_set_height\(_otaSlots\[i\], (\d+)\)')
-        ax,ay,aw,ah=match(r'panel\(_otaButton, (\d+), (\d+), (\d+), (\d+),')
-        errorY,=match(r'_ota.stage == S::Failed \? (\d+) : discovery')
-        vh,=match(r'lv_obj_set_height\(text, (\d+)\); lv_label_set_long_mode\(text, LV_LABEL_LONG_MODE_DOTS\)')
-        for stage in ('Idle','Checking','Available','WaitingPower','Downloading','Verifying','ReadyInstall','Installing','ReadyReboot','BootChecking','Complete','Failed'):
-            regions=[(hy,hy+metaH),(sy,sy+sh),(ay,ay+ah)]
-            if stage in ('ReadyInstall','Installing','ReadyReboot','WaitingPower'):regions += [(iy,iy+ih),(by1,by1+bh)]
-            if stage in ('Downloading','Verifying','BootChecking'):regions += [(py,py+ph),(by2,by2+bh),(my,my+mh)]
-            if stage=='Failed':regions += [(errorY,errorY+vh)]
-            for i,a in enumerate(regions):
-                for b in regions[i+1:]:self.assertTrue(a[1]<=b[0] or b[1]<=a[0],stage)
-        for text in ('100%','100.00%'):
-            cols=len(text)*6-1;pitch=min(max(2,pp),pw//cols,ph//7)
-            diameter=max(1,pitch*7//10);drawnH=6*pitch+diameter;drawnW=(cols-1)*pitch+diameter
-            self.assertGreater(diameter,0);self.assertLessEqual(drawnH,ph);self.assertLessEqual(drawnW,pw)
-            self.assertLessEqual(py+(ph-drawnH)//2+drawnH,by2)
-        for version in ('0.8.1-mosaico-ota','x'*31):self.assertLessEqual(len(version),31)
-        self.assertIn('lv_obj_set_height(text, 24); lv_label_set_long_mode(text, LV_LABEL_LONG_MODE_DOTS)',CPP)
-        failed=CPP.split('if (_ota.stage == S::Failed) {',1)[1].split('void CodexMicroView::touchEvent',1)[0]
-        self.assertNotIn('_otaBytes',failed);self.assertIn('char safe[25]',failed)
+        # Exhaustive actual rectangle overlap/bounds assertions live in the
+        # shared model test, rather than constructor positions that now move.
+        self.assertIn('box(_otaBytes,view.byteBox)',CPP)
+        self.assertIn('box(_otaHash,view.hashBox)',CPP)
+        self.assertIn('box(_otaSignature,view.signatureBox)',CPP)
+        self.assertIn('box(_otaSlots[i],view.slot[i])',CPP)
+        self.assertIn('lv_text_get_size(&measured,text,font',CPP)
+        self.assertIn('LV_LABEL_LONG_MODE_DOTS',CPP)
+        self.assertIn('&lv_font_montserrat_14',CPP)
+        self.assertIn('Rect action{0,334,440,64}',MODEL)
+        self.assertIn('Rect phase{184,18,256,26}, badge{308,0,132,32}',MODEL)
+        self.assertIn('view.slot[i].h<=48',CPP)
     def test_actual_swipe_source_constexpr_harness(self):
         # The installed compiler has only embedded targets. constexpr assertions
         # execute extracted production function bodies in the compiler, with

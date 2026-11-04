@@ -6,6 +6,7 @@ struct VerifiedImageDescriptor {uint32_t size;uint8_t hash[32];char version[32];
 // Signature/layout verification ONLY. No discovery, requests or OTA-state writes.
 bool verifySignedImageDescriptor(const char* json,VerifiedImageDescriptor& out);
 enum class UiStage : uint8_t { Idle, Checking, Available, WaitingPower, Downloading, Verifying, ReadyInstall, Installing, ReadyReboot, BootChecking, Complete, Failed };
+enum class WorkPhase : uint8_t { None, Preparing, Negotiating, Downloading, Merging, Verifying };
 struct UiSnapshot {
     uint32_t revision, size, received;
     UiStage stage;
@@ -15,6 +16,8 @@ struct UiSnapshot {
     uint16_t progressBasisPoints;
     bool deltaTransfer;
     uint32_t transferReceived, transferSize;
+    WorkPhase workPhase = WorkPhase::None;
+    bool modeKnown = false;
 };
 bool copyUiSnapshot(UiSnapshot& out);
 bool requestCheck(); // Queue discovery; callbacks perform no network or telemetry work.
@@ -81,6 +84,8 @@ bool runningImageDescriptor(VerifiedImageDescriptor& out);
 bool readRunningImage(uint32_t offset, uint8_t* data, size_t length);
 // Retry only while this same authorized transaction is still live. Never revives fail().
 bool resetDownloadForFullFallback();
+// Presentation only; never changes admission, authorization, or OTA control state.
+void recordWorkPhase(WorkPhase phase);
 void recordTransferProgress(bool delta, uint32_t bytes, uint32_t total, bool reconstructing=false);
 bool beginManifest(const char* json);
 bool writeChunk(uint32_t offset, const uint8_t* data, size_t length);

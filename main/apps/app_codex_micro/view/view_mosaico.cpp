@@ -9,6 +9,7 @@
 #include "session_status_model.h"
 #include "lock_session_geometry.h"
 #include "keyboard_style_model.h"
+#include "ota_presentation_model.h"
 #include <hal/hal.h>
 #include <host/network_quota.h>
 #include <host/tailscale_transport.h>
@@ -280,7 +281,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_style_radius(_rotationCurtain, 0, 0);
     lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
-    bool widgetsReady = _lockSessionNumbers[5] && _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    bool widgetsReady = _lockSessionNumbers[5] && _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaModeBadge && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
     for (auto* number : _lockSessionNumbers) widgetsReady = widgetsReady && number;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
@@ -1045,6 +1046,8 @@ void CodexMicroView::initOta() {
     _otaPage = lv_obj_create(_root); panel(_otaPage, 20, 64, 440, 402, 0);
     lv_obj_add_flag(_otaPage, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
     _otaTitle = createText(_otaPage, 170, 56, 8, Cyan); place(_otaTitle, 0, 0); setText(_otaTitle, "OTA", Cyan);
+    _otaModeBadge = createText(_otaPage, 132, 32, 4, Purple); place(_otaModeBadge, 308, 0);
+    lv_obj_add_flag(_otaModeBadge, LV_OBJ_FLAG_HIDDEN);
     _otaPhase = label(_otaPage, 184, 18, 256, "", &lv_font_montserrat_20);
     _otaCurrent = label(_otaPage, 0, 58, 440, "", &lv_font_montserrat_20);
     _otaTarget = label(_otaPage, 0, 110, 440, "", &lv_font_montserrat_20);
@@ -1193,111 +1196,95 @@ void CodexMicroView::refreshOta(uint32_t tick) {
     }
 }
 void CodexMicroView::renderOta() {
-    using S = MosaicoOta::UiStage;
-    const bool idle = _ota.stage == S::Idle || _ota.stage == S::Checking ||
-        (_ota.stage == S::WaitingPower && !_ota.imageVerified && !otaHasDownloadOffer());
-    const bool offer = _ota.stage == S::Available || (_ota.stage == S::WaitingPower && !_ota.imageVerified && otaHasDownloadOffer());
-    const bool terminal = _ota.stage == S::Complete || _ota.stage == S::Failed || _ota.stage == S::Idle;
-    const bool discovery = offer || terminal || idle;
-    const char* phase = "CURRENT";
-    switch (_ota.stage) {
-    case S::Checking: phase = "CHECKING"; break;
-    case S::Available: phase = "UPDATE"; break;
-    case S::WaitingPower: phase = _ota.imageVerified ? "USB POWER" : otaHasDownloadOffer() ? "DOWNLOAD BLOCKED" : "CHECK REQUIRED"; break;
-    case S::Downloading: phase = "DOWNLOADING"; break;
-    case S::Verifying: phase = "VERIFYING"; break;
-    case S::ReadyInstall: phase = "READY"; break;
-    case S::Installing: phase = "INSTALLING"; break;
-    case S::ReadyReboot: phase = "READY TO REBOOT"; break;
-    case S::BootChecking: phase = "BOOT CHECK"; break;
-    case S::Complete: phase = "VERIFIED 100%"; break;
-    case S::Failed: phase = "FAILED"; break;
-    case S::Idle: phase = _otaSeen ? "NO UPDATE" : "CHECKING"; break;
-    default: break;
+    using namespace mosaico_ota_view;
+    const auto view = present(_ota);
+    _otaLoader = view.loader;
+    const auto show = [](lv_obj_t* obj, bool visible) {
+        if (visible) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    };
+    const auto box = [](lv_obj_t* obj, Rect r) {place(obj,r.x,r.y);lv_obj_set_size(obj,r.w,r.h);};
+    const auto version = [&](lv_obj_t* obj,const char* text,Rect r,bool secondary,uint32_t color) {
+        box(obj,r);lv_label_set_text(obj,text);
+        const lv_font_t* font = secondary ? &lv_font_montserrat_16 : &lv_font_montserrat_24;
+        lv_point_t measured{};lv_text_get_size(&measured,text,font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        if(measured.x>r.w || measured.y>r.h)font=&lv_font_montserrat_20;
+        lv_text_get_size(&measured,text,font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        if(measured.x>r.w || measured.y>r.h)font=&lv_font_montserrat_16;
+        lv_text_get_size(&measured,text,font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+        if(measured.x>r.w || measured.y>r.h)font=&lv_font_montserrat_14;
+        lv_obj_set_style_text_font(obj,font,0);
+        lv_obj_set_style_text_color(obj,lv_color_hex(color),0);
+        lv_obj_set_style_text_align(obj,LV_TEXT_ALIGN_CENTER,0);
+        lv_label_set_long_mode(obj,LV_LABEL_LONG_MODE_DOTS);
+    };
+    show(_otaTitle,view.title);
+    box(_otaPhase,view.phase);lv_label_set_text(_otaPhase,view.heading);
+    lv_obj_set_style_text_color(_otaPhase,lv_color_hex(view.color),0);
+    lv_obj_set_style_text_align(_otaPhase,view.title?LV_TEXT_ALIGN_RIGHT:LV_TEXT_ALIGN_LEFT,0);
+    box(_otaModeBadge,view.badge);show(_otaModeBadge,view.mode);
+    if(view.mode)setText(_otaModeBadge,_ota.deltaTransfer?"DELTA":"FULL",_ota.deltaTransfer?Purple:Orange);
+    show(_otaCurrent,view.current);show(_otaTarget,view.target);
+    if(view.current) {
+        version(_otaCurrent,_ota.currentVersion,view.currentBox,view.currentBox.h<=28,Cyan);
     }
-    lv_label_set_text(_otaPhase, phase);
-    char text[96];
-    lv_label_set_text(_otaCurrent, _ota.currentVersion[0] ? _ota.currentVersion : "READING VERSION");
-    lv_label_set_text(_otaTarget, _ota.stage == S::Complete ? _ota.currentVersion : _ota.targetVersion);
-    place(_otaTarget, 0, _ota.stage == S::Failed ? 110 : discovery && _ota.stage != S::Complete ? 86 : 58);
-    if (discovery && _ota.stage != S::Complete) lv_obj_remove_flag(_otaCurrent, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaCurrent, LV_OBJ_FLAG_HIDDEN);
-    // Idle describes only the running image, never a cached or unknown candidate.
-    if (idle) lv_obj_add_flag(_otaTarget, LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(_otaTarget, LV_OBJ_FLAG_HIDDEN);
-    const bool download = _ota.stage == S::Downloading || _ota.stage == S::Verifying;
-    const uint32_t transferSize = _ota.deltaTransfer ? _ota.transferSize : _ota.size;
-    const uint32_t transferReceived = _ota.deltaTransfer ? _ota.transferReceived : _ota.received;
-    const uint16_t bp = download ? (transferSize ? static_cast<uint16_t>(std::min<uint64_t>(10000, static_cast<uint64_t>(transferReceived) * 10000 / transferSize)) : 0)
-        : std::min<uint16_t>(10000, _ota.progressBasisPoints);
-    // Byte/health progress are the only meaningful percentages; installation is an activity icon.
-    const bool numericProgress = download || _ota.stage == S::BootChecking;
-    const bool stageIcon = _ota.stage == S::ReadyInstall || _ota.stage == S::Installing || _ota.stage == S::ReadyReboot || (_ota.stage == S::WaitingPower && _ota.imageVerified);
-    if (stageIcon) {
-        lv_obj_remove_flag(_otaStageIcon, LV_OBJ_FLAG_HIDDEN);
-        setIcon(_otaStageIcon, _ota.stage == S::Installing ? Icon::Refresh : Icon::Check,
-                _ota.stage == S::ReadyInstall && _ota.imageVerified ? Green : Gold);
-    } else lv_obj_add_flag(_otaStageIcon, LV_OBJ_FLAG_HIDDEN);
-    if (!discovery && numericProgress) {
-        lv_obj_remove_flag(_otaPercent, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_otaMeter, LV_OBJ_FLAG_HIDDEN);
-        percent(bp, text, sizeof(text)); setText(_otaPercent, text, download ? Green : Cyan);
-        setMeter(_otaMeter, bp, download ? transferSize != 0 : _ota.stage == S::BootChecking, download ? Green : Cyan);
-    } else for (auto* obj : {_otaPercent, _otaMeter}) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
-    place(_otaBytes, 0, stageIcon ? 194 : 162);
-    if (!discovery && (download || _ota.size)) {
-        const uint32_t shownSize = download ? transferSize : _ota.size;
-        const bool mega = shownSize >= 1000000;
-        const double divisor = mega ? 1000000.0 : 1000.0;
-        if (download) std::snprintf(text, sizeof(text), "%s%.2f / %.2f %sB", _ota.deltaTransfer ? "DELTA " : "", transferReceived / divisor, shownSize / divisor, mega ? "M" : "K");
-        else std::snprintf(text, sizeof(text), "%.2f %sB", _ota.size / divisor, mega ? "M" : "K");
-        lv_label_set_text(_otaBytes, text); lv_obj_remove_flag(_otaBytes, LV_OBJ_FLAG_HIDDEN);
-    } else lv_obj_add_flag(_otaBytes, LV_OBJ_FLAG_HIDDEN);
-    std::snprintf(text, sizeof(text), "SHA %.12s", _ota.sha256[0] ? _ota.sha256 : "--"); lv_label_set_text(_otaHash, text);
-    std::snprintf(text, sizeof(text), "SIG %.8s", _ota.signatureShort[0] ? _ota.signatureShort : "--"); lv_label_set_text(_otaSignature, text);
-    setIcon(_otaImageIcon, _ota.imageVerified ? Icon::Check : (_ota.stage == S::Downloading ? Icon::Download : _ota.stage == S::Verifying ? Icon::Refresh : Icon::Chip), _ota.imageVerified ? Green : Gold);
-    setIcon(_otaSignatureIcon, _ota.signatureVerified ? Icon::Check : Icon::Unknown, _ota.signatureVerified ? Green : Gold);
-    // Fixed one-line metadata and version boxes: no line can grow into the cards/action.
-    for (auto* obj : {_otaHash, _otaSignature}) {
-        lv_obj_set_style_text_font(obj, &lv_font_montserrat_14, 0);
-        lv_obj_set_height(obj, 24); lv_label_set_long_mode(obj, LV_LABEL_LONG_MODE_CLIP);
-    }
-    lv_obj_set_width(_otaHash, 184); lv_obj_set_width(_otaSignature, 168);
-    place(_otaHash, 36, 222); place(_otaImageIcon, 0, 220);
-    place(_otaSignature, 272, 222); place(_otaSignatureIcon, 236, 220);
-    const bool hashKnown = !idle && _ota.sha256[0] && _ota.sha256[0] != '-';
-    const bool signatureKnown = !idle && _ota.signatureShort[0] && _ota.signatureShort[0] != '-';
-    for (auto* obj : {_otaHash, _otaImageIcon}) {
-        if (hashKnown) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
-    }
-    for (auto* obj : {_otaSignature, _otaSignatureIcon}) {
-        if (signatureKnown) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
-    }
-    const bool sameSlot = _ota.currentSlot >= 0 && _ota.currentSlot == _ota.targetSlot;
-    const bool slotTransition = !idle && _ota.currentSlot >= 0 && _ota.targetSlot >= 0 && !sameSlot;
-    for (size_t i = 0; i < 2; ++i) {
-        lv_label_set_text(_otaSlotNames[i], !idle && sameSlot ? (i ? "VERIFY" : "ACTIVE") : (i ? "NEW" : "CURRENT"));
-        place(_otaSlots[i], idle ? 127 : (i ? 254 : 0), 252);
-        if (idle && (i || !_otaSeen || _ota.currentSlot < 0)) lv_obj_add_flag(_otaSlots[i], LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_remove_flag(_otaSlots[i], LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_height(_otaSlots[i], 72);
-        place(_otaSlotNumbers[i], 72, 16);
-        lv_obj_set_height(_otaSlotNumbers[i], 52);
-        setTextPitch(_otaSlotNumbers[i], 7);
-        place(_otaChips[i], 16, 24);
-        const int slot = i ? _ota.targetSlot : _ota.currentSlot;
-        std::snprintf(text, sizeof(text), "%s", slot == 0 ? "0" : slot == 1 ? "1" : "?"); setText(_otaSlotNumbers[i], text, i ? Gold : Cyan);
-        lv_obj_set_style_border_width(_otaSlots[i], i && _ota.imageVerified ? 3 : 1, 0);
-        lv_obj_set_style_border_color(_otaSlots[i], lv_color_hex(i ? Gold : Cyan), 0);
-    }
-    place(_otaArrow, 202, 270);
-    if (slotTransition) lv_obj_remove_flag(_otaArrow, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_otaArrow, LV_OBJ_FLAG_HIDDEN);
-    renderOtaAction();
-    if (_ota.stage == S::Failed) {
-        // The backend supplies a short ID; never expose arbitrary diagnostic text.
-        char safe[25]{}; size_t n = 0;
-        for (; n < sizeof(safe) - 1 && _ota.error[n]; ++n) {
-            const char c = _ota.error[n]; safe[n] = ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') ? c : '?';
+    if(view.target) {
+        char safe[25]{};const char* text=view.targetIsCurrent?_ota.currentVersion:_ota.targetVersion;
+        if(view.error) {
+            size_t n=0;for(;n<sizeof(safe)-1&&_ota.error[n];++n) {
+                const char c=_ota.error[n];safe[n]=((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='_'||c=='-')?c:'?';
+            }
+            text=safe[0]?safe:"OTA_ERROR";
         }
-        lv_label_set_text(_otaTarget, safe[0] ? safe : "OTA_ERROR");
+        version(_otaTarget,text,view.targetBox,false,view.error?Orange:Gold);
     }
+    const bool staticIcon=view.screen==Screen::Ready||view.screen==Screen::Reboot||view.screen==Screen::Complete;
+    show(_otaStageIcon,view.loader||staticIcon);box(_otaStageIcon,view.activity);
+    if(view.loader||staticIcon)setIcon(_otaStageIcon,view.loader?Icon::Refresh:Icon::Check,view.color);
+    show(_otaPercent,view.numeric);show(_otaMeter,view.numeric);
+    box(_otaPercent,view.percent);box(_otaMeter,view.meter);
+    if(view.numeric) {
+        char text[32];percent(view.bp,text,sizeof(text));setTextPitch(_otaPercent,8);setText(_otaPercent,text,view.color);
+        setMeter(_otaMeter,view.bp,view.total!=0||view.screen==Screen::BootCheck,view.color);
+    }
+    show(_otaBytes,view.bytes);box(_otaBytes,view.byteBox);
+    lv_obj_set_style_text_align(_otaBytes,view.hash&&!view.signature?LV_TEXT_ALIGN_RIGHT:LV_TEXT_ALIGN_CENTER,0);
+    if(view.bytes) {
+        char text[64];const bool mega=view.total>=1000000;const double divisor=mega?1000000.0:1000.0;
+        if(view.ratio)std::snprintf(text,sizeof(text),"%.2f / %.2f %sB",view.done/divisor,view.total/divisor,mega?"M":"K");
+        else std::snprintf(text,sizeof(text),"%.2f %sB",view.total/divisor,mega?"M":"K");
+        lv_label_set_text(_otaBytes,text);
+    }
+    box(_otaHash,view.hashBox);box(_otaSignature,view.signatureBox);
+    box(_otaImageIcon,view.imageIcon);box(_otaSignatureIcon,view.signatureIcon);
+    show(_otaHash,view.hash);show(_otaImageIcon,view.hash);
+    show(_otaSignature,view.signature);show(_otaSignatureIcon,view.signature);
+    char text[96];std::snprintf(text,sizeof(text),"SHA %.12s",_ota.sha256);lv_label_set_text(_otaHash,text);
+    std::snprintf(text,sizeof(text),"SIG %.8s",_ota.signatureShort);lv_label_set_text(_otaSignature,text);
+    for(auto* obj:{_otaHash,_otaSignature}) {
+        lv_obj_set_style_text_font(obj,&lv_font_montserrat_14,0);
+        lv_label_set_long_mode(obj,LV_LABEL_LONG_MODE_CLIP);
+    }
+    setIcon(_otaImageIcon,_ota.imageVerified?Icon::Check:Icon::Chip,_ota.imageVerified?Green:Gold);
+    setIcon(_otaSignatureIcon,_ota.signatureVerified?Icon::Check:Icon::Unknown,_ota.signatureVerified?Green:Gold);
+    for(size_t i=0;i<2;++i) {
+        show(_otaSlots[i],i<view.slots);box(_otaSlots[i],view.slot[i]);
+        lv_label_set_text(_otaSlotNames[i],i?"NEW":"CURRENT");
+        const bool compact=view.slot[i].h<=48;
+        place(_otaSlotNames[i],8,compact?3:6);
+        lv_obj_set_style_text_font(_otaSlotNames[i],&lv_font_montserrat_14,0);
+        lv_obj_set_height(_otaSlotNames[i],17);
+        place(_otaSlotNumbers[i],72,compact?20:30);lv_obj_set_height(_otaSlotNumbers[i],compact?26:52);
+        setTextPitch(_otaSlotNumbers[i],compact?4:7);
+        place(_otaChips[i],16,compact?21:38);lv_obj_set_size(_otaChips[i],compact?22:28,compact?22:28);
+        const int slot=i?_ota.targetSlot:_ota.currentSlot;
+        std::snprintf(text,sizeof(text),"%d",slot);setText(_otaSlotNumbers[i],text,i?Gold:Cyan);
+        lv_obj_set_style_border_width(_otaSlots[i],i&&_ota.imageVerified?3:1,0);
+        lv_obj_set_style_border_color(_otaSlots[i],lv_color_hex(i?Gold:Cyan),0);
+    }
+    box(_otaArrow,view.arrow);show(_otaArrow,view.slots==2);
+    box(_otaButton,view.action);
+    renderOtaAction();
 }
 void CodexMicroView::touchEvent(lv_event_t* e) {
     const auto code = lv_event_get_code(e);
@@ -1545,7 +1532,8 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
     const uint16_t meterPhase = static_cast<uint16_t>(((tick - _motionEpoch) % 6000U) * 360U / 6000U);
     using S = MosaicoOta::UiStage;
     const bool otaMotion = _page == Page::OTA && (_ota.stage == S::Downloading || _ota.stage == S::Verifying || _ota.stage == S::Installing || _ota.stage == S::BootChecking);
-    setMotion(_otaStageIcon, meterPhase, _page == Page::OTA && _ota.stage == S::Installing);
+    const uint16_t loadingPhase = static_cast<uint16_t>(((tick - _motionEpoch) % 1600U) * 360U / 1600U);
+    setMotion(_otaStageIcon, loadingPhase, _page == Page::OTA && _otaLoader && !lv_obj_has_flag(_otaStageIcon, LV_OBJ_FLAG_HIDDEN));
     // Reverse only OTA phase: quota/reset meters retain their right-to-left charging sweep.
     const uint16_t otaMeterPhase = static_cast<uint16_t>((360U - meterPhase) % 360U);
     setMotion(_otaMeter, otaMeterPhase, otaMotion && !lv_obj_has_flag(_otaMeter, LV_OBJ_FLAG_HIDDEN));

@@ -89,7 +89,6 @@ struct Descriptor {bool versionSigned;uint32_t size;uint8_t hash[32];char sha[65
 struct InstallPowerEvidence {char text[96]{};};
 void captureInstallPower(InstallPowerEvidence*,const Hal::BatteryTelemetry&,bool,bool){}
 bool currentReady(){return validSdk;}int currentLayout(){return 1;}int partitionGeometry(const esp_partition_t*){return 1;}int slot(const esp_partition_t*p){return p==&parts[1]?1:0;}
-void publish(UiStage stage,const char* error=""){statusStage=stage;ui.stage=stage;std::snprintf(ui.error,sizeof(ui.error),"%s",error);}
 bool busy(){return active||approvedRequest||checkQueued||checking||installQueued||rebootQueued;}
 uint32_t requestAgeMs(){return uint32_t(clockUs/1000)-requestedAtMs.load();}
 bool validateDescriptor(const char* json,Descriptor&d,const char*&e){e="signature_invalid";if(!signatureOk)return false;d={};d.versionSigned=true;d.size=70000;for(int i=0;i<32;++i)d.hash[i]=json[0]=='b'?0xbb:0xaa;for(int i=0;i<64;++i)d.sha[i]=json[0]=='b'?'b':'a';d.sha[64]=0;std::memcpy(d.version,"new",4);return true;}
@@ -102,7 +101,7 @@ using namespace MosaicoOta;
 static void reset(){storageBusy=targetSame=hashFault=false;storageLeaseDepth=0;usbUnmounts=0;usbSuspended=reconnectInRaw=false;usbConnected=true;clockUs=1000000;usb=rawOk=validSdk=signatureOk=true;scale=false;critical=true;rawFault=busyReads=waitFault=delays=rawHook=0;detachAtSelector=failRawAtEnd=expireAtEnd=expireAtJournal=detachBeforeFinish=false;boot=&parts[0];
  erases=writes=aborts=ends=selectors=restarts=rawReads=journals=telemetryReads=historyReads=scaleReads=0,policyReads=0;active=pending=approvedRequest=imageReady=selected=verified=checkQueued=checking=installQueued=rebootQueued=false;
  fullFallbackUsed=deltaTransfer=false;transferReceived=transferSize=0;
- maintenanceMode=writing=hashLive=automaticMode=usbBypass=false;maintenanceGrant={};maintenancePower={};maintenanceRawUs=readySince=installSince=0;maintenanceRawBytes=0;expectedSize=received=requestedAtMs=0;handle=0;target=nullptr;approvedHash[0]=0;statusStage=UiStage::Idle;}
+ maintenanceMode=writing=hashLive=automaticMode=usbBypass=false;maintenanceGrant={};maintenancePower={};maintenanceRawUs=readySince=installSince=0;maintenanceRawBytes=0;expectedSize=received=requestedAtMs=0;handle=0;target=nullptr;approvedHash[0]=0;statusStage=UiStage::Idle;ui={};}
 static int stageImage(){if(!requestMaintenanceUpdate(A,600)||!takeRequest()||!beginManifest("a"))return 1;uint8_t data[4096]{};
  for(uint32_t off=0;off<70000;){uint32_t n=70000-off;if(n>3001)n=3001;if(!writeChunk(off,data,n))return 2;off+=n;}
  if(detachBeforeFinish)usb=false;
@@ -185,6 +184,43 @@ static int run_case(int c){reset();
  if(c==84){if(!request()||!takeRequest())return 1;usb=false;if(beginManifest("a")||!usbBypass||active||telemetryReads)return 2;
   ui.stage=UiStage::Available;statusStage=UiStage::Available;std::memcpy(ui.sha256,A,65);ui.signatureVerified=true;
   if(!approveUpdate(A)||!takeRequest()||usbBypass||!active||telemetryReads!=2||policyReads||historyReads)return 3;return 0;}
+ if(c==85){ui.modeKnown=true;ui.workPhase=WorkPhase::Merging;ui.deltaTransfer=true;
+  if(!requestMaintenanceUpdate(A,30)||ui.modeKnown||ui.workPhase!=WorkPhase::Preparing||ui.stage!=UiStage::Downloading||ui.deltaTransfer)return 1;
+  if(!takeRequest()||!beginManifest("a")||ui.modeKnown||ui.workPhase!=WorkPhase::Preparing)return 2;
+  recordWorkPhase(WorkPhase::Negotiating);if(ui.modeKnown||ui.workPhase!=WorkPhase::Negotiating)return 3;
+  recordTransferProgress(true,0,1234);if(!ui.modeKnown||!ui.deltaTransfer||ui.workPhase!=WorkPhase::Downloading||ui.transferReceived)return 4;
+  recordTransferProgress(true,1234,1234,true);if(ui.workPhase!=WorkPhase::Merging||ui.stage!=UiStage::Verifying||ui.received)return 5;
+  uint8_t d[1000]{};if(!writeChunk(0,d,1000)||ui.received!=1000||ui.size!=70000||ui.progressBasisPoints!=142||ui.workPhase!=WorkPhase::Merging)return 6;
+  recordWorkPhase(WorkPhase::Verifying);if(ui.workPhase!=WorkPhase::Verifying||!ui.modeKnown)return 7;
+  fail("test");if(ui.workPhase!=WorkPhase::None||active)return 8;
+  recordTransferProgress(true,1,1,true);recordWorkPhase(WorkPhase::Preparing);if(ui.workPhase!=WorkPhase::None||active)return 9;return 0;}
+ if(c==86){if(!requestMaintenanceUpdate(A,30)||!takeRequest()||!beginManifest("a"))return 1;
+  recordTransferProgress(true,100,200);if(!resetDownloadForFullFallback()||ui.modeKnown||ui.workPhase!=WorkPhase::Preparing||ui.received)return 2;
+  if(!beginManifest("a")||ui.modeKnown)return 3;recordTransferProgress(false,0,70000);
+  if(!ui.modeKnown||ui.deltaTransfer||ui.workPhase!=WorkPhase::Downloading||!active)return 4;
+  fail("test");if(resetDownloadForFullFallback()||active||ui.workPhase!=WorkPhase::None)return 5;return 0;}
+ if(c==87){active=true;recordTransferProgress(false,0,70000);
+  UiStage stages[]={UiStage::ReadyInstall,UiStage::Installing,UiStage::ReadyReboot,UiStage::BootChecking,UiStage::Complete,UiStage::Failed,UiStage::Idle};
+  for(auto stage:stages){recordWorkPhase(WorkPhase::Verifying);publish(stage);if(ui.workPhase!=WorkPhase::None||!ui.modeKnown)return 1;}return 0;}
+ if(c==88){std::memcpy(ui.targetVersion,"old-A",6);std::memcpy(ui.sha256,A,65);std::memcpy(ui.signatureShort,"old-signature",14);ui.targetSlot=1;ui.signatureVerified=true;ui.stage=UiStage::Failed;statusStage=UiStage::Failed;
+  if(!requestCheck()||ui.signatureVerified||ui.imageVerified||ui.sha256[0]||ui.signatureShort[0]||ui.targetSlot!=-1||std::strcmp(ui.targetVersion,"-"))return 1;
+  if(!takeCheckRequest())return 2;finishCheck(false);
+  if(ui.stage!=UiStage::Failed||ui.signatureVerified||ui.sha256[0]||std::strcmp(ui.targetVersion,"-"))return 3;return 0;}
+ if(c==89){std::memcpy(ui.targetVersion,"old-A",6);std::memcpy(ui.sha256,A,65);ui.signatureVerified=true;ui.targetSlot=1;
+  if(!requestMaintenanceUpdate(B,30)||ui.signatureVerified||ui.sha256[0]||std::strcmp(ui.targetVersion,"-")||ui.targetSlot!=-1||ui.workPhase!=WorkPhase::Preparing||!maintenanceGrant.matches(B))return 1;
+  if(!takeRequest()||!beginManifest("b")||!ui.signatureVerified||std::strcmp(ui.sha256,B))return 2;return 0;}
+ if(c==90){std::memcpy(ui.targetVersion,"bound-A",8);std::memcpy(ui.sha256,A,65);ui.signatureVerified=true;ui.targetSlot=1;ui.stage=UiStage::Available;statusStage=UiStage::Available;
+  if(!approveUpdate(A)||!takeRequest()||!ui.signatureVerified||std::strcmp(ui.sha256,A)||std::strcmp(ui.targetVersion,"bound-A")||ui.targetSlot!=1||ui.workPhase!=WorkPhase::Preparing)return 1;return 0;}
+ if(c==91){if(!requestMaintenanceUpdate(A,30)||!takeRequest()||!beginManifest("a"))return 1;
+  recordTransferProgress(true,100,200);if(!resetDownloadForFullFallback()||!ui.signatureVerified||std::strcmp(ui.sha256,A)||std::strcmp(ui.targetVersion,"new")||ui.targetSlot!=1||ui.workPhase!=WorkPhase::Preparing||ui.modeKnown)return 2;return 0;}
+ if(c==92){for(unsigned path=0;path<2;++path){reset();std::memcpy(ui.targetVersion,"old-A",6);std::memcpy(ui.sha256,A,65);ui.signatureVerified=true;ui.targetSlot=1;ui.modeKnown=true;ui.deltaTransfer=true;usb=false;
+   if(path==0){if(requestMaintenanceUpdate(B,30))return 1;}
+   else {std::memcpy(approvedHash,B,65);usbBypass=true;if(requestLocked(false))return 2;}
+   if(ui.signatureVerified||ui.sha256[0]||std::strcmp(ui.targetVersion,"-")||ui.targetSlot!=-1||ui.modeKnown||ui.workPhase!=WorkPhase::None||active||ui.stage!=UiStage::Failed||erases)return 3;}
+  return 0;}
+ if(c==93){std::memcpy(ui.targetVersion,"live-A",7);std::memcpy(ui.sha256,A,65);ui.signatureVerified=true;ui.targetSlot=1;ui.modeKnown=true;ui.deltaTransfer=true;ui.workPhase=WorkPhase::Merging;active=true;
+  if(requestMaintenanceUpdate(B,30)||requestLocked(false))return 1;
+  if(!ui.signatureVerified||std::strcmp(ui.sha256,A)||std::strcmp(ui.targetVersion,"live-A")||ui.targetSlot!=1||!ui.modeKnown||!ui.deltaTransfer||ui.workPhase!=WorkPhase::Merging||!active)return 2;return 0;}
  return 999;
 }
 static int model(){using namespace MosaicoOtaMaintenance;Grant g;if(g.enabled||g.check(0,true,1,1,1))return 1;
@@ -199,13 +235,13 @@ static int model(){using namespace MosaicoOtaMaintenance;Grant g;if(g.enabled||g
  s.temperatureDeciK=3000;s.sampledUs=0;if(powerSafe(s,1))return 13;
  if(!refreshDue(false,0,0,66022,0)||refreshDue(false,0,0,63021,0)||!refreshDue(false,1000000,0,1,0))return 12;
  return 0;}
-extern "C" volatile int test_results[86];volatile int test_results[86];
+extern "C" volatile int test_results[95];volatile int test_results[95];
 extern "C" __attribute__((noinline,used)) void test_done(){for(;;){asm volatile("");}}
-extern "C" void _start(){for(int i=0;i<85;++i)test_results[i]=run_case(i);test_results[85]=model();test_done();}
+extern "C" void _start(){for(int i=0;i<94;++i)test_results[i]=run_case(i);test_results[94]=model();test_done();}
 '''
 class MaintenanceTests(unittest.TestCase):
  def test_actual_chain(self):
-  signatures=['bool gaugeSafe()', 'bool activeUsbPower()', 'bool downloadPowerSafe()', 'bool automaticPowerSafe(', 'bool installPowerSafe(', 'bool maintenancePowerSafe(', 'void failLocked(', 'bool reject(', 'bool lowerHex(', 'void hashHex(', 'void revokeForNormalRequest()', 'bool requestLocked(', 'bool request()', 'bool maintenanceDenied(', 'bool requestMaintenanceUpdate(', 'bool requestMaintenanceReboot(', 'bool takeRequest()', 'bool beginManifest(', 'bool writeChunk(', 'bool finishDownload()', 'bool installVerified()', 'bool rebootWithFreshPower()', 'void fail(', 'bool approveUpdate(', 'bool approveInstall(', 'bool requestReboot()', 'void deferUpdate()', 'void processLocalRequests()', 'bool maintenanceStatus(']
+  signatures=['void clearCandidateUiLocked()', 'void refreshRequestUiBinding(', 'void publish(', 'void recordWorkPhase(', 'void recordTransferProgress(', 'bool resetDownloadForFullFallback()', 'bool gaugeSafe()', 'bool activeUsbPower()', 'bool downloadPowerSafe()', 'bool automaticPowerSafe(', 'bool installPowerSafe(', 'bool maintenancePowerSafe(', 'void failLocked(', 'bool reject(', 'bool lowerHex(', 'void hashHex(', 'void revokeForNormalRequest()', 'bool requestLocked(', 'bool request()', 'bool maintenanceDenied(', 'bool requestMaintenanceUpdate(', 'bool requestMaintenanceReboot(', 'bool takeRequest()', 'bool beginManifest(', 'bool writeChunk(', 'bool finishDownload()', 'bool installVerified()', 'bool rebootWithFreshPower()', 'void fail(', 'bool approveUpdate(', 'bool approveInstall(', 'bool requestReboot()', 'void deferUpdate()', 'void processLocalRequests()', 'bool maintenanceStatus(', 'bool requestCheck()', 'bool takeCheckRequest()', 'void finishCheck(']
   support=base.MOCKS.split('static Hal hal;',1)[0]+base.RV_SUPPORT.split('static esp_partition_t imageParts',1)[0]
   # Mock journal only; production call sequence and selector boundary remain actual.
   support+='extern \"C\" int64_t __divdi3(int64_t a,int64_t b){bool n=(a<0)!=(b<0);uint64_t q=__udivdi3(a<0?uint64_t(-a):uint64_t(a),b<0?uint64_t(-b):uint64_t(b));return n?-int64_t(q):int64_t(q);}'
@@ -233,9 +269,9 @@ class MaintenanceTests(unittest.TestCase):
    for pos in range(sh[4],sh[4]+sh[5],sh[9]):
     name,value,_,_,_,_=struct.unpack_from('<IIIBBH',raw,pos);symbols[text[name:].split(b'\0',1)[0].decode()]=value
   uc.reg_write(UC_RISCV_REG_SP,0x1fffff0);uc.emu_start(entry,symbols['test_done'],timeout=20000000,count=100000000)
-  values=struct.unpack('<86i',bytes(uc.mem_read(symbols['test_results'],344)))
+  values=struct.unpack('<95i',bytes(uc.mem_read(symbols['test_results'],380)))
   (RUN/'execution.log').write_text('Actual extracted OTA functions; mocked SDK/PSA/signature result/locks/raw provider. Not firmware or hardware validation.\n'+f'ELF_SHA256={hashlib.sha256(raw).hexdigest()}\n'+repr(values)+'\n')
-  self.assertEqual(uc.reg_read(UC_RISCV_REG_PC),symbols['test_done']);self.assertEqual(values,(0,)*86)
+  self.assertEqual(uc.reg_read(UC_RISCV_REG_PC),symbols['test_done']);self.assertEqual(values,(0,)*95)
  def test_preserved_security_boundaries(self):
   manifest=function('bool beginManifest(')
   self.assertLess(manifest.index('validateDescriptor('),manifest.index('maintenanceGrant.matches'))

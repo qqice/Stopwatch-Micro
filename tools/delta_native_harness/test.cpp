@@ -33,22 +33,28 @@ bool writeChunk(uint32_t offset,const uint8_t* data,size_t length) {
  written.insert(written.end(),data,data+length);return true;
 }
 void recordTransferProgress(bool,uint32_t,uint32_t,bool) {}
+void recordWorkPhase(WorkPhase) {}
 }
 #include "nesting_actual.h"
 // Include the actual production implementation: no test copy of the parser,
 // callback bounds, hash verification, aggregation, or codec integration.
 #include "production/mosaico_delta.cpp"
 namespace ResetActual {
+using MosaicoOta::WorkPhase;using MosaicoOta::UiStage;
+void recordWorkPhase(WorkPhase phase){assert(phase==WorkPhase::Preparing);}
+void publish(UiStage stage){assert(stage==UiStage::Downloading);}
 std::mutex lock;
 std::atomic<bool> active{true},selected{false},imageReady{false},fullFallbackUsed{false};
 bool writing=false,hashLive=false,admitted=true;
 unsigned handle=1,received=7,aborts=0,progressCalls=0;
+std::atomic<bool> deltaTransfer{true};
+std::atomic<uint32_t> transferReceived{7},transferSize{10};
 psa_hash_operation_t hash=PSA_HASH_OPERATION_INIT;
 struct StorageAdmission {explicit operator bool() const{return admitted;}};
 void esp_ota_abort(unsigned){++aborts;}
 void recordTransferProgress(bool delta,uint32_t bytes,uint32_t total) {assert(!delta&&!bytes&&!total);++progressCalls;}
 #include "reset_actual.h"
-void reset(){active=true;selected=false;imageReady=false;fullFallbackUsed=false;writing=true;hashLive=true;admitted=true;handle=1;received=7;aborts=progressCalls=0;}
+void reset(){active=true;selected=false;imageReady=false;fullFallbackUsed=false;writing=true;hashLive=true;admitted=true;handle=1;received=7;aborts=progressCalls=0;deltaTransfer=true;transferReceived=7;transferSize=10;}
 void test() {
  for(unsigned fault=0;fault<5;++fault){reset();
   if(fault==0)active=false;if(fault==1)selected=true;if(fault==2)imageReady=true;
@@ -56,7 +62,7 @@ void test() {
   assert(!resetDownloadForFullFallback()&&writing&&hashLive&&received==7&&aborts==0);
  }
  reset();assert(resetDownloadForFullFallback());
- assert(fullFallbackUsed&&!writing&&!hashLive&&!handle&&!received&&active&&aborts==1&&progressCalls==1);
+ assert(fullFallbackUsed&&!writing&&!hashLive&&!handle&&!received&&active&&aborts==1&&!deltaTransfer&&!transferReceived&&!transferSize);
  assert(!resetDownloadForFullFallback());
  std::puts("PASS actual fallback reset: one retry, inactive non-revival, selected/ready/admission guards (maintenance power is an SDK boundary)");
 }

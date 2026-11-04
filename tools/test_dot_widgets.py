@@ -39,7 +39,7 @@ class DotWidgetsTests(unittest.TestCase):
     def test_upgrade_glyphs(self):
         glyphs = dict((key, tuple(map(int, rows.split(","))))
                       for key, rows in re.findall(r"\{'(.)',\{([\d,]+)\}\}", HEADER + SOURCE))
-        for char in "CHECKDOWNLOADUPGRADEREBOOT":
+        for char in "CHECKDOWNLOADUPGRADEREBOOTDELTAFULL":
             self.assertIn(char, glyphs)
             self.assertEqual(len(glyphs[char]), 7)
             self.assertNotEqual(glyphs[char], glyphs["?"])
@@ -178,6 +178,8 @@ class DotWidgetsTests(unittest.TestCase):
         view=(VIEW / "view_mosaico.cpp").read_text(encoding="utf-8")
         w,h,pitch=map(int,re.search(r'_otaPercent = createText\(_otaPage, (\d+), (\d+), (\d+)\)',view).groups())
         checks='#include "dot_patterns.h"\nusing namespace mosaico_dot::detail;\n'
+        for count in (len("DELTA"), len("FULL")):
+            checks+=f'static_assert(validBounds(textLayout(132,32,{count},4),132,32) && textLayout(132,32,{count},4).pitch==4 && textLayout(132,32,{count},4).diameter==2);\n'
         for count in (len("100%"),len("100.00%")):
             checks+=f'static_assert(validBounds(textLayout({w},{h},{count},{pitch}),{w},{h}) && textLayout({w},{h},{count},{pitch}).diameter>0);\n'
         result=subprocess.run([compiler,"-std=c++17","-fsyntax-only","-x","c++","-I"+str(VIEW),"-"],

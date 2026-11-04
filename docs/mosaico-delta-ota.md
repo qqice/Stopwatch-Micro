@@ -66,10 +66,32 @@ bytes and JSON as untrusted inputs; size, nesting, offset and output limits appl
 
 ## UI and compatibility
 
-The existing download page shows `DELTA` and actual patch bytes/percentage during
-Delta transfer. It keeps the complete target version, SHA/signature, slot display,
-buttons and animation. Rebuilding/verifying does not bypass the install step.
-Fallback returns the progress display to full-image bytes.
+The OTA page changes its presentation with the actual operation:
+
+- Preparing and waiting for the server's Delta plan: animated point-matrix loader,
+  current/target versions, **no invented percentage or presumed FULL mode**.
+- Downloading: its own progress bar using actual transferred bytes (patch bytes
+  for Delta, full image bytes for full OTA).
+- Local merging: a separate cyan progress bar using complete image bytes written
+  to the inactive slot, **not** the already-100% patch download count.
+- Final image verification and installation: an animated loader where the SDK
+  does not expose measurable progress. Boot-health checking retains its existing
+  measured progress.
+- Ready to install/reboot: verified image metadata and the existing confirmation
+  button. Hash/signature rows are hidden when irrelevant to the active operation;
+  versions and other controls use the space instead.
+
+A purple point-matrix `DELTA` or orange `FULL` wordmark appears only after the
+mode is known, and follows a full-transfer fallback. The original controls stay
+visible but dimmed when unavailable; layout changes do not change consent, power,
+signature or rollback policy. The completed/idle page never fabricates a mode
+that was not retained across reboot.
+
+`ota_presentation_model.h` is the shared, side-effect-free layout/progress model.
+`tools/preview_ota_stages.py` exports that actual model and point-matrix primitives
+for inspection before deployment; ordinary preview text approximates Montserrat
+and is not a device screenshot. Compile-time tests check all visible rectangles
+for bounds and overlap across stages, modes and slot combinations.
 
 An older server without `/plan`, or a server with Delta disabled, is compatible:
 the device uses the original full-image route. The first installation of a

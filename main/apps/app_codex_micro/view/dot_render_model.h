@@ -126,8 +126,24 @@ constexpr int accentScale(Accent icon,uint16_t phase,bool enabled) {
     if(!enabled || (icon!=Accent::Coin && icon!=Accent::ResetCard))return 1000;
     const int scale=detail::flipScale(phase);return scale<0?-scale:scale;
 }
-constexpr uint32_t accentColor(Accent icon,uint16_t phase,bool enabled,uint32_t color) {
-    return icon==Accent::Refresh && enabled?blendWhite(color,detail::pulse(phase)):color;
+// Clockwise Manhattan-angle approximation: top=0, right=90. The existing
+// approved Refresh mask is unchanged; only its lit dots acquire a comet tail.
+constexpr int refreshAngle(int x,int y) {
+    const int dx=x-7,dy=y-7,ax=dx<0?-dx:dx,ay=dy<0?-dy:dy;
+    const int sum=ax+ay;
+    if(!sum)return 0;
+    if(dx>=0 && dy<0)return ax*90/sum;
+    if(dx>=0 && dy>=0)return 90+ay*90/sum;
+    if(dx<0 && dy>=0)return 180+ax*90/sum;
+    return 270+ay*90/sum;
+}
+constexpr uint32_t iconPointColor(Accent icon,int x,int y,uint16_t phase,bool enabled,uint32_t color) {
+    if(icon!=Accent::Refresh || !enabled)return color;
+    const int behind=((phase%360)-refreshAngle(x,y)+360)%360;
+    // Short bright head, then a smooth 110-degree tail; unlit sector retains
+    // the original base colour, never a percentage/progress interpretation.
+    const int mix=behind<110?(110-behind)*220/110:0;
+    return blendWhite(color,mix);
 }
 constexpr bool meterChanged(int w,int h,int rows,uint16_t bp,bool known,uint16_t before,bool beforeEnabled,
                             uint16_t after,bool afterEnabled,uint32_t color) {
@@ -139,7 +155,11 @@ constexpr bool meterChanged(int w,int h,int rows,uint16_t bp,bool known,uint16_t
 }
 constexpr bool iconChanged(Accent icon,int w,int h,uint16_t before,bool beforeEnabled,uint16_t after,bool afterEnabled,uint32_t color) {
     const auto g=iconLayout(icon,w,h);if(!g.diameter)return false;
-    if(accentColor(icon,before,beforeEnabled,color)!=accentColor(icon,after,afterEnabled,color))return true;
+    if(icon==Accent::Refresh) {
+        for(int y=0;y<g.grid;++y)for(int x=0;x<g.grid;++x)if(iconPixel(icon,x,y))
+            if(iconPointColor(icon,x,y,before,beforeEnabled,color)!=iconPointColor(icon,x,y,after,afterEnabled,color))return true;
+        return false;
+    }
     const int a=accentScale(icon,before,beforeEnabled),b=accentScale(icon,after,afterEnabled);
     if(a==b)return false;
     for(int x=0;x<g.grid;++x)if(iconX(g,x,a)!=iconX(g,x,b))
@@ -151,9 +171,8 @@ constexpr void sampleIcon(Accent icon,int w,int h,uint16_t phase,bool enabled,ui
     const auto g=iconLayout(icon,w,h);
     if(!g.diameter)return;
     const int scale=accentScale(icon,phase,enabled); // C/R read the same on both faces.
-    const uint32_t rgb=accentColor(icon,phase,enabled,color);
     for(int y=0;y<g.grid;++y)for(int x=0;x<g.grid;++x)if(iconPixel(icon,x,y))
-        sink.dot(iconX(g,x,scale),g.y+y*g.pitch256/256,g.diameter,rgb);
+        sink.dot(iconX(g,x,scale),g.y+y*g.pitch256/256,g.diameter,iconPointColor(icon,x,y,phase,enabled,color));
 }
 struct BoundsSink {
     int w,h,count=0;bool valid=true;

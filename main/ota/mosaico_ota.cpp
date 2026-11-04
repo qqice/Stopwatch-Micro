@@ -179,6 +179,22 @@ bool exactSlot(const esp_partition_t* p)
     return p && MosaicoOtaLayout::exactSlot(currentLayout(), partitionGeometry(p));
 }
 int8_t slot(const esp_partition_t* p) { return exactSlot(p) ? static_cast<int8_t>(p->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0) : -1; }
+// snapshotLock held; display metadata only, never transaction authorization.
+void clearCandidateUiLocked()
+{
+    std::snprintf(ui.targetVersion, sizeof(ui.targetVersion), "-");
+    ui.sha256[0]=ui.signatureShort[0]=0;
+    ui.targetSlot=-1;
+    ui.signatureVerified=ui.imageVerified=false;
+}
+// Called only after the caller's existing exclusive idle admission guard.
+void refreshRequestUiBinding(const char* expectedSha)
+{
+    std::lock_guard<std::mutex> uiGuard(snapshotLock);
+    if (!ui.signatureVerified || !expectedSha || !expectedSha[0] || std::strcmp(expectedSha,ui.sha256))
+        clearCandidateUiLocked();
+    ui.modeKnown=false; ui.workPhase=WorkPhase::None; ++ui.revision;
+}
 void publish(UiStage stage, const char* error = "")
 {
     std::lock_guard<std::mutex> guard(snapshotLock);
@@ -186,6 +202,7 @@ void publish(UiStage stage, const char* error = "")
     statusStage.store(stage);
     ui.stage = stage; ui.size = expectedSize.load(); ui.received = received.load();
     ui.automaticInstall = autoInstall.load();
+    if (stage != UiStage::Downloading && stage != UiStage::Verifying) ui.workPhase = WorkPhase::None;
     ui.progressBasisPoints = ui.size ? static_cast<uint16_t>(static_cast<uint64_t>(ui.received) * 10000 / ui.size) : 0;
     std::snprintf(ui.error, sizeof(ui.error), "%s", error); ++ui.revision;
 }
@@ -340,6 +357,7 @@ bool requestLocked(bool automatic, bool preserveAge = false, bool maintenance = 
 #endif
     TouchSleep::OtaAdmission touchGuard; if(!touchGuard)return false;
     if (active.load() || approvedRequest.load() || imageReady || selected.load()) return false;
+    refreshRequestUiBinding(maintenance ? maintenanceGrant.sha : approvedHash);
     if (!currentReady()) return reject("running_or_layout_not_ready");
     if (!(maintenance ? maintenancePowerSafe(true) : downloadPowerSafe())) return reject("gauge_not_valid_sealed_cfg0_cal0");
     automaticMode = automatic;
@@ -351,6 +369,8 @@ bool requestLocked(bool automatic, bool preserveAge = false, bool maintenance = 
     cachedRunning.store(esp_ota_get_running_partition());
     if (!preserveAge) requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
     active.store(true);
+    recordWorkPhase(WorkPhase::Preparing);
+    publish(UiStage::Downloading);
     mosaico_rx_ingress::request(false); // Admission invalidates pending RX generations.
     StandbySleep::otaActivity();
     GetNetworkQuota().notifyOtaQueued();
@@ -475,11 +495,23 @@ bool readRunningImage(uint32_t offset,uint8_t* data,size_t length)
        length>currentImageSize-offset)return false;
     return esp_partition_read(running,offset,data,length)==ESP_OK;
 }
+void recordWorkPhase(WorkPhase phase)
+{
+    std::lock_guard<std::mutex> guard(snapshotLock);
+    if (!active.load()) return; // A late presentation update cannot revive fail().
+    ui.workPhase=phase;
+    if (phase==WorkPhase::Preparing) {
+        ui.modeKnown=false; ui.deltaTransfer=false; ui.transferReceived=ui.transferSize=0;
+    }
+    ++ui.revision;
+}
 void recordTransferProgress(bool delta,uint32_t bytes,uint32_t total,bool reconstructing)
 {
-    deltaTransfer=delta; transferReceived=bytes; transferSize=total;
     std::lock_guard<std::mutex> guard(snapshotLock);
+    if (!active.load()) return;
+    deltaTransfer=delta; transferReceived=bytes; transferSize=total;
     ui.deltaTransfer=delta; ui.transferReceived=bytes; ui.transferSize=total;
+    ui.modeKnown=true; ui.workPhase=reconstructing?WorkPhase::Merging:WorkPhase::Downloading;
     if(reconstructing) { ui.stage=UiStage::Verifying; statusStage=UiStage::Verifying; }
     ++ui.revision;
 }
@@ -495,7 +527,9 @@ bool resetDownloadForFullFallback()
     writing=false; handle=0;
     if(hashLive)psa_hash_abort(&hash);
     hashLive=false; received=0;
-    recordTransferProgress(false,0,0);
+    deltaTransfer=false; transferReceived=transferSize=0;
+    recordWorkPhase(WorkPhase::Preparing);
+    publish(UiStage::Downloading);
     return true;
 }
 bool busy() { return active.load() || approvedRequest.load() || checkQueued.load() || checking.load() || installQueued.load() || rebootQueued.load() || bootPending.load(); }
@@ -593,6 +627,7 @@ bool requestMaintenanceUpdate(const char* expectedSha, uint32_t ttlSeconds)
     const auto usbState=mosaico_console_usb_snapshot();
     if (!currentReady() || !running || !boot || running->address!=boot->address ||
         !maintenanceGrant.start(expectedSha,ttlSeconds,esp_timer_get_time(),running->address,boot->address,usbState.unmounts)) return maintenanceDenied("maintenance_grant_invalid");
+    refreshRequestUiBinding(expectedSha);
     maintenanceMode=true;
     automaticMode=usbBypass=false; approvedHash[0]=0;
     if (!maintenancePowerSafe(true)) return reject("maintenance_admission_power");
@@ -702,7 +737,7 @@ bool discoverManifest(const char* json)
       std::snprintf(ui.targetVersion, sizeof(ui.targetVersion), "%s", d.version);
       std::memcpy(ui.sha256, d.sha, 65); std::memcpy(ui.signatureShort, d.fingerprint, 17);
       ui.signatureVerified = true; ui.imageVerified = false; verified.store(false);
-      ui.targetSlot = nextSlot; }
+      ui.targetSlot = nextSlot; ui.modeKnown=false; ui.workPhase=WorkPhase::None; }
     publish(UiStage::Available);
     checking.store(false);
     guard.unlock();
@@ -746,7 +781,7 @@ void deferUpdate()
     revokeForNormalRequest();
     std::unique_lock<std::mutex> guard(snapshotLock, std::try_to_lock);
     if (!guard.owns_lock() || busy() || ui.imageVerified || selected.load()) return;
-    approvedRequest.store(false); statusStage.store(UiStage::Idle); ui.stage = UiStage::Idle; ++ui.revision;
+    approvedRequest.store(false); statusStage.store(UiStage::Idle); ui.stage = UiStage::Idle; ui.workPhase=WorkPhase::None; ui.modeKnown=false; ++ui.revision;
 }
 bool automaticInstall() { return autoInstall.load(); }
 bool setAutomaticInstall(bool enabled)
@@ -846,6 +881,7 @@ bool finishDownload()
     std::lock_guard<std::mutex> guard(lock);
     if (!active.load() || !writing || received != expectedSize) return reject("incomplete_image");
     if (maintenanceMode && !maintenancePowerSafe(true,received.load())) return reject("maintenance_final_power");
+    recordWorkPhase(WorkPhase::Verifying);
     publish(UiStage::Verifying);
     uint8_t digest[32];
     size_t digestSize = 0;
@@ -922,6 +958,8 @@ bool requestCheck()
         (ui.stage == UiStage::WaitingPower && imageReady.load())) return false;
     requestedAtMs.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
     cachedRunning.store(esp_ota_get_running_partition()); // Diagnostic cache before busy queue publication.
+    clearCandidateUiLocked();
+    ui.modeKnown=false; ui.workPhase=WorkPhase::None; ++ui.revision;
     checkQueued.store(true); mosaico_rx_ingress::request(false);
     StandbySleep::otaActivity();
     GetNetworkQuota().notifyOtaQueued();
@@ -1053,10 +1091,14 @@ void status(char* out, size_t length)
     const size_t used = std::strlen(out);
     const char* stages[] = {"idle", "checking", "available", "waiting_power", "downloading", "verifying", "ready_install", "installing", "ready_reboot", "boot_checking", "complete", "failed"};
     const unsigned stage = static_cast<unsigned>(statusStage.load());
-    std::snprintf(out + used, length - used, " automatic_check=0 stage=%s image_verified=%d selected=%d transfer_mode=%s transfer_bytes=%lu/%lu fallback=%d",
+    UiSnapshot presentation{};
+    const bool presentationAvailable=copyUiSnapshot(presentation);
+    std::snprintf(out + used, length - used, " automatic_check=0 stage=%s image_verified=%d selected=%d transfer_mode=%s transfer_bytes=%lu/%lu fallback=%d work_phase=%u mode_known=%d",
         stage < sizeof(stages)/sizeof(stages[0]) ? stages[stage] : "unknown", verified.load(), selected.load(),
         deltaTransfer.load()?"delta":"full",static_cast<unsigned long>(deltaTransfer.load()?transferReceived.load():received.load()),
-        static_cast<unsigned long>(deltaTransfer.load()?transferSize.load():expectedSize.load()),fullFallbackUsed.load());
+        static_cast<unsigned long>(deltaTransfer.load()?transferSize.load():expectedSize.load()),fullFallbackUsed.load(),
+        presentationAvailable?static_cast<unsigned>(presentation.workPhase):0U,
+        presentationAvailable&&presentation.modeKnown);
     // Diagnostic evidence only: old journals remain valid when this key is absent.
     // Do not read NVS during OTA writes or block behind the network owner.
     if (busy()) return;

@@ -154,6 +154,7 @@ bool reconstruct(const uint8_t* patch,const Plan& plan,
     // Finalize also destroys the official patch reader after feed errors.
     const bool finalized=decoder&&esp_delta_ota_finalize(decoder)==ESP_OK;
     if(ok)ok=finalized&&d.produced==target.size&&d.flush()&&d.written==target.size;
+    if(ok)MosaicoOta::recordWorkPhase(MosaicoOta::WorkPhase::Verifying);
     uint8_t digest[32];size_t length=0;
     if(ok)ok=psa_hash_finish(&d.hash,digest,sizeof(digest),&length)==PSA_SUCCESS&&length==32&&
         !std::memcmp(digest,target.hash,32);

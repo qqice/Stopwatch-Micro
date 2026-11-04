@@ -120,11 +120,12 @@ private:
     void lockDisplay();
     const TokenHistoryCell* selectedCell() const;
     MosaicoOta::UiSnapshot _ota{};
-    bool _otaSeen = false, _otaPending = false, _otaApproved = false;
+    bool _otaSeen = false, _otaPending = false, _otaApproved = false, _otaLoader = false;
     bool _externalPowerReady = false, _otaNetworkReady = false;
     Page _otaReturn = Page::Command;
     lv_obj_t* _otaPage = nullptr;
     lv_obj_t* _otaTitle = nullptr;
+    lv_obj_t* _otaModeBadge = nullptr;
     lv_obj_t* _otaCurrent = nullptr;
     lv_obj_t* _otaTarget = nullptr;
     lv_obj_t* _otaPhase = nullptr;
