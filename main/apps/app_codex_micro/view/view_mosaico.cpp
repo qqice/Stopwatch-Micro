@@ -1398,7 +1398,8 @@ void CodexMicroView::refreshBattery(uint32_t now) {
     // The qualifier belongs to the same native sample as the shown SOC.
     // Policy may be unavailable/busy or reject historical experiment state;
     // neither means the readable native configuration became inconsistent.
-    if (display.valid) std::snprintf(text, sizeof(text), "%u%%%s", static_cast<unsigned>(display.reportedSoc), display.nominalConfigured ? "*" : "?");
+    if (display.valid) std::snprintf(text, sizeof(text), "%u%%%s", static_cast<unsigned>(display.reportedSoc),
+        display.nominalConfigured && !display.knownSafetyCalibrationMismatch ? "*" : "?");
     else std::snprintf(text, sizeof(text), "?");
     const uint32_t color = display.valid ? levelColor(static_cast<uint16_t>(display.reportedSoc) * 100) : Gray;
     if (_locked) {
