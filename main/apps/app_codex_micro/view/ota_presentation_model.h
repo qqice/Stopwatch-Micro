@@ -11,16 +11,23 @@ enum class Screen : uint8_t {
     Ready, Installing, Reboot, BootCheck, Complete, Failed
 };
 struct Rect { int x=0, y=0, w=0, h=0; };
+struct SlotContent { Rect name,chip,number; int pitch; };
+constexpr SlotContent slotContent(Rect card) {
+    return card.h<=48
+        ? SlotContent{{8,3,80,17},{37,24,22,22},{96,(card.h-44)/2,80,44},6}
+        : SlotContent{{8,6,80,17},{34,(card.h-28)/2,28,28},{96,(card.h-70)/2,80,70},9};
+}
 struct Model {
     Screen screen=Screen::Current;
     const char* heading="CURRENT";
     uint32_t color=0x68C9D6;
-    bool title=true, loader=false, numeric=false, current=false, target=false;
+    bool title=false, loader=false, numeric=false, current=false, target=false;
     bool targetIsCurrent=false, mode=false, bytes=false, ratio=false, hash=false, signature=false;
-    bool error=false;
+    bool error=false, phaseCentered=false;
     unsigned slots=0;
     uint32_t done=0, total=0;
     uint16_t bp=0;
+    int phasePitch=5;
     Rect phase{184,18,256,26}, badge{308,0,132,32};
     Rect currentBox{0,64,440,34}, targetBox{0,54,440,34};
     Rect activity{176,136,88,88}, percent{0,122,440,60}, meter{0,198,440,28};
@@ -66,32 +73,35 @@ constexpr Model present(const MosaicoOta::UiSnapshot& s) {
     switch(m.screen) {
     case Screen::Current:m.target=false;break;
     case Screen::Checking:m.heading="CHECKING";m.loader=true;m.target=false;break;
-    case Screen::Offer:m.heading=s.stage==Stage::WaitingPower ? "DOWNLOAD BLOCKED" : "UPDATE";break;
-    case Screen::Preparing:m.heading="PREPARING";m.title=false;m.loader=true;break;
+    case Screen::Offer:m.heading=s.stage==Stage::WaitingPower ? "BLOCKED" : "UPDATE";break;
+    case Screen::Preparing:m.heading="PREPARE";m.title=false;m.loader=true;break;
     case Screen::Negotiating:m.heading="DELTA PLAN";m.title=false;m.loader=true;break;
     case Screen::Download:
-        m.heading="DOWNLOADING";m.color=0x67E7AE;m.title=false;m.numeric=true;m.bytes=true;m.ratio=true;
+        m.heading="DOWNLOAD";m.color=0x67E7AE;m.title=false;m.numeric=true;m.bytes=true;m.ratio=true;
         m.done=s.deltaTransfer?s.transferReceived:s.received;m.total=s.deltaTransfer?s.transferSize:s.size;break;
     case Screen::Merge:
-        m.heading="MERGING";m.title=false;m.numeric=true;m.bytes=true;m.ratio=true;
+        m.heading="MERGE";m.title=false;m.numeric=true;m.bytes=true;m.ratio=true;
         m.done=s.received;m.total=s.size;break;
     case Screen::Verify:
-        m.heading="VERIFYING";m.color=0xE9C46A;m.title=false;m.loader=true;m.bytes=true;
+        m.heading="VERIFY";m.color=0xE9C46A;m.title=false;m.loader=true;m.bytes=true;
         m.hash=known(s.sha256);m.byteBox={280,238,160,24};break;
     case Screen::Ready:
         m.heading=s.stage==Stage::WaitingPower ? "POWER" : "READY";m.color=0x67E7AE;m.title=false;
         m.activity={176,106,88,88};m.bytes=true;m.byteBox={0,200,440,24};m.hash=known(s.sha256);m.signature=known(s.signatureShort);break;
-    case Screen::Installing:m.heading="INSTALLING";m.color=0xE9C46A;m.title=false;m.loader=true;break;
+    case Screen::Installing:m.heading="INSTALL";m.color=0xE9C46A;m.title=false;m.loader=true;break;
     case Screen::Reboot:m.heading="REBOOT";m.color=0xE9C46A;m.title=false;break;
     case Screen::BootCheck:
         m.heading="BOOT CHECK";m.title=false;m.numeric=true;m.bp=s.progressBasisPoints>10000?10000:s.progressBasisPoints;
         m.targetIsCurrent=true;break;
     case Screen::Complete:
         m.heading="VERIFIED";m.color=0x67E7AE;m.targetIsCurrent=true;m.targetBox={0,64,440,34};m.activity={176,124,88,88};
-        m.hash=known(s.sha256);m.signature=known(s.signatureShort);break;
-    case Screen::Failed:m.heading="FAILED";m.color=0xD18C37;m.title=false;m.error=true;break;
+        m.hash=known(s.sha256);m.signature=known(s.signatureShort);m.phaseCentered=true;break;
+    case Screen::Failed:m.heading="FAILED";m.color=0xE87575;m.title=false;m.error=true;m.activity={176,124,88,88};break;
     }
-    if(!m.title)m.phase={0,6,296,26};
+    int letters=0;while(m.heading[letters])++letters;
+    const int width=(letters*6-1)*5;
+    m.phase={0,0,width<296?width:296,40};
+    if(m.phaseCentered){m.phase={0,0,440,44};m.phasePitch=6;}
     if(m.screen==Screen::Current)m.currentBox={0,90,440,34};
     if(m.screen==Screen::Offer) {
         m.currentBox={0,64,440,24};m.targetBox={0,108,440,34};
@@ -102,7 +112,7 @@ constexpr Model present(const MosaicoOta::UiSnapshot& s) {
     if(m.targetIsCurrent) { m.target=m.current;m.current=false; }
     else if(m.target && m.screen!=Screen::Offer && m.screen!=Screen::Preparing && m.screen!=Screen::Negotiating)m.current=false;
     if(m.target && m.current && m.screen!=Screen::Offer)m.currentBox={0,94,440,24};
-    if(m.error) {m.current=known(s.currentVersion);m.currentBox={0,64,440,28};m.target=true;m.targetBox={0,118,440,32};}
+    if(m.error) {m.current=known(s.currentVersion);m.currentBox={0,64,440,28};m.target=true;m.targetBox={0,232,440,28};}
     m.mode=s.modeKnown && m.screen!=Screen::Current && m.screen!=Screen::Checking && m.screen!=Screen::Offer &&
         m.screen!=Screen::Preparing && m.screen!=Screen::Negotiating && m.screen!=Screen::Complete;
     if(m.bytes && !m.total)m.total=s.size;

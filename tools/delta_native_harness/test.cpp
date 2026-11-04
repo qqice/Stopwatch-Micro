@@ -12,28 +12,32 @@
 #include <vector>
 #include "production/mosaico_ota.h"
 #include "sdk/psa/crypto.h"
+#include "sdk/hal/hal.h"
 int64_t fakeTime=1;
 static std::vector<uint8_t> sourceImage,written;
 static bool live=true,failWrite=false;
-static unsigned writeCalls=0,readCalls=0,callocCalls=0,failCalloc=0;
+static unsigned writeCalls=0,readCalls=0,callocCalls=0,failCalloc=0,preparingCalls=0;
 static uint8_t internalBuffer[4096];
 extern "C" void* delta_test_calloc(size_t n,size_t size) {
  ++callocCalls;if(failCalloc&&callocCalls==failCalloc)return nullptr;return std::calloc(n,size);
 }
 namespace MosaicoOta {
 bool readRunningImage(uint32_t offset,uint8_t* data,size_t length) {
- ++readCalls;
+ assert(GetHAL().held);++readCalls;
  if(offset>sourceImage.size()||length>sourceImage.size()-offset)return false;
  std::memcpy(data,sourceImage.data()+offset,length);return true;
 }
 bool writeChunk(uint32_t offset,const uint8_t* data,size_t length) {
- ++writeCalls;
+ assert(GetHAL().held);++writeCalls;
  assert(data==internalBuffer&&length>0&&length<=4096&&offset==written.size());
  if(!live||failWrite){live=false;return false;}
  written.insert(written.end(),data,data+length);return true;
 }
 void recordTransferProgress(bool,uint32_t,uint32_t,bool) {}
-void recordWorkPhase(WorkPhase) {}
+void recordWorkPhase(WorkPhase phase) {
+ assert(phase==WorkPhase::Preparing||phase==WorkPhase::Verifying);
+ if(phase==WorkPhase::Preparing)++preparingCalls;
+}
 }
 #include "nesting_actual.h"
 // Include the actual production implementation: no test copy of the parser,
@@ -41,7 +45,6 @@ void recordWorkPhase(WorkPhase) {}
 #include "production/mosaico_delta.cpp"
 namespace ResetActual {
 using MosaicoOta::WorkPhase;using MosaicoOta::UiStage;
-void recordWorkPhase(WorkPhase phase){assert(phase==WorkPhase::Preparing);}
 void publish(UiStage stage){assert(stage==UiStage::Downloading);}
 std::mutex lock;
 std::atomic<bool> active{true},selected{false},imageReady{false},fullFallbackUsed{false};
@@ -54,16 +57,17 @@ struct StorageAdmission {explicit operator bool() const{return admitted;}};
 void esp_ota_abort(unsigned){++aborts;}
 void recordTransferProgress(bool delta,uint32_t bytes,uint32_t total) {assert(!delta&&!bytes&&!total);++progressCalls;}
 #include "reset_actual.h"
-void reset(){active=true;selected=false;imageReady=false;fullFallbackUsed=false;writing=true;hashLive=true;admitted=true;handle=1;received=7;aborts=progressCalls=0;deltaTransfer=true;transferReceived=7;transferSize=10;}
+void reset(){active=true;selected=false;imageReady=false;fullFallbackUsed=false;writing=true;hashLive=true;admitted=true;handle=1;received=7;aborts=progressCalls=preparingCalls=0;deltaTransfer=true;transferReceived=7;transferSize=10;}
 void test() {
  for(unsigned fault=0;fault<5;++fault){reset();
   if(fault==0)active=false;if(fault==1)selected=true;if(fault==2)imageReady=true;
   if(fault==3)fullFallbackUsed=true;if(fault==4)admitted=false;
-  assert(!resetDownloadForFullFallback()&&writing&&hashLive&&received==7&&aborts==0);
+  assert(!resetDownloadForFullFallback()&&writing&&hashLive&&received==7&&aborts==0&&preparingCalls==0);
  }
  reset();assert(resetDownloadForFullFallback());
  assert(fullFallbackUsed&&!writing&&!hashLive&&!handle&&!received&&active&&aborts==1&&!deltaTransfer&&!transferReceived&&!transferSize);
- assert(!resetDownloadForFullFallback());
+ assert(preparingCalls==1);
+ assert(!resetDownloadForFullFallback()&&preparingCalls==1);
  std::puts("PASS actual fallback reset: one retry, inactive non-revival, selected/ready/admission guards (maintenance power is an SDK boundary)");
 }
 }
@@ -141,10 +145,11 @@ static void testChunk() {
  assert(!MosaicoDelta::decodeChunk(deep.c_str(),deep.size(),0,3,internalBuffer,4096,count));
  std::puts("PASS actual chunk JSON/offset/count validation (Foundation base64 SDK shim)");
 }
-static void clean(){written.clear();writeCalls=readCalls=callocCalls=failCalloc=0;failWrite=false;live=true;fakeTime=1;}
+static void clean(){assert(!GetHAL().held);GetHAL()=Hal{};written.clear();writeCalls=readCalls=callocCalls=failCalloc=0;failWrite=false;live=true;fakeTime=1;}
 static bool run(const std::vector<uint8_t>& patch,const MosaicoDelta::Plan& plan,
  const MosaicoOta::VerifiedImageDescriptor& base,const MosaicoOta::VerifiedImageDescriptor& target) {
- return MosaicoDelta::reconstruct(patch.data(),plan,base,target,internalBuffer,4096,1000000);
+ const bool ok=MosaicoDelta::reconstruct(patch.data(),plan,base,target,internalBuffer,4096,1000000);
+ assert(!GetHAL().held);return ok;
 }
 int main(int argc,char** argv) {
  assert(argc==4);sourceImage=load(argv[1]);auto targetBytes=load(argv[2]);auto patch=load(argv[3]);
@@ -152,6 +157,15 @@ int main(int argc,char** argv) {
  MosaicoDelta::Plan plan{};plan.size=patchDescriptor.size;std::memcpy(plan.hash,patchDescriptor.hash,32);MosaicoDelta::hashHex(plan.hash,plan.sha256);
  testPlan(base,target,plan);testChunk();ResetActual::test();
  clean();assert(run(patch,plan,base,target)&&written==targetBytes&&writeCalls==(target.size+4095)/4096&&readCalls>0);
+ const unsigned successBegins=GetHAL().begins;
+ assert(GetHAL().ends==successBegins&&successBegins==(plan.size+255)/256+1);
+ for(unsigned fail:{1U,2U,successBegins,~0U}) {
+  clean();GetHAL().failBegin=fail;
+  assert(!run(patch,plan,base,target)&&!GetHAL().held);
+  assert(GetHAL().ends<=GetHAL().begins);
+  if(fail==~0U)assert(!readCalls&&!writeCalls);
+ }
+ std::puts("PASS display windows: successful batching/finalize, first/mid/final/all acquisition failure, cleanup releases");
  std::puts("PASS real base -> target detools-heatshrink streaming reconstruction + exact internal 4096 aggregation + real SHA256");
  clean();auto corrupt=patch;corrupt[patch.size()/2]^=1;assert(!run(corrupt,plan,base,target)&&writeCalls==0);
  std::puts("PASS corrupted patch rejected by real SHA256 before any codec/flash output");
@@ -164,6 +178,12 @@ int main(int argc,char** argv) {
  for(unsigned n:{1U,2U}) {clean();failCalloc=n;assert(!run(patch,plan,base,target)&&writeCalls==0);}std::puts("PASS official codec context/apply-patch OOM returns full-fallback failure");
  clean();fakeTime=1000000;assert(!run(patch,plan,base,target)&&writeCalls==0);std::puts("PASS total deadline stops decode before output");
  clean();MosaicoDelta::Decoder d{internalBuffer,base.size,target.size};d.deadline=1000000;
+ d.buffered=1;
+ assert(MosaicoDelta::Decoder::read(internalBuffer,1,0,&d)!=ESP_OK);
+ assert(MosaicoDelta::Decoder::write(internalBuffer,1,&d)!=ESP_OK);
+ assert(!d.flush()&&!readCalls&&!writeCalls&&!d.produced);
+ d.buffered=0;d.displayHeld=true;
+
  assert(MosaicoDelta::Decoder::read(internalBuffer,1,-1,&d)!=ESP_OK);
  assert(MosaicoDelta::Decoder::read(internalBuffer,1,INT_MAX,&d)!=ESP_OK);
  assert(MosaicoDelta::Decoder::read(internalBuffer,SIZE_MAX,0,&d)!=ESP_OK);

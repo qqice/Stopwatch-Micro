@@ -161,9 +161,11 @@ void CodexMicroView::init(lv_obj_t* parent) {
     _root = lv_obj_create(parent); panel(_root, 0, 0, 480, 480, 0x000000);
     lv_obj_add_event_cb(_root, touchEvent, LV_EVENT_ALL, this);
     _wifiIcon = createIcon(_root, Icon::WifiOff, 28, Orange); place(_wifiIcon, 20, 22);
-    _batteryIcon = createIcon(_root, Icon::Battery, 32); place(_batteryIcon, 296, 20);
+    _batteryIcon = createIcon(_root, Icon::Battery, 32); place(_batteryIcon, 428, 20);
     _boltIcon = createIcon(_root, Icon::Bolt, 24, Gold); place(_boltIcon, 266, 24);
-    _battery = label(_root, 338, 26, 122, "?", &lv_font_montserrat_20);
+    _battery = label(_root, 298, 24, 122, "?", &lv_font_montserrat_20);
+    lv_obj_set_style_text_align(_battery, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_add_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
     for (size_t i = 0; i < 3; ++i) { _resetIcons[i] = createIcon(_root, Icon::ResetCard, 28, Gray); place(_resetIcons[i], 70 + i * 34, 22); }
     _resetCount = label(_root, 174, 26, 84, "?", &lv_font_montserrat_20);
     _quotaPage = lv_obj_create(_root); panel(_quotaPage, 20, 64, 440, 360, 0);
@@ -281,7 +283,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_style_radius(_rotationCurtain, 0, 0);
     lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
-    bool widgetsReady = _lockSessionNumbers[5] && _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaModeBadge && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    bool widgetsReady = _lockSessionNumbers[5] && _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaModeBadge && _otaPhase && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
     for (auto* number : _lockSessionNumbers) widgetsReady = widgetsReady && number;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
@@ -1048,7 +1050,7 @@ void CodexMicroView::initOta() {
     _otaTitle = createText(_otaPage, 170, 56, 8, Cyan); place(_otaTitle, 0, 0); setText(_otaTitle, "OTA", Cyan);
     _otaModeBadge = createText(_otaPage, 132, 32, 4, Purple); place(_otaModeBadge, 308, 0);
     lv_obj_add_flag(_otaModeBadge, LV_OBJ_FLAG_HIDDEN);
-    _otaPhase = label(_otaPage, 184, 18, 256, "", &lv_font_montserrat_20);
+    _otaPhase = createText(_otaPage, 296, 40, 5, Cyan); place(_otaPhase, 0, 0);
     _otaCurrent = label(_otaPage, 0, 58, 440, "", &lv_font_montserrat_20);
     _otaTarget = label(_otaPage, 0, 110, 440, "", &lv_font_montserrat_20);
     for (auto* text : {_otaCurrent, _otaTarget}) {
@@ -1195,6 +1197,20 @@ void CodexMicroView::refreshOta(uint32_t tick) {
         _otaPending = false; setPageForDebug(Page::OTA);
     }
 }
+void CodexMicroView::serviceOtaTerminalReturn(uint32_t tick, bool interacting) {
+    const bool terminal = _ota.stage == MosaicoOta::UiStage::Complete || _ota.stage == MosaicoOta::UiStage::Failed;
+    if (_page != Page::OTA || _locked || _suppressed || _rotationFault || _settingsOpen || _slideTo || otaBusy() || MosaicoOta::busy() || !terminal) {
+        _otaTerminalArmed = false;
+        return;
+    }
+    if (!_otaTerminalArmed || _otaTerminalStage != _ota.stage) {
+        _otaTerminalArmed = true; _otaTerminalStage = _ota.stage; _otaTerminalSince = tick;
+    }
+    if (interacting) { _otaTerminalSince = tick; return; }
+    // Independent of _activity: the OTA page intentionally remains awake.
+    const uint32_t elapsed = tick - _otaTerminalSince;
+    if (elapsed >= 15000U && elapsed < 0x80000000U && setPageForDebug(Page::Command)) _otaTerminalArmed = false;
+}
 void CodexMicroView::renderOta() {
     using namespace mosaico_ota_view;
     const auto view = present(_ota);
@@ -1219,9 +1235,7 @@ void CodexMicroView::renderOta() {
         lv_label_set_long_mode(obj,LV_LABEL_LONG_MODE_DOTS);
     };
     show(_otaTitle,view.title);
-    box(_otaPhase,view.phase);lv_label_set_text(_otaPhase,view.heading);
-    lv_obj_set_style_text_color(_otaPhase,lv_color_hex(view.color),0);
-    lv_obj_set_style_text_align(_otaPhase,view.title?LV_TEXT_ALIGN_RIGHT:LV_TEXT_ALIGN_LEFT,0);
+    box(_otaPhase,view.phase);setTextPitch(_otaPhase,view.phasePitch);setText(_otaPhase,view.heading,view.color);
     box(_otaModeBadge,view.badge);show(_otaModeBadge,view.mode);
     if(view.mode)setText(_otaModeBadge,_ota.deltaTransfer?"DELTA":"FULL",_ota.deltaTransfer?Purple:Orange);
     show(_otaCurrent,view.current);show(_otaTarget,view.target);
@@ -1236,11 +1250,11 @@ void CodexMicroView::renderOta() {
             }
             text=safe[0]?safe:"OTA_ERROR";
         }
-        version(_otaTarget,text,view.targetBox,false,view.error?Orange:Gold);
+        version(_otaTarget,text,view.targetBox,false,view.error?view.color:Gold);
     }
-    const bool staticIcon=view.screen==Screen::Ready||view.screen==Screen::Reboot||view.screen==Screen::Complete;
+    const bool staticIcon=view.screen==Screen::Ready||view.screen==Screen::Reboot||view.screen==Screen::Complete||view.screen==Screen::Failed;
     show(_otaStageIcon,view.loader||staticIcon);box(_otaStageIcon,view.activity);
-    if(view.loader||staticIcon)setIcon(_otaStageIcon,view.loader?Icon::Refresh:Icon::Check,view.color);
+    if(view.loader||staticIcon)setIcon(_otaStageIcon,view.loader?Icon::Refresh:view.error?Icon::Cross:Icon::Check,view.color);
     show(_otaPercent,view.numeric);show(_otaMeter,view.numeric);
     box(_otaPercent,view.percent);box(_otaMeter,view.meter);
     if(view.numeric) {
@@ -1270,13 +1284,12 @@ void CodexMicroView::renderOta() {
     for(size_t i=0;i<2;++i) {
         show(_otaSlots[i],i<view.slots);box(_otaSlots[i],view.slot[i]);
         lv_label_set_text(_otaSlotNames[i],i?"NEW":"CURRENT");
-        const bool compact=view.slot[i].h<=48;
-        place(_otaSlotNames[i],8,compact?3:6);
+        const auto content=slotContent(view.slot[i]);
+        box(_otaSlotNames[i],content.name);
         lv_obj_set_style_text_font(_otaSlotNames[i],&lv_font_montserrat_14,0);
-        lv_obj_set_height(_otaSlotNames[i],17);
-        place(_otaSlotNumbers[i],72,compact?20:30);lv_obj_set_height(_otaSlotNumbers[i],compact?26:52);
-        setTextPitch(_otaSlotNumbers[i],compact?4:7);
-        place(_otaChips[i],16,compact?21:38);lv_obj_set_size(_otaChips[i],compact?22:28,compact?22:28);
+        lv_obj_set_style_text_align(_otaSlotNames[i],LV_TEXT_ALIGN_CENTER,0);
+        box(_otaSlotNumbers[i],content.number);setTextPitch(_otaSlotNumbers[i],content.pitch);
+        box(_otaChips[i],content.chip);
         const int slot=i?_ota.targetSlot:_ota.currentSlot;
         std::snprintf(text,sizeof(text),"%d",slot);setText(_otaSlotNumbers[i],text,i?Gold:Cyan);
         lv_obj_set_style_border_width(_otaSlots[i],i&&_ota.imageVerified?3:1,0);
@@ -1401,6 +1414,10 @@ void CodexMicroView::refreshBattery(uint32_t now) {
         setIcon(_lockBatteryIcon, Icon::Battery, color, display.reportedSoc, display.valid);
     } else {
         lv_label_set_text(_battery, text);
+        lv_point_t size;lv_text_get_size(&size,text,&lv_font_montserrat_20,0,0,480,LV_TEXT_FLAG_NONE);
+        const auto row=mosaico_lock_sessions::awakeBatteryRow(size.x,size.y);
+        lv_obj_set_size(_battery,row.textWidth,size.y);place(_battery,row.textX,row.textY);
+        place(_batteryIcon,row.iconX,20);place(_boltIcon,row.boltX,24);
         lv_obj_set_style_text_color(_battery, lv_color_hex(color), 0);
         setIcon(_batteryIcon, Icon::Battery, color, display.reportedSoc, display.valid);
         if (_chargeSupply.external) lv_obj_remove_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(_boltIcon, LV_OBJ_FLAG_HIDDEN);
@@ -2069,6 +2086,7 @@ void CodexMicroView::update(const CodexMicroState& state) {
     }
     // Rendering/page callbacks can record activity after the entry tick.
     tick = lv_tick_get();
+    serviceOtaTerminalReturn(tick,interacting);
     const bool keepAwake = otaKeepAwake();
     if (!_locked && (interacting || keepAwake)) _activity = tick;
     const uint32_t idleElapsed = tick - _activity;

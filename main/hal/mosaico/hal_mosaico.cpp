@@ -3370,6 +3370,24 @@ void Hal::lvgl_init()
 #endif
 }
 
+// BEGIN MERGE DISPLAY FLASH WINDOW
+bool Hal::beginDisplayFlashWindow()
+{
+    if (!port_ready.load(std::memory_order_acquire) || !display || !panel_io) return false;
+    if (!lvgl_port_lock(100)) return false;
+    // Public no-command/no-parameter transaction drains queued color DMA first.
+    if (esp_lcd_panel_io_tx_param(panel_io, -1, nullptr, 0) != ESP_OK) {
+        lvgl_port_unlock();
+        return false;
+    }
+    return true; // Caller retains GUI ownership until endDisplayFlashWindow().
+}
+void Hal::endDisplayFlashWindow()
+{
+    lvgl_port_unlock();
+}
+// END MERGE DISPLAY FLASH WINDOW
+
 bool Hal::lvglLock() { return port_ready && lvgl_port_lock(0); }
 void Hal::lvglUnlock() { if (port_ready) lvgl_port_unlock(); }
 

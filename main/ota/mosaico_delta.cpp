@@ -1,4 +1,5 @@
 #include "mosaico_delta.h"
+#include <hal/hal.h>
 #include <host/token_history.h>
 #include <cJSON.h>
 #include <esp_delta_ota.h>
@@ -49,9 +50,11 @@ struct Decoder {
     uint32_t baseSize,targetSize,produced=0,written=0;
     size_t buffered=0;
     bool cancelled=false;
+    bool displayHeld=false;
     int64_t deadline=0;
     psa_hash_operation_t hash=PSA_HASH_OPERATION_INIT;
     bool flush() {
+        if(!displayHeld)return false;
         if(!buffered)return true;
         if(!MosaicoOta::writeChunk(written,chunk,buffered))return false;
         written+=static_cast<uint32_t>(buffered);buffered=0;return true;
@@ -60,14 +63,14 @@ struct Decoder {
         auto& d=*static_cast<Decoder*>(opaque);
         // esp_delta_ota passes absolute signed offset, incremented after each read.
         // Also bound the subsequent vendor int advance, not merely partition IO.
-        if(d.cancelled||esp_timer_get_time()>=d.deadline||offset<0||!length||
+        if(!d.displayHeld||d.cancelled||esp_timer_get_time()>=d.deadline||offset<0||!length||
            static_cast<uint32_t>(offset)>d.baseSize||length>d.baseSize-static_cast<uint32_t>(offset)||
            length>static_cast<size_t>(INT_MAX-offset))return ESP_FAIL;
         return MosaicoOta::readRunningImage(static_cast<uint32_t>(offset),data,length)?ESP_OK:ESP_FAIL;
     }
     static esp_err_t write(const uint8_t* data,size_t length,void* opaque) {
         auto& d=*static_cast<Decoder*>(opaque);
-        if(d.cancelled||esp_timer_get_time()>=d.deadline||!data||!length||d.produced>d.targetSize||
+        if(!d.displayHeld||d.cancelled||esp_timer_get_time()>=d.deadline||!data||!length||d.produced>d.targetSize||
            length>d.targetSize-d.produced)return ESP_FAIL;
         if(psa_hash_update(&d.hash,data,length)!=PSA_SUCCESS)return ESP_FAIL;
         d.produced+=static_cast<uint32_t>(length);
@@ -79,6 +82,22 @@ struct Decoder {
         }
         return ESP_OK;
     }
+};
+// Acquire outside Storage/OTA owner locks. Cleanup may run without a window,
+// but Decoder callbacks then fail closed before touching either flash path.
+class DisplayFlashWindow {
+public:
+    explicit DisplayFlashWindow(Decoder& decoder) : d(decoder) {
+        d.displayHeld=GetHAL().beginDisplayFlashWindow();
+    }
+    ~DisplayFlashWindow() {
+        if(d.displayHeld) {d.displayHeld=false;GetHAL().endDisplayFlashWindow();}
+    }
+    explicit operator bool() const {return d.displayHeld;}
+    DisplayFlashWindow(const DisplayFlashWindow&)=delete;
+    DisplayFlashWindow& operator=(const DisplayFlashWindow&)=delete;
+private:
+    Decoder& d;
 };
 }
 void hashHex(const uint8_t hash[32],char out[65])
@@ -146,14 +165,22 @@ bool reconstruct(const uint8_t* patch,const Plan& plan,
     bool ok=decoder!=nullptr;
     MosaicoOta::recordTransferProgress(true,plan.size,plan.size,true);
     for(uint32_t offset=0;ok&&offset<plan.size;) {
-        const uint32_t count=std::min<uint32_t>(4096,plan.size-offset);
-        ok=esp_timer_get_time()<deadlineUs&&esp_delta_ota_feed_patch(decoder,patch+offset,count)==ESP_OK;
+        const uint32_t count=std::min<uint32_t>(256,plan.size-offset);
+        {
+            DisplayFlashWindow window(d);
+            ok=window&&esp_timer_get_time()<deadlineUs&&
+                esp_delta_ota_feed_patch(decoder,patch+offset,count)==ESP_OK;
+        }
         offset+=count;vTaskDelay(pdMS_TO_TICKS(1));
     }
     if(!ok)d.cancelled=true;
-    // Finalize also destroys the official patch reader after feed errors.
-    const bool finalized=decoder&&esp_delta_ota_finalize(decoder)==ESP_OK;
-    if(ok)ok=finalized&&d.produced==target.size&&d.flush()&&d.written==target.size;
+    if(decoder) {
+        DisplayFlashWindow window(d);
+        if(!window){ok=false;d.cancelled=true;}
+        // Finalize must destroy the official reader even on lock/feed failure.
+        const bool finalized=esp_delta_ota_finalize(decoder)==ESP_OK;
+        if(ok)ok=finalized&&d.produced==target.size&&d.flush()&&d.written==target.size;
+    }
     if(ok)MosaicoOta::recordWorkPhase(MosaicoOta::WorkPhase::Verifying);
     uint8_t digest[32];size_t length=0;
     if(ok)ok=psa_hash_finish(&d.hash,digest,sizeof(digest),&length)==PSA_SUCCESS&&length==32&&

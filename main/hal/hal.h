@@ -395,6 +395,14 @@ public:
     // Lvgl
     lv_indev_t* lvTouchpad = nullptr;
     std::unique_ptr<BootLogo> bootLogo;
+#ifdef MOSAICO_BOARD
+    // GUI -> drain queued display DMA -> bounded flash work. Caller owns pairing.
+    bool beginDisplayFlashWindow();
+    void endDisplayFlashWindow();
+#else
+    bool beginDisplayFlashWindow() { return false; }
+    void endDisplayFlashWindow() {}
+#endif
     bool lvglLock();
     void lvglUnlock();
     void startLvglUpdate();

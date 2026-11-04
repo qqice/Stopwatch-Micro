@@ -92,8 +92,8 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         self.assertIn('m.bp=s.progressBasisPoints',MODEL)
         self.assertIn('show(_otaPercent,view.numeric);show(_otaMeter,view.numeric)',CPP)
         self.assertNotIn('setText(_otaPercent, "--"',CPP)
-        self.assertIn('m.heading="VERIFYING"',MODEL)
-        for phase in ('DOWNLOADING','MERGING','DELTA PLAN','VERIFYING','READY','INSTALLING','BOOT CHECK','VERIFIED','FAILED'):
+        self.assertIn('m.heading="VERIFY"',MODEL)
+        for phase in ('DOWNLOAD','MERGE','DELTA PLAN','VERIFY','READY','INSTALL','BOOT CHECK','VERIFIED','FAILED'):
             self.assertIn('"'+phase+'"',MODEL)
         self.assertIn('SHA %.12s',CPP);self.assertIn('SIG %.8s',CPP)
         self.assertIn('char safe[25]',CPP)
@@ -109,7 +109,7 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         self.assertIn('_ota.deltaTransfer?"DELTA":"FULL"',CPP)
     def test_meaningful_stage_icon_and_terminal_version(self):
         self.assertIn('box(_otaStageIcon,view.activity)',CPP)
-        self.assertIn('view.loader?Icon::Refresh:Icon::Check',CPP)
+        self.assertIn('view.loader?Icon::Refresh:view.error?Icon::Cross:Icon::Check',CPP)
         self.assertIn('setMotion(_otaStageIcon, loadingPhase, _page == Page::OTA && _otaLoader',CPP)
         self.assertIn('m.targetIsCurrent=true',MODEL)
         self.assertIn('view.targetIsCurrent?_ota.currentVersion:_ota.targetVersion',CPP)
@@ -129,8 +129,8 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         self.assertNotIn('"VERIFY" : "ACTIVE"',CPP)
     def test_vector_assets_and_animation_gates(self):
         rows=[tuple(map(int,m.split(','))) for m in re.findall(r'\{([\d,]+)\}',DOT.split('constexpr uint16_t masks[][9] = {')[1].split('};')[0])]
-        self.assertEqual(len(rows),18)
-        self.assertEqual(len(set(rows)),18)
+        self.assertEqual(len(rows),19)
+        self.assertEqual(len(set(rows)),19)
         for row in rows:self.assertEqual(len(row),9);self.assertTrue(all(0<=x<512 for x in row))
         self.assertIn('if (_locked || _suppressed || _slideTo) return;',CPP); self.assertIn('tick - _motionTick < 100',CPP)
         self.assertIn('const bool otaMotion = _page == Page::OTA',CPP)
@@ -260,8 +260,10 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         self.assertIn('LV_LABEL_LONG_MODE_DOTS',CPP)
         self.assertIn('&lv_font_montserrat_14',CPP)
         self.assertIn('Rect action{0,334,440,64}',MODEL)
-        self.assertIn('Rect phase{184,18,256,26}, badge{308,0,132,32}',MODEL)
-        self.assertIn('view.slot[i].h<=48',CPP)
+        self.assertIn('m.phase={0,0,width<296?width:296,40}',MODEL)
+        self.assertIn('setTextPitch(_otaPhase,view.phasePitch)',CPP)
+        self.assertIn('const auto content=slotContent(view.slot[i]);',CPP)
+        self.assertIn('box(_otaSlotNumbers[i],content.number)',CPP)
     def test_actual_swipe_source_constexpr_harness(self):
         # The installed compiler has only embedded targets. constexpr assertions
         # execute extracted production function bodies in the compiler, with

@@ -5,6 +5,12 @@ namespace mosaico_lock_sessions {
 struct Box { int x,y,w,h; };
 constexpr Box card(unsigned slot) { return {48+static_cast<int>(slot)*66,392,54,48}; }
 struct BatteryRow { int iconX,textX,textY; };
+struct AwakeBatteryRow {int iconX,textX,textY,textWidth,boltX;};
+constexpr AwakeBatteryRow awakeBatteryRow(int textWidth,int textHeight) {
+    const int width=textWidth<1?1:textWidth>122?122:textWidth;
+    // Keep the icon itself at the right edge; variable-width percentages grow left.
+    return {428,420-width,20+(32-textHeight)/2,width,390-width};
+}
 constexpr BatteryRow batteryRow(int textWidth,int textHeight) {
     const int left=(480-(36+12+textWidth))/2;
     return {left,left+48,334+(36-textHeight)/2};

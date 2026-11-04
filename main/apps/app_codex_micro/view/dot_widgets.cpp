@@ -38,11 +38,12 @@ constexpr uint16_t masks[][9] = {
     {0,0,1,2,132,72,48,0,0}, // Check
     {0,84,254,130,171,130,254,84,0}, // Chip
     {0,16,8,4,510,4,8,16,0}, // Arrow
-    {56,68,130,258,262,128,130,68,56} // Refresh
+    {56,68,130,258,262,128,130,68,56}, // Refresh
+    {0,130,68,40,16,40,68,130,0} // Cross: same 9x9 grid and circle dots as Check.
 };
 constexpr int maskCount = static_cast<int>(sizeof(masks) / sizeof(masks[0]));
 constexpr bool iconPatternsTest() {
-    if (maskCount != static_cast<int>(Icon::Refresh) + 1 || sizeof(masks[0]) / sizeof(masks[0][0]) != 9)
+    if (maskCount != static_cast<int>(Icon::Cross) + 1 || sizeof(masks[0]) / sizeof(masks[0][0]) != 9)
         return false;
     for (const auto& mask : masks) for (auto row : mask) if (row > 511) return false;
     bool distinct = false;
@@ -61,14 +62,16 @@ constexpr detail::Glyph otaGlyphs[] = {
     {'N',{17,25,25,21,19,19,17}}, {'L',{16,16,16,16,16,16,31}},
     {'B',{30,17,17,30,17,17,30}}, {'C',{14,17,16,16,16,17,14}},
     {'K',{17,18,20,24,20,18,17}}, {'P',{30,17,17,30,16,16,16}},
-    {'F',{31,16,16,30,16,16,16}}
+    {'F',{31,16,16,30,16,16,16}},
+    {'I',{14,4,4,4,4,4,14}}, {'S',{15,16,16,14,1,1,30}},
+    {'V',{17,17,17,17,17,10,4}}, {'Y',{17,17,10,4,4,4,4}}
 };
 constexpr const detail::Glyph& uiGlyph(char c) {
     for (const auto& g : otaGlyphs) if (g.key == c) return g;
     return detail::glyph(c);
 }
 constexpr bool actionGlyphsTest() {
-    for (const char* text : {"CHECK", "DOWNLOAD", "UPGRADE", "REBOOT", "DELTA", "FULL"})
+    for (const char* text : {"CHECK", "DOWNLOAD", "UPGRADE", "REBOOT", "DELTA", "FULL", "CURRENT", "CHECKING", "UPDATE", "PREPARE", "DELTA PLAN", "MERGE", "VERIFY", "READY", "POWER", "INSTALL", "BOOT CHECK", "VERIFIED", "FAILED", "BLOCKED"})
         for (const char* c = text; *c; ++c) if (uiGlyph(*c).key != *c) return false;
     return true;
 }

@@ -29,7 +29,7 @@ constexpr bool fits(Model m) {
  if(m.mode)visible[n++]=m.badge;
  if(m.current)visible[n++]=m.currentBox;
  if(m.target)visible[n++]=m.targetBox;
- if(m.loader||m.screen==Screen::Ready||m.screen==Screen::Reboot||m.screen==Screen::Complete)visible[n++]=m.activity;
+ if(m.loader||m.screen==Screen::Ready||m.screen==Screen::Reboot||m.screen==Screen::Complete||m.screen==Screen::Failed)visible[n++]=m.activity;
  if(m.numeric){visible[n++]=m.percent;visible[n++]=m.meter;}
  if(m.bytes)visible[n++]=m.byteBox;
  if(m.hash){visible[n++]=m.hashBox;visible[n++]=m.imageIcon;}
@@ -69,10 +69,18 @@ constexpr bool all() {
  auto full=present(s);if(full.total!=3852320||full.bp!=10000||!full.mode)return false;
  s.stage=Stage::Complete;s.modeKnown=false;s.currentSlot=s.targetSlot=1;
  auto done=present(s);if(done.mode||done.slots!=1||done.current||!done.targetIsCurrent)return false;
+ if(!done.phaseCentered)return false;
+ s.stage=Stage::Failed;auto failed=present(s);
+ if(failed.color!=0xE87575||failed.activity.w!=done.activity.w||failed.activity.h!=done.activity.h||failed.activity.y!=done.activity.y)return false;
  for(int current=-1;current<=1;++current)for(int target=-1;target<=1;++target) {
   s=sample();s.stage=Stage::Downloading;s.workPhase=Work::Downloading;s.currentSlot=current;s.targetSlot=target;
   const unsigned expected=current<0?0U:target>=0&&target!=current?2U:1U;
   if(present(s).slots!=expected)return false;
+ }
+ for(int h:{48,96}) {
+  auto c=slotContent({0,0,186,h});
+  if(c.number.y*2+c.number.h!=h||c.number.h<=c.chip.h||overlaps(c.name,c.number)||overlaps(c.chip,c.number)||overlaps(c.name,c.chip))return false;
+  for(auto r:{c.name,c.chip,c.number})if(r.x<0||r.y<0||r.x+r.w>186||r.y+r.h>h)return false;
  }
  s=sample();s.stage=Stage::Idle;auto idle=present(s);
  if(idle.target||idle.mode||idle.hash||idle.signature||idle.numeric||idle.slots!=1)return false;
@@ -97,7 +105,7 @@ static_assert(all(),"Every visible OTA component must fit, avoid overlap and ref
         cpp=(V/'view_mosaico.cpp').read_text(encoding='utf8')
         body=cpp.split('void CodexMicroView::renderOta() {',1)[1].split('void CodexMicroView::touchEvent(',1)[0]
         self.assertIn('const auto view = present(_ota);',body)
-        self.assertIn('view.loader?Icon::Refresh:Icon::Check',body)
+        self.assertIn('view.loader?Icon::Refresh:view.error?Icon::Cross:Icon::Check',body)
         self.assertIn('_ota.deltaTransfer?"DELTA":"FULL"',body)
         self.assertIn('show(_otaModeBadge,view.mode)',body)
         self.assertIn('box(_otaButton,view.action)',body)

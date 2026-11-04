@@ -121,6 +121,10 @@ private:
     const TokenHistoryCell* selectedCell() const;
     MosaicoOta::UiSnapshot _ota{};
     bool _otaSeen = false, _otaPending = false, _otaApproved = false, _otaLoader = false;
+    bool _otaTerminalArmed = false;
+    uint32_t _otaTerminalSince = 0;
+    MosaicoOta::UiStage _otaTerminalStage = MosaicoOta::UiStage::Idle;
+    void serviceOtaTerminalReturn(uint32_t tick, bool interacting);
     bool _externalPowerReady = false, _otaNetworkReady = false;
     Page _otaReturn = Page::Command;
     lv_obj_t* _otaPage = nullptr;

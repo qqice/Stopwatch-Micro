@@ -69,6 +69,7 @@ struct CodexMicroView {
  constexpr bool otaBusy() const;
  constexpr bool otaKeepAwake() const;
  constexpr bool setPageForDebug(Page page);
+ constexpr void serviceOtaTerminalReturn(uint32_t,bool) {} // Tested from its production body separately.
  constexpr void lockDisplay();
  constexpr void compare(bool interacting=false) {
   const bool firstQuotaReady=_firstQuotaReady;

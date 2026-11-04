@@ -63,8 +63,10 @@ class DotWidgetsTests(unittest.TestCase):
         masks = SOURCE.split("constexpr uint16_t masks[][9] = {", 1)[1].split("};", 1)[0]
         rows = [tuple(map(int, match.split(",")))
                 for match in re.findall(r"\{([\d,]+)\}", masks)]
-        self.assertEqual(len(rows), 18)
-        self.assertEqual(len(set(rows)), 18)
+        self.assertEqual(len(rows), 19)
+        self.assertEqual(len(set(rows)), 19)
+        self.assertEqual(rows[14],(0,0,1,2,132,72,48,0,0)) # Keep the accepted green check.
+        self.assertEqual(rows[18],(0,130,68,40,16,40,68,130,0))
         self.assertNotEqual(rows[11], rows[12])
         for mask in rows:
             self.assertEqual(len(mask), 9)

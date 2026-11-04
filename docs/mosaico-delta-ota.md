@@ -87,6 +87,34 @@ visible but dimmed when unavailable; layout changes do not change consent, power
 signature or rollback policy. The completed/idle page never fabricates a mode
 that was not retained across reboot.
 
+Status headings also use the point-matrix font. Slot numbers have a larger,
+vertically centered right column; the slot name and chip icon occupy the left
+column. The awake battery icon is fixed to the top-right margin independently of
+percentage text width. Terminal success keeps the existing green check, and
+terminal failure uses a red cross on the same 9×9 dot grid and 88-pixel widget.
+After 15 seconds without interaction, success/failure returns to the quota page.
+Touch/settings interaction postpones this; an active backend operation, pending
+install, pending reboot or boot-health check is never dismissed by that timer.
+
+### Merge/display coordination
+
+The Mosaico display uses PSRAM DMA, while reconstruction densely reads/writes
+NOR. To remove their overlap during merge, each small decoder batch takes the
+existing LVGL mutex and drains queued display DMA through the public
+`esp_lcd_panel_io_tx_param(io, -1, nullptr, 0)` operation before flash work. In the
+pinned IDF 6.1 SPI implementation this drains the queue without sending any LCD
+command/data, so brightness and display timing are unchanged. The batch releases
+the GUI afterward, allowing progress updates between batches. Finalization and
+the tail write use the same window. Callbacks cannot access flash without a held
+window, including failure cleanup. If the optional window cannot be acquired,
+the existing full-download fallback remains available.
+
+The 256-byte patch batch is a byte bound, not a guarantee of wall-clock lock
+duration. SDK SPI-drain waits retain their existing hardware-driver behavior.
+This is a targeted mitigation for reported merge-region artifacts, not proof of
+the sole cause or a claim to fix unrelated cold-start/standby display issues;
+real-device visual acceptance remains necessary.
+
 `ota_presentation_model.h` is the shared, side-effect-free layout/progress model.
 `tools/preview_ota_stages.py` exports that actual model and point-matrix primitives
 for inspection before deployment; ordinary preview text approximates Montserrat
