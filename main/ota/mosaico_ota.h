@@ -13,6 +13,8 @@ struct UiSnapshot {
     int8_t currentSlot, targetSlot;
     bool signatureVerified, imageVerified, automaticInstall;
     uint16_t progressBasisPoints;
+    bool deltaTransfer;
+    uint32_t transferReceived, transferSize;
 };
 bool copyUiSnapshot(UiSnapshot& out);
 bool requestCheck(); // Queue discovery; callbacks perform no network or telemetry work.
@@ -74,6 +76,12 @@ bool request(); // Existing local bypass: explicit external-power confirmation A
 bool automaticCheckDue(); // Always false: permanent manual-only discovery policy.
 bool requestAutomatic(const char* manifest);
 bool takeRequest(); // Only the network owner consumes requests and writes images.
+// Network owner only; exact whole-BIN SHA and SDK-verified length, cached this boot.
+bool runningImageDescriptor(VerifiedImageDescriptor& out);
+bool readRunningImage(uint32_t offset, uint8_t* data, size_t length);
+// Retry only while this same authorized transaction is still live. Never revives fail().
+bool resetDownloadForFullFallback();
+void recordTransferProgress(bool delta, uint32_t bytes, uint32_t total, bool reconstructing=false);
 bool beginManifest(const char* json);
 bool writeChunk(uint32_t offset, const uint8_t* data, size_t length);
 bool finish();

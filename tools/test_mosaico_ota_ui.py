@@ -87,7 +87,7 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         self.assertIn('if (otaBusy()) return;',CPP)
         self.assertNotIn('setAutomaticInstall',CPP)
     def test_honest_progress_and_verification(self):
-        self.assertIn('static_cast<uint64_t>(_ota.received) * 10000 / _ota.size',CPP)
+        self.assertIn('static_cast<uint64_t>(transferReceived) * 10000 / transferSize',CPP)
         self.assertIn('_ota.progressBasisPoints',CPP)
         self.assertIn('const bool numericProgress = download || _ota.stage == S::BootChecking',CPP)
         self.assertIn('if (!discovery && numericProgress)',CPP)
@@ -99,6 +99,27 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
             self.assertIn('"'+phase+'"',CPP)
         self.assertIn('SHA %.12s',CPP); self.assertIn('SIG %.8s',CPP)
         self.assertIn('char safe[25]',CPP)
+    def test_delta_progress_uses_network_bytes_without_changing_target(self):
+        block = CPP.split('    const uint32_t transferSize =', 1)[1].split('    // Byte/health progress', 1)[0]
+        code = '#include <algorithm>\n#include <cstdint>\n'
+        code += 'struct Snapshot { bool deltaTransfer; uint32_t transferSize, transferReceived, size, received; uint16_t progressBasisPoints; };\n'
+        code += 'constexpr uint16_t progress(Snapshot _ota, bool download) { const uint32_t transferSize =' + block + '\nreturn bp; }\n'
+        code += '''
+static_assert(progress({false,100,50,1000,250,0},true)==2500);
+static_assert(progress({true,100,50,1000,0,0},true)==5000);
+static_assert(progress({true,100,101,1000,0,0},true)==10000);
+static_assert(progress({true,0,0,1000,0,0},true)==0);
+static_assert(progress({true,100,100,1000,0,7500},false)==7500);
+'''
+        compilers=sorted(Path('C:/Espressif/tools/riscv32-esp-elf').glob('*/riscv32-esp-elf/bin/riscv32-esp-elf-g++.exe'))
+        self.assertTrue(compilers)
+        with tempfile.TemporaryDirectory(dir=R/'.artifacts') as directory:
+            path=Path(directory)/'delta_progress.cpp';path.write_text(code,encoding='utf8')
+            result=subprocess.run([str(compilers[-1]),'-std=c++17','-fsyntax-only',str(path)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn('_ota.deltaTransfer ? "DELTA " : ""',CPP)
+        self.assertIn('const uint32_t shownSize = download ? transferSize : _ota.size;',CPP)
+        self.assertIn('place(_otaBytes, 0, stageIcon ? 194 : 162)',CPP)
     def test_meaningful_stage_icon_and_terminal_version(self):
         self.assertIn('createIcon(_otaPage, Icon::Refresh, 88, Gold); place(_otaStageIcon, 176, 106)',CPP)
         self.assertTrue(176+88<=440 and 106+88<=194 and 58+48<=106)

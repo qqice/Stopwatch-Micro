@@ -13,7 +13,10 @@ class OtaMemoryTests(unittest.TestCase):
   model=(R/'main/host/mosaico_ota_buffer_model.h').read_text()
   self.assertIn('ChunkCapacity=4096, BodyCapacity=8192',model)
   self.assertIn('otaBuffers.acquire(otaBufferAllocator)',update)
-  self.assertNotIn('heap_caps_malloc(',update)
+  # Optional delta storage is PSRAM only; the NOR source stays boot-reserved.
+  self.assertEqual(update.count('heap_caps_malloc('),2)
+  self.assertIn('heap_caps_malloc(2049,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)',update)
+  self.assertIn('heap_caps_malloc(plan.size,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)',update)
   self.assertNotIn('new (std::nothrow)',update)
   self.assertLess(update.index('ota_buffer_not_internal'),update.index('beginManifest('))
  def test_allocator_caps_exclude_rtc_sdk_candidate(self):

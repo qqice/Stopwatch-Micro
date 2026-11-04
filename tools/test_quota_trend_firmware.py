@@ -208,6 +208,10 @@ static_assert(rejection(),"strict point/schema rejection preserves the whole cac
         for name in ('token_history.cpp','network_quota.cpp','view_mosaico.cpp'):
             entry=next(e for e in entries if e['file'].endswith(name))
             command=re.sub(r' -o \S+ -c ', ' -fsyntax-only ',entry['command'])
+            # Keyboard/editor already uses font18 in HEAD. Bare LV_CONF_SKIP
+            # compilation needs its real application font enabled explicitly.
+            if name=='view_mosaico.cpp':
+                command+=' -DLV_FONT_MONTSERRAT_18=1'
             result=subprocess.run(command,cwd=entry['directory'],capture_output=True,text=True)
             logs.append(name+'\n'+result.stdout+result.stderr)
             (R/'.artifacts/mosaico/quota-trend-target-syntax.log').write_text('\n'.join(logs),encoding='utf8')

@@ -1224,7 +1224,9 @@ void CodexMicroView::renderOta() {
     // Idle describes only the running image, never a cached or unknown candidate.
     if (idle) lv_obj_add_flag(_otaTarget, LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(_otaTarget, LV_OBJ_FLAG_HIDDEN);
     const bool download = _ota.stage == S::Downloading || _ota.stage == S::Verifying;
-    const uint16_t bp = download ? (_ota.size ? static_cast<uint16_t>(std::min<uint64_t>(10000, static_cast<uint64_t>(_ota.received) * 10000 / _ota.size)) : 0)
+    const uint32_t transferSize = _ota.deltaTransfer ? _ota.transferSize : _ota.size;
+    const uint32_t transferReceived = _ota.deltaTransfer ? _ota.transferReceived : _ota.received;
+    const uint16_t bp = download ? (transferSize ? static_cast<uint16_t>(std::min<uint64_t>(10000, static_cast<uint64_t>(transferReceived) * 10000 / transferSize)) : 0)
         : std::min<uint16_t>(10000, _ota.progressBasisPoints);
     // Byte/health progress are the only meaningful percentages; installation is an activity icon.
     const bool numericProgress = download || _ota.stage == S::BootChecking;
@@ -1237,13 +1239,14 @@ void CodexMicroView::renderOta() {
     if (!discovery && numericProgress) {
         lv_obj_remove_flag(_otaPercent, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_otaMeter, LV_OBJ_FLAG_HIDDEN);
         percent(bp, text, sizeof(text)); setText(_otaPercent, text, download ? Green : Cyan);
-        setMeter(_otaMeter, bp, download ? _ota.size != 0 : _ota.stage == S::BootChecking, download ? Green : Cyan);
+        setMeter(_otaMeter, bp, download ? transferSize != 0 : _ota.stage == S::BootChecking, download ? Green : Cyan);
     } else for (auto* obj : {_otaPercent, _otaMeter}) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
     place(_otaBytes, 0, stageIcon ? 194 : 162);
     if (!discovery && (download || _ota.size)) {
-        const bool mega = _ota.size >= 1000000;
+        const uint32_t shownSize = download ? transferSize : _ota.size;
+        const bool mega = shownSize >= 1000000;
         const double divisor = mega ? 1000000.0 : 1000.0;
-        if (download) std::snprintf(text, sizeof(text), "%.2f / %.2f %sB", _ota.received / divisor, _ota.size / divisor, mega ? "M" : "K");
+        if (download) std::snprintf(text, sizeof(text), "%s%.2f / %.2f %sB", _ota.deltaTransfer ? "DELTA " : "", transferReceived / divisor, shownSize / divisor, mega ? "M" : "K");
         else std::snprintf(text, sizeof(text), "%.2f %sB", _ota.size / divisor, mega ? "M" : "K");
         lv_label_set_text(_otaBytes, text); lv_obj_remove_flag(_otaBytes, LV_OBJ_FLAG_HIDDEN);
     } else lv_obj_add_flag(_otaBytes, LV_OBJ_FLAG_HIDDEN);

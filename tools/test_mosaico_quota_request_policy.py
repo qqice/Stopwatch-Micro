@@ -44,6 +44,7 @@ struct Owner {
  }
  constexpr void recordTwtCycle(MosaicoTwt::CyclePhase,MosaicoTwt::CycleReason,uint8_t value) { flags=value; }
  constexpr void publishTwt() {}
+ constexpr void noteStartup(unsigned) {} // Existing timestamp has no request-policy side effects.
  constexpr void closeWindow(MosaicoTwt::CycleReason value) { updateWindow=false; reason=value; }
  constexpr void wait(int value) { waitMs=value; }
  constexpr void run() {

@@ -13,6 +13,7 @@
 #include <host/standby_sleep.h>
 #include <host/network_quota.h>
 #include <host/touch_sleep.h>
+#include <host/token_history.h>
 #ifdef MOSAICO_NAND_STORE
 #include <host/gauge_trace_nand_backend.h>
 #endif
@@ -50,7 +51,7 @@ struct StorageAdmission {
  explicit operator bool() const { return held.owns_lock()&&storageLeaseDepth==0; }
 };
 std::mutex snapshotLock; // Never held over flash, crypto, NVS, or telemetry calls.
-UiSnapshot ui{0, 0, 0, UiStage::Idle, "", "-", "", "", "", -1, -1, false, false, false, 0};
+UiSnapshot ui{0, 0, 0, UiStage::Idle, "", "-", "", "", "", -1, -1, false, false, false, 0, false, 0, 0};
 std::atomic<bool> approvedRequest{false}, autoInstall{false};
 std::atomic<bool> preferenceLoaded{false};
 std::atomic<bool> imageReady{false}; // Retained staged image, distinct from historical boot verification.
@@ -71,6 +72,10 @@ std::atomic<bool> maintenanceMode{false};
 MosaicoOtaMaintenance::Grant maintenanceGrant;
 bool currentHashChecked = false, currentHashValid = false;
 char currentHash[65]{};
+uint32_t currentImageSize=0;
+std::atomic<bool> fullFallbackUsed{false};
+std::atomic<bool> deltaTransfer{false};
+std::atomic<uint32_t> transferReceived{0}, transferSize{0};
 esp_ota_handle_t handle = 0;
 const esp_partition_t* target = nullptr;
 std::atomic<uint32_t> expectedSize{0}, received{0};
@@ -282,7 +287,7 @@ bool currentImageHash()
     if (ok) ok = psa_hash_finish(&operation, digest, sizeof(digest), &length) == PSA_SUCCESS && length == 32;
     psa_hash_abort(&operation);
     heap_caps_free(buffer);
-    if (ok) hashHex(digest, currentHash);
+    if (ok) { hashHex(digest, currentHash); currentImageSize=metadata.image_len; }
     currentHashValid = ok;
     return ok;
 }
@@ -338,6 +343,8 @@ bool requestLocked(bool automatic, bool preserveAge = false, bool maintenance = 
     if (!currentReady()) return reject("running_or_layout_not_ready");
     if (!(maintenance ? maintenancePowerSafe(true) : downloadPowerSafe())) return reject("gauge_not_valid_sealed_cfg0_cal0");
     automaticMode = automatic;
+    fullFallbackUsed=false; deltaTransfer=false; transferReceived=transferSize=0;
+    { std::lock_guard<std::mutex> uiGuard(snapshotLock); ui.deltaTransfer=false; ui.transferReceived=ui.transferSize=0; }
     received = expectedSize = 0;
     pending = true;
     std::snprintf(reason, sizeof(reason), "requested");
@@ -354,6 +361,7 @@ bool validateDescriptor(const char* json, Descriptor& out, const char*& error)
     const auto invalid = [&](const char* why) { error = why; return false; };
     if (psa_crypto_init() != PSA_SUCCESS) return invalid("crypto_init");
     if (!json || std::strlen(json) > 2048) return invalid("manifest_length");
+    if(!JsonNestingValid(json,std::strlen(json)))return invalid("manifest_json_depth");
     const char* end = nullptr;
     cJSON* m = cJSON_ParseWithOpts(json, &end, true);
     if (!m) return invalid("manifest_json");
@@ -445,6 +453,50 @@ bool verifySignedImageDescriptor(const char* json,VerifiedImageDescriptor& out)
     if(!validateDescriptor(json,verified,error)||!verified.versionSigned)return false;
     out.size=verified.size;std::memcpy(out.hash,verified.hash,sizeof(out.hash));
     std::memcpy(out.version,verified.version,sizeof(out.version));return true;
+}
+bool runningImageDescriptor(VerifiedImageDescriptor& out)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    out={};
+    if(!currentImageHash())return false;
+    out.size=currentImageSize;
+    for(unsigned i=0;i<32;++i) {
+        const auto nibble=[](char c){return c<='9'?c-'0':c-'a'+10;};
+        out.hash[i]=static_cast<uint8_t>((nibble(currentHash[2*i])<<4)|nibble(currentHash[2*i+1]));
+    }
+    std::snprintf(out.version,sizeof(out.version),"%s",esp_app_get_description()->version);
+    return true;
+}
+bool readRunningImage(uint32_t offset,uint8_t* data,size_t length)
+{
+    // Called synchronously by the network owner's decoder, never reads the candidate.
+    const auto* running=esp_ota_get_running_partition();
+    if(!currentHashValid||!data||!length||!exactSlot(running)||offset>currentImageSize||
+       length>currentImageSize-offset)return false;
+    return esp_partition_read(running,offset,data,length)==ESP_OK;
+}
+void recordTransferProgress(bool delta,uint32_t bytes,uint32_t total,bool reconstructing)
+{
+    deltaTransfer=delta; transferReceived=bytes; transferSize=total;
+    std::lock_guard<std::mutex> guard(snapshotLock);
+    ui.deltaTransfer=delta; ui.transferReceived=bytes; ui.transferSize=total;
+    if(reconstructing) { ui.stage=UiStage::Verifying; statusStage=UiStage::Verifying; }
+    ++ui.revision;
+}
+bool resetDownloadForFullFallback()
+{
+    StorageAdmission admission; if(!admission)return false;
+    std::lock_guard<std::mutex> guard(lock);
+    if(!active.load()||selected.load()||imageReady.load()||fullFallbackUsed)return false;
+    // Retain SHA/size/version authorization and maintenance grant. A failed power,
+    // write, or security check already closed active and cannot enter this path.
+    fullFallbackUsed=true;
+    if(writing)esp_ota_abort(handle);
+    writing=false; handle=0;
+    if(hashLive)psa_hash_abort(&hash);
+    hashLive=false; received=0;
+    recordTransferProgress(false,0,0);
+    return true;
 }
 bool busy() { return active.load() || approvedRequest.load() || checkQueued.load() || checking.load() || installQueued.load() || rebootQueued.load() || bootPending.load(); }
 bool healthPending() { return bootPending.load(); }
@@ -748,6 +800,8 @@ bool beginManifest(const char* json)
     if (!validateDescriptor(json, d, error)) return reject(error);
     if (maintenanceMode && (!d.versionSigned || !maintenanceGrant.matches(d.sha))) return reject("maintenance_manifest_pin");
     if (approvedHash[0] && std::strcmp(d.sha, approvedHash)) return reject("approved_manifest_changed");
+    if(fullFallbackUsed && (d.size!=expectedSize.load()||std::memcmp(d.hash,expectedHash,32)))
+        return reject("fallback_target_changed");
     expectedSize = d.size; signedVersion = d.versionSigned; std::memcpy(expectedHash, d.hash, 32);
     { std::lock_guard<std::mutex> uiGuard(snapshotLock);
       std::snprintf(ui.targetVersion, sizeof(ui.targetVersion), "%s", d.version);
@@ -783,7 +837,7 @@ bool writeChunk(uint32_t offset, const uint8_t* data, size_t length)
     if (esp_ota_write(handle, data, length) != ESP_OK) return reject("ota_write");
     if (psa_hash_update(&hash, data, length)) return reject("hash_update");
     received += length;
-    publish(UiStage::Downloading);
+    publish(deltaTransfer.load()?UiStage::Verifying:UiStage::Downloading);
     return true;
 }
 bool finishDownload()
@@ -999,8 +1053,10 @@ void status(char* out, size_t length)
     const size_t used = std::strlen(out);
     const char* stages[] = {"idle", "checking", "available", "waiting_power", "downloading", "verifying", "ready_install", "installing", "ready_reboot", "boot_checking", "complete", "failed"};
     const unsigned stage = static_cast<unsigned>(statusStage.load());
-    std::snprintf(out + used, length - used, " automatic_check=0 stage=%s image_verified=%d selected=%d",
-        stage < sizeof(stages)/sizeof(stages[0]) ? stages[stage] : "unknown", verified.load(), selected.load());
+    std::snprintf(out + used, length - used, " automatic_check=0 stage=%s image_verified=%d selected=%d transfer_mode=%s transfer_bytes=%lu/%lu fallback=%d",
+        stage < sizeof(stages)/sizeof(stages[0]) ? stages[stage] : "unknown", verified.load(), selected.load(),
+        deltaTransfer.load()?"delta":"full",static_cast<unsigned long>(deltaTransfer.load()?transferReceived.load():received.load()),
+        static_cast<unsigned long>(deltaTransfer.load()?transferSize.load():expectedSize.load()),fullFallbackUsed.load());
     // Diagnostic evidence only: old journals remain valid when this key is absent.
     // Do not read NVS during OTA writes or block behind the network owner.
     if (busy()) return;

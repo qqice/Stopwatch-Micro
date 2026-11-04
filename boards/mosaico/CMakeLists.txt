@@ -9,6 +9,7 @@ set(MOSAICO_BOARD ON)
 # Explicit OFF remains available only for a deliberate timing comparison.
 option(MOSAICO_GAUGE_DEFER_ENGINE_DIAGNOSTICS "Defer optional engine diagnostics until boot uptime 5 minutes" ON)
 set(EXTRA_COMPONENT_DIRS
+ "${STOPWATCH_ROOT}/components/esp_delta_ota"
  "${STOPWATCH_ROOT}/components/mooncake"
  "${STOPWATCH_ROOT}/components/mooncake_log"
  "${STOPWATCH_ROOT}/components/smooth_ui_toolkit"

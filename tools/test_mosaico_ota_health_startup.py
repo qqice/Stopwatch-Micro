@@ -149,7 +149,8 @@ static void ulTaskNotifyTake(int clear,unsigned ms){++waits;if(clear!=1||ms!=20)
  if(MODE==1)pending=false;
  if((MODE==1||MODE==2)&&waits==3){test_results[0]=!heavy&&!markSuccess&&!bad?0:1;test_done();}
 }
-struct NetworkQuota{void run(){
+struct NetworkQuota{void noteStartup(unsigned){} // Existing production timestamp, outside barrier policy.
+void run(){
 '''+body+r'''
  ++heavy;}};
 extern "C" void _start(){pending=MODE!=3;markSuccess=false;NetworkQuota q;q.run();test_results[0]=(MODE==0?heavy==1&&waits==1&&probes==2:MODE==3&&heavy==1&&!waits&&!probes)?0:2;test_done();}

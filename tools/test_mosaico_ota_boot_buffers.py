@@ -91,8 +91,12 @@ void updatePrefix(){
   self.assertEqual(N.count('otaBuffers.acquire('),1)
   update=N.split('void NetworkQuota::updateFirmware()',1)[1].split('void NetworkQuota::wakeForFirmwareUpdate()',1)[0]
   self.assertLess(update.index('ota_boot_buffers_unavailable'),update.index('beginManifest('))
-  for forbidden in ('new (std::nothrow)','heap_caps_malloc(', 'heap_caps_free(', 'xTaskCreate(', 'std::mutex'):
+  for forbidden in ('new (std::nothrow)', 'xTaskCreate(', 'std::mutex'):
    self.assertNotIn(forbidden,update)
+  self.assertEqual(update.count('heap_caps_malloc('),2)
+  self.assertIn('heap_caps_malloc(2049,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)',update)
+  self.assertIn('heap_caps_malloc(plan.size,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)',update)
+  self.assertEqual(update.count('heap_caps_free('),1) # Strict-PSRAM RAII deleter only.
   self.assertIn('~BodyScope(){std::memset(p,0,BodyCapacity);}',update)
   self.assertIn('std::memset(body,0,BodyCapacity);',update)
   self.assertEqual(update.count('cJSON_ParseWithLength(body, static_cast<size_t>(used))'),2)

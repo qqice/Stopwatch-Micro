@@ -1,4 +1,4 @@
-"""Immutable, read-only OTA release serving (stdlib only; no signing keys)."""
+"""Immutable OTA serving; optional verified-image archival, no signing keys."""
 from __future__ import annotations
 
 import base64
@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from ota_delta import DeltaStore
 
 DEFAULT_LAYOUT = "mosaico-dual-v1"
 LAYOUT_IMAGE_CAPS = {DEFAULT_LAYOUT: 0x3E0000, "mosaico-dual-v2": 0x600000}
@@ -85,8 +86,8 @@ def _unique_object(pairs):
 
 
 class ImmutableReleaseStore:
-    """Read bounded fixed filenames once; later disk changes cannot mix releases."""
-    def __init__(self, directory: Path):
+    """Snapshot bounded release files once; optional archival cannot alter this snapshot."""
+    def __init__(self, directory: Path, *, delta_enabled=False, delta_base_dir=None, delta_max_percent=60):
         directory = Path(directory)
         with (directory / "manifest.json").open("rb") as handle:
             raw = handle.read(4097)
@@ -100,6 +101,8 @@ class ImmutableReleaseStore:
         self._manifest = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
         self._image = image
         self._sha256 = manifest["sha256"]
+        self._delta = DeltaStore(image, self._sha256, image_capacity(manifest["layout"]),
+                                 enabled=delta_enabled, base_dir=delta_base_dir, max_percent=delta_max_percent)
 
     def response(self, target: str) -> bytes:
         parsed = urlsplit(target)
@@ -109,18 +112,28 @@ class ImmutableReleaseStore:
             if parsed.query or "?" in target:
                 raise ValueError("manifest does not accept query")
             return self._manifest
-        if parsed.path != "/v1/ota/chunk":
+        if parsed.path == "/v1/ota/plan":
+            query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+            if set(query) != {"base", "target"} or any(len(v) != 1 for v in query.values()):
+                raise ValueError("invalid OTA plan query")
+            base, target_sha = query["base"][0], query["target"][0]
+            if HASH_RE.fullmatch(base) is None or HASH_RE.fullmatch(target_sha) is None or target_sha != self._sha256:
+                raise ValueError("invalid OTA plan hash")
+            return json.dumps(self._delta.plan(base), separators=(",", ":")).encode("utf-8")
+        if parsed.path not in ("/v1/ota/chunk", "/v1/ota/delta"):
             raise LookupError("unknown OTA route")
         query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
         if set(query) != {"sha256", "offset"} or any(len(v) != 1 for v in query.values()):
             raise ValueError("invalid OTA query")
         sha, offset = query["sha256"][0], query["offset"][0]
-        if HASH_RE.fullmatch(sha) is None or sha != self._sha256:
+        is_delta = parsed.path == "/v1/ota/delta"
+        if HASH_RE.fullmatch(sha) is None or (not is_delta and sha != self._sha256):
             raise ValueError("release hash mismatch")
         if re.fullmatch(r"0|[1-9][0-9]{0,9}", offset) is None:
             raise ValueError("invalid OTA offset")
         start = int(offset)
-        if start >= len(self._image):
+        image = self._delta.image(sha) if is_delta else self._image
+        if start >= len(image):
             raise ValueError("OTA offset outside image")
         return json.dumps({"offset": start, "data": base64.b64encode(
-            self._image[start:start + CHUNK_SIZE]).decode("ascii")}, separators=(",", ":")).encode("utf-8")
+            image[start:start + CHUNK_SIZE]).decode("ascii")}, separators=(",", ":")).encode("utf-8")

@@ -16,6 +16,7 @@
 #include "first_quota_refresh_policy.h"
 #include "system_clock.h"
 #include <ota/panic_capture.h>
+#include <ota/mosaico_delta.h>
 #include <hal/hal.h>
 #include <esp_heap_caps.h>
 #include <esp_memory_utils.h>
@@ -2268,6 +2269,7 @@ void NetworkQuota::updateFirmware()
     if (!requestJson("/v1/ota/manifest", body, BodyCapacity, used)) {
         MosaicoOta::fail("manifest_download"); return;
     }
+    if(used<=0||!JsonNestingValid(body,static_cast<size_t>(used))) {MosaicoOta::fail("manifest_json_depth");return;}
     cJSON* manifest = cJSON_ParseWithLength(body, static_cast<size_t>(used));
     const cJSON* sizeValue = manifest ? cJSON_GetObjectItemCaseSensitive(manifest, "size") : nullptr;
     char imageHash[65]{};
@@ -2279,10 +2281,62 @@ void NetworkQuota::updateFirmware()
     const uint32_t size = fieldsOk ? static_cast<uint32_t>(sizeValue->valuedouble) : 0;
     cJSON_Delete(manifest);
     if (!fieldsOk) { MosaicoOta::fail("manifest_metadata"); return; }
+    // Preserve the original signed bytes before reusing the reserved JSON body.
+    // Allocation is strictly PSRAM; inability to optimize never gates full OTA.
+    struct PsramFree { void operator()(uint8_t* p) const {heap_caps_free(p);} };
+    std::unique_ptr<uint8_t,PsramFree> savedManifest;
+    MosaicoOta::VerifiedImageDescriptor signedTarget{},baseImage{};
+    const bool signedV2=used>0&&used<=2048&&MosaicoOta::verifySignedImageDescriptor(body,signedTarget);
+    if(signedV2) {
+        savedManifest.reset(static_cast<uint8_t*>(heap_caps_malloc(2049,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)));
+        if(savedManifest){std::memcpy(savedManifest.get(),body,used);savedManifest.get()[used]=0;}
+    }
     MosaicoOtaBreadcrumb(3, 0); // validation + inactive-slot erase
     if (!MosaicoOta::beginManifest(body)) return;
     const int64_t deadline = esp_timer_get_time() + 600LL * 1000000;
-    for (uint32_t offset = 0; offset < size;) {
+    bool deltaCompleted=false;
+    if(savedManifest&&MosaicoOta::runningImageDescriptor(baseImage)&&esp_timer_get_time()<deadline) {
+        char baseSha[65];MosaicoDelta::hashHex(baseImage.hash,baseSha);
+        char path[192];
+        const int n=std::snprintf(path,sizeof(path),"/v1/ota/plan?base=%s&target=%s",baseSha,imageHash);
+        MosaicoDelta::Plan plan{};
+        if(n>0&&n<static_cast<int>(sizeof(path))&&requestJson(path,body,BodyCapacity,used)&&
+           MosaicoDelta::parsePlan(body,static_cast<size_t>(used),baseImage,signedTarget,plan)) {
+            std::unique_ptr<uint8_t,PsramFree> patch(static_cast<uint8_t*>(
+                heap_caps_malloc(plan.size,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)));
+            if(patch) {
+                bool downloaded=true;
+                MosaicoOta::recordTransferProgress(true,0,plan.size);
+                for(uint32_t offset=0;downloaded&&offset<plan.size;) {
+                    std::snprintf(path,sizeof(path),"/v1/ota/delta?sha256=%s&offset=%lu",plan.sha256,
+                                  static_cast<unsigned long>(offset));
+                    bool fetched=false;
+                    for(unsigned attempt=0;attempt<3&&esp_timer_get_time()<deadline;++attempt) {
+                        if(requestJson(path,body,BodyCapacity,used)){fetched=true;break;}
+                        if(attempt<2)vTaskDelay(pdMS_TO_TICKS(300U<<attempt));
+                    }
+                    if(!fetched){downloaded=false;break;}
+                    size_t count=0;
+                    downloaded=MosaicoDelta::decodeChunk(body,static_cast<size_t>(used),offset,plan.size,
+                                                        chunk,ChunkCapacity,count);
+                    if(!downloaded)break;
+                    std::memcpy(patch.get()+offset,chunk,count);offset+=static_cast<uint32_t>(count);
+                    MosaicoOta::recordTransferProgress(true,offset,plan.size);
+                    vTaskDelay(pdMS_TO_TICKS(1));
+                }
+                deltaCompleted=downloaded&&esp_timer_get_time()<deadline&&
+                    MosaicoDelta::reconstruct(patch.get(),plan,baseImage,signedTarget,chunk,ChunkCapacity,deadline);
+                if(!deltaCompleted) {
+                    // Codec/network/base/patch errors may retry this exact signed target
+                    // once. Safety/write failures have revoked active and cannot revive.
+                    if(!MosaicoOta::resetDownloadForFullFallback())return;
+                    if(!MosaicoOta::beginManifest(reinterpret_cast<const char*>(savedManifest.get())))return;
+                }
+            }
+        }
+    }
+    savedManifest.reset();
+    for (uint32_t offset = 0; !deltaCompleted && offset < size;) {
         MosaicoOtaBreadcrumb(4, offset); // probe before allocating HTTP/JSON
         if ((offset % 65536U) == 0 && ![&]() { MosaicoHeapProbeScope probe(MosaicoHeapProbeStage::DownloadChunkBoundary); return heap_caps_check_integrity_all(true); }()) {
             MosaicoOta::fail("heap_during_ota"); return;
@@ -2304,6 +2358,7 @@ void NetworkQuota::updateFirmware()
         }
         if (!downloaded) { MosaicoOta::fail("chunk_download"); return; }
         MosaicoOtaBreadcrumb(6, offset); // JSON allocation / decode / free
+        if(used<=0||!JsonNestingValid(body,static_cast<size_t>(used))) {MosaicoOta::fail("chunk_json_depth");return;}
         cJSON* root = cJSON_ParseWithLength(body, static_cast<size_t>(used));
         const cJSON* position = root ? cJSON_GetObjectItemCaseSensitive(root, "offset") : nullptr;
         const cJSON* data = root ? cJSON_GetObjectItemCaseSensitive(root, "data") : nullptr;

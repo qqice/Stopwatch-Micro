@@ -41,6 +41,9 @@ class ServiceConfig:
     device_token: str
     additional_hosts: tuple[str, ...] = ()
     history_db: Path | None = None
+    ota_delta_enabled: bool = False
+    ota_delta_base_dir: Path | None = None
+    ota_delta_max_percent: int = 60
 
 
 def load_config(path: Path) -> ServiceConfig:
@@ -83,7 +86,18 @@ def load_config(path: Path) -> ServiceConfig:
     history_path = (config_parent / history_value).resolve() if history_value else config_parent / "private" / "history.sqlite3"
     if not history_path.is_relative_to(config_parent):
         raise BridgeError("history_db must stay under the configuration directory")
-    return ServiceConfig(host, port, token, tuple(dict.fromkeys(x for x in additional if x != host)), history_path)
+    delta_enabled = raw.get("ota_delta_enabled", False)
+    delta_percent = raw.get("ota_delta_max_percent", 60)
+    delta_value = raw.get("ota_delta_base_dir", "private/ota-bases")
+    if type(delta_enabled) is not bool or type(delta_percent) is not int or not 10 <= delta_percent <= 90:
+        raise BridgeError("invalid OTA delta configuration")
+    if not isinstance(delta_value, str) or not delta_value or Path(delta_value).is_absolute():
+        raise BridgeError("invalid ota_delta_base_dir")
+    delta_path = (config_parent / delta_value).resolve()
+    if not delta_path.is_relative_to(config_parent):
+        raise BridgeError("ota_delta_base_dir must stay under the configuration directory")
+    return ServiceConfig(host, port, token, tuple(dict.fromkeys(x for x in additional if x != host)), history_path,
+                         delta_enabled, delta_path, delta_percent)
 
 
 class SnapshotStore:
@@ -301,7 +315,8 @@ def run(args: argparse.Namespace) -> int:
     try:
         config = load_config(args.config)
         release_dir = args.config.parent / "ota-release"
-        release_store = ImmutableReleaseStore(release_dir) if release_dir.exists() else None
+        release_store = ImmutableReleaseStore(release_dir, delta_enabled=config.ota_delta_enabled,
+            delta_base_dir=config.ota_delta_base_dir, delta_max_percent=config.ota_delta_max_percent) if release_dir.exists() else None
         history = HistoryStore(config.history_db if config.history_db is not None else args.config.parent / "private" / "history.sqlite3")
         collector = QuotaCollector(lambda: AppServerClient(locate_codex(args.codex_path)), SnapshotStore(), history)
         stop = threading.Event()

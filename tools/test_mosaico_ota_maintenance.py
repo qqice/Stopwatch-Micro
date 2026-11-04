@@ -70,10 +70,16 @@ namespace mosaico_wifi_rx_observer {void request(bool){}void service(bool){}stru
 #define portTICK_PERIOD_MS 1
 void vTaskDelay(int ms){++delays;clockUs+=int64_t(ms)*1000;if(waitFault==1)++usbUnmounts;if(waitFault==2)clockUs+=30000000;if(waitFault==3)boot=&parts[1];if(waitFault==4)validSdk=false;if(waitFault==5)usb=false;if(waitFault==6)clockUs-=2000;if(waitFault==7)clockUs+=250000;}
 namespace MosaicoOtaLayout {bool imageFits(int,int,uint32_t s){return s<=0x7d0000;}}
+// Existing network-owner queue notification is outside the maintenance power model.
+struct NetworkQuotaFixture {void notifyOtaQueued(){}};
+NetworkQuotaFixture& GetNetworkQuota(){static NetworkQuotaFixture owner;return owner;}
 namespace MosaicoOta {
 std::mutex lock,snapshotLock;
 struct StorageAdmission {explicit operator bool()const{return !storageBusy && storageLeaseDepth==0;}};
 UiSnapshot ui{};Atomic<bool> active=false,pending=false,approvedRequest=false,autoInstall=false,imageReady=false,selected=false,verified=false,checkQueued=false,checking=false,installQueued=false,rebootQueued=false;
+// Actual requestLocked/beginManifest/writeChunk now reference Delta RAM diagnostics.
+Atomic<bool> fullFallbackUsed=false,deltaTransfer=false;
+Atomic<uint32_t> transferReceived=0,transferSize=0;
 Atomic<uint32_t> expectedSize=0,received=0,requestedAtMs=0;Atomic<const esp_partition_t*> cachedRunning=nullptr;
 Atomic<UiStage> statusStage=UiStage::Idle;
 Atomic<bool> maintenanceMode=false;bool writing=false,hashLive=false,automaticMode=false,usbBypass=false,signedVersion=false;
@@ -95,6 +101,7 @@ static const char* B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 using namespace MosaicoOta;
 static void reset(){storageBusy=targetSame=hashFault=false;storageLeaseDepth=0;usbUnmounts=0;usbSuspended=reconnectInRaw=false;usbConnected=true;clockUs=1000000;usb=rawOk=validSdk=signatureOk=true;scale=false;critical=true;rawFault=busyReads=waitFault=delays=rawHook=0;detachAtSelector=failRawAtEnd=expireAtEnd=expireAtJournal=detachBeforeFinish=false;boot=&parts[0];
  erases=writes=aborts=ends=selectors=restarts=rawReads=journals=telemetryReads=historyReads=scaleReads=0,policyReads=0;active=pending=approvedRequest=imageReady=selected=verified=checkQueued=checking=installQueued=rebootQueued=false;
+ fullFallbackUsed=deltaTransfer=false;transferReceived=transferSize=0;
  maintenanceMode=writing=hashLive=automaticMode=usbBypass=false;maintenanceGrant={};maintenancePower={};maintenanceRawUs=readySince=installSince=0;maintenanceRawBytes=0;expectedSize=received=requestedAtMs=0;handle=0;target=nullptr;approvedHash[0]=0;statusStage=UiStage::Idle;}
 static int stageImage(){if(!requestMaintenanceUpdate(A,600)||!takeRequest()||!beginManifest("a"))return 1;uint8_t data[4096]{};
  for(uint32_t off=0;off<70000;){uint32_t n=70000-off;if(n>3001)n=3001;if(!writeChunk(off,data,n))return 2;off+=n;}
