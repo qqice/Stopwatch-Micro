@@ -22,7 +22,8 @@ class DotWidgetsTests(unittest.TestCase):
         branch = ui.split('const char* proBadge = nullptr;', 1)[1].split('const size_t validWindows', 1)[0]
         self.assertIn('std::strcmp(bucket.id, "codex") == 0', branch)
         self.assertIn('std::strcmp(bucket.plan, "pro") == 0) proBadge = "Pro200";', branch)
-        self.assertIn('std::strcmp(bucket.plan, "prolite") == 0) proBadge = "PRO100";', branch)
+        self.assertIn('std::strcmp(bucket.plan, "prolite") == 0) proBadge = "Pro100";', branch)
+        self.assertIn('_cardBadges[i] = createText(_cards[i], 408, 40, 5, 0xE9EDF2)', ui)
         self.assertIn('if (proBadge)', branch)
         self.assertIn('lv_obj_add_flag(_cardTitles[i], LV_OBJ_FLAG_HIDDEN)', branch)
         self.assertIn('lv_obj_remove_flag(_cardBadges[i], LV_OBJ_FLAG_HIDDEN)', branch)
@@ -48,12 +49,12 @@ class DotWidgetsTests(unittest.TestCase):
         glyphs = dict((key, tuple(map(int, rows.split(","))))
                       for key, rows in re.findall(r"\{'(.)',\{([\d,]+)\}\}", HEADER))
         self.assertTrue(set("0123456789.%-?+CKMBTPROdhmro ") <= glyphs.keys())
-        for char in 'PRO100':
+        for char in 'Pro100':
             self.assertNotEqual(glyphs[char], glyphs['?'])
         for rows in glyphs.values():
             self.assertEqual(len(rows), 7)
             self.assertTrue(all(0 <= row < 32 for row in rows))
-        for text in ("99.99%", "100%", "Pro200", "999.99B", "?" * 32, "88888888888888888888888888888888"):
+        for text in ("99.99%", "100%", "Pro200", "Pro100", "999.99B", "?" * 32, "88888888888888888888888888888888"):
             dots = sum(row.bit_count() for char in text for row in glyphs[char])
             self.assertLessEqual(dots, 1120)
         self.assertNotEqual(glyphs["?"], glyphs["0"])

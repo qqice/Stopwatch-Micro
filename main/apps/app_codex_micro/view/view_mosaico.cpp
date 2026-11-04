@@ -1607,7 +1607,7 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         const char* proBadge = nullptr;
         if (std::strcmp(bucket.id, "codex") == 0) {
             if (std::strcmp(bucket.plan, "pro") == 0) proBadge = "Pro200";
-            else if (std::strcmp(bucket.plan, "prolite") == 0) proBadge = "PRO100";
+            else if (std::strcmp(bucket.plan, "prolite") == 0) proBadge = "Pro100";
         }
         if (proBadge) {
             lv_obj_add_flag(_cardTitles[i], LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_cardBadges[i], LV_OBJ_FLAG_HIDDEN);
