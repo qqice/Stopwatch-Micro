@@ -12,7 +12,10 @@ class BatteryDisplayTests(unittest.TestCase):
         self.assertIn('if (display.valid) std::snprintf',b)
         self.assertIn('static_cast<unsigned>(display.reportedSoc)',b)
         self.assertIn('Icon::Battery, color, display.reportedSoc, display.valid',b)
-        self.assertIn('telemetry.nominalConfigured ? "*" : "?"',b)
+        self.assertIn('display.nominalConfigured ? "*" : "?"',b)
+        self.assertNotIn('telemetry.nominalConfigured ? "*" : "?"',b)
+        # Changing the UI binding does not weaken supply or OTA policy.
+        self.assertIn('MosaicoOta::manualInstallPowerSafe(telemetry, tud_mounted(), critical)',b)
     def test_transient_failure_keeps_last_visible_value(self):
         b=self.body();guard=b.index('if (!display.valid && _batterySeen && _batteryValid)')
         self.assertLess(guard,b.index('char text[80]'))

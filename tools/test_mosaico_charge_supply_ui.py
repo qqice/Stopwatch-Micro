@@ -58,6 +58,8 @@ constexpr bool boundaries() {
 }
 struct Telemetry { bool valid=true;int currentMa=0;uint8_t reportedSoc=99; };
 struct Hal { Telemetry sample;int reads=0;bool forced=false;
+ struct Physical { Telemetry native; };
+ constexpr Physical physicalBatteryTelemetry(bool){return {sample};}
  constexpr Telemetry batteryPolicyTelemetry(bool refresh){++reads;forced=refresh;return sample;}
 };
 namespace PowerbankKeepalive {
