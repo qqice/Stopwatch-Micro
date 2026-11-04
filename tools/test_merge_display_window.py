@@ -33,6 +33,8 @@ namespace std {enum memory_order {memory_order_acquire};}
 struct Ready {bool value=true;constexpr bool load(std::memory_order) const {return value;}} port_ready;
 bool display=true; int panel_io=1;
 static constexpr int ESP_OK=0;
+using esp_err_t=int;
+#define ESP_LOGW(...) ((void)0)
 bool lockOk=true;int txResult=0,locks=0,unlocks=0,drains=0,sequence=0;
 bool valid=true,held=false;
 constexpr bool lvgl_port_lock(int ms) {valid=valid&&ms==100&&sequence==0;++locks;sequence=1;held=lockOk;return lockOk;}
@@ -72,9 +74,12 @@ static_assert(Test{}.check(3));static_assert(Test{}.check(4));static_assert(Test
         self.assertIn('if(!displayHeld)return false;',DELTA)
         self.assertIn('std::min<uint32_t>(256,plan.size-offset)',DELTA)
         self.assertIn('if(d.displayHeld) {d.displayHeld=false;GetHAL().endDisplayFlashWindow();}',DELTA)
-        self.assertIn('if(!window){ok=false;d.cancelled=true;}',DELTA)
+        self.assertIn('if(!window){if(ok)reason="finalize_display_window";ok=false;d.cancelled=true;}',DELTA)
         self.assertIn('const bool finalized=esp_delta_ota_finalize(decoder)==ESP_OK;',DELTA)
-        self.assertIn('if(ok)ok=finalized&&d.produced==target.size&&d.flush()&&d.written==target.size;',DELTA)
+        self.assertIn('ok=finalized&&d.produced==target.size&&d.flush()&&d.written==target.size;',DELTA)
+        for reason in ('notready','locktimeout','drainerror'):
+            self.assertIn('reason='+reason,HAL)
+        self.assertIn('reconstruct_failed reason=%s offset=%u prod=%u written=%u',DELTA)
         self.assertNotIn('StorageAdmission',DELTA)
         sdk=Path('C:/esp/v6.1/esp-idf/components/esp_lcd/spi/esp_lcd_panel_io_spi.c').read_text()
         tx=sdk.split('static esp_err_t panel_io_spi_tx_param(',2)[-1]

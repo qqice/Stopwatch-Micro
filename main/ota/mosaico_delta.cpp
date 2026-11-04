@@ -4,6 +4,7 @@
 #include <cJSON.h>
 #include <esp_delta_ota.h>
 #include <esp_timer.h>
+#include <esp_log.h>
 #include <psa/crypto.h>
 #include <mbedtls/base64.h>
 #include <algorithm>
@@ -156,35 +157,55 @@ bool reconstruct(const uint8_t* patch,const Plan& plan,
                  const MosaicoOta::VerifiedImageDescriptor& target,
                  uint8_t* internalChunk,size_t capacity,int64_t deadlineUs)
 {
-    if(!internalChunk||capacity!=4096||!base.size||!target.size||!patchHashMatches(patch,plan))return false;
+    if(!internalChunk||capacity!=4096||!base.size||!target.size||!patchHashMatches(patch,plan)) {
+        ESP_LOGW("MosaicoDelta", "reconstruct_failed reason=input_or_patch_hash offset=0 prod=0 written=0");
+        return false;
+    }
     Decoder d{internalChunk,base.size,target.size};d.deadline=deadlineUs;
-    if(psa_hash_setup(&d.hash,PSA_ALG_SHA_256)!=PSA_SUCCESS)return false;
+    if(psa_hash_setup(&d.hash,PSA_ALG_SHA_256)!=PSA_SUCCESS) {
+        ESP_LOGW("MosaicoDelta", "reconstruct_failed reason=hash_setup offset=0 prod=0 written=0");
+        return false;
+    }
     esp_delta_ota_cfg_t cfg{};cfg.user_data=&d;
     cfg.read_cb_with_user_data=Decoder::read;cfg.write_cb_with_user_data=Decoder::write;
     const auto decoder=esp_delta_ota_init(&cfg);
     bool ok=decoder!=nullptr;
+    const char* reason="decoder_init";
+    uint32_t failedOffset=0;
     MosaicoOta::recordTransferProgress(true,plan.size,plan.size,true);
     for(uint32_t offset=0;ok&&offset<plan.size;) {
+        failedOffset=offset;
         const uint32_t count=std::min<uint32_t>(256,plan.size-offset);
         {
             DisplayFlashWindow window(d);
-            ok=window&&esp_timer_get_time()<deadlineUs&&
-                esp_delta_ota_feed_patch(decoder,patch+offset,count)==ESP_OK;
+            if(!window){ok=false;reason="feed_display_window";}
+            else if(esp_timer_get_time()>=deadlineUs){ok=false;reason="feed_deadline";}
+            else {reason="feed_codec";ok=esp_delta_ota_feed_patch(decoder,patch+offset,count)==ESP_OK;}
         }
         offset+=count;vTaskDelay(pdMS_TO_TICKS(1));
     }
+    if(ok)failedOffset=plan.size;
     if(!ok)d.cancelled=true;
     if(decoder) {
         DisplayFlashWindow window(d);
-        if(!window){ok=false;d.cancelled=true;}
+        if(!window){if(ok)reason="finalize_display_window";ok=false;d.cancelled=true;}
         // Finalize must destroy the official reader even on lock/feed failure.
         const bool finalized=esp_delta_ota_finalize(decoder)==ESP_OK;
-        if(ok)ok=finalized&&d.produced==target.size&&d.flush()&&d.written==target.size;
+        if(ok) {
+            reason="finalize_or_tail";
+            ok=finalized&&d.produced==target.size&&d.flush()&&d.written==target.size;
+        }
     }
     if(ok)MosaicoOta::recordWorkPhase(MosaicoOta::WorkPhase::Verifying);
     uint8_t digest[32];size_t length=0;
-    if(ok)ok=psa_hash_finish(&d.hash,digest,sizeof(digest),&length)==PSA_SUCCESS&&length==32&&
-        !std::memcmp(digest,target.hash,32);
+    if(ok) {
+        reason="target_hash";
+        ok=psa_hash_finish(&d.hash,digest,sizeof(digest),&length)==PSA_SUCCESS&&length==32&&
+            !std::memcmp(digest,target.hash,32);
+    }
+    if(!ok)ESP_LOGW("MosaicoDelta", "reconstruct_failed reason=%s offset=%u prod=%u written=%u",
+                   reason,static_cast<unsigned>(failedOffset),static_cast<unsigned>(d.produced),
+                   static_cast<unsigned>(d.written));
     psa_hash_abort(&d.hash);
     if(decoder)esp_delta_ota_deinit(decoder);
     return ok;

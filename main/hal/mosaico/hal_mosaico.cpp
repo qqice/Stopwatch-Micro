@@ -3373,11 +3373,19 @@ void Hal::lvgl_init()
 // BEGIN MERGE DISPLAY FLASH WINDOW
 bool Hal::beginDisplayFlashWindow()
 {
-    if (!port_ready.load(std::memory_order_acquire) || !display || !panel_io) return false;
-    if (!lvgl_port_lock(100)) return false;
+    if (!port_ready.load(std::memory_order_acquire) || !display || !panel_io) {
+        ESP_LOGW(Tag, "display_flash_window reason=notready");
+        return false;
+    }
+    if (!lvgl_port_lock(100)) {
+        ESP_LOGW(Tag, "display_flash_window reason=locktimeout timeout_ms=100");
+        return false;
+    }
     // Public no-command/no-parameter transaction drains queued color DMA first.
-    if (esp_lcd_panel_io_tx_param(panel_io, -1, nullptr, 0) != ESP_OK) {
+    const esp_err_t drain = esp_lcd_panel_io_tx_param(panel_io, -1, nullptr, 0);
+    if (drain != ESP_OK) {
         lvgl_port_unlock();
+        ESP_LOGW(Tag, "display_flash_window reason=drainerror err=%d", static_cast<int>(drain));
         return false;
     }
     return true; // Caller retains GUI ownership until endDisplayFlashWindow().
