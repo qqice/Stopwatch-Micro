@@ -84,14 +84,17 @@ static_assert(Test{}.check(9));static_assert(Test{}.check(10));static_assert(Tes
         self.assertEqual(result.returncode,0,str(OUT/'hal-mock.log'))
 
     def test_callback_and_window_contract(self):
-        self.assertEqual(DELTA.count('if(!d.displayHeld||d.cancelled||'),2)
-        self.assertIn('if(!displayHeld||esp_timer_get_time()>=deadline)return false;',DELTA)
-        self.assertIn('GetHAL().beginDisplayFlashWindow(d.deadline)',DELTA)
+        self.assertNotIn('displayHeld',DELTA)
+        self.assertIn('if(cancelled||esp_timer_get_time()>=deadline)return false;',DELTA)
+        self.assertIn('held(GetHAL().beginDisplayFlashWindow(deadline))',DELTA)
+        self.assertIn('std::min<size_t>(4096,length)',DELTA)
         self.assertIn('std::min<uint32_t>(256,plan.size-offset)',DELTA)
-        self.assertIn('if(d.displayHeld) {d.displayHeld=false;GetHAL().endDisplayFlashWindow();}',DELTA)
-        self.assertIn('if(!window){if(ok)reason="finalize_display_window";ok=false;d.cancelled=true;}',DELTA)
+        self.assertEqual(DELTA.count('DisplayFlashWindow window('),2)
+        self.assertNotIn('DisplayFlashWindow',DELTA.split('bool reconstruct(',1)[1])
+        self.assertIn('~DisplayFlashWindow() {if(held)GetHAL().endDisplayFlashWindow();}',DELTA)
         self.assertIn('const bool finalized=esp_delta_ota_finalize(decoder)==ESP_OK;',DELTA)
         self.assertIn('ok=finalized&&d.produced==target.size&&d.flush()&&d.written==target.size;',DELTA)
+        self.assertEqual(DELTA.count('vTaskDelay(1);'),2)
         for reason in ('notready','locktimeout','drainerror'):
             self.assertIn('reason='+reason,HAL)
         self.assertIn('reconstruct_failed reason=%s offset=%u prod=%u written=%u',DELTA)

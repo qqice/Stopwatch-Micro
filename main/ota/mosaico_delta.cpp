@@ -46,59 +46,73 @@ bool uniqueKeys(const cJSON* root)
             if(!a->string||!b->string||!std::strcmp(a->string,b->string))return false;
     return true;
 }
+// Hold GUI ownership only for one bounded flash operation, never codec work.
+class DisplayFlashWindow {
+public:
+    explicit DisplayFlashWindow(int64_t deadline) : held(GetHAL().beginDisplayFlashWindow(deadline)) {}
+    ~DisplayFlashWindow() {if(held)GetHAL().endDisplayFlashWindow();}
+    explicit operator bool() const {return held;}
+    DisplayFlashWindow(const DisplayFlashWindow&)=delete;
+    DisplayFlashWindow& operator=(const DisplayFlashWindow&)=delete;
+private:
+    bool held;
+};
 struct Decoder {
     uint8_t* chunk;
     uint32_t baseSize,targetSize,produced=0,written=0;
     size_t buffered=0;
     bool cancelled=false;
-    bool displayHeld=false;
     int64_t deadline=0;
     psa_hash_operation_t hash=PSA_HASH_OPERATION_INIT;
+    esp_err_t fail() {cancelled=true;return ESP_FAIL;}
     bool flush() {
-        if(!displayHeld||esp_timer_get_time()>=deadline)return false;
+        if(cancelled||esp_timer_get_time()>=deadline)return false;
         if(!buffered)return true;
-        if(!MosaicoOta::writeChunk(written,chunk,buffered))return false;
+        bool ok=false;
+        {
+            DisplayFlashWindow window(deadline);
+            if(!window||cancelled||esp_timer_get_time()>=deadline){cancelled=true;return false;}
+            ok=MosaicoOta::writeChunk(written,chunk,buffered);
+        }
+        vTaskDelay(1); // GUI/main may advance between individual NOR writes.
+        if(!ok){cancelled=true;return false;}
         written+=static_cast<uint32_t>(buffered);buffered=0;return true;
     }
     static esp_err_t read(uint8_t* data,size_t length,int offset,void* opaque) {
         auto& d=*static_cast<Decoder*>(opaque);
-        // esp_delta_ota passes absolute signed offset, incremented after each read.
-        // Also bound the subsequent vendor int advance, not merely partition IO.
-        if(!d.displayHeld||d.cancelled||esp_timer_get_time()>=d.deadline||offset<0||!length||
+        // Bound the vendor signed offset advance before splitting flash reads.
+        if(d.cancelled||esp_timer_get_time()>=d.deadline||!data||offset<0||!length||
            static_cast<uint32_t>(offset)>d.baseSize||length>d.baseSize-static_cast<uint32_t>(offset)||
-           length>static_cast<size_t>(INT_MAX-offset))return ESP_FAIL;
-        return MosaicoOta::readRunningImage(static_cast<uint32_t>(offset),data,length)?ESP_OK:ESP_FAIL;
+           length>static_cast<size_t>(INT_MAX-offset))return d.fail();
+        while(length) {
+            const size_t count=std::min<size_t>(4096,length);
+            if(d.cancelled||esp_timer_get_time()>=d.deadline)return d.fail();
+            bool ok=false;
+            {
+                DisplayFlashWindow window(d.deadline);
+                if(!window||d.cancelled||esp_timer_get_time()>=d.deadline)return d.fail();
+                ok=MosaicoOta::readRunningImage(static_cast<uint32_t>(offset),data,count);
+            }
+            vTaskDelay(1);
+            if(!ok)return d.fail();
+            offset+=static_cast<int>(count);data+=count;length-=count;
+        }
+        return ESP_OK;
     }
     static esp_err_t write(const uint8_t* data,size_t length,void* opaque) {
         auto& d=*static_cast<Decoder*>(opaque);
-        if(!d.displayHeld||d.cancelled||esp_timer_get_time()>=d.deadline||!data||!length||d.produced>d.targetSize||
-           length>d.targetSize-d.produced)return ESP_FAIL;
-        if(psa_hash_update(&d.hash,data,length)!=PSA_SUCCESS)return ESP_FAIL;
+        if(d.cancelled||esp_timer_get_time()>=d.deadline||!data||!length||d.produced>d.targetSize||
+           length>d.targetSize-d.produced)return d.fail();
+        if(psa_hash_update(&d.hash,data,length)!=PSA_SUCCESS)return d.fail();
         d.produced+=static_cast<uint32_t>(length);
         while(length) {
             const size_t count=std::min<size_t>(4096-d.buffered,length);
             std::memcpy(d.chunk+d.buffered,data,count);
             d.buffered+=count;data+=count;length-=count;
-            if(d.buffered==4096&&!d.flush())return ESP_FAIL;
+            if(d.buffered==4096&&!d.flush())return d.fail();
         }
         return ESP_OK;
     }
-};
-// Acquire outside Storage/OTA owner locks. Cleanup may run without a window,
-// but Decoder callbacks then fail closed before touching either flash path.
-class DisplayFlashWindow {
-public:
-    explicit DisplayFlashWindow(Decoder& decoder) : d(decoder) {
-        d.displayHeld=GetHAL().beginDisplayFlashWindow(d.deadline);
-    }
-    ~DisplayFlashWindow() {
-        if(d.displayHeld) {d.displayHeld=false;GetHAL().endDisplayFlashWindow();}
-    }
-    explicit operator bool() const {return d.displayHeld;}
-    DisplayFlashWindow(const DisplayFlashWindow&)=delete;
-    DisplayFlashWindow& operator=(const DisplayFlashWindow&)=delete;
-private:
-    Decoder& d;
 };
 }
 void hashHex(const uint8_t hash[32],char out[65])
@@ -176,19 +190,13 @@ bool reconstruct(const uint8_t* patch,const Plan& plan,
     for(uint32_t offset=0;ok&&offset<plan.size;) {
         failedOffset=offset;
         const uint32_t count=std::min<uint32_t>(256,plan.size-offset);
-        {
-            DisplayFlashWindow window(d);
-            if(!window){ok=false;reason="feed_display_window";}
-            else if(esp_timer_get_time()>=deadlineUs){ok=false;reason="feed_deadline";}
-            else {reason="feed_codec";ok=esp_delta_ota_feed_patch(decoder,patch+offset,count)==ESP_OK;}
-        }
+        if(esp_timer_get_time()>=deadlineUs){ok=false;reason="feed_deadline";}
+        else {reason="feed_codec";ok=esp_delta_ota_feed_patch(decoder,patch+offset,count)==ESP_OK;}
         offset+=count;vTaskDelay(pdMS_TO_TICKS(1));
     }
     if(ok)failedOffset=plan.size;
     if(!ok)d.cancelled=true;
     if(decoder) {
-        DisplayFlashWindow window(d);
-        if(!window){if(ok)reason="finalize_display_window";ok=false;d.cancelled=true;}
         // Finalize must destroy the official reader even on lock/feed failure.
         const bool finalized=esp_delta_ota_finalize(decoder)==ESP_OK;
         if(ok) {
