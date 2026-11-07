@@ -18,6 +18,10 @@ struct State {
     uint8_t level = 100;
     uint16_t phase = 0;
     bool motion = false;
+    // Disable intentionally does not redraw. Retain the last animated phase so
+    // re-enable covers both retained pixels and any static draws in the interim.
+    uint16_t meterPhase = 0;
+    bool meterMotion = false;
 };
 // Hand-authored nine-column masks, leftmost bit = 0x100.
 constexpr uint16_t masks[][9] = {
@@ -252,7 +256,18 @@ void setMotion(lv_obj_t* obj, uint16_t phase, bool enabled) {
     if (!enabled) return;
     bool changed=false;
     if (s->kind==Kind::Meter) {
-        changed=render::meterChanged(w,h,s->rows,s->bp,s->known,previousPhase,previousEnabled,phase,enabled,s->color);
+        lv_area_t content;
+        lv_obj_get_content_coords(obj, &content); // Same absolute origin as DRAW_MAIN, including parent scroll.
+        const auto dirty=render::meterDirtyRegions(lv_area_get_width(&content),lv_area_get_height(&content),
+            s->rows,s->bp,s->known,s->meterPhase,s->meterMotion,phase,enabled,s->color,
+            !previousEnabled && s->meterMotion);
+        s->meterPhase=phase; s->meterMotion=enabled;
+        for(int i=0;i<dirty.count;++i) {
+            const auto& r=dirty.rects[i];
+            const lv_area_t area={content.x1+r.x1,content.y1+r.y1,content.x1+r.x2,content.y1+r.y2};
+            lv_obj_invalidate_area(obj,&area);
+        }
+        return;
     } else if (s->kind==Kind::Icon && render::supports(static_cast<unsigned>(s->icon))) {
         changed=render::iconChanged(static_cast<render::Accent>(s->icon),w,h,previousPhase,previousEnabled,phase,enabled,s->color);
     } else if (old.pulse!=next.pulse) {

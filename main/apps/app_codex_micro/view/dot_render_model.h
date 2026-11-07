@@ -145,6 +145,35 @@ constexpr uint32_t iconPointColor(Accent icon,int x,int y,uint16_t phase,bool en
     const int mix=behind<110?(110-behind)*220/110:0;
     return blendWhite(color,mix);
 }
+// Inclusive local content coordinates, including a conservative one-pixel AA
+// guard. Geometry is stationary: only lit columns with different sampled RGB
+// need repainting. Merge third/later runs into the second, never invalidate per dot.
+struct MeterDirtyRect { int x1=0,y1=0,x2=0,y2=0; };
+struct MeterDirtyRegions { MeterDirtyRect rects[2]{}; int count=0; };
+constexpr MeterDirtyRegions meterDirtyRegions(int w,int h,int rows,uint16_t bp,bool known,
+        uint16_t before,bool beforeEnabled,uint16_t after,bool afterEnabled,uint32_t color,
+        bool alsoStaticBefore=false) {
+    MeterDirtyRegions out;
+    const auto g=detail::meterLayout(w,h,rows);
+    const int filled=known?detail::filledDots(g.columns*g.rows,bp):0;
+    if(!filled)return out;
+    int run=-1;
+    for(int x=0;x<=g.columns;++x) {
+        const auto next=meterColumnColor(g,bp,known,after,afterEnabled,x,color);
+        const bool changed=x*g.rows<filled &&
+            (meterColumnColor(g,bp,known,before,beforeEnabled,x,color)!=next ||
+             (alsoStaticBefore && next!=color));
+        if(changed && run<0)run=x;
+        if(!changed && run>=0) {
+            const MeterDirtyRect rect{g.x+run*g.pitch-1,g.y-1,
+                g.x+(x-1)*g.pitch+g.diameter,g.y+g.height};
+            if(out.count<2)out.rects[out.count++]=rect;
+            else out.rects[1].x2=rect.x2;
+            run=-1;
+        }
+    }
+    return out;
+}
 constexpr bool meterChanged(int w,int h,int rows,uint16_t bp,bool known,uint16_t before,bool beforeEnabled,
                             uint16_t after,bool afterEnabled,uint32_t color) {
     const auto g=detail::meterLayout(w,h,rows);

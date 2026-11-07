@@ -113,7 +113,7 @@ class DotWidgetsTests(unittest.TestCase):
     def test_motion_uses_shared_stationary_sampler(self):
         self.assertIn('render::sampleMeter(', SOURCE)
         self.assertIn('render::sampleIcon(', SOURCE)
-        self.assertIn('render::meterChanged(', SOURCE)
+        self.assertIn('render::meterDirtyRegions(', SOURCE)
         self.assertIn('meterColumnColor(', (VIEW/'dot_render_model.h').read_text(encoding='utf8'))
         self.assertNotIn('waveLift', SOURCE)
         self.assertNotIn('liftA', SOURCE)

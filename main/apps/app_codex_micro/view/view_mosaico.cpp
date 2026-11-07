@@ -1126,6 +1126,8 @@ void CodexMicroView::renderOtaAction() {
     default: break;
     }
     const bool enabled = otaActionEnabled();
+    if (_otaRenderedAction && std::strcmp(_otaRenderedAction, action) == 0 && _otaRenderedEnabled == enabled) return;
+    _otaRenderedAction = action; _otaRenderedEnabled = enabled;
     const bool wasDisabled = lv_obj_has_state(_otaButton, LV_STATE_DISABLED);
     if (enabled) {
         lv_obj_remove_state(_otaButton, LV_STATE_DISABLED);
@@ -1234,69 +1236,73 @@ void CodexMicroView::renderOta() {
         lv_obj_set_style_text_align(obj,LV_TEXT_ALIGN_CENTER,0);
         lv_label_set_long_mode(obj,LV_LABEL_LONG_MODE_DOTS);
     };
-    show(_otaTitle,view.title);
-    box(_otaPhase,view.phase);setTextPitch(_otaPhase,view.phasePitch);setText(_otaPhase,view.heading,view.color);
-    box(_otaModeBadge,view.badge);show(_otaModeBadge,view.mode);
-    if(view.mode)setText(_otaModeBadge,_ota.deltaTransfer?"DELTA":"FULL",_ota.deltaTransfer?Purple:Orange);
-    show(_otaCurrent,view.current);show(_otaTarget,view.target);
-    if(view.current) {
-        version(_otaCurrent,_ota.currentVersion,view.currentBox,view.currentBox.h<=28,Cyan);
-    }
-    if(view.target) {
-        char safe[25]{};const char* text=view.targetIsCurrent?_ota.currentVersion:_ota.targetVersion;
-        if(view.error) {
-            size_t n=0;for(;n<sizeof(safe)-1&&_ota.error[n];++n) {
-                const char c=_ota.error[n];safe[n]=((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='_'||c=='-')?c:'?';
-            }
-            text=safe[0]?safe:"OTA_ERROR";
+    const bool staticChanged = !_otaStaticSeen || !mosaico_view_update::sameOtaStatic(_otaRenderedStatic, _ota);
+    if (staticChanged) {
+        show(_otaTitle,view.title);
+        box(_otaPhase,view.phase);setTextPitch(_otaPhase,view.phasePitch);setText(_otaPhase,view.heading,view.color);
+        box(_otaModeBadge,view.badge);show(_otaModeBadge,view.mode);
+        if(view.mode)setText(_otaModeBadge,_ota.deltaTransfer?"DELTA":"FULL",_ota.deltaTransfer?Purple:Orange);
+        show(_otaCurrent,view.current);show(_otaTarget,view.target);
+        if(view.current) {
+            version(_otaCurrent,_ota.currentVersion,view.currentBox,view.currentBox.h<=28,Cyan);
         }
-        version(_otaTarget,text,view.targetBox,false,view.error?view.color:Gold);
+        if(view.target) {
+            char safe[25]{};const char* text=view.targetIsCurrent?_ota.currentVersion:_ota.targetVersion;
+            if(view.error) {
+                size_t n=0;for(;n<sizeof(safe)-1&&_ota.error[n];++n) {
+                    const char c=_ota.error[n];safe[n]=((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='_'||c=='-')?c:'?';
+                }
+                text=safe[0]?safe:"OTA_ERROR";
+            }
+            version(_otaTarget,text,view.targetBox,false,view.error?view.color:Gold);
+        }
+        const bool staticIcon=view.screen==Screen::Ready||view.screen==Screen::Reboot||view.screen==Screen::Complete||view.screen==Screen::Failed;
+        show(_otaStageIcon,view.loader||staticIcon);box(_otaStageIcon,view.activity);
+        if(view.loader||staticIcon)setIcon(_otaStageIcon,view.loader?Icon::Refresh:view.error?Icon::Cross:Icon::Check,view.color);
+        show(_otaPercent,view.numeric);show(_otaMeter,view.numeric);
+        box(_otaPercent,view.percent);box(_otaMeter,view.meter);
+        show(_otaBytes,view.bytes);box(_otaBytes,view.byteBox);
+        lv_obj_set_style_text_align(_otaBytes,view.hash&&!view.signature?LV_TEXT_ALIGN_RIGHT:LV_TEXT_ALIGN_CENTER,0);
+        box(_otaHash,view.hashBox);box(_otaSignature,view.signatureBox);
+        box(_otaImageIcon,view.imageIcon);box(_otaSignatureIcon,view.signatureIcon);
+        show(_otaHash,view.hash);show(_otaImageIcon,view.hash);
+        show(_otaSignature,view.signature);show(_otaSignatureIcon,view.signature);
+        char text[96];std::snprintf(text,sizeof(text),"SHA %.12s",_ota.sha256);lv_label_set_text(_otaHash,text);
+        std::snprintf(text,sizeof(text),"SIG %.8s",_ota.signatureShort);lv_label_set_text(_otaSignature,text);
+        for(auto* obj:{_otaHash,_otaSignature}) {
+            lv_obj_set_style_text_font(obj,&lv_font_montserrat_14,0);
+            lv_label_set_long_mode(obj,LV_LABEL_LONG_MODE_CLIP);
+        }
+        setIcon(_otaImageIcon,_ota.imageVerified?Icon::Check:Icon::Chip,_ota.imageVerified?Green:Gold);
+        setIcon(_otaSignatureIcon,_ota.signatureVerified?Icon::Check:Icon::Unknown,_ota.signatureVerified?Green:Gold);
+        for(size_t i=0;i<2;++i) {
+            show(_otaSlots[i],i<view.slots);box(_otaSlots[i],view.slot[i]);
+            lv_label_set_text(_otaSlotNames[i],i?"NEW":"CURRENT");
+            const auto content=slotContent(view.slot[i]);
+            box(_otaSlotNames[i],content.name);
+            lv_obj_set_style_text_font(_otaSlotNames[i],&lv_font_montserrat_14,0);
+            lv_obj_set_style_text_align(_otaSlotNames[i],LV_TEXT_ALIGN_CENTER,0);
+            box(_otaSlotNumbers[i],content.number);setTextPitch(_otaSlotNumbers[i],content.pitch);
+            box(_otaChips[i],content.chip);
+            const int slot=i?_ota.targetSlot:_ota.currentSlot;
+            std::snprintf(text,sizeof(text),"%d",slot);setText(_otaSlotNumbers[i],text,i?Gold:Cyan);
+            lv_obj_set_style_border_width(_otaSlots[i],i&&_ota.imageVerified?3:1,0);
+            lv_obj_set_style_border_color(_otaSlots[i],lv_color_hex(i?Gold:Cyan),0);
+        }
+        box(_otaArrow,view.arrow);show(_otaArrow,view.slots==2);
+        box(_otaButton,view.action);
+        _otaRenderedStatic = _ota; _otaStaticSeen = true;
     }
-    const bool staticIcon=view.screen==Screen::Ready||view.screen==Screen::Reboot||view.screen==Screen::Complete||view.screen==Screen::Failed;
-    show(_otaStageIcon,view.loader||staticIcon);box(_otaStageIcon,view.activity);
-    if(view.loader||staticIcon)setIcon(_otaStageIcon,view.loader?Icon::Refresh:view.error?Icon::Cross:Icon::Check,view.color);
-    show(_otaPercent,view.numeric);show(_otaMeter,view.numeric);
-    box(_otaPercent,view.percent);box(_otaMeter,view.meter);
     if(view.numeric) {
         char text[32];percent(view.bp,text,sizeof(text));setTextPitch(_otaPercent,8);setText(_otaPercent,text,view.color);
         setMeter(_otaMeter,view.bp,view.total!=0||view.screen==Screen::BootCheck,view.color);
     }
-    show(_otaBytes,view.bytes);box(_otaBytes,view.byteBox);
-    lv_obj_set_style_text_align(_otaBytes,view.hash&&!view.signature?LV_TEXT_ALIGN_RIGHT:LV_TEXT_ALIGN_CENTER,0);
     if(view.bytes) {
         char text[64];const bool mega=view.total>=1000000;const double divisor=mega?1000000.0:1000.0;
         if(view.ratio)std::snprintf(text,sizeof(text),"%.2f / %.2f %sB",view.done/divisor,view.total/divisor,mega?"M":"K");
         else std::snprintf(text,sizeof(text),"%.2f %sB",view.total/divisor,mega?"M":"K");
-        lv_label_set_text(_otaBytes,text);
+        if (std::strcmp(lv_label_get_text(_otaBytes), text) != 0) lv_label_set_text(_otaBytes,text);
     }
-    box(_otaHash,view.hashBox);box(_otaSignature,view.signatureBox);
-    box(_otaImageIcon,view.imageIcon);box(_otaSignatureIcon,view.signatureIcon);
-    show(_otaHash,view.hash);show(_otaImageIcon,view.hash);
-    show(_otaSignature,view.signature);show(_otaSignatureIcon,view.signature);
-    char text[96];std::snprintf(text,sizeof(text),"SHA %.12s",_ota.sha256);lv_label_set_text(_otaHash,text);
-    std::snprintf(text,sizeof(text),"SIG %.8s",_ota.signatureShort);lv_label_set_text(_otaSignature,text);
-    for(auto* obj:{_otaHash,_otaSignature}) {
-        lv_obj_set_style_text_font(obj,&lv_font_montserrat_14,0);
-        lv_label_set_long_mode(obj,LV_LABEL_LONG_MODE_CLIP);
-    }
-    setIcon(_otaImageIcon,_ota.imageVerified?Icon::Check:Icon::Chip,_ota.imageVerified?Green:Gold);
-    setIcon(_otaSignatureIcon,_ota.signatureVerified?Icon::Check:Icon::Unknown,_ota.signatureVerified?Green:Gold);
-    for(size_t i=0;i<2;++i) {
-        show(_otaSlots[i],i<view.slots);box(_otaSlots[i],view.slot[i]);
-        lv_label_set_text(_otaSlotNames[i],i?"NEW":"CURRENT");
-        const auto content=slotContent(view.slot[i]);
-        box(_otaSlotNames[i],content.name);
-        lv_obj_set_style_text_font(_otaSlotNames[i],&lv_font_montserrat_14,0);
-        lv_obj_set_style_text_align(_otaSlotNames[i],LV_TEXT_ALIGN_CENTER,0);
-        box(_otaSlotNumbers[i],content.number);setTextPitch(_otaSlotNumbers[i],content.pitch);
-        box(_otaChips[i],content.chip);
-        const int slot=i?_ota.targetSlot:_ota.currentSlot;
-        std::snprintf(text,sizeof(text),"%d",slot);setText(_otaSlotNumbers[i],text,i?Gold:Cyan);
-        lv_obj_set_style_border_width(_otaSlots[i],i&&_ota.imageVerified?3:1,0);
-        lv_obj_set_style_border_color(_otaSlots[i],lv_color_hex(i?Gold:Cyan),0);
-    }
-    box(_otaArrow,view.arrow);show(_otaArrow,view.slots==2);
-    box(_otaButton,view.action);
     renderOtaAction();
 }
 void CodexMicroView::touchEvent(lv_event_t* e) {
@@ -1564,12 +1570,13 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
         const bool active = quotaActive && _quota->resetCreditsKnown && _quota->resetCredits && !lv_obj_has_flag(_resetIcons[i], LV_OBJ_FLAG_HIDDEN);
         setMotion(_resetIcons[i], phase, active);
     }
+    const bool quotaBodyActive = quotaActive && !mosaico_view_update::quotaBodyCovered(_settingsOpen, _settingsAnimating);
     const int scrollY = lv_obj_get_scroll_y(_quotaPage);
     const int viewportHeight = lv_obj_get_height(_quotaPage);
     const uint64_t epoch = static_cast<uint64_t>(_quota->capturedEpoch) + age;
     for (size_t i = 0; i < _cards.size(); ++i) {
         const int top = lv_obj_get_y(_cards[i]) - scrollY;
-        const bool visible = quotaActive && i < _quota->bucketCount && !lv_obj_has_flag(_cards[i], LV_OBJ_FLAG_HIDDEN) && top < viewportHeight && top + 350 > 0;
+        const bool visible = quotaBodyActive && i < _quota->bucketCount && !lv_obj_has_flag(_cards[i], LV_OBJ_FLAG_HIDDEN) && top < viewportHeight && top + 350 > 0;
         const auto& bucket = _quota->buckets[i];
         setMotion(_creditIcons[i], phase, visible && top + 278 < viewportHeight && top + 306 > 0 && bucket.creditsKnown && !lv_obj_has_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN));
         for (size_t j = 0; j < 2; ++j) {
@@ -1775,10 +1782,19 @@ void CodexMicroView::selectTrendAt(int localX) {
     const size_t count = _hourly ? trend.hours.size() : trend.days.size();
     const uint32_t start = _hourly ? trend.start24hEpoch : trend.start7dEpoch;
     const size_t index = trend.available ? mosaico_trend::nearest(points, count, start, trend.endEpoch, localX) : mosaico_trend::NoPoint;
-    _trendTouch.epoch = index == mosaico_trend::NoPoint ? UINT32_MAX : points[index].epoch;
+    const uint32_t epoch = index == mosaico_trend::NoPoint ? UINT32_MAX : points[index].epoch;
+    const uint64_t age = static_cast<uint64_t>(trend.ageSecondsAtReceipt) + (GetHAL().millis() - trend.receivedAtMs) / 1000U;
+    const mosaico_view_update::TrendKey key{epoch, _historyRevision,
+        (trend.available ? 1U : 0U) | (age > 600 ? 2U : 0U) | (_hourly ? 4U : 0U) |
+        (static_cast<uint32_t>(GetHAL().getDisplayOrientation()) << 3)};
+    if (_trendRendered && _trendRenderedKey == key) return;
+    _trendTouch.epoch = epoch;
     renderTrendHint(); lv_obj_invalidate(_historyChart);
+    _trendRenderedKey = key; _trendRendered = true;
 }
 void CodexMicroView::renderTrendHint() {
+    // History/mode/style refreshes can replace the hint independently of touch.
+    _trendRendered = false;
     const auto& trend = _history->quotaTrend;
     const auto* points = _hourly ? trend.hours.data() : trend.days.data();
     const size_t count = _hourly ? trend.hours.size() : trend.days.size();
