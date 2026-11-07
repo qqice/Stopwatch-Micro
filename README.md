@@ -1,16 +1,21 @@
-# Stopwatch Micro
+# Mosaico Beacon
 
-**ESP-Mosaico / ESP32-S31:** a separate native board profile is available; see [build, capabilities and app-only deployment](docs/mosaico.md). The original StopWatch build is preserved.
+**ESP-Mosaico / ESP32-S31:** the primary monitor profile is available; see [build, capabilities and app-only deployment](docs/mosaico.md). The original StopWatch build is preserved.
 
 **English** | [简体中文](README.zh-CN.md)
 
 [![Firmware build](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/firmware-build.yml/badge.svg?branch=main)](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/firmware-build.yml)
 [![clang-format](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/clang-format-check.yml/badge.svg?branch=main)](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/clang-format-check.yml)
 
-Stopwatch Micro is dedicated firmware that turns the M5Stack StopWatch into an unofficial
-Codex Micro-compatible controller. It boots directly into a Command / History / Agent LVGL interface and keeps
-Bluetooth Low Energy active as a system service; the original Mooncake launcher and demo apps are
-not included.
+Mosaico Beacon is an independently maintained Codex quota, usage-history, and session
+hardware monitor for ESP-Mosaico. The ESP-Mosaico profile does not provide Codex Micro controller inputs. The legacy StopWatch build retains
+its Command / History / Agent LVGL interface and unofficial Codex Micro-compatible BLE
+controls; the original Mooncake launcher and demo apps are not included.
+
+**Naming compatibility:** internal BLE identity `Codex Micro` and OTA identity
+`Stopwatch-Mosaico` are preserved for compatibility. The Git remote and GitHub URLs have
+not been renamed; historical release names, binary filenames, and upstream credits remain intact.
+Current Windows examples use the checkout path `C:\Workspace\Mosaico-Beacon`.
 
 > This project implements an unofficial compatibility layer for a protocol that is not a stable
 > public API. A future ChatGPT update may require corresponding firmware changes.
@@ -19,8 +24,8 @@ not included.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/assets/stopwatch-micro-command-product.jpg" alt="Stopwatch Micro Command interface product render"></td>
-    <td width="50%"><img src="docs/assets/stopwatch-micro-agents-product.jpg" alt="Stopwatch Micro Agent interface product render"></td>
+    <td width="50%"><img src="docs/assets/stopwatch-micro-command-product.jpg" alt="Mosaico Beacon legacy StopWatch Command interface product render"></td>
+    <td width="50%"><img src="docs/assets/stopwatch-micro-agents-product.jpg" alt="Mosaico Beacon legacy StopWatch Agent interface product render"></td>
   </tr>
   <tr>
     <td align="center">Command interface</td>
@@ -32,7 +37,7 @@ _Product concept renders supplied by the project owner._
 
 ## References and project status
 
-Stopwatch Micro was built with reference to the following sources:
+Mosaico Beacon builds on Stopwatch Micro, with reference to the following sources:
 
 - [Official Codex Micro documentation](https://learn.chatgpt.com/docs/features/codex-micro) is the
   authoritative reference for pairing, controls, ChatGPT Desktop behavior, and the intended user
@@ -52,6 +57,9 @@ vendor protocol a stable public API. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_
 upstream copyright and MIT license notice.
 
 ## Interface and controls
+
+The controller inputs and host setup below apply to the legacy StopWatch build, not the
+ESP-Mosaico monitor. See [the ESP-Mosaico profile](docs/mosaico.md) for its feature boundaries.
 
 Command and Agent controls require a compatible Bluetooth host. With Wi-Fi configured, quota and History remain available without Bluetooth; an unconfigured device shows Pairing. Blue B cycles the available local pages.
 
@@ -146,6 +154,9 @@ linked into the firmware accidentally.
 
 ## Build and flash
 
+For ESP-Mosaico use the [board-specific build and app-only deployment guide](docs/mosaico.md).
+The full-flash/restore examples below apply to the legacy StopWatch build only.
+
 This local port targets ESP-IDF v6.1; upstream v0.4.0 release binaries use v5.5.4.
 
 On Windows, use the checked-in PowerShell entry point. It validates the toolchain, discovers the
@@ -154,6 +165,7 @@ factory restore path. Set `IDF_PATH` to your ESP-IDF v6.1 checkout, or pass `-Id
 that use the toolchain:
 
 ```powershell
+Set-Location C:\Workspace\Mosaico-Beacon
 $env:IDF_PATH = 'C:\esp\v6.1\esp-idf'
 .\tools\stopwatch.ps1 doctor -Port COM5
 .\tools\stopwatch.ps1 deps -DirectGit

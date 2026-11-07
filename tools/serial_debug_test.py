@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Stopwatch Micro's machine-readable USB serial diagnostics."""
+"""Run Mosaico Beacon's machine-readable USB serial diagnostics."""
 
 from __future__ import annotations
 

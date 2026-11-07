@@ -9,7 +9,9 @@
 
 namespace system_config {
 
-inline constexpr char ProductName[]     = "Codex Micro";
+inline constexpr char ProductName[]     = "Mosaico Beacon";
+// Compatibility identity for existing companion clients and pairing records.
+inline constexpr char BluetoothDeviceName[] = "Codex Micro";
 inline constexpr char FirmwareVersion[] = STOPWATCH_MICRO_VERSION;
 inline constexpr bool DisplayAlwaysOn   = true;
 

@@ -62,7 +62,7 @@ switch ($Action) {
             -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1)
         $definition = New-ScheduledTask -Action $actionDefinition -Trigger $trigger -Principal $principal `
             -Settings $settings `
-            -Description 'Keeps Stopwatch Micro Codex quota and reset time updated over paired Bluetooth HID.'
+            -Description 'Keeps Mosaico Beacon Codex quota and reset time updated over paired Bluetooth HID.'
         Register-ScheduledTask -TaskName $taskName -InputObject $definition -Force | Out-Null
         Start-ScheduledTask -TaskName $taskName
         Start-Sleep -Seconds 1

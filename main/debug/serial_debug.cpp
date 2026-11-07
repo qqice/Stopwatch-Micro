@@ -1247,7 +1247,7 @@ void SerialDebug::handleLine(char* line)
                 static_cast<unsigned long>(s.revision),static_cast<unsigned long>(s.savedRevision),s.pending,static_cast<long>(s.error));
             WifiSettingsSnapshot w{};
             const bool ready=GetNetworkQuota().wifiSettingsSnapshot(w);
-            char name[89]{}; settingsBase64(system_config::ProductName,name);
+            char name[89]{}; settingsBase64(system_config::BluetoothDeviceName,name);
             debugPrintf("DBG SETTINGS ble_name_b64=%s ble_name_mutable=0 wifi_available=%d wifi_count=%u wifi_current_index=%u wifi_pending=%d wifi_reboot_required=%d wifi_scan_error=%ld\r\n",
                 name,ready && w.available,w.count,w.currentIndex,w.pending,w.rebootRequired,static_cast<long>(w.scanError));
             result(command,"PASS",details); return;

@@ -1,6 +1,6 @@
-# ESP-Mosaico board profile
+# Mosaico Beacon: ESP-Mosaico board profile
 
-This is an independent **ESP-Mosaico V1.0 / ESP32-S31** build of the quota/history
+Mosaico Beacon is an independent **ESP-Mosaico V1.0 / ESP32-S31** quota/history/session
 monitor. The root project remains the M5Stack StopWatch / ESP32-S3 build; its
 SDK config and dependency lock are not replaced. Both use the installed IDF6.1,
 with `--preview` for S31. Do not select ESP32-S3 as a substitute.

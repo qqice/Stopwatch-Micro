@@ -31,9 +31,24 @@ constexpr bool check(){
   if((x<Left||x>=Left+LogoWidth||y<Top||y>=Top+LogoHeight)&&pixel(x,y))return false;
  }
  int dots=0;
- for(int letter=0;letter<5;++letter)for(int y=0;y<7;++y)for(int x=0;x<5;++x)
-  if(row(letter,y)&(1U<<(4-x)))++dots;
+ for(int line=0;line<2;++line){
+  const char* text=line?SecondLine:FirstLine;
+  const int count=line?sizeof(SecondLine)-1:sizeof(FirstLine)-1;
+  const int left=(Width-lineWidth(count))/2, top=Top+line*LineAdvance;
+  for(int letter=0;letter<count;++letter)for(int y=0;y<7;++y)for(int x=0;x<5;++x){
+   const bool lit=row(text[letter],y)&(1U<<(4-x));
+   if(lit)++dots;
+   if(bool(pixel(left+letter*6*Pitch+x*Pitch,top+y*Pitch))!=lit)return false;
+  }
+  int lo=Width,hi=0;
+  for(int y=top;y<top+LineHeight;++y)for(int x=0;x<Width;++x)
+   if(pixel(x,y)){if(x<lo)lo=x;if(x>hi)hi=x;}
+  if(lo+hi!=Width-1)return false;
+ }
+ for(int y=Top+LineHeight;y<Top+LineAdvance;++y)for(int x=0;x<Width;++x)
+  if(pixel(x,y))return false;
  return count==dots*Diameter*Diameter && minX+maxX==Width-1 && minY+maxY==Height-1;
+
 }
 static_assert(check(),"native geometry, black edges, drain-before-reuse/free/enable, allocation failure");
 constexpr auto bake(){std::array<uint8_t,LogoWidth*LogoHeight> out{};
@@ -58,6 +73,6 @@ __attribute__((used,section(".preview_meta"))) constexpr uint32_t metadata[]={Wi
     image.convert('RGB').save(OUT/'boot-splash-native.png')
     detail=image.crop((max(0,left-16),max(0,top-16),min(width,left+logo_width+16),min(height,top+logo_height+16)))
     detail.resize((detail.width*2,detail.height*2),Image.Resampling.NEAREST).convert('RGB').save(OUT/'boot-splash-detail.png')
-    (OUT/'manifest.json').write_text(json.dumps({'model_sha256':hashlib.sha256(header.read_bytes()).hexdigest(),'command':command,'geometry':[width,height],'logo_box':[left,top,logo_width,logo_height],'panel_brightness':brightness,'preview_note':'Exact RGB565 white/black pixels; image does not simulate panel luminance or optical acceptance.'},indent=2))
+    (OUT/'manifest.json').write_text(json.dumps({'model_sha256':hashlib.sha256(header.read_bytes()).hexdigest(),'command':command,'geometry':[width,height],'logo_box':[left,top,logo_width,logo_height],'panel_brightness':brightness,'wordmark_lines':['MOSAICO','BEACON'],'preview_note':'Exact RGB565 white/black pixels; image does not simulate panel luminance or optical acceptance.'},indent=2))
     return OUT/'boot-splash-native.png'
 if __name__=='__main__':print(export())

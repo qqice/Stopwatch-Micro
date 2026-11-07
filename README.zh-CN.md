@@ -1,15 +1,20 @@
-# Stopwatch Micro
+# Mosaico Beacon
 
-**ESP-Mosaico / ESP32-S31：** 新增独立原生板级适配，构建、功能边界与仅应用分区部署见 [Mosaico 文档](docs/mosaico.md)，原 StopWatch 构建保留。
+**ESP-Mosaico / ESP32-S31：** 主目标板级适配，构建、功能边界与仅应用分区部署见 [Mosaico 文档](docs/mosaico.md)，原 StopWatch 构建保留。
 
 [English](README.md) | **简体中文**
 
 [![Firmware build](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/firmware-build.yml/badge.svg?branch=main)](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/firmware-build.yml)
 [![clang-format](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/clang-format-check.yml/badge.svg?branch=main)](https://github.com/Dissipative-ATLAS/Stopwatch-Micro/actions/workflows/clang-format-check.yml)
 
-Stopwatch Micro 是一套面向 M5Stack StopWatch Dev Kit（ESP32-S3）的专用固件，把它变成一个
-非官方的 Codex Micro 兼容控制器。设备开机后直接进入Command / History / Agent 多页面 LVGL 界面，并把低功耗蓝牙作为
-系统服务持续运行；原厂 Mooncake 启动器和演示应用不包含在本固件中。
+Mosaico Beacon 是面向 ESP-Mosaico、独立维护的 Codex 额度、用量历史和会话硬件监视器。
+ESP-Mosaico 不提供 Codex Micro 控制输入。
+旧版 StopWatch 构建继续保留 Command / History / Agent 多页面 LVGL 界面和非官方
+Codex Micro 兼容蓝牙控制；不包含原厂 Mooncake 启动器和演示应用。
+
+**命名兼容：** 内部 BLE 身份 `Codex Micro` 和 OTA 身份 `Stopwatch-Mosaico` 保持不变。
+Git 远程地址与 GitHub URL 尚未改名；历史发布名称、二进制文件名和上游署名继续保留。
+当前 Windows 使用示例的仓库路径为 `C:\Workspace\Mosaico-Beacon`。
 
 > 本项目通过非稳定公开 API 的协议实现非官方兼容层。ChatGPT Desktop 后续更新可能导致行为
 > 变化，并需要同步更新固件或桥接程序。
@@ -18,8 +23,8 @@ Stopwatch Micro 是一套面向 M5Stack StopWatch Dev Kit（ESP32-S3）的专用
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/assets/stopwatch-micro-command-product.jpg" alt="Stopwatch Micro Command 界面产品示意图"></td>
-    <td width="50%"><img src="docs/assets/stopwatch-micro-agents-product.jpg" alt="Stopwatch Micro Agent 界面产品示意图"></td>
+    <td width="50%"><img src="docs/assets/stopwatch-micro-command-product.jpg" alt="Mosaico Beacon 旧版 StopWatch Command 界面产品示意图"></td>
+    <td width="50%"><img src="docs/assets/stopwatch-micro-agents-product.jpg" alt="Mosaico Beacon 旧版 StopWatch Agent 界面产品示意图"></td>
   </tr>
   <tr>
     <td align="center">Command 界面</td>
@@ -30,6 +35,9 @@ Stopwatch Micro 是一套面向 M5Stack StopWatch Dev Kit（ESP32-S3）的专用
 _产品概念示意图由项目所有者提供。_
 
 ## 主要功能与界面
+
+以下控制器输入及主机设置适用于旧版 StopWatch 构建，不适用于 ESP-Mosaico 监视器；
+后者的硬件与功能边界见 [Mosaico 文档](docs/mosaico.md)。
 
 - 六个带分层、高光与按压反馈的圆形 Command 按钮，环绕中央状态圆盘。
 - 顶部弧形触控区用于降低、选择或提高推理强度。
@@ -79,7 +87,8 @@ Command 和 Agent 控制需要蓝牙主机；配置 Wi-Fi 后，断开蓝牙仍�
 
 ## 硬件与环境要求
 
-- M5Stack StopWatch Dev Kit，ESP32-S3；本项目在 16 MiB Flash、8 MiB PSRAM 的硬件上验证。
+- 主目标为 ESP-Mosaico V1.0 / ESP32-S31，详见 [Mosaico 文档](docs/mosaico.md)。
+- 旧版控制器为 M5Stack StopWatch Dev Kit，ESP32-S3；其 16 MiB Flash、8 MiB PSRAM 硬件已有验证。
 - 首次备份和刷机需要可传输数据的 USB-C 线。
 - 日常控制和无线额度更新可拔掉 USB 线，通过已配对的 Bluetooth HID 运行。
 - Windows 无线额度桥接需要已登录的 ChatGPT Desktop、Python，以及 `hidapi`。
@@ -87,11 +96,15 @@ Command 和 Agent 控制需要蓝牙主机；配置 Wi-Fi 后，断开蓝牙仍�
 
 ## Windows 构建与刷机
 
+ESP-Mosaico 请使用[板级构建与仅应用分区部署流程](docs/mosaico.md)。
+以下整片刷写和恢复示例仅适用于旧版 StopWatch 构建。
+
 仓库自带的 PowerShell 入口会检查工具链、发现 ESP32-S3 USB Serial/JTAG 端口，并在没有完整
 备份时拒绝刷机。先把 `IDF_PATH` 设为你的 ESP-IDF v6.1 路径；示例端口 `COM5` 请替换为
 你的实际端口：
 
 ```powershell
+Set-Location C:\Workspace\Mosaico-Beacon
 $env:IDF_PATH = 'C:\esp\v6.1\esp-idf'
 .\tools\stopwatch.ps1 doctor -Port COM5
 .\tools\stopwatch.ps1 deps -DirectGit

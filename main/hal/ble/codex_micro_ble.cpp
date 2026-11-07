@@ -47,7 +47,7 @@ extern "C" esp_bluedroid_config_t mosaico_bluedroid_config(void);
 namespace {
 
 constexpr const char* Tag                    = "CodexMicro-BLE";
-constexpr const char* DeviceName             = system_config::ProductName;
+constexpr const char* DeviceName             = system_config::BluetoothDeviceName;
 constexpr const char* Manufacturer           = "Work Louder";
 constexpr const char* FirmwareVersion        = system_config::FirmwareVersion;
 constexpr uint16_t VendorId                  = 0x303A;

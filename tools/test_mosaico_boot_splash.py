@@ -8,6 +8,13 @@ S=(R/'main/hal/mosaico/hal_mosaico.cpp').read_text()
 class BootSplashTests(unittest.TestCase):
  def test_model_and_preview(self):
   self.assertTrue(export().is_file())
+ def test_visible_and_compatibility_brand(self):
+  config=(R/'main/system_config.h').read_text()
+  self.assertIn('ProductName[]     = "Mosaico Beacon"',config)
+  self.assertIn('BluetoothDeviceName[] = "Codex Micro"',config)
+  self.assertIn('_label_logo->setText(system_config::ProductName)',(R/'main/hal/hal.h').read_text())
+  model=(R/'main/hal/mosaico/mosaico_boot_splash_model.h').read_text()
+  self.assertIn('FirstLine[] = "MOSAICO", SecondLine[] = "BEACON"',model)
  def test_protected_startup_order(self):
   init=HAL.split('void Hal::init()',1)[1].split('Hal::Diagnostics',1)[0]
   tokens=['pmic_init();','display_init();','display_boot_splash();','BootTiming::GaugeStart','gaugeBootReload(', 'BootTiming::GaugeEnd','ioe_init();','touchpad_init();','lvgl_init();','audio_init();','button_init();']

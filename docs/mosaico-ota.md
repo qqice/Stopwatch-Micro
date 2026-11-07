@@ -864,7 +864,7 @@ Host single-command example after upgrade:
 
 ```powershell
 & C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe `
-  C:\Workspace\Stopwatch-Micro\tools\serial_debug_test.py `
+  C:\Workspace\Mosaico-Beacon\tools\serial_debug_test.py `
   --uart --port COM17 --command "debug power" --command-timeout 30
 ```
 

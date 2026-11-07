@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bridge Codex account usage to Stopwatch Micro over Bluetooth HID or USB serial."""
+"""Bridge Codex account usage to Mosaico Beacon over Bluetooth HID or USB serial."""
 
 from __future__ import annotations
 
@@ -265,7 +265,7 @@ class AppServerClient:
             {
                 "clientInfo": {
                     "name": "stopwatch_micro_usage_bridge",
-                    "title": "Stopwatch Micro Usage Bridge",
+                    "title": "Mosaico Beacon Usage Bridge",
                     "version": "0.1.0",
                 }
             },

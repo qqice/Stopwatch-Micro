@@ -55,7 +55,7 @@ switch ($Action) {
             -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1)
         $definition = New-ScheduledTask -Action $actionDefinition -Trigger $trigger -Principal $principal `
             -Settings $settings `
-            -Description 'Serves the latest Stopwatch Micro quota snapshot to trusted LAN devices.'
+            -Description 'Serves the latest Mosaico Beacon quota snapshot to trusted LAN devices.'
         Register-ScheduledTask -TaskName $taskName -InputObject $definition -Force | Out-Null
         Start-ScheduledTask -TaskName $taskName
         Show-QuotaServiceTask

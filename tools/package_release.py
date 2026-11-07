@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a self-contained Stopwatch Micro flashing bundle."""
+"""Create a self-contained Mosaico Beacon flashing bundle."""
 
 from __future__ import annotations
 
@@ -360,7 +360,7 @@ def main() -> None:
         flash_files,
     )
 
-    flashing = f"""# Flash Stopwatch Micro v{version}
+    flashing = f"""# Flash Mosaico Beacon v{version}
 
 This bundle targets the M5Stack StopWatch ESP32-S3 with 16 MB flash.
 The standalone flasher verifies bundle checksums but does not create a factory backup. Use the
@@ -386,7 +386,7 @@ with USB Serial/JTAG available as a fallback.
     (bundle_dir / "FLASHING.md").write_text(flashing, encoding="utf-8")
 
     manifest = {
-        "project": "Stopwatch Micro",
+        "project": "Mosaico Beacon",
         "version": version,
         "commit": args.commit,
         "target": chip,

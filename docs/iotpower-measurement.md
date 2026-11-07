@@ -11,7 +11,7 @@ not redistributed in this repository.
 
 On this computer:
 - V1: COM21, CP2102 VID:PID10c4:ea60, serial0001 (verify again before use).
-- DLL: `C:\Workspace\Stopwatch-Micro\.artifacts\iotpower\native\iot_parser.dll`
+- DLL: `C:\Workspace\Mosaico-Beacon\.artifacts\iotpower\native\iot_parser.dll`
 - Approved SHA256: `100bc284bc998252d0be924629f1c16e0264122549df10697357444296d244e7`.
 - Python: `C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe`.
 
@@ -19,12 +19,12 @@ Example read-only capture with physically disabled output:
 
 ```powershell
 & C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe `
-  C:\Workspace\Stopwatch-Micro\tools\iotpower_capture.py `
+  C:\Workspace\Mosaico-Beacon\tools\iotpower_capture.py `
   --port COM21 `
-  --dll C:\Workspace\Stopwatch-Micro\.artifacts\iotpower\native\iot_parser.dll `
+  --dll C:\Workspace\Mosaico-Beacon\.artifacts\iotpower\native\iot_parser.dll `
   --dll-sha256 100bc284bc998252d0be924629f1c16e0264122549df10697357444296d244e7 `
   --seconds 300 `
-  --output C:\Workspace\Stopwatch-Micro\.artifacts\iotpower\run-001
+  --output C:\Workspace\Mosaico-Beacon\.artifacts\iotpower\run-001
 ```
 
 The output directory must be new; existing captures are never overwritten.

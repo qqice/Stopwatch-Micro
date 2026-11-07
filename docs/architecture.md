@@ -1,8 +1,11 @@
 # Architecture
 
-Stopwatch Micro is a single-purpose ESP-IDF firmware. It keeps hardware setup, the Codex Micro
+Mosaico Beacon is a single-purpose ESP-IDF firmware. It keeps hardware setup, the Codex Micro
 compatibility transport, and the LVGL application separated so connection state and input handling
 have one owner each.
+
+This document describes the retained StopWatch BLE controller architecture. For the
+ESP-Mosaico monitor and its distinct feature boundaries, see [mosaico.md](mosaico.md).
 
 ## Startup and ownership
 
@@ -37,7 +40,7 @@ events fit in one 63-byte report.
 ## Runtime scheduling
 
 The ESP-IDF configuration pins the Bluetooth controller, Bluedroid host, and `main_task` to CPU0.
-Stopwatch Micro therefore pins its HID TX, audio, vibration, and battery workers to
+Mosaico Beacon therefore pins its HID TX, audio, vibration, and battery workers to
 CPU0 as well, while LVGL rendering and 8 ms touch sampling run alone on CPU1 at priority 2. The main
 loop yields for one RTOS tick on each iteration. This prevents Codex traffic and feedback work from
 stealing touch/render time while keeping all host communication off the UI core.
