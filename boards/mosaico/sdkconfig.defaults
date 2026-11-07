@@ -92,3 +92,6 @@ CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 # MicroLink raw APIs use the public synchronous TCPIP owner boundary.
 CONFIG_LWIP_TCPIP_CORE_LOCKING=y
 CONFIG_LWIP_CHECK_THREAD_SAFETY=y
+
+# Temporary subtree images for page/sheet transitions; no SDK source changes.
+CONFIG_LV_USE_SNAPSHOT=y

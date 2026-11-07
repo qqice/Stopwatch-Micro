@@ -460,10 +460,12 @@ void CodexMicroView::settingsDetailExec(void* owner, int32_t y) {
     if (self->_settingsDetail) lv_obj_set_y(self->_settingsDetails[self->_settingsDetail - 1], y);
 }
 void CodexMicroView::settingsSheetExec(void* owner, int32_t y) {
-    auto* self = static_cast<CodexMicroView*>(owner); lv_obj_set_y(self->_settingsPage, y);
+    auto* self = static_cast<CodexMicroView*>(owner); self->_sheetSnapshot.setY(self->_settingsPage, y);
 }
 void CodexMicroView::settingsSheetCompleted(lv_anim_t* anim) {
     auto* self = static_cast<CodexMicroView*>(anim->var); self->_settingsAnimating = false;
+    const int32_t y = self->_sheetSnapshot.yFor(self->_settingsPage);
+    self->_sheetSnapshot.clear(); lv_obj_set_y(self->_settingsPage, y);
     if (self->_settingsClosing) { lv_obj_add_flag(self->_settingsPage, LV_OBJ_FLAG_HIDDEN); self->_settingsClosing = false; }
 }
 void CodexMicroView::openSettings() {
@@ -474,6 +476,7 @@ void CodexMicroView::openSettings() {
     _wifiNewProfile = false; lv_dropdown_set_text(_wifiProfiles, nullptr);
     WifiSettingsSnapshot wifi{}; GetNetworkQuota().wifiSettingsSnapshot(wifi); lv_textarea_set_text(_wifiSsid, wifi.ssid);
     lv_obj_remove_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_settingsPage);
+    if (_settingsDetail == 0) _sheetSnapshot.beginInset(_settingsTiles);
     lv_anim_t anim; lv_anim_init(&anim); lv_anim_set_var(&anim, this);
     lv_anim_set_exec_cb(&anim, settingsSheetExec); lv_anim_set_values(&anim, 480, 64);
     lv_anim_set_duration(&anim, 200); lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
@@ -484,6 +487,8 @@ void CodexMicroView::closeSettings(bool animate) {
     if (!_settingsPage || (!_settingsOpen && !_settingsAnimating)) return;
     restoreWifiEditor();
     lv_anim_delete(this, settingsDetailExec);
+    const int32_t startY = _sheetSnapshot.yFor(_settingsPage);
+    _sheetSnapshot.clear(); lv_obj_set_y(_settingsPage, startY);
     lv_anim_delete(this, settingsSheetExec); _settingsOpen = false; _settingsAnimating = animate; _settingsClosing = animate;
     _trendTouch.cancel(); _touchTracking = false; _swipeConsumed = true; _activity = lv_tick_get();
     lv_dropdown_close(_wifiProfiles);
@@ -496,6 +501,7 @@ void CodexMicroView::closeSettings(bool animate) {
         lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_border_width(_wifiOpenButton, 0, 0);
     if (!animate) { lv_obj_add_flag(_settingsPage, LV_OBJ_FLAG_HIDDEN); lv_obj_set_y(_settingsPage, 64); return; }
+    if (_settingsDetail == 0) _sheetSnapshot.beginInset(_settingsTiles);
     lv_anim_t anim; lv_anim_init(&anim); lv_anim_set_var(&anim, this);
     lv_anim_set_exec_cb(&anim, settingsSheetExec); lv_anim_set_values(&anim, lv_obj_get_y(_settingsPage), 480);
     lv_anim_set_duration(&anim, 180); lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
@@ -1454,6 +1460,7 @@ void CodexMicroView::refreshClock(uint32_t tick, bool force) {
 }
 void CodexMicroView::cancelOrientation() {
     if (_rotationFault) {
+        closeSettings(false); cancelPageSlide();
         lv_anim_delete(this, orientationExec);
         if (_rotationCurtain) {
             lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_COVER, 0);
@@ -1547,10 +1554,8 @@ void CodexMicroView::stopAnimations() {
     }
 }
 void CodexMicroView::updateAnimations(uint32_t tick) {
-    if (_locked || _suppressed || _slideTo) return;
-    if (_rotationFault || _rotationPhase != RotationPhase::Idle) return;
-    if (tick - _motionTick < 100) return;
-    _motionTick = tick;
+    const bool eligible = !(_locked || _suppressed || _slideTo || _rotationFault || _rotationPhase != RotationPhase::Idle);
+    if (!_motionCadence.sample(tick, eligible)) return;
     const uint16_t phase = static_cast<uint16_t>(((tick - _motionEpoch) % 12000U) * 360U / 12000U);
     const uint16_t meterPhase = static_cast<uint16_t>(((tick - _motionEpoch) % 6000U) * 360U / 6000U);
     using S = MosaicoOta::UiStage;
@@ -1947,25 +1952,28 @@ lv_obj_t* CodexMicroView::pagePanel(Page page) const {
 }
 void CodexMicroView::cancelPageSlide() {
     lv_anim_delete(this, slideExec);
+    _slideSnapshot.clear();
     for (auto* panel : {_slideFrom, _slideTo}) if (panel) {
         lv_obj_set_x(panel, 20);
         if (panel != pagePanel(_page)) lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_remove_flag(panel, LV_OBJ_FLAG_HIDDEN);
     }
     _slideFrom = _slideTo = nullptr;
 }
 void CodexMicroView::slideExec(void* owner, int32_t offset) {
     auto* self = static_cast<CodexMicroView*>(owner);
     if (!self->_slideTo) return;
-    lv_obj_set_x(self->_slideFrom, 20 - self->_slideDirection * offset);
-    lv_obj_set_x(self->_slideTo, 20 + self->_slideDirection * (480 - offset));
+    self->_slideSnapshot.setX(self->_slideFrom, 20 - self->_slideDirection * offset);
+    self->_slideSnapshot.setX(self->_slideTo, 20 + self->_slideDirection * (480 - offset));
 }
 void CodexMicroView::slideCompleted(lv_anim_t* anim) {
     auto* self = static_cast<CodexMicroView*>(anim->var);
+    self->_slideSnapshot.clear();
     if (self->_slideFrom) {
         lv_obj_add_flag(self->_slideFrom, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_x(self->_slideFrom, 20);
     }
-    if (self->_slideTo) lv_obj_set_x(self->_slideTo, 20);
+    if (self->_slideTo) { lv_obj_set_x(self->_slideTo, 20); lv_obj_remove_flag(self->_slideTo, LV_OBJ_FLAG_HIDDEN); }
     self->_slideFrom = self->_slideTo = nullptr;
 }
 void CodexMicroView::navigatePage(int direction) {
@@ -1976,7 +1984,12 @@ void CodexMicroView::navigatePage(int direction) {
     if (!setPageForDebug(pages[(index + (direction > 0 ? 1 : 3)) % 4])) return;
     _slideFrom = from; _slideTo = pagePanel(_page); _slideDirection = direction > 0 ? 1 : -1;
     lv_obj_remove_flag(_slideFrom, LV_OBJ_FLAG_HIDDEN);
-    // Executed by LVGL's existing timer under its single port mutex; no screen/snapshot allocations.
+    // Fresh temporary images are composited by LVGL software into its existing
+    // RGB565 display buffers; snapshot data is never a direct panel DMA source.
+    // Incoming quota ends above the fixed footer. Keep the outgoing panel live
+    // so its transparent corners still reveal clock/date siblings correctly.
+    if (_page == Page::Command) _slideSnapshot.begin(_slideTo);
+    else _slideSnapshot.begin(_slideFrom, _slideTo);
     slideExec(this, 0);
     lv_anim_t anim; lv_anim_init(&anim); lv_anim_set_var(&anim, this);
     lv_anim_set_exec_cb(&anim, slideExec); lv_anim_set_values(&anim, 0, 480);

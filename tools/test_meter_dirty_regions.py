@@ -12,8 +12,8 @@ from pathlib import Path
 
 R = Path(__file__).resolve().parents[1]
 V = R / 'main/apps/app_codex_micro/view'
-OUT = R / '.artifacts/mosaico/meter-dirty-regions'
-JUMPS = (0, 6, 97, 180, 359)
+OUT = R / '.artifacts/mosaico/meter-dirty-regions-20hz'
+JUMPS = (0, 3, 6, 97, 180, 359)
 SPECS = [
     (408, 24, 3, 10000, True), (198, 28, 3, 5000, True),
     (32, 8, 1, 2500, True), (408, 24, 4, 0, True),
@@ -34,18 +34,18 @@ struct Dot { int x,y,d;uint32_t color; };
 struct Frame { int count=0;std::array<Dot,200> dots{};
  constexpr void dot(int x,int y,int d,uint32_t c){dots[count++]={x,y,d,c};}
 };
-struct Record { Frame animated,off;std::array<render::MeterDirtyRegions,15> dirty{}; };
+struct Record { Frame animated,off;std::array<render::MeterDirtyRegions,18> dirty{}; };
 constexpr Record bake(int w,int h,int rows,int bp,bool known,int phase) {
  Record r;
  render::sampleMeter(w,h,rows,bp,known,phase,true,0x67e7ae,r.animated);
  render::sampleMeter(w,h,rows,bp,known,phase,false,0x67e7ae,r.off);
  int i=0;
- for(int jump:{0,6,97,180,359})for(int mode=0;mode<3;++mode)
+ for(int jump:{0,3,6,97,180,359})for(int mode=0;mode<3;++mode)
   r.dirty[i++]=render::meterDirtyRegions(w,h,rows,bp,known,phase,mode!=1,
       (phase+jump)%360,true,0x67e7ae,mode==2);
  return r;
 }
-static_assert(sizeof(Record)==6948,"export ABI");
+static_assert(sizeof(Record)==7056,"export ABI");
 struct Export {std::array<Record,2880> records;};
 __attribute__((used,section(".preview"))) constexpr Export output{{
 '''
@@ -76,20 +76,24 @@ __attribute__((used,section(".preview"))) constexpr Export output{{
                 raise RuntimeError(f'Compiler exit {run.returncode}: {run.stderr}')
         stamp.write_text(signature + ':' + hashlib.sha256(binary.read_bytes()).hexdigest())
     data = (OUT/'sampler-export.bin').read_bytes()
-    assert len(data) == 6948*360*len(SPECS)
+    assert len(data) == 7056*360*len(SPECS)
     frames = []
-    for offset in range(0, len(data), 6948):
+    for offset in range(0, len(data), 7056):
         record = []
         for base in (offset, offset+3204):
             count, = struct.unpack_from('<i', data, base)
             record.append([struct.unpack_from('<iiiI', data, base+4+i*16) for i in range(count)])
         dirty = []
-        for j in range(15):
+        for j in range(18):
             base = offset+6408+j*36
             count, = struct.unpack_from('<i', data, base+32)
             dirty.append([struct.unpack_from('<iiii', data, base+i*16) for i in range(count)])
         frames.append(dict(animated=record[0], off=record[1], dirty=dirty))
     payload = dict(specs=SPECS, jumps=JUMPS, frames=frames,
+                   record_size=7056, phase_count=360, sample_interval_ms=50, cycle_ms=6000,
+                   geometry_sha256=hashlib.sha256((V/'dot_patterns.h').read_bytes()).hexdigest(),
+                   source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                   binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                    model_sha256=hashlib.sha256((V/'dot_render_model.h').read_bytes()).hexdigest(),
                    note='Exact production sampleMeter primitives; dirty modes animated, static, animated-plus-static; all 360 phases.')
     (OUT/'sampler-export.json').write_text(json.dumps(payload, separators=(',', ':')), encoding='utf8')
@@ -128,7 +132,7 @@ class MeterDirtyTests(unittest.TestCase):
                                                     for x1, y1, x2, y2 in rects), (spec, phase, jump, mode, a, rects))
                                 checks += 1
                         self.assertEqual(bool(rects), changed)
-        print(f'Covered {checks} changed production primitives; 8 specs x 360 phases x 5 jumps x 3 prior modes; <=2 regions.')
+        print(f'Covered {checks} changed production primitives; 8 specs x 360 phases x 6 jumps x 3 prior modes; <=2 regions.')
         (OUT/'coverage.json').write_text(json.dumps(dict(changed_primitive_comparisons=checks,
             phases=360, specs=SPECS, jumps=JUMPS, modes=3), indent=2), encoding='utf8')
 
@@ -136,7 +140,7 @@ class MeterDirtyTests(unittest.TestCase):
         # Consecutive not-yet-drawn requests accumulate invalid regions. Each
         # intermediate transition is covered, hence the original->final delta is.
         si = 0
-        path = (358, 4, 101, 107, 287)
+        path = (358, 1, 4, 101, 107, 287)
         rects = []
         for a, b in zip(path, path[1:]):
             jump = (b-a) % 360

@@ -16,6 +16,8 @@
 #include "keyboard_style_model.h"
 #include "quota_trend_selection.h"
 #include "view_update_model.h"
+#include "dot_animation_cadence.h"
+#include "view_transition_snapshot.h"
 
 namespace view {
 class CodexMicroView {
@@ -263,6 +265,7 @@ private:
     lv_point_t _touchStart{};
     lv_obj_t* _slideFrom = nullptr;
     lv_obj_t* _slideTo = nullptr;
+    mosaico_transition::Snapshot _slideSnapshot{}, _sheetSnapshot{};
     int _slideDirection = 1;
     std::size_t _selected = SIZE_MAX;
     uint32_t _activity = 0, _refresh = 0, _lockRefreshCount = 0;
@@ -270,7 +273,8 @@ private:
     uint32_t _quotaObservedRevision = UINT32_MAX;
     uint32_t _quotaAttemptedRevision = UINT32_MAX, _quotaAttemptTick = 0;
     uint32_t _historyAgeKey = UINT32_MAX;
-    uint32_t _motionEpoch = 0, _motionTick = 0, _batteryReadTick = 0;
+    uint32_t _motionEpoch = 0, _batteryReadTick = 0;
+    mosaico_dot::AnimationCadence _motionCadence{};
     bool _batterySeen = false, _batteryValid = false, _batteryCharging = false;
     int _brightness = 80;
 };

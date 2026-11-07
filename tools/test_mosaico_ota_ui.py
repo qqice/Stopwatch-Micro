@@ -132,7 +132,10 @@ static_assert(direction(), "OTA reverse phase moves right and never paints unfil
         self.assertEqual(len(rows),19)
         self.assertEqual(len(set(rows)),19)
         for row in rows:self.assertEqual(len(row),9);self.assertTrue(all(0<=x<512 for x in row))
-        self.assertIn('if (_locked || _suppressed || _slideTo) return;',CPP); self.assertIn('tick - _motionTick < 100',CPP)
+        animation=CPP.split('void CodexMicroView::updateAnimations(',1)[1].split('void CodexMicroView::refreshQuota(',1)[0]
+        self.assertIn('const bool eligible = !(_locked || _suppressed || _slideTo || _rotationFault || _rotationPhase != RotationPhase::Idle);',animation)
+        self.assertIn('if (!_motionCadence.sample(tick, eligible)) return;',animation)
+        self.assertIn('PeriodMs = 50;', (V/'dot_animation_cadence.h').read_text(encoding='utf8'))
         self.assertIn('const bool otaMotion = _page == Page::OTA',CPP)
         self.assertNotIn('lv_timer_create',DOT)
     def test_permanent_third_page_and_function_guards(self):
@@ -331,6 +334,14 @@ constexpr void lv_anim_path_ease_out() {}
 constexpr void lv_anim_set_path_cb(lv_anim_t*,void(*)()) {}
 constexpr void lv_anim_set_completed_cb(lv_anim_t*,void(*)(lv_anim_t*)) {}
 constexpr void lv_anim_start(lv_anim_t*) {}
+// Snapshot allocation failure is an ordinary live-animation fallback. Keep
+// production navigation/cleanup bodies intact while observing this contract.
+struct FakeSnapshot {
+ int begins=0,clears=0,captures=0;lv_obj_t* first=nullptr;lv_obj_t* second=nullptr;
+ constexpr bool begin(lv_obj_t* a,lv_obj_t* b=nullptr) { ++begins;captures+=b?2:1;first=a;second=b;return false; }
+ constexpr void setX(lv_obj_t* obj,int x) { lv_obj_set_x(obj,x); }
+ constexpr void clear() { ++clears; }
+};
 struct CodexMicroView {
  enum class Page { Command,History,Agent,OTA,Settings,Sessions };
  enum class RotationPhase { Idle,FadeOut,WaitBlack,WaitRotated,FadeIn };
@@ -346,6 +357,7 @@ struct CodexMicroView {
  Page _page=Page::Command; lv_obj_t panels[5]{};
  lv_obj_t* _quotaPage=&panels[0]; lv_obj_t* _historyPage=&panels[1]; lv_obj_t* _otaPage=&panels[2]; lv_obj_t* _settingsPage=&panels[3]; lv_obj_t* _sessionsPage=&panels[4];
  lv_obj_t* _slideFrom=nullptr; lv_obj_t* _slideTo=nullptr;
+ FakeSnapshot _slideSnapshot;
  int _slideDirection=1; bool _suppressed=false,_locked=false,busy=false;
  mosaico_trend::TouchSelection _trendTouch;
  lv_obj_t historyChart; lv_obj_t* _historyChart=&historyChart;
@@ -374,14 +386,20 @@ struct CodexMicroView {
 constexpr bool exercise(int direction, bool cancel) {
  CodexMicroView v; lv_indev_t input{}; lv_event_t e{LV_EVENT_PRESSED,&v,&input};
  for(int step=0;step<4;++step) {
+  const int previousBegins=v._slideSnapshot.begins,previousClears=v._slideSnapshot.clears,previousCaptures=v._slideSnapshot.captures;
   input.point={240,200}; e.code=LV_EVENT_PRESSED; v.touchEvent(&e);
   input.point={240-direction*120,200}; e.code=LV_EVENT_PRESSING; v.touchEvent(&e);
   int target=direction>0?(step+1)%4:(3-step+4)%4;
   if(v._page != (target==0?CodexMicroView::Page::Command:target==1?CodexMicroView::Page::History:target==2?CodexMicroView::Page::OTA:CodexMicroView::Page::Sessions)) return false;
+  if(v._slideSnapshot.begins!=previousBegins+1 || v._slideSnapshot.clears!=previousClears+1)return false;
+  if(v._slideSnapshot.captures!=previousCaptures+(target==0?1:2))return false;
+  if(target==0 ? (v._slideSnapshot.first!=v._slideTo||v._slideSnapshot.second) :
+     (v._slideSnapshot.first!=v._slideFrom||v._slideSnapshot.second!=v._slideTo))return false;
   if(!v._slideTo || v._touchTracking || !v._swipeConsumed) return false;
   v.slideExec(&v,240);
   if(v._slideFrom->x != 20-direction*240 || v._slideTo->x != 20+direction*240) return false;
   if(cancel) v.cancelPageSlide(); else { lv_anim_t a{&v}; v.slideCompleted(&a); }
+  if(v._slideSnapshot.clears!=previousClears+2)return false;
   if(v._slideTo || v._slideFrom || v.pagePanel(v._page)->x!=20 || v.pagePanel(v._page)->hidden) return false;
   // Same contact reverses after animation: no second navigation or click.
   input.point={240+direction*130,200}; e.code=LV_EVENT_PRESSING; v.touchEvent(&e);

@@ -135,7 +135,7 @@ class DotWidgetsTests(unittest.TestCase):
         self.assertIn("setText(_lockQuota, lockText, lockKnown ? quotaLevelColor(lockBp, _quota->stale) : Gray);", view)
         self.assertNotRegex(view, r"quotaColor\s*=\s*[^;]*stale\s*\?\s*Gray")
         animation = view.split("void CodexMicroView::updateAnimations(", 1)[1].split("void CodexMicroView::refreshQuota(", 1)[0]
-        for gate in ("if (_locked || _suppressed || _slideTo) return;", "_page == Page::Command", "!_quota->stale", "age <= 130", "GetNetworkQuota().connected()",
+        for gate in ("!(_locked || _suppressed || _slideTo || _rotationFault || _rotationPhase != RotationPhase::Idle)", "if (!_motionCadence.sample(tick, eligible)) return;", "_page == Page::Command", "!_quota->stale", "age <= 130", "GetNetworkQuota().connected()",
                      "!lv_obj_has_flag(_cards[i], LV_OBJ_FLAG_HIDDEN)", "window.available && window.remainingBasisPoints > 0"):
             self.assertIn(gate, animation)
         lock = view.split("void CodexMicroView::lockDisplay()", 1)[1].split("void CodexMicroView::", 1)[0]
