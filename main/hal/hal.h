@@ -397,10 +397,11 @@ public:
     std::unique_ptr<BootLogo> bootLogo;
 #ifdef MOSAICO_BOARD
     // GUI -> drain queued display DMA -> bounded flash work. Caller owns pairing.
-    bool beginDisplayFlashWindow();
+    // deadlineUs is the existing OTA monotonic deadline, not a fresh timeout.
+    bool beginDisplayFlashWindow(int64_t deadlineUs);
     void endDisplayFlashWindow();
 #else
-    bool beginDisplayFlashWindow() { return false; }
+    bool beginDisplayFlashWindow(int64_t deadlineUs) { return false; }
     void endDisplayFlashWindow() {}
 #endif
     bool lvglLock();

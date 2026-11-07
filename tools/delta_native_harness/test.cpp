@@ -176,13 +176,16 @@ int main(int argc,char** argv) {
  clean();auto wrongTarget=target;wrongTarget.hash[0]^=1;assert(!run(patch,plan,base,wrongTarget));std::puts("PASS reconstructed signed target hash mismatch rejects before finishDownload");
  clean();failWrite=true;assert(!run(patch,plan,base,target)&&!live&&writeCalls==1);std::puts("PASS flash/safety failure not retried by finalize callbacks");
  for(unsigned n:{1U,2U}) {clean();failCalloc=n;assert(!run(patch,plan,base,target)&&writeCalls==0);}std::puts("PASS official codec context/apply-patch OOM returns full-fallback failure");
- clean();fakeTime=1000000;assert(!run(patch,plan,base,target)&&writeCalls==0);std::puts("PASS total deadline stops decode before output");
+ clean();fakeTime=1000000;assert(!run(patch,plan,base,target)&&writeCalls==0&&readCalls==0&&GetHAL().ends==0);std::puts("PASS total deadline stops decode before output");
  clean();MosaicoDelta::Decoder d{internalBuffer,base.size,target.size};d.deadline=1000000;
  d.buffered=1;
  assert(MosaicoDelta::Decoder::read(internalBuffer,1,0,&d)!=ESP_OK);
  assert(MosaicoDelta::Decoder::write(internalBuffer,1,&d)!=ESP_OK);
  assert(!d.flush()&&!readCalls&&!writeCalls&&!d.produced);
- d.buffered=0;d.displayHeld=true;
+ d.displayHeld=true;fakeTime=d.deadline;
+ assert(!d.flush()&&!readCalls&&!writeCalls&&d.buffered==1);
+ std::puts("PASS buffered tail flush after deadline performs no flash write");
+ fakeTime=1;d.buffered=0;
 
  assert(MosaicoDelta::Decoder::read(internalBuffer,1,-1,&d)!=ESP_OK);
  assert(MosaicoDelta::Decoder::read(internalBuffer,1,INT_MAX,&d)!=ESP_OK);

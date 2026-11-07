@@ -30,39 +30,53 @@ class MergeWindowTests(unittest.TestCase):
         body=body.replace('bool Hal::','constexpr bool Hal::').replace('void Hal::','constexpr void Hal::')
         code=r"""
 namespace std {enum memory_order {memory_order_acquire};}
+using int64_t=long long;using uint32_t=unsigned;
+struct Test {
 struct Ready {bool value=true;constexpr bool load(std::memory_order) const {return value;}} port_ready;
 bool display=true; int panel_io=1;
 static constexpr int ESP_OK=0;
 using esp_err_t=int;
 #define ESP_LOGW(...) ((void)0)
-bool lockOk=true;int txResult=0,locks=0,unlocks=0,drains=0,sequence=0;
+int fault=0,txResult=0,locks=0,unlocks=0,drains=0,yields=0;
+int64_t now=0,deadline=250000;
 bool valid=true,held=false;
-constexpr bool lvgl_port_lock(int ms) {valid=valid&&ms==100&&sequence==0;++locks;sequence=1;held=lockOk;return lockOk;}
-constexpr void lvgl_port_unlock() {valid=valid&&held;held=false;++unlocks;sequence=3;}
-constexpr int esp_lcd_panel_io_tx_param(int io,int cmd,const void* param,int size) {
- valid=valid&&held&&sequence==1&&io==panel_io&&cmd==-1&&param==nullptr&&size==0;
- ++drains;sequence=2;return txResult;
+constexpr int64_t esp_timer_get_time() {return now;}
+constexpr void vTaskDelay(int ticks) {valid=valid&&!held&&ticks==1;++yields;now+=1000;}
+constexpr bool lvgl_port_lock(uint32_t ms) {
+ valid=valid&&!held&&ms>0&&ms<=100&&ms<=(deadline-now)/1000;++locks;
+ if(fault==4||(fault==6&&locks<=2)){now+=ms*1000;return false;}
+ held=true;if(fault==9)now=deadline;return true;
 }
-struct Hal {constexpr bool beginDisplayFlashWindow();constexpr void endDisplayFlashWindow();};
+constexpr void lvgl_port_unlock() {valid=valid&&held;held=false;++unlocks;}
+constexpr int esp_lcd_panel_io_tx_param(int io,int cmd,const void* param,int size) {
+ valid=valid&&held&&now<deadline&&io==panel_io&&cmd==-1&&param==nullptr&&size==0;
+ ++drains;if(fault==10)now=deadline;return txResult;
+}
 """
-        # Globals cannot be modified by constant evaluation. Put mocks and the
-        # extracted method bodies inside one test object; no body substitution.
-        code=code.replace('namespace std {enum memory_order {memory_order_acquire};}', 'namespace std {enum memory_order {memory_order_acquire};}\nstruct Test {')
-        code=code.replace('struct Hal {constexpr bool beginDisplayFlashWindow();constexpr void endDisplayFlashWindow();};','')
+        # Extract the actual production bodies; only mocks execute at compile time.
         code+=body.replace('Hal::','')+r"""
-constexpr bool check(int fault) {
+constexpr bool check(int f) {
+ fault=f;
  if(fault==1)port_ready.value=false;if(fault==2)display=false;if(fault==3)panel_io=0;
- if(fault==4)lockOk=false;if(fault==5)txResult=-1;
- const bool ok=beginDisplayFlashWindow();
+ if(fault==5)txResult=-1;
+ if(fault==7)now=deadline;
+ if(fault==8)now=deadline-999;
+ if(fault==11)now=deadline-1000;
+ const bool ok=beginDisplayFlashWindow(deadline);
  if(fault<4&&fault>0)return !ok&&!locks&&!unlocks&&!drains;
- if(fault==4)return !ok&&locks==1&&!unlocks&&!drains&&!held&&valid;
- if(fault==5)return !ok&&locks==1&&unlocks==1&&drains==1&&!held&&valid;
+ if(fault==4)return !ok&&locks==3&&yields==3&&!unlocks&&!drains&&!held&&valid;
+ if(fault==5||fault==10)return !ok&&locks==1&&unlocks==1&&drains==1&&!held&&valid;
+ if(fault==7||fault==8)return !ok&&!locks&&!unlocks&&!drains&&!held&&valid;
+ if(fault==9)return !ok&&locks==1&&unlocks==1&&!drains&&!held&&valid;
  if(!ok||!held||unlocks||drains!=1)return false;
+ if(fault==6&&!(locks==3&&yields==2))return false;
  endDisplayFlashWindow();return valid&&!held&&unlocks==1;
 }
 };
 static_assert(Test{}.check(0));static_assert(Test{}.check(1));static_assert(Test{}.check(2));
 static_assert(Test{}.check(3));static_assert(Test{}.check(4));static_assert(Test{}.check(5));
+static_assert(Test{}.check(6));static_assert(Test{}.check(7));static_assert(Test{}.check(8));
+static_assert(Test{}.check(9));static_assert(Test{}.check(10));static_assert(Test{}.check(11));
 """
         source=OUT/'hal_mock.cpp';source.write_text(code)
         result=subprocess.run([str(COMPILER),'-std=c++20','-fsyntax-only',str(source)],capture_output=True,text=True)
@@ -71,7 +85,8 @@ static_assert(Test{}.check(3));static_assert(Test{}.check(4));static_assert(Test
 
     def test_callback_and_window_contract(self):
         self.assertEqual(DELTA.count('if(!d.displayHeld||d.cancelled||'),2)
-        self.assertIn('if(!displayHeld)return false;',DELTA)
+        self.assertIn('if(!displayHeld||esp_timer_get_time()>=deadline)return false;',DELTA)
+        self.assertIn('GetHAL().beginDisplayFlashWindow(d.deadline)',DELTA)
         self.assertIn('std::min<uint32_t>(256,plan.size-offset)',DELTA)
         self.assertIn('if(d.displayHeld) {d.displayHeld=false;GetHAL().endDisplayFlashWindow();}',DELTA)
         self.assertIn('if(!window){if(ok)reason="finalize_display_window";ok=false;d.cancelled=true;}',DELTA)
@@ -92,7 +107,16 @@ static_assert(Test{}.check(3));static_assert(Test{}.check(4));static_assert(Test
         command=re.sub(r' -o \S+ -c ', ' -fsyntax-only ',entry['command'])
         command=command.replace(entry['file'],str(ROOT/'main/ota/mosaico_delta.cpp'))
         command=command.replace(' -fsyntax-only ', ' -I'+str(ROOT/'components/esp_delta_ota/include')+' -fsyntax-only ')
-        result=subprocess.run(command,cwd=entry['directory'],capture_output=True,text=True)
+        # Historical evidence came from the prior checkout; preserve SDK flags.
+        old='C:/Workspace/Stopwatch-Micro'
+        def relocate(value):
+            return value.replace(old,str(ROOT).replace('\\','/')).replace(old.replace('/','\\'),str(ROOT))
+        command=relocate(command)
+        # Response files contain a checkout-bound specs path too. Expand only in
+        # the syntax command, leaving retained historical build evidence intact.
+        command=re.sub(r'@"([^"\n]+)"',lambda m:relocate(Path(m[1]).read_text()).replace('\n',' '),command)
+        directory=relocate(entry['directory'])
+        result=subprocess.run(command,cwd=directory,capture_output=True,text=True)
         (OUT/'decoder-syntax.log').write_text(result.stdout+result.stderr)
         self.assertEqual(result.returncode,0,str(OUT/'decoder-syntax.log'))
 

@@ -55,7 +55,7 @@ struct Decoder {
     int64_t deadline=0;
     psa_hash_operation_t hash=PSA_HASH_OPERATION_INIT;
     bool flush() {
-        if(!displayHeld)return false;
+        if(!displayHeld||esp_timer_get_time()>=deadline)return false;
         if(!buffered)return true;
         if(!MosaicoOta::writeChunk(written,chunk,buffered))return false;
         written+=static_cast<uint32_t>(buffered);buffered=0;return true;
@@ -89,7 +89,7 @@ struct Decoder {
 class DisplayFlashWindow {
 public:
     explicit DisplayFlashWindow(Decoder& decoder) : d(decoder) {
-        d.displayHeld=GetHAL().beginDisplayFlashWindow();
+        d.displayHeld=GetHAL().beginDisplayFlashWindow(d.deadline);
     }
     ~DisplayFlashWindow() {
         if(d.displayHeld) {d.displayHeld=false;GetHAL().endDisplayFlashWindow();}

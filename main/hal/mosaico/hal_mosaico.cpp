@@ -3371,14 +3371,25 @@ void Hal::lvgl_init()
 }
 
 // BEGIN MERGE DISPLAY FLASH WINDOW
-bool Hal::beginDisplayFlashWindow()
+bool Hal::beginDisplayFlashWindow(int64_t deadlineUs)
 {
     if (!port_ready.load(std::memory_order_acquire) || !display || !panel_io) {
         ESP_LOGW(Tag, "display_flash_window reason=notready");
         return false;
     }
-    if (!lvgl_port_lock(100)) {
-        ESP_LOGW(Tag, "display_flash_window reason=locktimeout timeout_ms=100");
+    for (;;) {
+        const int64_t remainingMs = (deadlineUs - esp_timer_get_time()) / 1000;
+        if (remainingMs <= 0) {
+            ESP_LOGW(Tag, "display_flash_window reason=locktimeout deadline=1");
+            return false;
+        }
+        // Zero means an infinite wait in lvgl_port_lock; never pass it.
+        const uint32_t waitMs = remainingMs > 100 ? 100 : static_cast<uint32_t>(remainingMs);
+        if (lvgl_port_lock(waitMs)) break;
+        vTaskDelay(1); // Let the GUI owner run before retrying a busy mutex.
+    }
+    if (esp_timer_get_time() >= deadlineUs) {
+        lvgl_port_unlock();
         return false;
     }
     // Public no-command/no-parameter transaction drains queued color DMA first.
@@ -3386,6 +3397,10 @@ bool Hal::beginDisplayFlashWindow()
     if (drain != ESP_OK) {
         lvgl_port_unlock();
         ESP_LOGW(Tag, "display_flash_window reason=drainerror err=%d", static_cast<int>(drain));
+        return false;
+    }
+    if (esp_timer_get_time() >= deadlineUs) {
+        lvgl_port_unlock();
         return false;
     }
     return true; // Caller retains GUI ownership until endDisplayFlashWindow().
