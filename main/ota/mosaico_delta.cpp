@@ -60,7 +60,7 @@ private:
 struct Decoder {
     uint8_t* chunk;
     uint32_t baseSize,targetSize,produced=0,written=0;
-    size_t buffered=0;
+    size_t buffered=0,readSinceYield=0;
     bool cancelled=false;
     int64_t deadline=0;
     psa_hash_operation_t hash=PSA_HASH_OPERATION_INIT;
@@ -85,7 +85,7 @@ struct Decoder {
            static_cast<uint32_t>(offset)>d.baseSize||length>d.baseSize-static_cast<uint32_t>(offset)||
            length>static_cast<size_t>(INT_MAX-offset))return d.fail();
         while(length) {
-            const size_t count=std::min<size_t>(4096,length);
+            const size_t count=std::min<size_t>(4096-d.readSinceYield,length);
             if(d.cancelled||esp_timer_get_time()>=d.deadline)return d.fail();
             bool ok=false;
             {
@@ -93,8 +93,9 @@ struct Decoder {
                 if(!window||d.cancelled||esp_timer_get_time()>=d.deadline)return d.fail();
                 ok=MosaicoOta::readRunningImage(static_cast<uint32_t>(offset),data,count);
             }
-            vTaskDelay(1);
             if(!ok)return d.fail();
+            d.readSinceYield+=count; // count cannot exceed the remaining byte budget.
+            if(d.readSinceYield==4096){d.readSinceYield=0;vTaskDelay(1);}
             offset+=static_cast<int>(count);data+=count;length-=count;
         }
         return ESP_OK;
