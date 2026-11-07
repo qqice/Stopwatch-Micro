@@ -4,6 +4,7 @@
 #include <cJSON.h>
 #include <esp_delta_ota.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <psa/crypto.h>
 #include <mbedtls/base64.h>
@@ -60,7 +61,11 @@ private:
 struct Decoder {
     uint8_t* chunk;
     uint32_t baseSize,targetSize,produced=0,written=0;
-    size_t buffered=0,readSinceYield=0;
+    size_t buffered=0;
+    uint8_t* sourcePage=static_cast<uint8_t*>(heap_caps_malloc(4096,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+    uint32_t sourcePageOffset=0;
+    size_t sourcePageLength=0;
+    ~Decoder() {if(sourcePage)heap_caps_free(sourcePage);}
     bool cancelled=false;
     int64_t deadline=0;
     psa_hash_operation_t hash=PSA_HASH_OPERATION_INIT;
@@ -85,17 +90,26 @@ struct Decoder {
            static_cast<uint32_t>(offset)>d.baseSize||length>d.baseSize-static_cast<uint32_t>(offset)||
            length>static_cast<size_t>(INT_MAX-offset))return d.fail();
         while(length) {
-            const size_t count=std::min<size_t>(4096-d.readSinceYield,length);
-            if(d.cancelled||esp_timer_get_time()>=d.deadline)return d.fail();
-            bool ok=false;
-            {
-                DisplayFlashWindow window(d.deadline);
-                if(!window||d.cancelled||esp_timer_get_time()>=d.deadline)return d.fail();
-                ok=MosaicoOta::readRunningImage(static_cast<uint32_t>(offset),data,count);
+            if(d.cancelled||esp_timer_get_time()>=d.deadline||!d.sourcePage)return d.fail();
+            const uint32_t pageOffset=static_cast<uint32_t>(offset)&~uint32_t(4095);
+            if(!d.sourcePageLength||d.sourcePageOffset!=pageOffset) {
+                d.sourcePageLength=0; // A failed/replaced page can never serve a hit.
+                const size_t pageLength=std::min<size_t>(4096,d.baseSize-pageOffset);
+                bool ok=false;
+                {
+                    DisplayFlashWindow window(d.deadline);
+                    if(!window||d.cancelled||esp_timer_get_time()>=d.deadline)return d.fail();
+                    ok=MosaicoOta::readRunningImage(pageOffset,d.sourcePage,pageLength);
+                }
+                vTaskDelay(1);
+                if(!ok)return d.fail();
+                d.sourcePageOffset=pageOffset;d.sourcePageLength=pageLength;
             }
-            if(!ok)return d.fail();
-            d.readSinceYield+=count; // count cannot exceed the remaining byte budget.
-            if(d.readSinceYield==4096){d.readSinceYield=0;vTaskDelay(1);}
+            if(d.cancelled||esp_timer_get_time()>=d.deadline)return d.fail();
+            const size_t inPage=static_cast<uint32_t>(offset)-d.sourcePageOffset;
+            if(inPage>=d.sourcePageLength)return d.fail();
+            const size_t count=std::min(length,d.sourcePageLength-inPage);
+            std::memcpy(data,d.sourcePage+inPage,count); // GUI is not held on cache hits/copies.
             offset+=static_cast<int>(count);data+=count;length-=count;
         }
         return ESP_OK;
@@ -177,6 +191,10 @@ bool reconstruct(const uint8_t* patch,const Plan& plan,
         return false;
     }
     Decoder d{internalChunk,base.size,target.size};d.deadline=deadlineUs;
+    if(!d.sourcePage) {
+        ESP_LOGW("MosaicoDelta", "reconstruct_failed reason=source_cache_oom offset=0 prod=0 written=0");
+        return false;
+    }
     if(psa_hash_setup(&d.hash,PSA_ALG_SHA_256)!=PSA_SUCCESS) {
         ESP_LOGW("MosaicoDelta", "reconstruct_failed reason=hash_setup offset=0 prod=0 written=0");
         return false;

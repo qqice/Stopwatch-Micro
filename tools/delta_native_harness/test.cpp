@@ -15,15 +15,25 @@
 #include "sdk/hal/hal.h"
 int64_t fakeTime=1;
 bool pendingIoYield=false;
-static unsigned ioYields=0,readYields=0,writeYields=0,readBudget=0,feedCalls=0,finalizeCalls=0;
+static unsigned ioYields=0,readYields=0,writeYields=0,logicalReads=0,feedCalls=0,finalizeCalls=0;
 static uint64_t readBytes=0;
-static bool pendingWriteYield=false;
+static bool pendingWriteYield=false,failCache=false,failRead=false,expireReadYield=false;
+static void* cachePtr=nullptr;
+static unsigned cacheAllocs=0,cacheFrees=0;
+void* heap_caps_malloc(size_t size,unsigned caps) {
+ assert(!GetHAL().held&&!cachePtr&&size==4096&&caps==3);++cacheAllocs;
+ if(failCache)return nullptr;
+ cachePtr=std::malloc(size);assert(cachePtr);return cachePtr;
+}
+void heap_caps_free(void* ptr) {
+ assert(!GetHAL().held&&ptr==cachePtr&&ptr);std::free(ptr);cachePtr=nullptr;++cacheFrees;
+}
 void delta_test_delay(unsigned ticks) {
  assert(!GetHAL().held&&ticks==1);
  if(pendingIoYield){
   pendingIoYield=false;++ioYields;
   if(pendingWriteYield){pendingWriteYield=false;++writeYields;}
-  else {assert(readBudget==4096);readBudget=0;++readYields;}
+  else {++readYields;if(expireReadYield)fakeTime=1000000;}
  }
 }
 static std::vector<uint8_t> sourceImage,written;
@@ -35,8 +45,9 @@ extern "C" void* delta_test_calloc(size_t n,size_t size) {
 }
 namespace MosaicoOta {
 bool readRunningImage(uint32_t offset,uint8_t* data,size_t length) {
- assert(GetHAL().held&&!pendingIoYield&&++GetHAL().operations==1&&length>0&&length<=4096-readBudget);
- readBudget+=static_cast<unsigned>(length);readBytes+=length;pendingIoYield=readBudget==4096;++readCalls;
+ assert(GetHAL().held&&!pendingIoYield&&++GetHAL().operations==1&&length>0&&length<=4096);
+ assert(data==cachePtr&&offset%4096==0);readBytes+=length;pendingIoYield=true;++readCalls;
+ if(failRead){std::memset(data,0xaa,length);return false;}
  if(offset>sourceImage.size()||length>sourceImage.size()-offset)return false;
  std::memcpy(data,sourceImage.data()+offset,length);return true;
 }
@@ -56,6 +67,14 @@ void recordWorkPhase(WorkPhase phase) {
 // Include the actual production implementation: no test copy of the parser,
 // callback bounds, hash verification, aggregation, or codec integration.
 #include <esp_delta_ota.h>
+static src_read_cb_with_user_ctx_t actualRead=nullptr;
+static esp_err_t checkedRead(uint8_t* data,size_t length,int offset,void* user) {
+ assert(!GetHAL().held);++logicalReads;return actualRead(data,length,offset,user);
+}
+static esp_delta_ota_handle_t checkedInit(esp_delta_ota_cfg_t* cfg) {
+ actualRead=cfg->read_cb_with_user_data;auto checked=*cfg;checked.read_cb_with_user_data=checkedRead;
+ return esp_delta_ota_init(&checked);
+}
 static esp_err_t checkedFeed(esp_delta_ota_handle_t h,const uint8_t* data,int length) {
  assert(!GetHAL().held&&!pendingIoYield);++feedCalls;
  const auto result=esp_delta_ota_feed_patch(h,data,length);
@@ -66,9 +85,11 @@ static esp_err_t checkedFinalize(esp_delta_ota_handle_t h) {
  const auto result=esp_delta_ota_finalize(h);
  assert(!GetHAL().held&&!pendingIoYield);return result;
 }
+#define esp_delta_ota_init checkedInit
 #define esp_delta_ota_feed_patch checkedFeed
 #define esp_delta_ota_finalize checkedFinalize
 #include "production/mosaico_delta.cpp"
+#undef esp_delta_ota_init
 #undef esp_delta_ota_feed_patch
 #undef esp_delta_ota_finalize
 namespace ResetActual {
@@ -173,11 +194,15 @@ static void testChunk() {
  assert(!MosaicoDelta::decodeChunk(deep.c_str(),deep.size(),0,3,internalBuffer,4096,count));
  std::puts("PASS actual chunk JSON/offset/count validation (Foundation base64 SDK shim)");
 }
-static void clean(){assert(!GetHAL().held);GetHAL()=Hal{};written.clear();writeCalls=readCalls=callocCalls=failCalloc=0;failWrite=false;live=true;fakeTime=1;assert(!pendingIoYield);ioYields=readYields=writeYields=readBudget=feedCalls=finalizeCalls=0;readBytes=0;}
+static void clean(){
+ assert(!GetHAL().held&&!cachePtr&&!pendingIoYield);GetHAL()=Hal{};written.clear();
+ writeCalls=readCalls=callocCalls=failCalloc=0;failWrite=failCache=failRead=expireReadYield=false;live=true;fakeTime=1;
+ ioYields=readYields=writeYields=logicalReads=feedCalls=finalizeCalls=cacheAllocs=cacheFrees=0;readBytes=0;
+}
 static bool run(const std::vector<uint8_t>& patch,const MosaicoDelta::Plan& plan,
  const MosaicoOta::VerifiedImageDescriptor& base,const MosaicoOta::VerifiedImageDescriptor& target) {
  const bool ok=MosaicoDelta::reconstruct(patch.data(),plan,base,target,internalBuffer,4096,1000000);
- assert(!GetHAL().held);return ok;
+ assert(!GetHAL().held&&!cachePtr);assert(cacheFrees==(failCache?0U:cacheAllocs));return ok;
 }
 int main(int argc,char** argv) {
  assert(argc==4);sourceImage=load(argv[1]);auto targetBytes=load(argv[2]);auto patch=load(argv[3]);
@@ -187,17 +212,17 @@ int main(int argc,char** argv) {
  clean();assert(run(patch,plan,base,target)&&written==targetBytes&&writeCalls==(target.size+4095)/4096&&readCalls>0);
  const unsigned successBegins=GetHAL().begins;
   assert(GetHAL().ends==successBegins&&successBegins==readCalls+writeCalls);
- assert(readYields==readBytes/4096&&writeYields==writeCalls&&ioYields==readYields+writeYields);
+ assert(readYields==readCalls&&writeYields==writeCalls&&ioYields==readYields+writeYields);
  assert(feedCalls==(plan.size+255)/256&&finalizeCalls==1);
- std::printf("STATS read_calls=%u read_bytes=%llu read_yields=%u write_calls=%u write_yields=%u feed_calls=%u exact_output_sha256=1\n",
-             readCalls,static_cast<unsigned long long>(readBytes),readYields,writeCalls,writeYields,feedCalls);
+ std::printf("STATS logical_read_calls=%u actual_NOR_read_calls=%u read_bytes=%llu read_yields=%u write_calls=%u write_yields=%u feed_calls=%u exact_output_sha256=1\n",
+             logicalReads,readCalls,static_cast<unsigned long long>(readBytes),readYields,writeCalls,writeYields,feedCalls);
  for(unsigned fail:{1U,successBegins/2,successBegins,~0U}) {
   clean();GetHAL().failBegin=fail;
   assert(!run(patch,plan,base,target)&&!GetHAL().held);
   assert(GetHAL().ends+1==GetHAL().begins&&finalizeCalls==1);
   if(fail==~0U)assert(!readCalls&&!writeCalls);
  }
- std::puts("PASS bounded IO windows: codec feed/finalize unlocked, every read/write <=4096 independently held + released, <=4096 read-byte yield budget, every write yielded, first/mid/final/all failure cleanup");
+ std::puts("PASS bounded IO windows: codec feed/finalize unlocked, every read/write <=4096 independently held + released, one PSRAM source page per real read/yield, every write yielded, first/mid/final/all failure cleanup");
  std::puts("PASS real base -> target detools-heatshrink streaming reconstruction + exact internal 4096 aggregation + real SHA256");
  clean();auto corrupt=patch;corrupt[patch.size()/2]^=1;assert(!run(corrupt,plan,base,target)&&writeCalls==0);
  std::puts("PASS corrupted patch rejected by real SHA256 before any codec/flash output");
@@ -209,39 +234,61 @@ int main(int argc,char** argv) {
  clean();failWrite=true;assert(!run(patch,plan,base,target)&&!live&&writeCalls==1);std::puts("PASS flash/safety failure not retried by finalize callbacks");
  for(unsigned n:{1U,2U}) {clean();failCalloc=n;assert(!run(patch,plan,base,target)&&writeCalls==0);}std::puts("PASS official codec context/apply-patch OOM returns full-fallback failure");
  clean();fakeTime=1000000;assert(!run(patch,plan,base,target)&&writeCalls==0&&readCalls==0&&GetHAL().ends==0);std::puts("PASS total deadline stops decode before output");
- clean();MosaicoDelta::Decoder d{internalBuffer,base.size,target.size};d.deadline=1000000;
+ clean();failCache=true;assert(!run(patch,plan,base,target)&&!readCalls&&!writeCalls&&cacheAllocs==1&&!cacheFrees);
+ std::puts("PASS PSRAM cache OOM returns failure/full-fallback with no IO");
+ clean();{
+ MosaicoDelta::Decoder d{internalBuffer,base.size,target.size};d.deadline=1000000;
  d.buffered=1;d.cancelled=true;
  assert(MosaicoDelta::Decoder::read(internalBuffer,1,0,&d)!=ESP_OK);
  assert(MosaicoDelta::Decoder::write(internalBuffer,1,&d)!=ESP_OK);
  assert(!d.flush()&&!readCalls&&!writeCalls&&!d.produced);
  d.cancelled=false;fakeTime=d.deadline;
  assert(!d.flush()&&!readCalls&&!writeCalls&&d.buffered==1);
- std::puts("PASS buffered tail flush after deadline performs no flash write");
- fakeTime=1;d.buffered=0;d.cancelled=false;
- // Tiny codec callbacks retain separate guards but share only a byte counter.
- for(unsigned i=0;i<4096;++i)assert(MosaicoDelta::Decoder::read(internalBuffer,1,i,&d)==ESP_OK);
- assert(readCalls==4096&&readYields==1&&ioYields==1&&GetHAL().ends==4096&&d.readSinceYield==0);
- std::puts("PASS 4096 one-byte reads retain 4096 guards but need only one read yield");
- clean();
- // Exercise a vendor callback larger than one flash window without new buffering.
+ }
+ clean();{
+ MosaicoDelta::Decoder d{internalBuffer,base.size,target.size};d.deadline=1000000;
+ for(unsigned i=0;i<4096;++i){assert(MosaicoDelta::Decoder::read(internalBuffer,1,i,&d)==ESP_OK);assert(internalBuffer[0]==sourceImage[i]);}
+ assert(readCalls==1&&readYields==1&&GetHAL().ends==1);
+ std::puts("PASS 4096 sequential one-byte logical reads coalesce into one fenced NOR page fill");
  std::vector<uint8_t> readback(9000);assert(base.size>=readback.size());
  assert(MosaicoDelta::Decoder::read(readback.data(),readback.size(),0,&d)==ESP_OK);
  assert(std::equal(readback.begin(),readback.end(),sourceImage.begin()));
- assert(readCalls==3&&GetHAL().begins==3&&GetHAL().ends==3&&ioYields==2&&d.readSinceYield==808);
- std::puts("PASS 9000-byte vendor read: three independent guards, two 4096-byte yields, 808-byte remainder");
- clean();d.cancelled=false;d.readSinceYield=0;
- assert(MosaicoDelta::Decoder::read(readback.data(),4000,0,&d)==ESP_OK);
- assert(MosaicoDelta::Decoder::read(readback.data()+4000,4096,4000,&d)==ESP_OK);
- assert(readCalls==3&&readYields==1&&readBudget==4000&&d.readSinceYield==4000);
- assert(GetHAL().begins==3&&GetHAL().ends==3);
- std::puts("PASS cross-callback 4000+4096 reads split at 96-byte remaining budget before yield");
- clean();d.cancelled=false;
-
+ assert(readCalls==3&&readYields==3); // First page reused, next two filled.
+ assert(MosaicoDelta::Decoder::read(internalBuffer,1,0,&d)==ESP_OK&&readCalls==4&&internalBuffer[0]==sourceImage[0]);
+ // Hit deadline/cancellation must not even serve an already valid cached page.
+ fakeTime=d.deadline;internalBuffer[0]=0x5a;
+ assert(MosaicoDelta::Decoder::read(internalBuffer,1,0,&d)!=ESP_OK&&internalBuffer[0]==0x5a&&readCalls==4);
+ fakeTime=1;
+ assert(MosaicoDelta::Decoder::read(internalBuffer,1,8192,&d)!=ESP_OK&&readCalls==4);
+ std::puts("PASS cross-page copy, backwards seek refill, cached deadline/cancel noIO");
+ }
+ clean();{
+ // Force a short last page irrespective of fixture alignment.
+ MosaicoDelta::Decoder d{internalBuffer,8192+17,target.size};d.deadline=1000000;
+ assert(base.size>=8192+17);
+ assert(MosaicoDelta::Decoder::read(internalBuffer,17,8192,&d)==ESP_OK&&readBytes==17&&d.sourcePageLength==17);
+ assert(!std::memcmp(internalBuffer,sourceImage.data()+8192,17));
+ assert(MosaicoDelta::Decoder::read(internalBuffer,1,8209,&d)!=ESP_OK&&readCalls==1);
+ std::puts("PASS bounded partial final source page and read-end rejection");
+ }
+ clean();{
+ MosaicoDelta::Decoder d{internalBuffer,base.size,target.size};d.deadline=1000000;failRead=true;
+ assert(MosaicoDelta::Decoder::read(internalBuffer,1,0,&d)!=ESP_OK&&!d.sourcePageLength&&d.cancelled);
+ assert(MosaicoDelta::Decoder::read(internalBuffer,1,0,&d)!=ESP_OK&&readCalls==1);
+ }
+ clean();{
+ MosaicoDelta::Decoder d{internalBuffer,base.size,target.size};d.deadline=1000000;expireReadYield=true;internalBuffer[0]=0x5a;
+ assert(MosaicoDelta::Decoder::read(internalBuffer,1,0,&d)!=ESP_OK&&readCalls==1&&internalBuffer[0]==0x5a);
+ }
+ clean();{
+ MosaicoDelta::Decoder d{internalBuffer,base.size,target.size};d.deadline=1000000;
  assert(MosaicoDelta::Decoder::read(internalBuffer,1,-1,&d)!=ESP_OK);
  d.cancelled=false;assert(MosaicoDelta::Decoder::read(internalBuffer,1,INT_MAX,&d)!=ESP_OK);
  d.cancelled=false;assert(MosaicoDelta::Decoder::read(internalBuffer,SIZE_MAX,0,&d)!=ESP_OK);
  d.cancelled=false;assert(MosaicoDelta::Decoder::read(internalBuffer,1,(int)base.size,&d)!=ESP_OK);
  d.cancelled=false;assert(MosaicoDelta::Decoder::write(internalBuffer,SIZE_MAX,&d)!=ESP_OK);
- assert(readCalls==0&&writeCalls==0);std::puts("PASS direct production signed offset/SIZE_MAX/read-end/output overflow guards");
+ assert(readCalls==0&&writeCalls==0);
+ }
+ assert(!cachePtr&&cacheAllocs==cacheFrees);std::puts("PASS cache release on every success/failure scope, read-failure invalidation, deadline after fill, signed/SIZE_MAX bounds");
  std::puts("ALL PASS");
 }
