@@ -36,8 +36,6 @@
 #include <esp_netif.h>
 #include <esp_netif_sntp.h>
 #ifdef MOSAICO_BOARD
-#include <esp_sntp.h>
-#undef SNTP_OPMODE_POLL
 #include <lwip/apps/sntp.h>
 #endif
 #include <ctime>

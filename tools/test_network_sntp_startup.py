@@ -134,6 +134,9 @@ class SntpStartupTests(unittest.TestCase):
         self.assertIn('timeConfig.start = false;', s)
         self.assertEqual(s.count('esp_netif_sntp_start()'), 1)
         self.assertNotIn('esp_sntp_stop(', s)
+        self.assertNotIn('#include <esp_sntp.h>', s)
+        self.assertNotIn('#undef SNTP_OPMODE_POLL', s)
+        self.assertIn('#ifdef MOSAICO_BOARD\n#include <lwip/apps/sntp.h>\n#endif', s)
         stop = rv.function(s, '    auto stopInvalidClockSntp =')
         self.assertIn('esp_netif_tcpip_exec([](void*) -> esp_err_t {\n                sntp_stop();\n                return ESP_OK;\n            }, nullptr)', stop)
         self.assertIn('SNTP suspend failed: %s', stop)
@@ -157,7 +160,7 @@ class SntpStartupTests(unittest.TestCase):
         self.assertLess(pause, s.index('                esp_wifi_disconnect();', pause))
         self.assertLess(pause, s.index('esp_wifi_stop()', pause))
         # Exact inverse binds every unrelated owner/window/firstQuota/TLS path to R56.
-        before = s.replace('#ifdef MOSAICO_BOARD\n#include <esp_sntp.h>\n#undef SNTP_OPMODE_POLL\n#include <lwip/apps/sntp.h>\n#endif\n', '', 1)
+        before = s.replace('#ifdef MOSAICO_BOARD\n#include <lwip/apps/sntp.h>\n#endif\n', '', 1)
         begin = before.index('    int64_t sntpNextAttemptUs = 0;')
         end = before.index('#endif\n    bool hadConnection = false;', begin)
         before = before[:begin] + before[end:]
