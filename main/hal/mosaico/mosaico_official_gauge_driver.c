@@ -108,6 +108,13 @@ bool mosaico_bq_boot_factory_reset(i2c_master_dev_handle_t device, uint16_t capa
         } while (esp_timer_get_time() < deadline);
     }
     const esp_err_t primaryError = mosaico_bq_first_error;
+    if (ok && primaryError == ESP_OK) {
+        // Continue directly into the existing vendor profile flow. Do not add
+        // an intermediate seal/unseal cycle to the single RESET experiment.
+        mosaico_bq_track_writes = false;
+        ESP_LOGW(TAG, "COLD_FACTORY_RESET_V1_READY");
+        return true;
+    }
     // Cleanup gets an independent ACK budget, never replays any keys/RESET.
     // Check status before calling the vendor API (its own accessor is lossy).
     mosaico_bq_first_error = ESP_OK;
@@ -125,7 +132,6 @@ bool mosaico_bq_boot_factory_reset(i2c_master_dev_handle_t device, uint16_t capa
     ESP_LOGI(TAG, "COLD_FACTORY_RESET_V1 result=%u sealed=%u reset_try=%u dc=%u fcc=%u op=%04x primary_err=%d cleanup_err=%d",
              ok && sealed && primaryError == ESP_OK, sealed, !!(mosaico_bq_attempts & 4), dc, fcc, raw,
              primaryError, mosaico_bq_first_error);
-    if (ok && sealed && primaryError == ESP_OK) ESP_LOGW(TAG, "COLD_FACTORY_RESET_V1_VERIFIED");
-    else ESP_LOGE(TAG, "COLD_FACTORY_RESET_V1_FAILED");
-    return ok && sealed && primaryError == ESP_OK;
+    ESP_LOGE(TAG, "COLD_FACTORY_RESET_V1_FAILED");
+    return false;
 }

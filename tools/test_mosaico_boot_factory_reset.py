@@ -81,11 +81,11 @@ struct Harness {
 '''+security.replace('esp_err_t ', 'constexpr esp_err_t ')+ '\n'+helper.replace('bool mosaico_bq_boot_factory_reset(', 'constexpr bool mosaico_bq_boot_factory_reset(')+r'''
 };
 constexpr bool tests(){
- Harness cold;if(!cold.mosaico_bq_boot_factory_reset(7,65,true)||cold.resets!=1||cold.sec!=3||!cold.intent||cold.forbidden)return false;
- Harness stale;stale.staleInit=true;if(!stale.mosaico_bq_boot_factory_reset(7,65,true)||stale.earlyAccept||stale.time-stale.resetAt<4000000)return false;
+ Harness cold;if(!cold.mosaico_bq_boot_factory_reset(7,65,true)||cold.resets!=1||cold.sec!=2||cold.seals||!cold.intent||cold.forbidden)return false;
+ Harness stale;stale.staleInit=true;if(!stale.mosaico_bq_boot_factory_reset(7,65,true)||stale.earlyAccept||stale.time-stale.resetAt<2000000||stale.seals)return false;
  for(unsigned key:{1u,2u}){Harness k;k.unknownKey=key;if(k.mosaico_bq_boot_factory_reset(7,65,true)||k.keys!=key||k.resets||k.sec!=3||k.mosaico_bq_track_writes)return false;}
- Harness sealAck;sealAck.sealUnknown=true;if(sealAck.mosaico_bq_boot_factory_reset(7,65,true)||sealAck.sec!=3||sealAck.seals!=1||sealAck.resets!=1||sealAck.mosaico_bq_track_writes)return false;
- Harness por;por.sec=2;if(!por.mosaico_bq_boot_factory_reset(7,65,true)||por.resets!=1||por.keys||por.sec!=3)return false;
+ Harness sealAck;sealAck.sealUnknown=true;sealAck.badPostCaps=true;if(sealAck.mosaico_bq_boot_factory_reset(7,65,true)||sealAck.sec!=3||sealAck.seals!=1||sealAck.resets!=1||sealAck.mosaico_bq_track_writes)return false;
+ Harness por;por.sec=2;if(!por.mosaico_bq_boot_factory_reset(7,65,true)||por.resets!=1||por.keys||por.sec!=2||por.seals)return false;
  for(unsigned cap:{65u,130u,3000u}){
   Harness runtime;if(!runtime.mosaico_bq_boot_factory_reset(7,cap,false)||runtime.resets||runtime.keys||runtime.seals)return false;
  }
@@ -94,7 +94,7 @@ constexpr bool tests(){
  Harness mixed;mixed.fcc=65;if(!mixed.mosaico_bq_boot_factory_reset(7,65,true)||mixed.resets||mixed.keys)return false;
  Harness ack;ack.unknownAck=true;if(ack.mosaico_bq_boot_factory_reset(7,65,true)||ack.resets!=1||ack.seals!=1||ack.sec!=3||!ack.intent)return false;
  Harness timeout;timeout.timeout=true;if(timeout.mosaico_bq_boot_factory_reset(7,65,true)||timeout.resets!=1||timeout.sec!=3||timeout.time-timeout.resetAt>6100000)return false;
- Harness seal;seal.sealFail=true;if(seal.mosaico_bq_boot_factory_reset(7,65,true)||seal.resets!=1||seal.seals!=1||seal.sec!=2)return false;
+ Harness seal;seal.sealFail=true;seal.badPostCaps=true;if(seal.mosaico_bq_boot_factory_reset(7,65,true)||seal.resets!=1||seal.seals!=1||seal.sec!=2)return false;
  Harness unseal;unseal.unsealFail=true;if(unseal.mosaico_bq_boot_factory_reset(7,65,true)||unseal.resets||unseal.keys!=2||unseal.sec!=3)return false;
  Harness failedRead;failedRead.readFail=true;if(failedRead.mosaico_bq_boot_factory_reset(7,65,true)||failedRead.resets||failedRead.keys)return false;
  Harness full;full.sec=1;if(full.mosaico_bq_boot_factory_reset(7,65,true)||full.resets||full.keys)return false;
@@ -134,7 +134,7 @@ struct Harness {''')
         self.assertIn('bool bootFactoryReset = false',(BASE/'mosaico_official_gauge.h').read_text())
         self.assertIn('bool bootFactoryReset = false',function(hal,'bool gauge_official_apply_locked('))
         apply=function((BASE/'mosaico_official_gauge.cpp').read_text(),'MosaicoOfficialGaugeResult mosaico_official_gauge_apply(')
-        failed=apply.split('if (!mosaico_bq_boot_factory_reset',1)[1].split('// A successful reset helper',1)[0]
+        failed=apply.split('if (!mosaico_bq_boot_factory_reset',1)[1].split('\n    }',1)[0]
         self.assertIn('return {false, (attempts & 1) != 0, (attempts & 2) != 0, true};',failed)
         self.assertNotIn('bq27220_create',failed)
         outer=function(hal,'bool gauge_official_apply_locked(')
@@ -148,7 +148,7 @@ struct Harness {''')
         helper=function(driver,'bool mosaico_bq_boot_factory_reset(')
         self.assertGreater(driver.index(helper),driver.index('#include "vendor/bq27220/bq27220.c"'))
         self.assertEqual(helper.count('bq27220_control(handle, CONTROL_RESET)'),1)
-        for marker in ('SUBMITTED','VERIFIED','FAILED'):
+        for marker in ('SUBMITTED','READY','FAILED'):
             self.assertEqual(helper.count('\"COLD_FACTORY_RESET_V1_'+marker+'\"'),1)
         self.assertNotIn('CONTROL_OCV',helper)
         self.assertNotIn('bq27220_set_parameter',helper)

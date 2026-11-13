@@ -427,12 +427,15 @@ This tests initialization state; it is not a periodic percentage-reset workaroun
 The helper uses the unchanged vendor security APIs with local write-error
 tracking. A missing ACK cannot authorize another key or RESET. After the single
 submission it waits 2 seconds before accepting INITCOMP, within a total 4-second
-initialization deadline plus a possible in-flight I/O margin. Cleanup requires
-checked status and an independently acknowledged seal. A failed pre-provision
-reset returns without entering the old profile-failure EXIT/SEAL path. Normal
+initialization deadline plus a possible in-flight I/O margin. Successful reset
+verification continues directly into the existing vendor profile flow, without
+an intermediate seal/unseal cycle; that flow owns final SEALED verification.
+Only reset failure invokes checked-status cleanup with at most one seal attempt
+and independent ACK verification. A failed pre-provision reset then returns
+without entering the old profile-failure EXIT/SEAL path. Normal
 profile-failure cleanup and OTA protections are otherwise unchanged.
 
-Existing NAND warning/error fingerprints retain fixed SUBMITTED, VERIFIED and
+Existing NAND warning/error fingerprints retain fixed SUBMITTED, READY and
 FAILED markers; no log schema, task, UART command or persistent gate is added.
 The 131-field parameter backup, original fault records and signed R82 recovery
 image must be retained before deployment. Tests and review do not substitute for

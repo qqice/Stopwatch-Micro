@@ -103,8 +103,8 @@ MosaicoOfficialGaugeResult mosaico_official_gauge_apply(i2c_master_dev_handle_t 
         const unsigned attempts = mosaico_bq_get_attempts();
         return {false, (attempts & 1) != 0, (attempts & 2) != 0, true};
     }
-    // A successful reset helper has independently verified SEALED. Its seal
-    // must not mask cleanup obligations of the subsequent provisioning call.
+    // The successful reset helper continues without an intermediate seal.
+    // Only provisioning owns its normal profile exit/final SEALED closure.
     mosaico_bq_reset_attempts();
     bq27220_handle_t handle = bq27220_create(&config);
     const unsigned attempts = mosaico_bq_get_attempts();
