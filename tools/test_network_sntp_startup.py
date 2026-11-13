@@ -21,11 +21,18 @@ struct esp_sntp_config_t{bool start;void(*sync_cb)(timeval*);const char* server;
 static long epoch;static int64_t now;
 namespace std{static long time(void*){return epoch;}}
 static int init_result,start_result,inits,starts,stops,marks,notifications,forwarded;
-static int pending_stops,serializations;static bool init_auto_start;
+static int pending_stops,serializations,stop_result;static bool init_auto_start,client_active;
 static int64_t esp_timer_get_time(){return now;}
 static esp_err_t esp_netif_sntp_init(esp_sntp_config_t*c){++inits;init_auto_start=c->start;return init_result;}
-static void esp_sntp_stop(){++stops;++pending_stops;}
-static esp_err_t esp_netif_sntp_start(){++starts;serializations+=pending_stops;pending_stops=0;return start_result;}
+// Model CORE_LOCKING: start executes directly; queued async stops are NOT drained.
+static void esp_sntp_stop(){++pending_stops;}
+static void sntp_stop(){++stops;client_active=false;}
+static esp_err_t esp_netif_tcpip_exec(esp_err_t(*fn)(void*),void*ctx){
+ if(stop_result)return stop_result;
+ ++serializations;return fn(ctx);
+}
+static void drain_async_stops(){if(pending_stops){client_active=false;pending_stops=0;}}
+static esp_err_t esp_netif_sntp_start(){++starts;client_active=start_result==ESP_OK;return start_result;}
 namespace MosaicoClock{static void onSntpTime(timeval*){++forwarded;}}
 struct Quota{void noteStartup(int){++marks;}void notifyStartupProgress(){++notifications;}};
 static Quota quota;
@@ -55,8 +62,8 @@ CASES = r'''
         online(0);stopInvalidClockSntp();online(300);online(600);
         return starts==1&&sntpStarted&&!stops?0:13;
     case 5: // Observed disconnect is idempotent; restoration is immediate.
-        online(0);stopInvalidClockSntp();stopInvalidClockSntp();online(5);
-        return starts==2&&stops==1&&serializations==1?0:14;
+        online(0);stopInvalidClockSntp();stopInvalidClockSntp();online(5);drain_async_stops();
+        return starts==2&&stops==1&&serializations==1&&client_active?0:14;
     case 6: // Clock becomes valid: leave normal SDK periodic sync alone.
         online(0);epoch=1735689600;online(30);stopInvalidClockSntp();online(300);
         return starts==1&&!stops&&sntpStarted?0:15;
@@ -71,6 +78,10 @@ CASES = r'''
     case 10: // Failed startup then link loss/restoration admits a fresh start.
         start_result=-1;online(0);stopInvalidClockSntp();start_result=0;online(5);
         return starts==2&&sntpStarted&&!stops?0:20;
+    case 11: // Stop failure is surfaced, no offline busy retry; next start recovers.
+        online(0);stop_result=-1;stopInvalidClockSntp();stopInvalidClockSntp();
+        if(sntpStarted||stops||serializations)return 21;
+        online(5);drain_async_stops();return starts==2&&client_active?0:22;
     }
     return 99;
 }
@@ -83,9 +94,9 @@ def fixture(s, mosaico=True):
 static int run_case(int id){
  init_result=id==2?-1:ESP_OK;start_result=id==3?-1:ESP_OK;
  inits=starts=stops=marks=notifications=forwarded=pending_stops=serializations=0;
- now=0;epoch=id==4?1735689601:0;init_auto_start=true;
+ now=0;stop_result=0;client_active=false;epoch=id==4?1735689601:0;init_auto_start=true;
 '''
-    count = 11 if mosaico else 1
+    count = 12 if mosaico else 1
     cases = CASES if mosaico else 'return inits==1&&init_auto_start&&!starts?0:1;\n}\n'
     return (('#define MOSAICO_BOARD 1\n' if mosaico else '') + PREFIX + setup + configuration + cases + f'''
 extern "C" {{volatile int test_results[{count}]={{}};}}
@@ -101,7 +112,7 @@ class SntpStartupTests(unittest.TestCase):
             rv.fixture = lambda s: fixture(s, mosaico)
             rv.RUN = RUN
             label = 'mosaico' if mosaico else 'non-mosaico'
-            count = 11 if mosaico else 1
+            count = 12 if mosaico else 1
             result = rv.execute(SOURCE.read_text(encoding='utf8'), label, count)
             log = RUN / (label + '-execution.log')
             log.write_text('Actual SNTP configuration and owner lifecycle lambdas. '
@@ -112,7 +123,7 @@ class SntpStartupTests(unittest.TestCase):
             rv.fixture, rv.RUN = oldf, oldr
 
     def test_actual_mosaico_config_and_lifecycle(self):
-        self.assertEqual(self.execute(True), (0,) * 11)
+        self.assertEqual(self.execute(True), (0,) * 12)
 
     def test_non_mosaico_keeps_default_autostart(self):
         self.assertEqual(self.execute(False), (0,))
@@ -122,6 +133,10 @@ class SntpStartupTests(unittest.TestCase):
         self.assertIn('ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org")', s)
         self.assertIn('timeConfig.start = false;', s)
         self.assertEqual(s.count('esp_netif_sntp_start()'), 1)
+        self.assertNotIn('esp_sntp_stop(', s)
+        stop = rv.function(s, '    auto stopInvalidClockSntp =')
+        self.assertIn('esp_netif_tcpip_exec([](void*) -> esp_err_t {\n                sntp_stop();\n                return ESP_OK;\n            }, nullptr)', stop)
+        self.assertIn('SNTP suspend failed: %s', stop)
         self.assertIn('attemptUs + 30LL * 1000000', s)
         self.assertIn('constexpr int64_t RefreshIntervalUs = 300LL * 1000000;', s)
         self.assertIn('constexpr int64_t UpdateWindowUs    = 90LL * 1000000;', s)
@@ -142,7 +157,7 @@ class SntpStartupTests(unittest.TestCase):
         self.assertLess(pause, s.index('                esp_wifi_disconnect();', pause))
         self.assertLess(pause, s.index('esp_wifi_stop()', pause))
         # Exact inverse binds every unrelated owner/window/firstQuota/TLS path to R56.
-        before = s.replace('#ifdef MOSAICO_BOARD\n#include <esp_sntp.h>\n#endif\n', '', 1)
+        before = s.replace('#ifdef MOSAICO_BOARD\n#include <esp_sntp.h>\n#undef SNTP_OPMODE_POLL\n#include <lwip/apps/sntp.h>\n#endif\n', '', 1)
         begin = before.index('    int64_t sntpNextAttemptUs = 0;')
         end = before.index('#endif\n    bool hadConnection = false;', begin)
         before = before[:begin] + before[end:]

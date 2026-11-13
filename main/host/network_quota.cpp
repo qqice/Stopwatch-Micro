@@ -37,6 +37,8 @@
 #include <esp_netif_sntp.h>
 #ifdef MOSAICO_BOARD
 #include <esp_sntp.h>
+#undef SNTP_OPMODE_POLL
+#include <lwip/apps/sntp.h>
 #endif
 #include <ctime>
 #include <esp_timer.h>
@@ -1653,9 +1655,18 @@ void NetworkQuota::run()
     auto stopInvalidClockSntp = [&]() {
         if (std::time(nullptr) >= 1735689600) return;
         if (sntpStarted) {
-            // Public stop posts to TCP/IP; the next public start serializes after it.
-            esp_sntp_stop();
-            ESP_LOGI("SystemClock", "SNTP suspended: clock invalid, link unavailable");
+            // Synchronous TCP/IP context: an async stop can run AFTER a new start
+            // when CORE_LOCKING makes that start execute directly under the lock.
+            const esp_err_t error = esp_netif_tcpip_exec([](void*) -> esp_err_t {
+                sntp_stop();
+                return ESP_OK;
+            }, nullptr);
+            if (error == ESP_OK)
+                ESP_LOGI("SystemClock", "SNTP suspended: clock invalid, link unavailable");
+            else
+                ESP_LOGW("SystemClock", "SNTP suspend failed: %s", esp_err_to_name(error));
+            // Retire owner intent even on failure: no offline busy retry or new
+            // power/OTA gate. The next public start synchronously stops/inits again.
             sntpStarted = false;
         }
         sntpNextAttemptUs = 0; // A restored association gets an immediate attempt.
