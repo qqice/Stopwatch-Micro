@@ -35,6 +35,9 @@
 #include <esp_http_client.h>
 #include <esp_netif.h>
 #include <esp_netif_sntp.h>
+#ifdef MOSAICO_BOARD
+#include <esp_sntp.h>
+#endif
 #include <ctime>
 #include <esp_timer.h>
 #include <esp_pm.h>
@@ -1646,6 +1649,30 @@ void NetworkQuota::run()
     if (timeInit != ESP_OK) ESP_LOGW("SystemClock", "SNTP init failed: %s", esp_err_to_name(timeInit));
 #ifdef MOSAICO_BOARD
     bool sntpStarted = false;
+    int64_t sntpNextAttemptUs = 0;
+    auto stopInvalidClockSntp = [&]() {
+        if (std::time(nullptr) >= 1735689600) return;
+        if (sntpStarted) {
+            // Public stop posts to TCP/IP; the next public start serializes after it.
+            esp_sntp_stop();
+            ESP_LOGI("SystemClock", "SNTP suspended: clock invalid, link unavailable");
+            sntpStarted = false;
+        }
+        sntpNextAttemptUs = 0; // A restored association gets an immediate attempt.
+    };
+    auto serviceSntp = [&]() {
+        const bool clockValid = std::time(nullptr) >= 1735689600;
+        if (timeInit != ESP_OK || (sntpStarted && clockValid)) return;
+        const int64_t attemptUs = esp_timer_get_time();
+        if (attemptUs < sntpNextAttemptUs) return;
+        // Bound both failed starts and invalid-clock retries. Do not inherit the
+        // SDK's 150s receive backoff across a short owner-controlled online window.
+        sntpNextAttemptUs = attemptUs + 30LL * 1000000;
+        // Public start synchronously stops/reinitializes the SDK client on TCP/IP.
+        const esp_err_t error = esp_netif_sntp_start();
+        sntpStarted = error == ESP_OK;
+        ESP_LOGI("SystemClock", "SNTP attempt clock_valid=%d result=%s", clockValid, esp_err_to_name(error));
+    };
 #endif
     bool hadConnection = false;
     bool wasLocked = false, updateWindow = false;
@@ -1832,6 +1859,9 @@ void NetworkQuota::run()
 #if defined(MOSAICO_BOARD) && CONFIG_IDF_TARGET_ESP32S31
                 if (!_lan_tcp.quiesce()) { wait(100); continue; }
 #endif
+#ifdef MOSAICO_BOARD
+                stopInvalidClockSntp();
+#endif
                 esp_wifi_disconnect();
                 if (esp_wifi_stop() != ESP_OK) {
                     setPhase(4);
@@ -1902,6 +1932,9 @@ void NetworkQuota::run()
         _connected = esp_wifi_sta_get_ap_info(&ap) == ESP_OK && netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK &&
                      ip.ip.addr != 0;
         if (!_connected) {
+#ifdef MOSAICO_BOARD
+            stopInvalidClockSntp();
+#endif
             hadConnection = false;
 #ifdef MOSAICO_BOARD
             bool useRetryPolicy = true;
@@ -1955,9 +1988,7 @@ void NetworkQuota::run()
         }
 #endif
 #ifdef MOSAICO_BOARD
-        if (timeInit == ESP_OK && !sntpStarted) {
-            if (esp_netif_sntp_start() == ESP_OK) sntpStarted = true;
-        }
+        serviceSntp();
 #endif
         if (GetTailnetQuota().enabled()) {
             // A real clock is required before certificate verification.
