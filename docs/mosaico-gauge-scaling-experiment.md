@@ -412,3 +412,29 @@ SEALED pair does not reopen access or reinitialize the gauge. Existing FA
 callers remain compatible. The existing `gauge-native-recovery evidence` output
 additionally exports CRC/MAC-validated current tx/access raw blobs and load
 codes for host backup; the original three-blob evidence CRC is unchanged.
+
+
+## Bounded cold factory initialization contrast (2026-11-13)
+
+The separately authorized R83 contrast adds one BQ27220 `RESET` before the
+existing official 65mAh provisioning, only for the initial `Hal::init` call,
+`ESP_RST_POWERON`, and a checked factory DC/FCC pair of 3000/3000. Existing
+physical/identity admission remains in effect. Runtime, deferred owner calls,
+software/watchdog boots, valid 65mAh state and the 130mAh trial do not opt in.
+No SOC/OCV register, gain, curve or protection threshold is directly written.
+This tests initialization state; it is not a periodic percentage-reset workaround.
+
+The helper uses the unchanged vendor security APIs with local write-error
+tracking. A missing ACK cannot authorize another key or RESET. After the single
+submission it waits 2 seconds before accepting INITCOMP, within a total 4-second
+initialization deadline plus a possible in-flight I/O margin. Cleanup requires
+checked status and an independently acknowledged seal. A failed pre-provision
+reset returns without entering the old profile-failure EXIT/SEAL path. Normal
+profile-failure cleanup and OTA protections are otherwise unchanged.
+
+Existing NAND warning/error fingerprints retain fixed SUBMITTED, VERIFIED and
+FAILED markers; no log schema, task, UART command or persistent gate is added.
+The 131-field parameter backup, original fault records and signed R82 recovery
+image must be retained before deployment. Tests and review do not substitute for
+a real battery cold-start observation; a normal prior boot is not proof that the
+intermittent plateau has been permanently fixed.

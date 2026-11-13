@@ -257,7 +257,7 @@ public:
     bool gaugeReconcileNominal(char* reason, size_t reasonSize);
     // Caller owns startup/radio-off scheduling. No task/timer is created here.
     bool gaugeCapacityTest(const char* action, char* details, size_t size);
-    GaugeBootReloadStatus gaugeBootReload(char* reason, size_t reasonSize);
+    GaugeBootReloadStatus gaugeBootReload(char* reason, size_t reasonSize, bool initialColdReset = false);
     // Snapshot only, no I2C/NVS. Waits for any transaction to finish before a
     // caller uses it to permit a runtime restart.
     GaugeBootReloadInfo gaugeBootReloadInfo() const;
@@ -373,7 +373,7 @@ public:
         return false;
     }
     bool gaugeCapacityTest(const char*, char*, size_t) { return false; }
-    GaugeBootReloadStatus gaugeBootReload(char* reason, size_t reasonSize)
+    GaugeBootReloadStatus gaugeBootReload(char* reason, size_t reasonSize, bool = false)
     {
         if (reason && reasonSize) std::snprintf(reason, reasonSize, "unsupported: not Mosaico");
         return GaugeBootReloadStatus::Skipped;

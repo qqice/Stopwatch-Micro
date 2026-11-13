@@ -8,10 +8,11 @@
 #include "vendor/bq27220/bq27220.h"
 extern "C" void mosaico_bq_reset_attempts(void);
 extern "C" unsigned mosaico_bq_get_attempts(void);
+extern "C" bool mosaico_bq_boot_factory_reset(i2c_master_dev_handle_t device, uint16_t capacity, bool bootFactoryReset);
 #ifndef MOSAICO_GAUGE_USE_PREVIOUS_PROFILE
 #define MOSAICO_GAUGE_USE_PREVIOUS_PROFILE 0
 #endif
-MosaicoOfficialGaugeResult mosaico_official_gauge_apply(i2c_master_dev_handle_t device, uint16_t capacity)
+MosaicoOfficialGaugeResult mosaico_official_gauge_apply(i2c_master_dev_handle_t device, uint16_t capacity, bool bootFactoryReset)
 {
     if (capacity != 65 && capacity != 130) return {false, false, false};
 #if MOSAICO_GAUGE_USE_PREVIOUS_PROFILE
@@ -97,6 +98,13 @@ MosaicoOfficialGaugeResult mosaico_official_gauge_apply(i2c_master_dev_handle_t 
     selected.design_cap = capacity;
     // Non-owning device token, NOT an actual managed bus. Wrapper intercepts all use.
     const bq27220_config_t config = {static_cast<void*>(device), &cfg, &selected};
+    mosaico_bq_reset_attempts();
+    if (!mosaico_bq_boot_factory_reset(device, capacity, bootFactoryReset)) {
+        const unsigned attempts = mosaico_bq_get_attempts();
+        return {false, (attempts & 1) != 0, (attempts & 2) != 0, true};
+    }
+    // A successful reset helper has independently verified SEALED. Its seal
+    // must not mask cleanup obligations of the subsequent provisioning call.
     mosaico_bq_reset_attempts();
     bq27220_handle_t handle = bq27220_create(&config);
     const unsigned attempts = mosaico_bq_get_attempts();

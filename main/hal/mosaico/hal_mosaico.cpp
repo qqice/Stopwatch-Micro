@@ -2714,10 +2714,14 @@ bool Hal::gaugeModeAudit(char* out, size_t len)
 }
 
 namespace {
-bool gauge_official_apply_locked(uint16_t capacity, char* details, size_t size, bool strictFcc = false)
+bool gauge_official_apply_locked(uint16_t capacity, char* details, size_t size, bool strictFcc = false, bool bootFactoryReset = false)
 {
     using namespace mosaico_gauge;
-    const auto official = mosaico_official_gauge_apply(gauge, capacity);
+    const auto official = mosaico_official_gauge_apply(gauge, capacity, bootFactoryReset);
+    if (official.resetFailed) {
+        std::snprintf(details, size, "boot_factory_reset_failed_no_profile");
+        return false; // Helper owns the sole cleanup; never enter legacy exit/key/seal paths.
+    }
     const bool applied = official.success;
     uint16_t operation=0, dc=0, fcc=0;
     bool capacityRead = gauge_word(0x3c, dc) && gauge_word(0x12, fcc);
@@ -2908,7 +2912,7 @@ Hal::GaugeBootReloadInfo Hal::gaugeBootReloadInfo() const
     return gauge_boot_info;
 }
 
-Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
+Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize, bool initialColdReset)
 {
     using namespace mosaico_gauge;
     using Status = GaugeBootReloadStatus;
@@ -2971,12 +2975,15 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
         return finish(Status::Skipped,"boot_official_security_unknown_or_not_idle_no_keys");
     if(!(admissionOperation&0x0020))
         return finish(Status::Deferred,"boot_official_deferred_initcomp");
-    if(security==2) {
+    bool bootFactoryReset=false;
+    uint16_t bootDc=0,bootFcc=0;
+    const bool bootPairRead=gauge_word(0x3c,bootDc)&&gauge_word(0x12,bootFcc);
+    if(security==2 && !bootPairRead)
+        return finish(Status::Deferred,"boot_official_deferred_factory_pair_read");
+    if(security==2 || (bootPairRead && bootDc==FactoryMah && bootFcc==FactoryMah)) {
         // Cold POR defaults to UNSEALED. Admit only the identified factory RAM
         // pair, never arbitrary open access or a partially configured profile.
-        uint16_t dc=0,fcc=0,mv=0,temp=0,current=0,average=0;
-        if(!gauge_word(0x3c,dc)||!gauge_word(0x12,fcc))
-            return finish(Status::Deferred,"boot_official_deferred_factory_pair_read");
+        uint16_t dc=bootDc,fcc=bootFcc,mv=0,temp=0,current=0,average=0;
         if(dc!=FactoryMah||fcc!=FactoryMah)
             return finish(Status::Skipped,"boot_official_unsealed_nonfactory_no_keys");
         if(!gauge_word(0x08,mv)||!gauge_word(0x06,temp)||!gauge_word(0x0c,current)||!gauge_word(0x14,average)||
@@ -2984,6 +2991,7 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
             return finish(Status::Deferred,"boot_official_deferred_factory_physical");
         if(!gauge_identity())
             return finish(Status::Deferred,"boot_official_deferred_factory_identity");
+        bootFactoryReset=initialColdReset && esp_reset_reason()==ESP_RST_POWERON;
     }
     // Deferred probes neither consume the experimental arm nor spend the one
     // hardware attempt. SEALED keeps its existing normal admission policy.
@@ -3010,7 +3018,7 @@ Hal::GaugeBootReloadStatus Hal::gaugeBootReload(char* reason, size_t reasonSize)
     }
     char details[128]{};
     gauge_boot_info.attempted = true; // Latch before vendor can submit its first write; never replay failures.
-    const bool verified=gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130);
+    const bool verified=gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130,bootFactoryReset && capacity==65);
     if(capacity==130)capacity_test.outcome=verified?"applied130_restore_pending":"apply130_failed_restore_pending";
     return finish(verified?Status::Applied:Status::Skipped,
                   verified?(capacity==130?"boot_capacity130_verified_restore_pending":"boot_official_profile_verified_sealed_native_capacity"):details);
