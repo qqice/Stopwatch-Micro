@@ -24,7 +24,7 @@ static_cast<uint8_t>(GaugeBootReloadStatus::Applied));''')
   # Admission/refusal and final-outcome capture keep their existing locations.
   boot=self.boot_source()
   self.assertNotIn('near_boot_finish(',boot)
-  self.assertEqual(boot.count('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130,bootFactoryReset && capacity==65)'),1)
+  self.assertEqual(boot.count('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130)'),1)
   self.assertEqual(boot.count('gauge_diagnostic_locked(gauge_boot_before'),1)
   self.assertEqual(boot.count('gauge_engine_locked(gauge_engine_before'),1)
   self.assertLess(boot.index('gauge_diagnostic_locked(gauge_boot_before'),boot.index('struct DiagnosticFinish'))
@@ -76,9 +76,9 @@ static_assert(cases(), "factory SEC2 guards");
    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
  def test_actual_flow_latch_official_apply_cleanup_order(self):
   source=self.boot_source()
-  self.assertLess(source.index('gauge_boot_info.attempted = true'),source.index('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130,bootFactoryReset && capacity==65)'))
+  self.assertLess(source.index('gauge_boot_info.attempted = true'),source.index('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130)'))
   helper=self.helper_source()
-  tokens=['mosaico_official_gauge_apply(gauge, capacity, bootFactoryReset)', 'const bool verified =','if (verified)', 'bool cleanup = observed;']
+  tokens=['mosaico_official_gauge_apply(gauge, capacity)', 'const bool verified =','if (verified)', 'bool cleanup = observed;']
   offsets=[helper.index(token) for token in tokens]
   self.assertEqual(offsets,sorted(offsets))
   for retired in ['gauge_load_normal_target(', 'gaugeAccess(', 'gaugeSetNominalCapacity(', 'near_boot_apply(', 'near_boot_finish(']:
@@ -93,7 +93,7 @@ static_assert(cases(), "factory SEC2 guards");
   self.assertIn('if(!lease.held)',admission)
   self.assertNotIn('mosaico_official_gauge_apply(',admission)
   self.assertIn('gauge_diagnostic_locked(gauge_boot_before',admission)
-  self.assertLess(source.index('if (!gauge || !selftest())'),source.index('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130,bootFactoryReset && capacity==65)'))
+  self.assertLess(source.index('if (!gauge || !selftest())'),source.index('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130)'))
   model=(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').read_text(encoding='utf8')
   exit_policy=model.split('bool configExitAccepted(',1)[1].split('inline bool capacityPolicy',1)[0]
   self.assertIn('security == 1 || security == 3',exit_policy)
@@ -123,11 +123,8 @@ constexpr int ESP_OK=0;
 struct Sim {
  enum class GaugeBootReloadStatus {Deferred,Skipped,Applied,Critical};
  struct {GaugeBootReloadStatus status=GaugeBootReloadStatus::Deferred;bool attempted=false;char reason[128]{};} gauge_boot_info;
- struct Result {bool success=true,exitAttempted=false,sealAttempted=false,resetFailed=false;} result;
- bool leaseAvailable=true,gauge=true,model=true,readable=true,resetOption=false;unsigned applies=0,exits=0,seals=0;
- int resetReason=1;static constexpr int ESP_RST_POWERON=1;
- constexpr int esp_reset_reason(){return resetReason;}
- constexpr bool gauge_identity(){return readable;}
+ struct Result {bool success=true,exitAttempted=false,sealAttempted=false;} result;
+ bool leaseAvailable=true,gauge=true,model=true,readable=true;unsigned applies=0,exits=0,seals=0;
  uint16_t dc=65,fcc=65,op=0x26,normal_gauge_target=0;
  struct {bool possiblyChanged=false,restorePending=false,restoreAttempted=false;long long deadlineUs=0;const char* outcome="idle";} capacity_test;
  constexpr bool capacity_consume_once(){return false;}
@@ -137,13 +134,13 @@ struct Sim {
  constexpr bool gaugeScaleTrialActive(){return false;}
  constexpr void gauge_legacy_cache_init_locked(){}
  constexpr bool selftest(){return model;}
- constexpr Result mosaico_official_gauge_apply(bool,uint16_t,bool reset){++applies;resetOption=reset;if(dc==3000){dc=fcc=65;op=0x26;}return result;}
- constexpr bool gauge_word(uint8_t reg,uint16_t& out){out=reg==0x3a?op:reg==0x3c?dc:reg==0x12?fcc:reg==8?4100:reg==6?2982:0;return readable;}
+ constexpr Result mosaico_official_gauge_apply(bool,uint16_t){++applies;return result;}
+ constexpr bool gauge_word(uint8_t reg,uint16_t& out){out=reg==0x3a?op:reg==0x3c?dc:fcc;return readable;}
  constexpr bool gauge_exit_config(bool){++exits;return false;}
  constexpr int i2c_master_transmit(bool,const uint8_t*,size_t,int){++seals;return 1;}
  constexpr void gauge_delay_ms(unsigned){}
  HELPER
- constexpr GaugeBootReloadStatus run(char* reason=nullptr,size_t reasonSize=0,bool initialColdReset=false) BODY
+ constexpr GaugeBootReloadStatus run(char* reason=nullptr,size_t reasonSize=0) BODY
 };
 constexpr bool cases(){using S=Sim::GaugeBootReloadStatus;
  {Sim s;if(s.run()!=S::Applied||s.applies!=1||s.normal_gauge_target!=65)return false;if(s.run()!=S::Applied||s.applies!=1)return false;}
@@ -153,26 +150,16 @@ constexpr bool cases(){using S=Sim::GaugeBootReloadStatus;
  {Sim s;s.result={false,true,false};s.op=0x402;if(s.run()!=S::Skipped||s.exits||s.seals||s.normal_gauge_target)return false;}
  {Sim s;s.result={false,false,true};s.op=0x22;if(s.run()!=S::Skipped||s.seals||s.normal_gauge_target)return false;}
  {Sim s;s.result.success=false;s.op=0x402;if(s.run()!=S::Skipped||s.applies||s.exits||s.seals)return false;}
- {Sim s;s.readable=false;if(s.run()!=S::Deferred||s.exits||s.seals||s.applies||s.gauge_boot_info.attempted)return false;}
- for(int reason:{1,2,3,4,5,6,7,8}){Sim s;s.dc=s.fcc=3000;s.resetReason=reason;if(s.run(nullptr,0,true)!=S::Applied||s.resetOption!=(reason==1))return false;}
- {Sim s;s.dc=s.fcc=3000;if(s.run()!=S::Applied||s.resetOption)return false;}
- {Sim s;s.dc=s.fcc=3000;s.leaseAvailable=false;if(s.run(nullptr,0,true)!=S::Deferred)return false;s.leaseAvailable=true;if(s.run()!=S::Applied||s.resetOption)return false;}
- {Sim s;s.result.resetFailed=true;if(s.run()!=S::Skipped||s.exits||s.seals||s.applies!=1||s.normal_gauge_target)return false;}
- for(bool readable:{false,true}){Sim s;s.result.resetFailed=true;s.op=0x402;s.readable=readable;char reason[128]{};
-  if(s.gauge_official_apply_locked(65,reason,sizeof(reason))||s.exits||s.seals||s.applies!=1||s.normal_gauge_target)return false;}
-
+ {Sim s;s.readable=false;if(s.run()!=S::Skipped||s.exits||s.seals)return false;}
  {Sim s;s.gauge=false;if(s.run()!=S::Skipped||s.applies)return false;}
  return true;
 }
 static_assert(cases(),"official boot once, preserve learned FCC, failure visible without OTA gate, no ambiguous cleanup retry");
 """.replace('BODY',body).replace('HELPER',helper)
-  # Preserve all cases and report the failing generated-source line.
-  start=harness.index('constexpr bool cases()')
-  harness=harness[:start]+harness[start:].replace('constexpr bool cases()', 'constexpr int cases()').replace('return false;', 'return __LINE__;').replace('return true;', 'return 0;').replace('static_assert(cases(),', 'static_assert(cases()==0,')
   with tempfile.TemporaryDirectory() as directory:
    path=Path(directory)/'official_boot.cpp';path.write_text('#include "'+(ROOT/'main/hal/mosaico/mosaico_gauge_model.h').as_posix()+'"\n'+harness)
    result=subprocess.run([compiler,'-std=c++20','-fsyntax-only',str(path)],capture_output=True,text=True)
-   self.assertEqual(result.returncode,0,result.stdout+result.stderr+'\n'+'\n'.join(f'{i+1}: {line}' for i,line in enumerate(harness.splitlines()) if 'Sim s;' in line))
+   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
  def test_actual_sealed_apply_single_owner_finally(self):
   compiler=shutil.which('g++') or shutil.which('clang++')
   if not compiler:
@@ -386,9 +373,6 @@ static_assert(check(),"production lease is nonblocking, OTA/health gated, exactl
   self.assertLess(init.index('display_boot_splash();'),init.index('gaugeBootReload('))
   self.assertLess(init.index('gaugeBootReload('),init.index('lvgl_init();'))
   self.assertIn('#ifdef MOSAICO_BOARD',init.split('gaugeBootReload(',1)[0])
-  self.assertIn('gaugeBootReload(gaugeReason, sizeof(gaugeReason), true)',init)
-  self.assertIn('bool initialColdReset = false',(ROOT/'main/hal/hal.h').read_text())
-  self.assertIn('bootFactoryReset=initialColdReset && esp_reset_reason()==ESP_RST_POWERON',self.boot_source())
  def test_idle_deferred_only_and_rate_limited(self):
   source=(ROOT/'main/host/network_quota.cpp').read_text(encoding='utf8')
   # TWT retained-association also reports phase2, but must not perform the

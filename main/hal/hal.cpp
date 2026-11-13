@@ -55,7 +55,7 @@ void Hal::init()
     // No LVGL, touch, motion or radios yet. Apply/verify the official board gauge baseline.
     char gaugeReason[128]{};
     BootTimingMark(BootTiming::GaugeStart);
-    const auto gaugeReload = gaugeBootReload(gaugeReason, sizeof(gaugeReason), true);
+    const auto gaugeReload = gaugeBootReload(gaugeReason, sizeof(gaugeReason));
     BootTimingMark(BootTiming::GaugeEnd);
     ESP_LOGI("GaugeBoot", "startup status=%u reason=%s", static_cast<unsigned>(gaugeReload), gaugeReason);
 #endif

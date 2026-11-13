@@ -154,12 +154,12 @@ class OfficialGaugeTests(unittest.TestCase):
     def test_boot_single_owner_no_legacy_replay(self):
         source=text(BASE/'hal_mosaico.cpp')
         boot=source.split('Hal::GaugeBootReloadStatus Hal::gaugeBootReload(',1)[1].split('Hal::MosaicoClockDiagnostics',1)[0]
-        self.assertEqual(boot.count('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130,bootFactoryReset && capacity==65)'),1)
+        self.assertEqual(boot.count('gauge_official_apply_locked(capacity,details,sizeof(details),capacity==130)'),1)
         for retired in ['gaugeSetNominalCapacity(', 'gaugeAccess(', 'near_boot_apply(', 'near_boot_finish(', 'gauge_load_journal(', 'normal_gauge_fence_locked(', 'MosaicoGaugeCold::']:
             self.assertNotIn(retired,boot)
         self.assertIn('gauge_boot_info.attempted = true',boot)
         helper=source.split('bool gauge_official_apply_locked(',1)[1].split('struct CapacityTestState',1)[0]
-        self.assertEqual(helper.count('mosaico_official_gauge_apply(gauge, capacity, bootFactoryReset)'),1)
+        self.assertEqual(helper.count('mosaico_official_gauge_apply(gauge, capacity)'),1)
         self.assertIn('fcc > 0 && fcc <= capacity',helper)
         self.assertIn('!official.exitAttempted && gauge_exit_config(true)',helper)
         self.assertIn('!official.sealAttempted',helper)
@@ -189,7 +189,6 @@ constexpr int ESP_OK=0,ESP_ERR_INVALID_ARG=-1,ESP_ERR_INVALID_SIZE=-2;
 constexpr void copy_bytes(uint8_t* to,const uint8_t* from,size_t n){for(size_t i=0;i<n;++i)to[i]=from[i];}
 struct Harness {
  unsigned mosaico_bq_attempts=0,exits=0,seals=0,localExits=0;
- bool mosaico_bq_track_writes=false;int mosaico_bq_first_error=0;
  bool marked=true,readable=true;
  uint16_t op=0x0402;
  uintptr_t gauge=7;
@@ -266,7 +265,6 @@ static_assert(test());
         source=text(BASE/'hal_mosaico.cpp')
         boot=source.split('Hal::GaugeBootReloadStatus Hal::gaugeBootReload(',1)[1].split('Hal::MosaicoClockDiagnostics',1)[0]
         boot='constexpr Status boot('+boot
-        boot=boot.replace('bool initialColdReset)', 'bool initialColdReset = true)')
         # Diagnostics and mutexes do not decide admission. Keep the actual HAL
         # control flow, arm consumption, latch and final verification code.
         boot=boot.split('    // Capture only initialized',1)[0]+'    // Terminal refusals'+boot.split('    // Terminal refusals',1)[1]
@@ -286,10 +284,8 @@ struct Harness {
  struct {Status status=Status::Deferred;bool attempted=false;char reason[128]={};} gauge_boot_info;
  struct NormalGaugeStorageLease {bool held=true;};
  struct {bool possiblyChanged=false,restorePending=false,restoreAttempted=false;int64_t deadlineUs=0;const char* outcome="idle";} capacity_test;
- bool model_ok=true,hold=false,armed=false,identity=true,applySuccess=true,resetOption=false;
+ bool model_ok=true,hold=false,armed=false,identity=true,applySuccess=true;
  unsigned consumes=0,vendorWrites=0,identityReads=0;int failReg=-1;
- int resetReason=1;constexpr int esp_reset_reason(){return resetReason;}
- static constexpr int ESP_RST_POWERON=1;
  uint16_t op=0xa4,dc=3000,fcc=3000,mv=4000,temp=2982,current=0,average=0;
  uint16_t finalOp=0xa6,finalDc=65,finalFcc=65,normal_gauge_target=0;
  uintptr_t gauge=7;
@@ -305,8 +301,8 @@ struct Harness {
    case 8:out=mv;break;case 6:out=temp;break;case 0xc:out=current;break;case 0x14:out=average;break;
    default:return false;}return true;
  }
- struct Result {bool success,exitAttempted,sealAttempted;bool resetFailed=false;};
- constexpr Result mosaico_official_gauge_apply(uintptr_t,uint16_t,bool reset){resetOption=reset;++vendorWrites;return {applySuccess&&gauge_boot_info.attempted,true,true};}
+ struct Result {bool success,exitAttempted,sealAttempted;};
+ constexpr Result mosaico_official_gauge_apply(uintptr_t,uint16_t){++vendorWrites;return {applySuccess&&gauge_boot_info.attempted,true,true};}
  constexpr bool capacity_safe_locked(uint16_t& d,uint16_t& f){d=dc;f=fcc;return ((op>>1)&3)==3;}
  constexpr int64_t esp_timer_get_time(){return 0;}
  constexpr bool gauge_exit_config(bool){return false;}
@@ -318,13 +314,6 @@ struct Harness {
 constexpr bool tests(){
  {Harness h;if(h.boot(nullptr,0)!=Status::Applied||h.vendorWrites!=1||!h.gauge_boot_info.attempted||h.identityReads!=1)return false;
   h.boot(nullptr,0);if(h.vendorWrites!=1||h.consumes!=1)return false;}
- {Harness h;if(h.boot(nullptr,0)!=Status::Applied||!h.resetOption)return false;}
- {Harness h;h.op=0xa6;if(h.boot(nullptr,0)!=Status::Applied||!h.resetOption)return false;}
- {Harness h;h.op=0xa6;h.mv=3499;if(h.boot(nullptr,0)!=Status::Deferred||h.vendorWrites||h.gauge_boot_info.attempted)return false;}
- {Harness h;h.op=0xa6;h.dc=h.fcc=65;if(h.boot(nullptr,0)!=Status::Applied||h.resetOption)return false;}
- {Harness h;if(h.boot(nullptr,0,false)!=Status::Applied||h.resetOption)return false;}
- {Harness h;h.mv=3499;if(h.boot(nullptr,0,true)!=Status::Deferred)return false;h.mv=4000;if(h.boot(nullptr,0,false)!=Status::Applied||h.resetOption)return false;}
- for(int reason:{2,3,4,5,6,7,8}){Harness h;h.resetReason=reason;if(h.boot(nullptr,0)!=Status::Applied||h.resetOption)return false;}
  {Harness h;h.op=0xb4;if(h.boot(nullptr,0)!=Status::Applied)return false;}
  {Harness h;h.mv=3499;h.armed=true;
   if(h.boot(nullptr,0)!=Status::Deferred||h.vendorWrites||h.consumes||h.gauge_boot_info.attempted||!h.armed)return false;

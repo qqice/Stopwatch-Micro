@@ -414,30 +414,18 @@ additionally exports CRC/MAC-validated current tx/access raw blobs and load
 codes for host backup; the original three-blob evidence CRC is unchanged.
 
 
-## Bounded cold factory initialization contrast (2026-11-13)
+## Cold pre-provision RESET contrast: withdrawn (2026-11-13)
 
-The separately authorized R83 contrast adds one BQ27220 `RESET` before the
-existing official 65mAh provisioning, only for the initial `Hal::init` call,
-`ESP_RST_POWERON`, and a checked factory DC/FCC pair of 3000/3000. Existing
-physical/identity admission remains in effect. Runtime, deferred owner calls,
-software/watchdog boots, valid 65mAh state and the 130mAh trial do not opt in.
-No SOC/OCV register, gain, curve or protection threshold is directly written.
-This tests initialization state; it is not a periodic percentage-reset workaround.
+The separately approved R83 contrast issued one BQ27220 RESET only during
+factory-3000-to-official-65 cold provisioning. NAND proved one submission and
+reset readiness, but RemainingCapacity still stayed at 65 during about 55
+minutes of discharge. All 131 audited parameter fields matched the pre-test
+backup, and the gauge ended configured at 65mAh and SEALED. The extra RESET
+was therefore not retained as a fix.
 
-The helper uses the unchanged vendor security APIs with local write-error
-tracking. A missing ACK cannot authorize another key or RESET. After the single
-submission it waits 2 seconds before accepting INITCOMP, within a total 4-second
-initialization deadline plus a possible in-flight I/O margin. Successful reset
-verification continues directly into the existing vendor profile flow, without
-an intermediate seal/unseal cycle; that flow owns final SEALED verification.
-Only reset failure invokes checked-status cleanup with at most one seal attempt
-and independent ACK verification. A failed pre-provision reset then returns
-without entering the old profile-failure EXIT/SEAL path. Normal
-profile-failure cleanup and OTA protections are otherwise unchanged.
-
-Existing NAND warning/error fingerprints retain fixed SUBMITTED, READY and
-FAILED markers; no log schema, task, UART command or persistent gate is added.
-The 131-field parameter backup, original fault records and signed R82 recovery
-image must be retained before deployment. Tests and review do not substitute for
-a real battery cold-start observation; a normal prior boot is not proof that the
-intermittent plateau has been permanently fixed.
+The device and release channel were restored to signed R82; product code is
+restored to the R82 implementation. R83 source history, signed artifacts and
+original NAND records remain retained for analysis. No SOC/OCV value, gain,
+curve or protection threshold was changed to make the percentage look right.
+The intermittent capacity fault remains unresolved; this experiment does not
+prove an IC arithmetic defect or identify a safe internal-register patch.

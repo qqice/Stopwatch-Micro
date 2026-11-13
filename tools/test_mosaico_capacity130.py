@@ -80,7 +80,6 @@ class Capacity130Tests(unittest.TestCase):
                 end=body.index('    } diagnosticFinish;')+len('    } diagnosticFinish;')
                 body=body[:begin]+body[end:]
                 body=body.replace('Hal::GaugeBootReloadStatus Hal::gaugeBootReload','GaugeBootReloadStatus boot')
-                body=body.replace('bool initialColdReset)', 'bool initialColdReset = true)')
             body=body.replace('bool Hal::gaugeCapacityTest','bool command')
             body=re.sub(r'std::lock_guard<[^;]+;','',body)
             body=re.sub(r'std::unique_lock<[^;]+;','',body).replace('!transaction.owns_lock()||','')
@@ -108,7 +107,7 @@ struct Fixture {
  enum class GaugeBootReloadStatus {Deferred,Skipped,Applied,Critical};
  struct {GaugeBootReloadStatus status=GaugeBootReloadStatus::Deferred;bool attempted=false;char reason[128]{};} gauge_boot_info;
  struct State {bool possiblyChanged=false,restorePending=false,restoreAttempted=false;int64_t deadlineUs=0;const char* outcome="idle";} capacity_test;
- struct Result {bool success=true,exitAttempted=false,sealAttempted=false,resetFailed=false;};
+ struct Result {bool success=true,exitAttempted=false,sealAttempted=false;};
  enum Fault {None,Partial,UnknownExit,UnknownSeal};
  Fault fault=None;
  bool gauge=true,model=true,oldTrial=false,leaseAvailable=true,readable=true,preserveFcc=false;
@@ -135,8 +134,7 @@ struct Fixture {
  constexpr bool gauge_exit_config(bool){++exits;return false;}
  constexpr void gauge_delay_ms(int){}
  constexpr int i2c_master_transmit(bool,const uint8_t*,size_t,int){++seals;return ESP_FAIL;}
- constexpr Result mosaico_official_gauge_apply(bool,uint16_t capacity,bool resetFactory){
-  if(resetFactory&&capacity==130)return {false,false,false};
+ constexpr Result mosaico_official_gauge_apply(bool,uint16_t capacity){
   ++applies;lastCapacity=capacity;
   if(fault==None){dc=capacity;if(!preserveFcc)fcc=capacity;op=0x26;return {};}
   dc=capacity; // represent a possibly submitted/partial write, never pretend unchanged
