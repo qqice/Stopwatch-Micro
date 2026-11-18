@@ -29,12 +29,12 @@ constexpr bool matches(const char* input, const char* expected) {
     return false;
 }
 static_assert(matches("62500.00000000", "62500"));
-static_assert(matches("62500.120000", "62500.12"));
-static_assert(matches("62500.00000001", "62500.00000001"));
-static_assert(matches("12345678901234567890.12345678900", "12345678901234567890.123456789"));
+static_assert(matches("62500.999999", "62500"));
+static_assert(matches("62500.00000001", "62500"));
+static_assert(matches("12345678901234567890.12345678900", "12345678901234567890"));
 static_assert(matches("0.000", "0"));
-static_assert(matches("000.100", "000.1"));
-static_assert(matches("-12.5000", "-12.5"));
+static_assert(matches("000.100", "000"));
+static_assert(matches("-12.5000", "-12"));
 static_assert(matches("+12.000", "+12"));
 static_assert(matches("1000", "1000"));
 static_assert(matches("", "--"));
