@@ -24,8 +24,17 @@ struct QuotaMonitorBucket {
     bool creditsAvailable = false;
     std::array<QuotaMonitorWindow, 2> windows{};
 };
+enum class ApiCreditState : uint8_t { Unavailable, Ok, Stale, Reauth, Forbidden };
+struct QuotaMonitorApiCredit {
+    bool present = false;
+    ApiCreditState state = ApiCreditState::Unavailable;
+    uint32_t remainingCents = 0;
+    uint32_t expiresEpoch = 0;
+    uint32_t capturedEpoch = 0;
+};
 struct QuotaMonitorSnapshot {
     std::array<QuotaMonitorBucket, QuotaMonitorMaxBuckets> buckets{};
+    QuotaMonitorApiCredit apiCredit{};
     uint8_t bucketCount = 0;
     uint32_t totalBuckets = 0;
     bool truncated = false;

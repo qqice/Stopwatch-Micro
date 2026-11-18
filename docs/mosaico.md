@@ -235,6 +235,25 @@ separate from Token history. Static screens have no scrollbars or horizontal
 scrolling; only multiple actual buckets enable vertical scrolling. Metadata uses
 larger 20px text; history cells use 16px and selected details use 20px text.
 
+API promotional credits are optional and separate from Codex Credits. When
+enabled, the Codex footer reserves its right half for a rose-colored dollar
+icon, USD to two decimal places, and the nearest eligible expiry (month/day in
+Asia/Shanghai). The icon rotates only while the fresh amount is visible on the
+awake quota page. The amount sums active, unspent promotional grants; if more
+than one grant is present, the displayed date is the earliest expiry, not
+necessarily the expiry of the entire balance. An expired cached aggregate is
+not presented as spendable. Older quota servers keep the original single row.
+
+The Mac service opts in via `api_credit_org` (the linked organization ID).
+It reads the existing `platform-session` item from the login Keychain under
+`com.qqice.mosaico-beacon.openai-api-billing`, and polls the dashboard endpoint
+every 15 minutes on success. The API web session is not sent to the board.
+A 401 pauses HTTP polling until a replacement credential is observed; a 403 is
+reported separately. The server log records the first and last observed
+success and first 401 for the in-process session, not its issue date or a
+guaranteed lifetime. The feature does not automatically refresh browser
+credentials or make additional device network requests.
+
 History uses 6x4 (24h) or 6x5 (30d) full-width grids. Each rounded tile has a 73x44
 touch slot, displays an hour or day and compact amount, and opens a separate exact
 value panel from RAM. Mode buttons are 216x48 and highlight the current mode.

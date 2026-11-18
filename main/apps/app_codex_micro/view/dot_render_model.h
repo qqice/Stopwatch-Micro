@@ -5,8 +5,8 @@
 // compiler-exported simulator. The approved default sweep is StrongDark.
 namespace mosaico_dot { namespace render {
 enum class SweepStyle : uint8_t { StrongDark, MildDark };
-enum class Accent : uint8_t { ResetCard=5, Quota=11, Coin=12, Refresh=17 };
-constexpr bool supports(unsigned index) { return index==5 || index==11 || index==12 || index==17; }
+enum class Accent : uint8_t { ResetCard=5, Quota=11, Coin=12, Refresh=17, Dollar=19 };
+constexpr bool supports(unsigned index) { return index==5 || index==11 || index==12 || index==17 || index==19; }
 constexpr uint32_t blendWhite(uint32_t color,int mix) {
     mix=detail::max(0,detail::min(255,mix));
     uint32_t out=0;
@@ -91,9 +91,12 @@ constexpr bool topRefreshArc(int x,int y) {
 constexpr int iconGrid(Accent icon) { return icon==Accent::Refresh?15:13; }
 constexpr bool iconPixel(Accent icon,int x,int y) {
     if(icon==Accent::Refresh)return topRefreshArc(x,y) || topRefreshArc(14-x,14-y);
-    if(icon==Accent::Coin) {
+    if(icon==Accent::Coin || icon==Accent::Dollar) {
         const int dx=x-6,dy=y-6,radius=dx*dx+dy*dy;
-        return (radius>=29 && radius<=40) || glyphPixel('C',x-4,y-3);
+        if(radius>=29 && radius<=40)return true;
+        if(icon==Accent::Coin)return glyphPixel('C',x-4,y-3);
+        constexpr uint8_t dollar[] = {4,4,15,20,20,14,5,5,30,4,4};
+        return x>=4 && x<=8 && y>=1 && y<=11 && (dollar[y-1] & (1U<<(8-x)));
     }
     if(icon==Accent::ResetCard) {
         const bool frame=((y==0 || y==12) && x>=2 && x<=10) ||
@@ -123,7 +126,7 @@ constexpr int iconX(IconLayout g,int column,int scale) {
     return g.x+(centre+(column*g.pitch256-centre)*scale/1000)/256;
 }
 constexpr int accentScale(Accent icon,uint16_t phase,bool enabled) {
-    if(!enabled || (icon!=Accent::Coin && icon!=Accent::ResetCard))return 1000;
+    if(!enabled || (icon!=Accent::Coin && icon!=Accent::ResetCard && icon!=Accent::Dollar))return 1000;
     const int scale=detail::flipScale(phase);return scale<0?-scale:scale;
 }
 // Clockwise Manhattan-angle approximation: top=0, right=90. The existing
@@ -199,7 +202,7 @@ template<typename Sink>
 constexpr void sampleIcon(Accent icon,int w,int h,uint16_t phase,bool enabled,uint32_t color,Sink& sink) {
     const auto g=iconLayout(icon,w,h);
     if(!g.diameter)return;
-    const int scale=accentScale(icon,phase,enabled); // C/R read the same on both faces.
+    const int scale=accentScale(icon,phase,enabled); // C/R/$ read the same on both faces.
     for(int y=0;y<g.grid;++y)for(int x=0;x<g.grid;++x)if(iconPixel(icon,x,y))
         sink.dot(iconX(g,x,scale),g.y+y*g.pitch256/256,g.diameter,iconPointColor(icon,x,y,phase,enabled,color));
 }
@@ -208,7 +211,7 @@ struct BoundsSink {
     constexpr void dot(int x,int y,int d,uint32_t) { ++count;valid=valid && d>0 && x>=0 && y>=0 && x+d<=w && y+d<=h; }
 };
 constexpr bool modelTest() {
-    for(auto icon:{Accent::Quota,Accent::Coin,Accent::ResetCard,Accent::Refresh})for(int size:{28,32,88})for(int phase:{0,45,90,180}) {
+    for(auto icon:{Accent::Quota,Accent::Coin,Accent::ResetCard,Accent::Refresh,Accent::Dollar})for(int size:{28,32,88})for(int phase:{0,45,90,180}) {
         BoundsSink s{size,size};sampleIcon(icon,size,size,phase,true,0xe9c46a,s);
         if(!s.valid || !s.count || s.count>225)return false;
     }

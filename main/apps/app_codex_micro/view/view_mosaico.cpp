@@ -5,6 +5,7 @@
 #include "dot_patterns.h"
 #include "reset_countdown.h"
 #include "credit_format.h"
+#include "api_credit_display.h"
 #include "quota_trend_geometry.h"
 #include "quota_display_cache.h"
 #include "session_status_model.h"
@@ -149,11 +150,15 @@ bool CodexMicroView::debugQuotaDisplay(char* out, std::size_t capacity) const {
     };
     copyAscii(quota, quotaText);
     copyAscii(reset, resetText);
+    const bool apiFooter = _page == Page::Command && !_locked && !_suppressed &&
+        !_settingsOpen && !_settingsAnimating &&
+        !lv_obj_has_flag(_apiCreditFooter, LV_OBJ_FLAG_HIDDEN) &&
+        !lv_obj_has_flag(lv_obj_get_parent(_apiCreditFooter), LV_OBJ_FLAG_HIDDEN);
     std::snprintf(out, capacity,
-                  "page=%u locked=%u ui_rev=%u backend_rev=%u lock_quota=\"%s\" lock_reset=\"%s\" wake_reels=%u",
+                  "page=%u locked=%u ui_rev=%u backend_rev=%u lock_quota=\"%s\" lock_reset=\"%s\" wake_reels=%u api_footer=%u",
                   static_cast<unsigned>(_page), static_cast<unsigned>(_locked),
                   static_cast<unsigned>(_quotaRevision), static_cast<unsigned>(QuotaMonitorRevision()),
-                  quotaText, resetText, static_cast<unsigned>(_wakeReelStarts));
+                  quotaText, resetText, static_cast<unsigned>(_wakeReelStarts), static_cast<unsigned>(apiFooter));
     return true;
 }
 
@@ -201,6 +206,24 @@ void CodexMicroView::init(lv_obj_t* parent) {
         _cardMeta[i] = label(_cards[i], 14, 314, 408, "", &lv_font_montserrat_20);
         lv_obj_set_height(_cardMeta[i], 30); lv_label_set_long_mode(_cardMeta[i], LV_LABEL_LONG_MODE_DOTS);
         lv_obj_add_flag(_cards[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    {
+        using namespace mosaico_api_credit;
+        // The server supplies a single organisation balance, so only one
+        // footer exists. It follows the Codex card if the bucket order changes.
+        _apiCreditFooter = lv_obj_create(_cards[0]);
+        panel(_apiCreditFooter, Split, FooterY, HalfWidth, FooterHeight);
+        lv_obj_set_style_bg_opa(_apiCreditFooter, LV_OPA_TRANSP, 0);
+        lv_obj_add_flag(_apiCreditFooter, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_EVENT_BUBBLE));
+        _apiCreditIcon = createIcon(_apiCreditFooter, Icon::Dollar, IconSize, Rose);
+        place(_apiCreditIcon, IconX, 0);
+        _apiCreditAmount = label(_apiCreditFooter, TextX, AmountY, TextWidth, "", &lv_font_montserrat_20);
+        lv_obj_set_height(_apiCreditAmount, AmountHeight);
+        lv_label_set_long_mode(_apiCreditAmount, LV_LABEL_LONG_MODE_CLIP);
+        _apiCreditDate = label(_apiCreditFooter, TextX, DateY, TextWidth, "", &lv_font_montserrat_14);
+        lv_obj_set_height(_apiCreditDate, DateHeight);
+        lv_label_set_long_mode(_apiCreditDate, LV_LABEL_LONG_MODE_CLIP);
+        lv_obj_set_style_text_color(_apiCreditDate, lv_color_hex(DimOrange), 0);
     }
     _clockIcon = createIcon(_root, Icon::Clock, 26, Purple); place(_clockIcon, 20, 430);
     _footer = createText(_root, 180, 48, 6, Purple); place(_footer, 48, 426);
@@ -294,6 +317,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
     bool widgetsReady = _lockSessionNumbers[5] && _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaModeBadge && _otaPhase && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
     widgetsReady = widgetsReady && _lockCreditCoin;
+    widgetsReady = widgetsReady && _apiCreditFooter && _apiCreditIcon && _apiCreditAmount && _apiCreditDate;
     for (auto* number : _lockSessionNumbers) widgetsReady = widgetsReady && number;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
@@ -1589,6 +1613,7 @@ void CodexMicroView::stopOtaReel() {
 }
 void CodexMicroView::stopAnimations() {
     stopOtaReel();
+    setMotion(_apiCreditIcon, 0, false);
     _wakeReelGate.cancel();
     for (size_t j = 0; j < _quotaReels.size(); ++j) stopQuotaReel(j);
     for (auto* obj : {_otaStageIcon, _otaMeter, _otaArrow, _otaChips[0], _otaChips[1]}) setMotion(obj, 0, false);
@@ -1608,6 +1633,7 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
         for (size_t j = 0; j < _quotaReels.size(); ++j)
             if (_quotaReels[j].value) stopQuotaReel(j);
     if (!otaReelVisible() && _otaReel.seen) stopOtaReel();
+    if (!eligible) setMotion(_apiCreditIcon, 0, false);
     if (!_motionCadence.sample(tick, eligible)) return;
     if (_otaReel.active) {
         const uint32_t reelTick = lv_tick_get();
@@ -1647,6 +1673,20 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
     const int scrollY = lv_obj_get_scroll_y(_quotaPage);
     const int viewportHeight = lv_obj_get_height(_quotaPage);
     const uint64_t epoch = static_cast<uint64_t>(_quota->capturedEpoch) + age;
+    const bool apiVisible = _page == Page::Command && !_settingsOpen && !_settingsAnimating &&
+        !lv_obj_has_flag(_apiCreditFooter, LV_OBJ_FLAG_HIDDEN);
+    bool rotateApi = false;
+    if (apiVisible && _apiCreditRenderedFresh) {
+        auto* card = lv_obj_get_parent(_apiCreditFooter);
+        const int top = lv_obj_get_y(card) - scrollY + mosaico_api_credit::FooterY;
+        if (!lv_obj_has_flag(card, LV_OBJ_FLAG_HIDDEN) &&
+            top < viewportHeight && top + mosaico_api_credit::IconSize > 0) {
+            const auto clock = MosaicoClock::snapshot();
+            rotateApi = mosaico_api_credit::present(
+                _quota->apiCredit, clock.valid ? static_cast<uint64_t>(clock.epoch) : epoch).fresh;
+        }
+    }
+    setMotion(_apiCreditIcon, phase, rotateApi);
     for (size_t j = 0; j < _quotaReels.size(); ++j) {
         auto& reel = _quotaReels[j];
         if (!reel.value) continue;
@@ -1728,10 +1768,46 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     std::array<bool, 2> retainedReels{};
     mosaico_credit::Reading nextCreditReading{};
     const uint32_t gold = _quota->stale ? dimCachedColor(Gold) : Gold;
+    bool apiFooterVisible = false;
     for (size_t i = 0; i < _cards.size(); ++i) {
         if (!displayKnown || i >= _quota->bucketCount) { lv_obj_add_flag(_cards[i], LV_OBJ_FLAG_HIDDEN); continue; }
         lv_obj_remove_flag(_cards[i], LV_OBJ_FLAG_HIDDEN);
         const auto& bucket = _quota->buckets[i];
+        const bool splitCredits = _quota->apiCredit.present && mosaico_credit::isCodex(bucket.id);
+        lv_obj_set_width(_creditValues[i], splitCredits ? mosaico_api_credit::CreditsWidth : 370);
+        lv_obj_set_width(_cardMeta[i], splitCredits ? mosaico_api_credit::MetaWidth : 408);
+        if (splitCredits) {
+            using namespace mosaico_api_credit;
+            apiFooterVisible = true;
+            if (lv_obj_get_parent(_apiCreditFooter) != _cards[i]) {
+                lv_obj_set_parent(_apiCreditFooter, _cards[i]);
+                place(_apiCreditFooter, Split, FooterY);
+            }
+            // This is independently polled and can be older than the Codex
+            // snapshot. Interpret expiration using the existing UTC clock.
+            const auto clock = MosaicoClock::snapshot();
+            const auto apiView = mosaico_api_credit::present(
+                _quota->apiCredit, clock.valid ? static_cast<uint64_t>(clock.epoch) : epoch);
+            _apiCreditRenderedFresh = apiView.fresh;
+            const uint32_t color = apiView.fresh ? Rose : dimCachedColor(Rose);
+            if (!apiView.fresh) setMotion(_apiCreditIcon, 0, false);
+            setIcon(_apiCreditIcon, Icon::Dollar, color);
+            char apiAmount[20]{}, apiDate[25]{};
+            formatAmount(_quota->apiCredit, apiView, apiAmount, sizeof(apiAmount));
+            formatDate(_quota->apiCredit, apiView, apiDate, sizeof(apiDate));
+            const lv_font_t* font = &lv_font_montserrat_20;
+            lv_point_t measured{};
+            lv_text_get_size(&measured, apiAmount, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+            if (measured.x > TextWidth) font = &lv_font_montserrat_16;
+            lv_text_get_size(&measured, apiAmount, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+            if (measured.x > TextWidth) font = &lv_font_montserrat_14;
+            lv_obj_set_style_text_font(_apiCreditAmount, font, 0);
+            lv_obj_set_style_text_color(_apiCreditAmount, lv_color_hex(color), 0);
+            if (std::strcmp(lv_label_get_text(_apiCreditAmount), apiAmount) != 0)
+                lv_label_set_text(_apiCreditAmount, apiAmount);
+            if (std::strcmp(lv_label_get_text(_apiCreditDate), apiDate) != 0)
+                lv_label_set_text(_apiCreditDate, apiDate);
+        }
         const int weekly = mosaico_credit::exhaustedWeeklyWindow(bucket, epoch);
         const Balance balanceKind = mosaico_credit::balanceKind(bucket);
         const bool creditMode = canShowCreditMode && weekly >= 0 && mosaico_credit::takeover(balanceKind);
@@ -1854,6 +1930,12 @@ void CodexMicroView::refreshQuota(uint32_t now) {
         } else { lv_obj_add_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN); }
         const bool rawLimitError = std::strcmp(bucket.reached, "rate_limit_reached") == 0;
         lv_label_set_text(_cardMeta[i], creditMode ? "7D 0%" : weekly >= 0 || rawLimitError ? "" : bucket.reached);
+    }
+    if (apiFooterVisible) lv_obj_remove_flag(_apiCreditFooter, LV_OBJ_FLAG_HIDDEN);
+    else {
+        lv_obj_add_flag(_apiCreditFooter, LV_OBJ_FLAG_HIDDEN);
+        _apiCreditRenderedFresh = false;
+        setMotion(_apiCreditIcon, 0, false);
     }
     for (size_t j = 0; j < _quotaReels.size(); ++j)
         if (_quotaReels[j].value && !retainedReels[j]) stopQuotaReel(j);

@@ -243,6 +243,11 @@ private:
     lv_obj_t* _resetCount = nullptr;
     std::array<lv_obj_t*, 3> _resetIcons{};
     std::array<lv_obj_t*, 8> _creditIcons{}, _creditValues{};
+    lv_obj_t* _apiCreditFooter = nullptr;
+    lv_obj_t* _apiCreditIcon = nullptr;
+    lv_obj_t* _apiCreditAmount = nullptr;
+    lv_obj_t* _apiCreditDate = nullptr;
+    bool _apiCreditRenderedFresh = false;
     mosaico_credit::Reading _creditReading{};
     struct QuotaReel {
         mosaico_credit::Reel reel{};

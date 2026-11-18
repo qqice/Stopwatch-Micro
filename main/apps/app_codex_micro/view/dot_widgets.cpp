@@ -129,6 +129,7 @@ struct LvglPrimitiveSink {
 static_assert(static_cast<unsigned>(Icon::Quota)==static_cast<unsigned>(render::Accent::Quota) &&
               static_cast<unsigned>(Icon::Coin)==static_cast<unsigned>(render::Accent::Coin) &&
               static_cast<unsigned>(Icon::ResetCard)==static_cast<unsigned>(render::Accent::ResetCard) &&
+              static_cast<unsigned>(Icon::Dollar)==static_cast<unsigned>(render::Accent::Dollar) &&
               static_cast<unsigned>(Icon::Refresh)==static_cast<unsigned>(render::Accent::Refresh),"preserve public icon enum ABI");
 void event(lv_event_t* e) {
     auto* obj = lv_event_get_current_target_obj(e);

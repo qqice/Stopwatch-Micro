@@ -38,6 +38,28 @@ bool text(const cJSON* root, const char* key, char (&out)[N], bool empty = true)
     std::memcpy(out, value->valuestring, length + 1);
     return true;
 }
+QuotaMonitorApiCredit readApiCredit(const cJSON* root)
+{
+    const auto* source = cJSON_GetObjectItemCaseSensitive(root, "api_credit");
+    if (!source) return {};
+    const QuotaMonitorApiCredit unavailable{true};
+    QuotaMonitorApiCredit credit{true};
+    char state[12]{};
+    if (!cJSON_IsObject(source) || !text(source, "state", state, false) ||
+        !number(source, "remaining_cents", 0, UINT32_MAX, credit.remainingCents) ||
+        !number(source, "expires_epoch", 0, UINT32_MAX, credit.expiresEpoch) ||
+        !number(source, "captured_epoch", 0, UINT32_MAX, credit.capturedEpoch)) return unavailable;
+    if (std::strcmp(state, "ok") == 0) credit.state = ApiCreditState::Ok;
+    else if (std::strcmp(state, "stale") == 0) credit.state = ApiCreditState::Stale;
+    else if (std::strcmp(state, "reauth") == 0) credit.state = ApiCreditState::Reauth;
+    else if (std::strcmp(state, "forbidden") == 0) credit.state = ApiCreditState::Forbidden;
+    else if (std::strcmp(state, "unavailable") != 0) return unavailable;
+    if ((!credit.capturedEpoch && (credit.remainingCents || credit.expiresEpoch ||
+                                   credit.state == ApiCreditState::Ok)) ||
+        (credit.remainingCents && !credit.expiresEpoch) ||
+        (credit.expiresEpoch && credit.expiresEpoch <= credit.capturedEpoch)) return unavailable;
+    return credit;
+}
 bool parse(const char* json, std::size_t length, QuotaMonitorSnapshot& next)
 {
     if (!json || !length || length > 8192 || !JsonNestingValid(json, length)) return false;
@@ -106,6 +128,8 @@ bool parse(const char* json, std::size_t length, QuotaMonitorSnapshot& next)
             }
         }
     }
+    // An absent or invalid optional field cannot invalidate the base Codex data.
+    next.apiCredit = readApiCredit(root.get());
     next.available = true;
     return true;
 }
@@ -163,8 +187,37 @@ bool QuotaMonitorRejectionSelfTest()
         "\"name\":\"Codex\",\"plan\":\"pro\",\"reached\":\"\",\"credits\":null,\"windows\":[null,"
         "{\"remaining_bp\":9700,\"duration_minutes\":10080,\"reset_epoch\":1000}]}]}";
     if (!parse(valid, sizeof(valid) - 1, *temporary) || temporary->resetCreditsKnown ||
-        temporary->buckets[0].windows[0].available || temporary->buckets[0].windows[1].remainingBasisPoints != 9700)
+        temporary->apiCredit.present || temporary->buckets[0].windows[0].available ||
+        temporary->buckets[0].windows[1].remainingBasisPoints != 9700)
         return false;
+    struct ApiFixture {
+        const char* value;
+        ApiCreditState state;
+        uint32_t remaining, expires, captured;
+    };
+    static constexpr ApiFixture apiFixtures[] = {
+        {"{\"state\":\"ok\",\"remaining_cents\":7700,\"expires_epoch\":200,\"captured_epoch\":100}", ApiCreditState::Ok, 7700, 200, 100},
+        {"{\"state\":\"ok\",\"remaining_cents\":0,\"expires_epoch\":0,\"captured_epoch\":100}", ApiCreditState::Ok, 0, 0, 100},
+        {"{\"state\":\"reauth\",\"remaining_cents\":7700,\"expires_epoch\":200,\"captured_epoch\":100}", ApiCreditState::Reauth, 7700, 200, 100},
+        {"{\"state\":\"forbidden\",\"remaining_cents\":0,\"expires_epoch\":0,\"captured_epoch\":0}", ApiCreditState::Forbidden, 0, 0, 0},
+        {"{\"state\":\"ok\",\"remaining_cents\":-1,\"expires_epoch\":200,\"captured_epoch\":100}", ApiCreditState::Unavailable, 0, 0, 0},
+        {"{\"state\":\"ok\",\"remaining_cents\":0,\"expires_epoch\":0,\"captured_epoch\":0}", ApiCreditState::Unavailable, 0, 0, 0},
+        {"{\"state\":\"ok\",\"remaining_cents\":7700,\"expires_epoch\":90,\"captured_epoch\":100}", ApiCreditState::Unavailable, 0, 0, 0},
+        {"{\"state\":\"bad\",\"remaining_cents\":7700,\"expires_epoch\":200,\"captured_epoch\":100}", ApiCreditState::Unavailable, 0, 0, 0},
+        {"null", ApiCreditState::Unavailable, 0, 0, 0},
+    };
+    for (const auto& fixture : apiFixtures) {
+        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> data(cJSON_Parse(valid), cJSON_Delete);
+        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> api(cJSON_Parse(fixture.value), cJSON_Delete);
+        if (!data || !api || !cJSON_AddItemToObject(data.get(), "api_credit", api.get())) return false;
+        api.release();
+        std::unique_ptr<char, decltype(&cJSON_free)> serialized(cJSON_PrintUnformatted(data.get()), cJSON_free);
+        if (!serialized || !parse(serialized.get(), std::strlen(serialized.get()), *temporary)) return false;
+        const auto& actual = temporary->apiCredit;
+        if (!actual.present || actual.state != fixture.state || actual.remainingCents != fixture.remaining ||
+            actual.expiresEpoch != fixture.expires || actual.capturedEpoch != fixture.captured ||
+            temporary->buckets[0].windows[1].remainingBasisPoints != 9700) return false;
+    }
     // An old v2 credits object is still usable for balance display, but does
     // not supply the explicit availability bit. Non-bool bits are rejected.
     constexpr const char* creditFixtures[] = {
