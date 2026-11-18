@@ -24,7 +24,9 @@ class DashboardTests(unittest.TestCase):
         body = self.normalize(raw)
         self.assertEqual([b["id"] for b in body["buckets"]], ["codex", "a", "z"])
         self.assertEqual(body["buckets"][2]["windows"][1]["remaining_bp"], 5000)
-        self.assertEqual(body["buckets"][2]["credits"]["balance"], "12.50")
+        self.assertEqual(body["version"], 2)
+        self.assertEqual(body["buckets"][2]["credits"],
+                         {"unlimited": False, "balance": "12.50", "has_credits": True})
         self.assertEqual(body["reset_credits"], 3)
         self.assertNotIn("secret", json.dumps(body))
 
@@ -70,8 +72,22 @@ class DashboardTests(unittest.TestCase):
             body = self.normalize({"rateLimits": {"credits": {"hasCredits": True, "unlimited": False, "balance": balance}}})
             self.assertIsNone(body["buckets"][0]["credits"]["balance"])
         body = self.normalize({"rateLimits": {"credits": {"hasCredits": False, "unlimited": True, "balance": "99"}}})
-        self.assertEqual(body["buckets"][0]["credits"], {"unlimited": True, "balance": None})
+        self.assertEqual(body["buckets"][0]["credits"],
+                         {"unlimited": True, "balance": None, "has_credits": False})
         self.assertIsNone(self.normalize({"rateLimits": {"credits": {"balance": "1"}}})["buckets"][0]["credits"])
+
+    def test_credit_availability_is_not_inferred_from_balance(self):
+        def credits(**fields):
+            source = {"unlimited": False, "balance": "12.50", **fields}
+            return self.normalize({"rateLimits": {"credits": source}})["buckets"][0]["credits"]
+
+        self.assertEqual(credits(hasCredits=True, balance=None),
+                         {"unlimited": False, "balance": None, "has_credits": True})
+        self.assertEqual(credits(hasCredits=False),
+                         {"unlimited": False, "balance": None, "has_credits": False})
+        self.assertIsNone(credits())
+        for invalid in (None, 0, 1, "true", "false"):
+            self.assertIsNone(credits(hasCredits=invalid))
 
     def test_sanitized_byte_limits_payload_bound_and_truncation(self):
         raw = {"rateLimitsByLimitId": {str(i): {"limitId": str(i) + "x" * 60,

@@ -59,7 +59,7 @@ def _credits(value: Any) -> dict[str, Any] | None:
     if (not has or not isinstance(balance, str) or len(balance) > 31
             or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", balance) is None):
         balance = None
-    return {"unlimited": value["unlimited"], "balance": balance}
+    return {"unlimited": value["unlimited"], "balance": balance, "has_credits": has}
 
 
 def normalize_quota_dashboard(raw: Any, captured_epoch: int) -> dict[str, Any]:

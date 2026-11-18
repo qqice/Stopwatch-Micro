@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <new>
 #include <esp_timer.h>
@@ -86,9 +87,13 @@ bool parse(const char* json, std::size_t length, QuotaMonitorSnapshot& next)
         if (!cJSON_IsNull(credit)) {
             const auto* unlimited = cJSON_GetObjectItemCaseSensitive(credit, "unlimited");
             const auto* balance = cJSON_GetObjectItemCaseSensitive(credit, "balance");
-            if (!cJSON_IsObject(credit) || !cJSON_IsBool(unlimited)) return false;
+            const auto* available = cJSON_GetObjectItemCaseSensitive(credit, "has_credits");
+            if (!cJSON_IsObject(credit) || !cJSON_IsBool(unlimited) ||
+                (available && !cJSON_IsBool(available))) return false;
             destination.creditsKnown = true;
             destination.creditsUnlimited = cJSON_IsTrue(unlimited);
+            destination.creditsAvailabilityKnown = available != nullptr;
+            destination.creditsAvailable = cJSON_IsTrue(available);
             if (!cJSON_IsNull(balance)) {
                 if (!text(credit, "balance", destination.creditBalance, false)) return false;
                 bool dot = false, digit = false;
@@ -160,6 +165,31 @@ bool QuotaMonitorRejectionSelfTest()
     if (!parse(valid, sizeof(valid) - 1, *temporary) || temporary->resetCreditsKnown ||
         temporary->buckets[0].windows[0].available || temporary->buckets[0].windows[1].remainingBasisPoints != 9700)
         return false;
+    // An old v2 credits object is still usable for balance display, but does
+    // not supply the explicit availability bit. Non-bool bits are rejected.
+    constexpr const char* creditFixtures[] = {
+        "{\"unlimited\":false,\"balance\":\"12.50\"}",
+        "{\"unlimited\":false,\"balance\":\"12.50\",\"has_credits\":true}",
+        "{\"unlimited\":false,\"balance\":null,\"has_credits\":false}",
+        "{\"unlimited\":false,\"balance\":null,\"has_credits\":1}",
+        "{\"unlimited\":false,\"balance\":null,\"has_credits\":null}",
+    };
+    for (std::size_t i = 0; i < std::size(creditFixtures); ++i) {
+        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> data(cJSON_Parse(valid), cJSON_Delete);
+        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> credit(cJSON_Parse(creditFixtures[i]), cJSON_Delete);
+        if (!data || !credit) return false;
+        auto* bucket = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(data.get(), "buckets"), 0);
+        if (!cJSON_ReplaceItemInObjectCaseSensitive(bucket, "credits", credit.get())) return false;
+        credit.release();
+        std::unique_ptr<char, decltype(&cJSON_free)> serialized(cJSON_PrintUnformatted(data.get()), cJSON_free);
+        temporary->buckets[0] = {};
+        if (!serialized || parse(serialized.get(), std::strlen(serialized.get()), *temporary) != (i < 3)) return false;
+        if (i < 3) {
+            const auto& value = temporary->buckets[0];
+            if (!value.creditsKnown || value.creditsAvailabilityKnown != (i != 0) ||
+                value.creditsAvailable != (i == 1)) return false;
+        }
+    }
     constexpr char invalid[] = "{\"version\":2,\"available\":true,\"buckets\":[]}";
     if (parse(invalid, sizeof(invalid) - 1, *temporary) ||
         parse(valid, 8193, *temporary) || parse("[[[[[[[[[]]]]]]]]]", 18, *temporary)) return false;

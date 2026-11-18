@@ -18,6 +18,10 @@ struct QuotaMonitorBucket {
     char creditBalance[32]{};
     bool creditsKnown = false;
     bool creditsUnlimited = false;
+    // Old v2 snapshots omit has_credits. A present credit object alone does
+    // not establish whether the account can fall back to Credits.
+    bool creditsAvailabilityKnown = false;
+    bool creditsAvailable = false;
     std::array<QuotaMonitorWindow, 2> windows{};
 };
 struct QuotaMonitorSnapshot {
