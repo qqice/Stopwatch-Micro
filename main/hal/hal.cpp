@@ -57,6 +57,7 @@ void Hal::init()
     BootTimingMark(BootTiming::GaugeStart);
     const auto gaugeReload = gaugeBootReload(gaugeReason, sizeof(gaugeReason));
     BootTimingMark(BootTiming::GaugeEnd);
+    restore_boot_splash_brightness();
     ESP_LOGI("GaugeBoot", "startup status=%u reason=%s", static_cast<unsigned>(gaugeReload), gaugeReason);
 #endif
     BootTraceStage(3);

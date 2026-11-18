@@ -516,6 +516,7 @@ private:
     void display_init();
 #ifdef MOSAICO_BOARD
     void display_boot_splash();
+    void restore_boot_splash_brightness();
 #endif
     void touchpad_init();
     void lvgl_init();

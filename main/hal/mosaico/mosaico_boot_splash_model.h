@@ -5,6 +5,8 @@
 // No LVGL, heap, tasks or board APIs: shared by the panel and PNG preview.
 namespace mosaico_boot_splash {
 constexpr int Width = 480, Height = 480, StripRows = 8, Brightness = 30;
+constexpr int ReloadBrightness = 5; // Temporary load contrast during gauge configuration.
+static_assert(ReloadBrightness > 0 && ReloadBrightness < Brightness);
 // Two centered lines retain the existing five-column, square-dot style.
 constexpr char FirstLine[] = "MOSAICO", SecondLine[] = "BEACON";
 constexpr int Pitch = 10, Diameter = 6, LineGap = 30;

@@ -17,11 +17,11 @@ class BootSplashTests(unittest.TestCase):
   self.assertIn('FirstLine[] = "MOSAICO", SecondLine[] = "BEACON"',model)
  def test_protected_startup_order(self):
   init=HAL.split('void Hal::init()',1)[1].split('Hal::Diagnostics',1)[0]
-  tokens=['pmic_init();','display_init();','display_boot_splash();','BootTiming::GaugeStart','gaugeBootReload(', 'BootTiming::GaugeEnd','ioe_init();','touchpad_init();','lvgl_init();','audio_init();','button_init();']
+  tokens=['pmic_init();','display_init();','display_boot_splash();','BootTiming::GaugeStart','gaugeBootReload(', 'BootTiming::GaugeEnd','restore_boot_splash_brightness();','ioe_init();','touchpad_init();','lvgl_init();','audio_init();','button_init();']
   offsets=[init.index(t) for t in tokens];self.assertEqual(offsets,sorted(offsets))
   self.assertIn('#ifndef MOSAICO_BOARD\n    delay(50);\n    display_init();',init)
  def test_single_owned_dma_strip_and_verified_drain(self):
-  splash=S.split('void Hal::display_boot_splash()',1)[1].split('void Hal::touchpad_init()',1)[0]
+  splash=S.split('void Hal::display_boot_splash()',1)[1].split('void Hal::restore_boot_splash_brightness()',1)[0]
   self.assertEqual(splash.count('heap_caps_malloc('),1)
   self.assertIn('MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA',splash)
   self.assertIn('ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, 0))',splash)
@@ -29,13 +29,26 @@ class BootSplashTests(unittest.TestCase):
    self.assertNotIn(forbidden,splash)
   enable=splash.split('void enable()',1)[1]
   self.assertLess(enable.index('disp_on_off(panel, true)'),enable.index('BootTimingMark(BootTiming::FirstFrame)'))
-  self.assertLess(enable.index('set_brightness(panel, mosaico_boot_splash::Brightness)'),enable.index('BootTimingMark(BootTiming::FirstFrame)'))
+  self.assertLess(enable.index('set_brightness(panel, mosaico_boot_splash::ReloadBrightness)'),enable.index('BootTimingMark(BootTiming::FirstFrame)'))
   driver=(R/'boards/mosaico/managed_components/espressif__esp_lcd_co5300/esp_lcd_co5300_spi.c').read_text()
   brightness=driver.split('static esp_err_t co5300_spi_apply_brightness(void *driver_data, uint8_t brightness_percent)\n{',1)[1]
   self.assertIn('tx_param(',brightness)
   io=Path('C:/esp/v6.1/esp-idf/components/esp_lcd/spi/esp_lcd_panel_io_spi.c').read_text()
   tx=io.split('static esp_err_t panel_io_spi_tx_param(esp_lcd_panel_io_t *io, int lcd_cmd, const void *param, size_t param_size)\n{',1)[1].split('static esp_err_t panel_io_spi_rx_param',1)[0]
   self.assertLess(tx.index('spi_device_get_trans_result('),tx.index('spi_device_polling_transmit('))
+ def test_reload_brightness_only_and_failed_splash_stays_dark(self):
+  model=(R/'main/hal/mosaico/mosaico_boot_splash_model.h').read_text()
+  self.assertIn('Brightness = 30;',model)
+  self.assertIn('ReloadBrightness = 5;',model)
+  init=S.split('void Hal::display_init()',1)[1].split('void Hal::display_boot_splash()',1)[0]
+  self.assertIn('panel_brightness = 0;',init)
+  restore=S.split('void Hal::restore_boot_splash_brightness()',1)[1].split('void Hal::touchpad_init()',1)[0]
+  tokens=['if (panel_brightness != mosaico_boot_splash::ReloadBrightness) return;',
+          'set_brightness(panel, mosaico_boot_splash::Brightness)',
+          'panel_brightness = mosaico_boot_splash::Brightness;']
+  offsets=[restore.index(t) for t in tokens]; self.assertEqual(offsets,sorted(offsets))
+  for forbidden in ('disp_on_off', 'setBackLightBrightness', 'delay(', 'gauge'):
+   self.assertNotIn(forbidden,restore)
  def test_lvgl_dark_full_redraw_handoff(self):
   init=S.split('void Hal::lvgl_init()',1)[1].split('void Hal::setTouchIdlePolling',1)[0]
   tokens=['set_brightness(panel, 0)','disp_on_off(panel, false)','pending_boot_display = true','lvgl_port_init(', 'lv_obj_invalidate(lv_screen_active())','lvglUnlock();']

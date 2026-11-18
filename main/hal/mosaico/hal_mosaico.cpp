@@ -3163,8 +3163,8 @@ void Hal::display_boot_splash()
         void release() { heap_caps_free(strip); strip = nullptr; }
         void enable() {
             ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
-            ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, mosaico_boot_splash::Brightness));
-            panel_brightness = mosaico_boot_splash::Brightness;
+            ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, mosaico_boot_splash::ReloadBrightness));
+            panel_brightness = mosaico_boot_splash::ReloadBrightness;
             BootTimingMark(BootTiming::FirstFrame); // Commands completed, not optical proof.
         }
     } transfer;
@@ -3173,7 +3173,15 @@ void Hal::display_boot_splash()
         return;
     }
     ESP_LOGI(Tag, "Boot splash transfer complete; native 480x480 brightness=%d; gauge work next",
-             mosaico_boot_splash::Brightness);
+             mosaico_boot_splash::ReloadBrightness);
+}
+
+void Hal::restore_boot_splash_brightness()
+{
+    // An unsuccessful allocation leaves the panel dark. Do not enable it here.
+    if (panel_brightness != mosaico_boot_splash::ReloadBrightness) return;
+    ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(panel, mosaico_boot_splash::Brightness));
+    panel_brightness = mosaico_boot_splash::Brightness;
 }
 
 
