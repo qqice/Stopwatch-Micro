@@ -27,6 +27,7 @@ from history_store import HistoryStore, unavailable_response
 from quota_dashboard import DashboardStore, normalize_quota_dashboard
 from ota_release import ImmutableReleaseStore
 from quota_trend import project as unavailable_trend
+from api_credit_poll import ApiCreditCollector, valid_organization
 
 
 POLL_SECONDS = 60.0
@@ -44,6 +45,7 @@ class ServiceConfig:
     ota_delta_enabled: bool = False
     ota_delta_base_dir: Path | None = None
     ota_delta_max_percent: int = 60
+    api_credit_org: str | None = None
 
 
 def load_config(path: Path) -> ServiceConfig:
@@ -96,8 +98,11 @@ def load_config(path: Path) -> ServiceConfig:
     delta_path = (config_parent / delta_value).resolve()
     if not delta_path.is_relative_to(config_parent):
         raise BridgeError("ota_delta_base_dir must stay under the configuration directory")
+    api_credit_org = raw.get("api_credit_org")
+    if api_credit_org is not None and not valid_organization(api_credit_org):
+        raise BridgeError("invalid api_credit_org")
     return ServiceConfig(host, port, token, tuple(dict.fromkeys(x for x in additional if x != host)), history_path,
-                         delta_enabled, delta_path, delta_percent)
+                         delta_enabled, delta_path, delta_percent, api_credit_org)
 
 
 class SnapshotStore:
@@ -224,7 +229,16 @@ def is_authorized(authorization: str, device_token: str) -> bool:
     return hmac.compare_digest(supplied, f"Bearer {device_token}".encode("ascii"))
 
 
-def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore | None = None, dashboard: DashboardStore | None = None, release_store: ImmutableReleaseStore | None = None) -> type[BaseHTTPRequestHandler]:
+def encode_status_v2(body: dict[str, Any], api_credit: ApiCreditCollector | None) -> bytes:
+    """Optional API status must never take a valid Codex payload over its cap."""
+    if api_credit is not None:
+        extra = json.dumps({**body, "api_credit": api_credit.status()}, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        if len(extra) <= 8192:
+            return extra
+    return json.dumps(body, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore | None = None, dashboard: DashboardStore | None = None, release_store: ImmutableReleaseStore | None = None, api_credit: ApiCreditCollector | None = None) -> type[BaseHTTPRequestHandler]:
     dashboard = dashboard if dashboard is not None else DashboardStore()
     class QuotaHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -286,7 +300,8 @@ def make_handler(store: SnapshotStore, device_token: str, history: HistoryStore 
                 body, available = dashboard.status()
             else:
                 body, available = store.status()
-            payload = json.dumps(body, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            payload = (encode_status_v2(body, api_credit) if self.path == "/v2/status"
+                       else json.dumps(body, separators=(",", ":"), allow_nan=False).encode("utf-8"))
             if len(payload) > (8192 if self.path == "/v2/status" else 32768):
                 self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
@@ -321,13 +336,18 @@ def run(args: argparse.Namespace) -> int:
         collector = QuotaCollector(lambda: AppServerClient(locate_codex(args.codex_path)), SnapshotStore(), history)
         stop = threading.Event()
         worker = threading.Thread(target=run_collector, args=(collector, stop), daemon=True)
+        api_credit = ApiCreditCollector(config.api_credit_org) if config.api_credit_org else None
+        api_worker = (threading.Thread(target=api_credit.run, args=(stop,), daemon=True, name="api-credit-poll")
+                      if api_credit is not None else None)
         for host in (config.server_host,)+config.additional_hosts:
-            servers.append(ThreadingHTTPServer((host, config.server_port), make_handler(collector._store, config.device_token, history, collector._dashboard, release_store)))
+            servers.append(ThreadingHTTPServer((host, config.server_port), make_handler(collector._store, config.device_token, history, collector._dashboard, release_store, api_credit)))
     except (BridgeError, OSError, ValueError) as exc:
         for server in servers: server.server_close()
         print(f"QUOTA SERVICE ERROR {exc}", file=sys.stderr)
         return 2
     worker.start()
+    if api_worker is not None:
+        api_worker.start()
     serving=[threading.Thread(target=server.serve_forever,kwargs={'poll_interval':0.5},daemon=True) for server in servers]
     for thread in serving:thread.start()
     try:
@@ -341,6 +361,8 @@ def run(args: argparse.Namespace) -> int:
             server.shutdown()
             server.server_close()
         worker.join(timeout=2)
+        if api_worker is not None:
+            api_worker.join(timeout=2)
         collector.close()
         history.close()
 
