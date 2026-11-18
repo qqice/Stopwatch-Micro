@@ -1,6 +1,7 @@
 #include "dot_widgets.h"
 #include "dot_patterns.h"
 #include "dot_render_model.h"
+#include "credit_reel.h"
 #include <cstring>
 #include <new>
 
@@ -22,6 +23,8 @@ struct State {
     // re-enable covers both retained pixels and any static draws in the interim.
     uint16_t meterPhase = 0;
     bool meterMotion = false;
+    const char* reelFrom = nullptr;
+    uint16_t reelMs = 0;
 };
 // Hand-authored nine-column masks, leftmost bit = 0x100.
 constexpr uint16_t masks[][9] = {
@@ -152,6 +155,41 @@ void event(lv_event_t* e) {
     dsc.radius = LV_RADIUS_CIRCLE;
     if (s->kind == Kind::Text) {
         int count = static_cast<int>(std::strlen(s->text));
+        if (s->reelFrom && count) {
+            const int oldCount = mosaico_credit::reelLength(s->reelFrom);
+            const int columns = detail::max(count, oldCount);
+            const auto l = detail::textLayout(w, h, columns, s->pitch);
+            if (l.diameter) {
+                const lv_area_t saved = layer->_clip_area;
+                const int y0 = a.y1 + l.y;
+                layer->_clip_area.y1 = detail::max(saved.y1, y0);
+                layer->_clip_area.y2 = detail::min(saved.y2, y0 + l.height - 1);
+                if (layer->_clip_area.y1 <= layer->_clip_area.y2) {
+                    const auto chars = visibleSpan(a.x1 + l.x, 6 * l.pitch, 4 * l.pitch + l.diameter, columns, saved.x1, saved.x2);
+                    for (int i = chars.first; i < chars.end; ++i) {
+                        const char old = mosaico_credit::column(s->reelFrom, oldCount, columns, i);
+                        const char next = mosaico_credit::column(s->text, count, columns, i);
+                        const int x0 = a.x1 + l.x + i * 6 * l.pitch;
+                        const auto glyphAt = [&](char c, int yAt) {
+                            const auto& g = uiGlyph(c);
+                            for (int y = 0; y < 7; ++y) for (int x = 0; x < 5; ++x)
+                                if (g.rows[y] & (16 >> x))
+                                    dot(layer, dsc, x0 + x * l.pitch, yAt + y * l.pitch, l.diameter);
+                        };
+                        if (old == next) glyphAt(next, y0);
+                        else {
+                            const int span = 7 * l.pitch;
+                            const int offset = mosaico_credit::lift(span, columns - 1 - i, s->reelMs);
+                            glyphAt(old, y0 - offset);
+                            glyphAt(next, y0 + span - offset);
+                        }
+                    }
+                }
+                // LVGL stores this layer clip on each draw task at creation.
+                layer->_clip_area = saved;
+                return;
+            }
+        }
         auto l = detail::textLayout(w, h, count, s->pitch);
         const bool cannotFit = count && !l.diameter;
         if (cannotFit) {
@@ -232,6 +270,13 @@ lv_obj_t* createText(lv_obj_t* parent, int w, int h, int pitch, uint32_t color) 
 const char* text(lv_obj_t* obj) {
     const auto* s = state(obj, Kind::Text);
     return s ? s->text : nullptr;
+}
+void setTextReel(lv_obj_t* obj, const char* from, uint16_t elapsedMs) {
+    auto* s = state(obj, Kind::Text);
+    if (!s || (s->reelFrom == from && (!from || s->reelMs == elapsedMs))) return;
+    s->reelFrom = from;
+    s->reelMs = elapsedMs;
+    lv_obj_invalidate(obj);
 }
 void setTextPitch(lv_obj_t* obj, int pitch) {
     auto* s = state(obj, Kind::Text);

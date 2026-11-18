@@ -205,15 +205,26 @@ chrome remains black/gray/white. Quota and time rows use identical text, icon an
 meter dimensions. The full window length stays an internal timer denominator,
 not an extra standalone label. `Pro200` is the owner's requested local badge for
 the canonical Pro bucket, **not** an API-returned price or a change to allowance.
-`Points` is the display name for the unchanged official credit balance; there is
-no conversion to dollars or tokens.
+The displayed balance is the received Credits balance; there is no conversion
+to dollars or tokens.
 
 The first page is an independent 480x480 dashboard, not the old circular control
 page with buttons removed. Each quota bucket has a large remaining-percentage
-card, up to two window progress bars, actual duration, reset countdown and optional
-plan/credits/limit-state metadata. Multiple buckets can be scrolled; at most eight
-are retained, with overflow explicitly marked. Snapshot reset credits are read-only.
-All-zero decimal fractions are omitted. A single returned window fills the card;
+card, up to two window progress bars, reset countdown and optional plan or balance
+metadata. Multiple buckets can be scrolled; at most eight are retained, with
+overflow explicitly marked. Snapshot reset credits are read-only and separate
+from Credits used for eligible usage. Credit balances display the integer part
+without rounding; the received balance retains its precision.
+
+When a fresh Codex snapshot confirms the weekly allowance has reached zero and
+Credits are available, the weekly value is replaced by a gold coin and large
+balance. The weekly reset countdown remains. Only an integer decrease between
+fresh, chronologically ordered observations in the same weekly period rolls the
+changed digits; lock screen updates are static. The display describes the
+observed account balance, not a live bill for a session. Older v2 responses
+without the optional `has_credits` field cannot confirm finite-credit availability.
+
+A single returned window fills the card;
 missing windows are hidden, never shown as a fabricated five-hour allowance or
 an empty second column. No window at all shows `--`. Credits are
 separate from Token history. Static screens have no scrollbars or horizontal

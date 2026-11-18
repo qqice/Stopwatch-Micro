@@ -17,6 +17,7 @@
 #include "quota_trend_selection.h"
 #include "view_update_model.h"
 #include "dot_animation_cadence.h"
+#include "credit_takeover.h"
 #include "view_transition_snapshot.h"
 
 namespace view {
@@ -115,6 +116,7 @@ private:
     static void orientationCompleted(lv_anim_t* anim);
     void updateAnimations(uint32_t tick);
     void stopAnimations();
+    void stopCreditReel();
     void updateHistoryHeader(bool force = false);
     void renderHistory();
     void selectTrendAt(int localX);
@@ -207,6 +209,7 @@ private:
     lv_obj_t* _lockPanel = nullptr;
     lv_obj_t* _lockClock = nullptr;
     lv_obj_t* _lockQuota = nullptr;
+    lv_obj_t* _lockCreditCoin = nullptr;
     lv_obj_t* _lockResetTime = nullptr;
     lv_obj_t* _lockResetIcon = nullptr;
     lv_obj_t* _lockBattery = nullptr;
@@ -233,6 +236,12 @@ private:
     lv_obj_t* _resetCount = nullptr;
     std::array<lv_obj_t*, 3> _resetIcons{};
     std::array<lv_obj_t*, 8> _creditIcons{}, _creditValues{};
+    mosaico_credit::Reading _creditReading{};
+    mosaico_credit::Reel _creditReel{};
+    lv_obj_t* _creditReelWidget = nullptr;
+    lv_obj_t* _creditReelCard = nullptr;
+    uint32_t _creditReelStart = 0, _creditModeRevision = 0;
+    bool _creditModeConfirmed = false;
     std::array<std::array<lv_obj_t*, 2>, 8> _resetTimes{}, _resetBars{}, _hourglassIcons{};
     lv_obj_t* _historyClock = nullptr;
     lv_obj_t* _historyAge = nullptr;

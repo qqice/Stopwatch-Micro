@@ -13,6 +13,9 @@ void setText(lv_obj_t* obj, const char* text, uint32_t color = 0x67E7AE);
 // LVGL-thread/lock only; pointer is valid only while the widget remains alive.
 const char* text(lv_obj_t* obj);
 void setTextPitch(lv_obj_t* obj, int pitch); // Same >=2 request clamp as createText.
+// Non-owning storage for the current display frame, shared by one reel widget.
+// The caller must detach the source before mutating or releasing it.
+void setTextReel(lv_obj_t* obj, const char* from, uint16_t elapsedMs = 0);
 // Caller schedules and gates motion (visible, awake, fresh, actually charging).
 // No internal timers. Phase wraps at 360; text/unsupported icons remain static.
 // Meter motion is colour-only; C/R accents keep readable front/back faces.

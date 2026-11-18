@@ -2,6 +2,7 @@
 #include "view_mosaico.h"
 #include <host/powerbank_keepalive.h>
 #include "dot_widgets.h"
+#include "dot_patterns.h"
 #include "reset_countdown.h"
 #include "credit_format.h"
 #include "quota_trend_geometry.h"
@@ -266,6 +267,8 @@ void CodexMicroView::init(lv_obj_t* parent) {
     _lockClock = createText(_lockPanel, 240, 64, 8, Orange); place(_lockClock, 120, 64);
     setText(_lockClock, "--:--", Orange);
     _lockQuota = createText(_lockPanel, 400, 90, 12); place(_lockQuota, 40, 148);
+    _lockCreditCoin = createIcon(_lockPanel, Icon::Coin, 42, Gold);
+    if (_lockCreditCoin) lv_obj_add_flag(_lockCreditCoin, LV_OBJ_FLAG_HIDDEN);
     _lockResetIcon = createIcon(_lockPanel, Icon::Hourglass, 28, Cyan);
     _lockResetTime = createText(_lockPanel, 340, 48, 6, Cyan);
     _lockBatteryIcon = createIcon(_lockPanel, Icon::Battery, 36); place(_lockBatteryIcon, 152, 334);
@@ -284,6 +287,7 @@ void CodexMicroView::init(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(_rotationCurtain, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN);
     bool widgetsReady = _lockSessionNumbers[5] && _sessionsCounts && _sessionsLink && _sessionNumbers[5] && _settingsStatus && _lockClock && _clockDate && _rotationCurtain && _otaButton && _otaButtonLabel && _otaStageIcon && _otaTitle && _otaModeBadge && _otaPhase && _otaPercent && _otaMeter && _otaArrow && _otaImageIcon && _otaSignatureIcon && _otaSlotNumbers[0] && _otaSlotNumbers[1] && _otaChips[0] && _otaChips[1] && _wifiIcon && _batteryIcon && _boltIcon && _resetCount && _quotaStatus && _clockIcon && _footer && _historyClock && _historyAge && _historyChart && _trendHint && _lockQuota && _lockBatteryIcon && _lockResetIcon && _lockResetTime;
+    widgetsReady = widgetsReady && _lockCreditCoin;
     for (auto* number : _lockSessionNumbers) widgetsReady = widgetsReady && number;
     for (auto* icon : _resetIcons) widgetsReady = widgetsReady && icon;
     for (size_t i = 0; i < _cards.size(); ++i) {
@@ -1544,7 +1548,12 @@ void CodexMicroView::updateOrientation(bool touching) {
     lv_obj_remove_flag(_rotationCurtain, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_rotationCurtain);
     startOrientationFade(false);
 }
+void CodexMicroView::stopCreditReel() {
+    if (_creditReelWidget) setTextReel(_creditReelWidget, nullptr);
+    _creditReelWidget = _creditReelCard = nullptr;
+}
 void CodexMicroView::stopAnimations() {
+    stopCreditReel();
     for (auto* obj : {_otaStageIcon, _otaMeter, _otaArrow, _otaChips[0], _otaChips[1]}) setMotion(obj, 0, false);
     setMotion(_batteryIcon, 0, false);
     for (auto* icon : _resetIcons) setMotion(icon, 0, false);
@@ -1555,6 +1564,12 @@ void CodexMicroView::stopAnimations() {
 }
 void CodexMicroView::updateAnimations(uint32_t tick) {
     const bool eligible = !(_locked || _suppressed || _slideTo || _rotationFault || _rotationPhase != RotationPhase::Idle);
+    if (_creditReelWidget && (!eligible || _page != Page::Command ||
+        mosaico_view_update::quotaBodyCovered(_settingsOpen, _settingsAnimating) ||
+        _quotaAge.secondsAt(GetHAL().millis()) > 130 ||
+        !_creditReelCard || !_creditReading.resetEpoch ||
+        static_cast<uint64_t>(_quota->capturedEpoch) + _quotaAge.secondsAt(GetHAL().millis()) >= _creditReading.resetEpoch))
+        stopCreditReel();
     if (!_motionCadence.sample(tick, eligible)) return;
     const uint16_t phase = static_cast<uint16_t>(((tick - _motionEpoch) % 12000U) * 360U / 12000U);
     const uint16_t meterPhase = static_cast<uint16_t>(((tick - _motionEpoch) % 6000U) * 360U / 6000U);
@@ -1578,6 +1593,14 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
     const bool quotaBodyActive = quotaActive && !mosaico_view_update::quotaBodyCovered(_settingsOpen, _settingsAnimating);
     const int scrollY = lv_obj_get_scroll_y(_quotaPage);
     const int viewportHeight = lv_obj_get_height(_quotaPage);
+    if (_creditReelWidget) {
+        const int top = lv_obj_get_y(_creditReelCard) - scrollY;
+        const uint32_t elapsed = lv_tick_get() - _creditReelStart;
+        const int columns = std::max(mosaico_credit::length(_creditReel.from), mosaico_credit::length(_creditReading.digits));
+        if (top + 48 >= viewportHeight || top + 118 <= 0 || elapsed >= mosaico_credit::duration(columns))
+            stopCreditReel();
+        else setTextReel(_creditReelWidget, _creditReel.from, static_cast<uint16_t>(elapsed));
+    }
     const uint64_t epoch = static_cast<uint64_t>(_quota->capturedEpoch) + age;
     for (size_t i = 0; i < _cards.size(); ++i) {
         const int top = lv_obj_get_y(_cards[i]) - scrollY;
@@ -1593,6 +1616,7 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
     }
 }
 void CodexMicroView::refreshQuota(uint32_t now) {
+    const bool previousFresh = _quotaRevision != UINT32_MAX && _quotaAge.secondsAt(now) <= 130;
     const bool copied = CopyQuotaMonitor(*_quota, now);
     // Incremental uptime keeps the same validated revision aging across millis wrap,
     // including failed copies; trusted backend age also seeds recreated views.
@@ -1600,6 +1624,7 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     if (copied) _quotaRevision = _quota->revision;
     const bool displayKnown = mosaico_quota_display::hasSnapshot(*_quota, _quotaRevision != UINT32_MAX);
     char buf[128];
+    using mosaico_credit::Balance;
     if (!_batterySeen || _locked || now - _batteryReadTick >= 5000) refreshBattery(now);
     const bool online = GetNetworkQuota().connected();
     setIcon(_wifiIcon, online ? Icon::Wifi : Icon::WifiOff, online ? Blue : Orange);
@@ -1617,11 +1642,37 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     else lv_obj_remove_flag(_quotaStatus, LV_OBJ_FLAG_HIDDEN);
     if (displayKnown && _quota->bucketCount > 1) lv_obj_add_flag(_quotaPage, LV_OBJ_FLAG_SCROLLABLE);
     else { lv_obj_remove_flag(_quotaPage, LV_OBJ_FLAG_SCROLLABLE); lv_obj_scroll_to_y(_quotaPage, 0, LV_ANIM_OFF); }
-    const uint64_t epoch = static_cast<uint64_t>(_quota->capturedEpoch) + _quotaAge.secondsAt(now);
+    const uint64_t age = _quotaAge.secondsAt(now);
+    const uint64_t epoch = static_cast<uint64_t>(_quota->capturedEpoch) + age;
+    const bool fresh = displayKnown && !_quota->stale;
+    if (fresh && (!_creditModeConfirmed || _creditModeRevision != _quotaRevision)) {
+        _creditModeConfirmed = false;
+        for (size_t i = 0; i < _quota->bucketCount; ++i) {
+            const auto& b = _quota->buckets[i];
+            if (mosaico_credit::exhaustedWeeklyWindow(b, epoch) >= 0 &&
+                mosaico_credit::takeover(mosaico_credit::balanceKind(b))) {
+                _creditModeConfirmed = true;
+                _creditModeRevision = _quotaRevision;
+                break;
+            }
+        }
+    }
+    // Keep only previously confirmed handoff data while the ordinary lock
+    // refresh sleeps. Never activate from an unseen stale revision.
+    const bool canShowCreditMode = age <= 600 && _creditModeConfirmed &&
+                                   _creditModeRevision == _quotaRevision;
+    mosaico_credit::Reading nextCreditReading{};
+    const uint32_t gold = _quota->stale ? dimCachedColor(Gold) : Gold;
     for (size_t i = 0; i < _cards.size(); ++i) {
         if (!displayKnown || i >= _quota->bucketCount) { lv_obj_add_flag(_cards[i], LV_OBJ_FLAG_HIDDEN); continue; }
         lv_obj_remove_flag(_cards[i], LV_OBJ_FLAG_HIDDEN);
         const auto& bucket = _quota->buckets[i];
+        const int weekly = mosaico_credit::exhaustedWeeklyWindow(bucket, epoch);
+        const Balance balanceKind = mosaico_credit::balanceKind(bucket);
+        const bool creditMode = canShowCreditMode && weekly >= 0 && mosaico_credit::takeover(balanceKind);
+        char balance[sizeof(bucket.creditBalance)];
+        mosaico_credit::formatBalance(bucket.creditBalance, balance, sizeof(balance));
+        const char* wholeBalance = mosaico_credit::unpad(balance);
         std::snprintf(buf, sizeof(buf), "%s%s%s", bucket.name[0] ? bucket.name : bucket.id, bucket.plan[0] ? " / " : "", bucket.plan);
         lv_label_set_text(_cardTitles[i], buf);
         const char* proBadge = nullptr;
@@ -1634,7 +1685,7 @@ void CodexMicroView::refreshQuota(uint32_t now) {
             setText(_cardBadges[i], proBadge, 0xE9EDF2);
         } else { lv_obj_remove_flag(_cardTitles[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_cardBadges[i], LV_OBJ_FLAG_HIDDEN); }
         const size_t validWindows = static_cast<size_t>(bucket.windows[0].available) + static_cast<size_t>(bucket.windows[1].available);
-        if (!validWindows) { lv_obj_remove_flag(_cardValues[i], LV_OBJ_FLAG_HIDDEN); place(_cardValues[i], 54, 48); lv_obj_set_width(_cardValues[i], 368); setTextPitch(_cardValues[i], 8); setText(_cardValues[i], "--", Gray); lv_obj_add_flag(_secondValues[i], LV_OBJ_FLAG_HIDDEN); }
+        if (!validWindows) { lv_obj_remove_flag(_cardValues[i], LV_OBJ_FLAG_HIDDEN); place(_cardValues[i], 54, 48); lv_obj_set_size(_cardValues[i], 368, 56); setTextPitch(_cardValues[i], 8); setText(_cardValues[i], "--", Gray); lv_obj_add_flag(_secondValues[i], LV_OBJ_FLAG_HIDDEN); }
         for (size_t j = 0; j < 2; ++j) {
             const auto& w = bucket.windows[j]; auto* value = j ? _secondValues[i] : _cardValues[i];
             if (!w.available) {
@@ -1649,15 +1700,43 @@ void CodexMicroView::refreshQuota(uint32_t now) {
             const int textOffset = validWindows == 1 ? 40 : 38;
             const int textWidth = width - textOffset;
             const int pitch = validWindows == 1 ? 8 : 4;
-            place(_quotaIcons[i][j], x, 62); lv_obj_set_size(_quotaIcons[i][j], iconSize, iconSize);
             const uint32_t quotaColor = quotaLevelColor(w.remainingBasisPoints, _quota->stale);
             const bool percentKnown = mosaico_quota_display::percentKnown(w, epoch);
-            const uint32_t displayColor = percentKnown ? quotaColor : Gray;
-            setIcon(_quotaIcons[i][j], Icon::Quota, displayColor);
-            place(value, x + textOffset, 48); lv_obj_set_width(value, textWidth); setTextPitch(value, pitch);
-            if (percentKnown) { percent(w.remainingBasisPoints, buf, sizeof(buf)); setText(value, buf, quotaColor); }
+            const uint32_t displayColor = percentKnown ? (static_cast<int>(j) == weekly ? 0xA2A9B0 : quotaColor) : Gray;
+            const bool takeoverWindow = creditMode && static_cast<int>(j) == weekly;
+            const int coinOffset = takeoverWindow && validWindows == 1 ? 10 : 0;
+            place(_quotaIcons[i][j], x, 62); lv_obj_set_size(_quotaIcons[i][j], iconSize + coinOffset, iconSize + coinOffset);
+            setIcon(_quotaIcons[i][j], takeoverWindow ? Icon::Coin : Icon::Quota, takeoverWindow ? gold : displayColor);
+            place(value, x + textOffset + coinOffset, 48); lv_obj_set_size(value, textWidth - coinOffset, takeoverWindow ? 70 : 56);
+            setTextPitch(value, takeoverWindow && validWindows == 1 ? 10 : pitch);
+            if (takeoverWindow) {
+                const char* shown = balanceKind == Balance::Unlimited ? "INF" : wholeBalance;
+                if (fresh && balanceKind == Balance::Finite) {
+                    std::snprintf(nextCreditReading.digits, sizeof(nextCreditReading.digits), "%s", shown);
+                    nextCreditReading.resetEpoch = w.resetEpoch;
+                    nextCreditReading.capturedEpoch = _quota->capturedEpoch;
+                }
+                const bool visible = !_locked && !_suppressed && !_slideTo &&
+                    !_rotationFault && _rotationPhase == RotationPhase::Idle && _page == Page::Command &&
+                    !mosaico_view_update::quotaBodyCovered(_settingsOpen, _settingsAnimating) &&
+                    lv_obj_get_y(_cards[i]) - lv_obj_get_scroll_y(_quotaPage) + 48 < lv_obj_get_height(_quotaPage) &&
+                    lv_obj_get_y(_cards[i]) - lv_obj_get_scroll_y(_quotaPage) + 118 > 0;
+                const bool sameMotion = _creditReelWidget == value && visible && fresh &&
+                    _creditReading.resetEpoch == nextCreditReading.resetEpoch && _creditReading.resetEpoch &&
+                    std::strcmp(_creditReading.digits, nextCreditReading.digits) == 0;
+                if (!sameMotion) stopCreditReel();
+                setText(value, shown, gold);
+                if (!sameMotion && mosaico_credit::rollDecrease(_creditReading, nextCreditReading, previousFresh, visible)) {
+                    std::memcpy(_creditReel.from, _creditReading.digits, sizeof(_creditReel.from));
+                    _creditReelWidget = value;
+                    _creditReelCard = _cards[i];
+                    _creditReelStart = lv_tick_get();
+                    setTextReel(value, _creditReel.from, 0);
+                }
+            } else if (percentKnown) { percent(w.remainingBasisPoints, buf, sizeof(buf)); setText(value, buf, displayColor); }
             else { std::snprintf(buf, sizeof(buf), "--"); setText(value, buf, Gray); }
             place(_windowBars[i][j], x, 110); lv_obj_set_width(_windowBars[i][j], width); setMeter(_windowBars[i][j], w.remainingBasisPoints, percentKnown, displayColor);
+            if (takeoverWindow) lv_obj_add_flag(_windowBars[i][j], LV_OBJ_FLAG_HIDDEN);
             place(_hourglassIcons[i][j], x, 174); lv_obj_set_size(_hourglassIcons[i][j], iconSize, iconSize);
             place(_resetTimes[i][j], x + textOffset, 160); lv_obj_set_width(_resetTimes[i][j], textWidth); setTextPitch(_resetTimes[i][j], pitch);
             const bool resetKnown = w.resetEpoch && _quota->capturedEpoch;
@@ -1670,15 +1749,22 @@ void CodexMicroView::refreshQuota(uint32_t now) {
             const uint16_t timeBp = durationSeconds ? static_cast<uint16_t>(std::min<uint64_t>(10000, seconds * 10000 / durationSeconds)) : 0;
             setMeter(_resetBars[i][j], timeBp, resetKnown && durationSeconds, Cyan);
         }
-        if (bucket.creditsKnown) {
+        if (!creditMode && (bucket.creditsKnown || weekly >= 0)) {
             lv_obj_remove_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN);
-            char balance[sizeof(bucket.creditBalance)];
-            mosaico_credit::formatBalance(bucket.creditBalance, balance, sizeof(balance));
-            std::snprintf(buf, sizeof(buf), "%s Credits", bucket.creditsUnlimited ? "inf" : balance);
+            const bool knownEmpty = balanceKind == Balance::Empty;
+            const char* secondary = knownEmpty ? "0" : bucket.creditsUnlimited ? "inf" : wholeBalance;
+            if (weekly >= 0 && balanceKind == Balance::Unknown) secondary = "--";
+            const uint32_t color = knownEmpty || std::strcmp(secondary, "--") == 0 ? 0xA2A9B0 : gold;
+            setIcon(_creditIcons[i], Icon::Coin, color == 0xA2A9B0 ? Gray : color);
+            lv_obj_set_style_text_color(_creditValues[i], lv_color_hex(color), 0);
+            std::snprintf(buf, sizeof(buf), "%s Credits", secondary);
             lv_label_set_text(_creditValues[i], buf);
         } else { lv_obj_add_flag(_creditIcons[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(_creditValues[i], LV_OBJ_FLAG_HIDDEN); }
-        lv_label_set_text(_cardMeta[i], bucket.reached);
+        const bool rawLimitError = std::strcmp(bucket.reached, "rate_limit_reached") == 0;
+        lv_label_set_text(_cardMeta[i], creditMode ? "7D 0%" : weekly >= 0 || rawLimitError ? "" : bucket.reached);
     }
+    if (!nextCreditReading.capturedEpoch) stopCreditReel();
+    _creditReading = mosaico_credit::animationReference(_creditReading, nextCreditReading);
     refreshClock(lv_tick_get());
     if (_quota->truncated && _page == Page::Command) {
         std::snprintf(buf, sizeof(buf), "%u/%lu", _quota->bucketCount,
@@ -1706,7 +1792,27 @@ void CodexMicroView::refreshQuota(uint32_t now) {
     const uint16_t lockBp = firstWindow[mosaico_quota_display::primaryWindow(_quota->buckets[0], epoch)].remainingBasisPoints;
     const bool lockKnown = displayKnown && (mosaico_quota_display::percentKnown(firstWindow[0], epoch) ||
                                            mosaico_quota_display::percentKnown(firstWindow[1], epoch));
-    setText(_lockQuota, lockText, lockKnown ? quotaLevelColor(lockBp, _quota->stale) : Gray);
+    const auto& lockBucket = _quota->buckets[0];
+    const auto lockBalanceKind = mosaico_credit::balanceKind(lockBucket);
+    const bool lockCredits = displayKnown && canShowCreditMode &&
+        mosaico_credit::exhaustedWeeklyWindow(lockBucket, epoch) >= 0 && mosaico_credit::takeover(lockBalanceKind);
+    if (lockCredits) {
+        char balance[sizeof(lockBucket.creditBalance)];
+        mosaico_credit::formatBalance(lockBucket.creditBalance, balance, sizeof(balance));
+        const char* shown = lockBalanceKind == Balance::Unlimited ? "INF" : mosaico_credit::unpad(balance);
+        const int count = mosaico_credit::length(shown);
+        const auto layout = mosaico_dot::detail::textLayout(336, 90, count, 10);
+        const int width = std::max((count * 6 - 1) * layout.pitch, 15);
+        const int left = (480 - (42 + 12 + width)) / 2;
+        place(_lockCreditCoin, left, 172); setIcon(_lockCreditCoin, Icon::Coin, gold);
+        lv_obj_remove_flag(_lockCreditCoin, LV_OBJ_FLAG_HIDDEN);
+        place(_lockQuota, left + 54, 148); lv_obj_set_width(_lockQuota, width); setTextPitch(_lockQuota, std::max(2, layout.pitch));
+        setText(_lockQuota, shown, gold);
+    } else {
+        lv_obj_add_flag(_lockCreditCoin, LV_OBJ_FLAG_HIDDEN);
+        place(_lockQuota, 40, 148); lv_obj_set_width(_lockQuota, 400); setTextPitch(_lockQuota, 12);
+        setText(_lockQuota, lockText, lockKnown ? quotaLevelColor(lockBp, _quota->stale) : Gray);
+    }
     char lockReset[64] = "--", leftReset[32]{}, rightReset[32]{};
     const auto leftTime = mosaico_time::countdown(displayKnown && firstWindow[0].available,
         _quota->capturedEpoch, firstWindow[0].resetEpoch, epoch);
@@ -2022,6 +2128,7 @@ void CodexMicroView::wakeDisplay() {
     GetHAL().setMotionIdle(_suppressed || otaBusy()); refreshClock(lv_tick_get(), true);
     if (_overlay) lv_obj_add_flag(_overlay, LV_OBJ_FLAG_HIDDEN);
     if (_lockPanel) lv_obj_add_flag(_lockPanel, LV_OBJ_FLAG_HIDDEN);
+    _creditReading = {}; // A hidden balance change is never replayed on wake.
     refreshQuota(GetHAL().millis());
     if (_page == Page::History) refreshHistory();
     refreshDisplaySettings();

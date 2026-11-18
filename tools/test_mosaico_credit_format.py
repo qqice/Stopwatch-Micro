@@ -74,8 +74,8 @@ static_assert(boundaries());
         self.assertIn('#include "credit_format.h"', source)
         self.assertIn('char balance[sizeof(bucket.creditBalance)];', source)
         self.assertIn('mosaico_credit::formatBalance(bucket.creditBalance, balance, sizeof(balance));', source)
-        self.assertIn('"%s Credits", bucket.creditsUnlimited ? "inf" : balance', source)
-        self.assertIn('if (bucket.creditsKnown)', source)
+        self.assertIn('"%s Credits", secondary', source)
+        self.assertIn('if (!creditMode && (bucket.creditsKnown || weekly >= 0))', source)
 
 
 if __name__ == '__main__':

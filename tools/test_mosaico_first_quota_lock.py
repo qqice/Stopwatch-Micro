@@ -19,8 +19,8 @@ class FirstQuotaLockTests(unittest.TestCase):
             '    // Rendering/page callbacks', 1)[0]
         revision = '    const uint32_t quotaRevision =' + revision
         auto_lock = next(line for line in UPDATE.splitlines() if 'firstQuotaReady &&' in line)
-        known = CPP.split('    const bool lockKnown =', 1)[1].split('    setText(_lockQuota', 1)[0]
-        known = '    const bool lockKnown =' + known
+        known = CPP.split('    const bool lockKnown =', 1)[1].split(';', 1)[0]
+        known = '    const bool lockKnown =' + known + ';'
         code = r'''
 #include "main/apps/app_codex_micro/view/first_quota_lock_gate.h"
 #include "main/apps/app_codex_micro/view/quota_display_cache.h"

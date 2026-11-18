@@ -131,7 +131,8 @@ class DotWidgetsTests(unittest.TestCase):
         self.assertIn("return stale ? dimCachedColor(color) : color;", view)
         self.assertIn("static_assert(dimCachedColor(Green) == 0x52B88B", view)
         self.assertIn("const uint32_t quotaColor = quotaLevelColor(w.remainingBasisPoints, _quota->stale);", view)
-        self.assertIn("setText(value, buf, quotaColor);", view)
+        self.assertIn("percentKnown ? (static_cast<int>(j) == weekly ? 0xA2A9B0 : quotaColor) : Gray", view)
+        self.assertIn("setText(value, buf, displayColor);", view)
         self.assertIn("setText(_lockQuota, lockText, lockKnown ? quotaLevelColor(lockBp, _quota->stale) : Gray);", view)
         self.assertNotRegex(view, r"quotaColor\s*=\s*[^;]*stale\s*\?\s*Gray")
         animation = view.split("void CodexMicroView::updateAnimations(", 1)[1].split("void CodexMicroView::refreshQuota(", 1)[0]
