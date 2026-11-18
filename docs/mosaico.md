@@ -218,9 +218,13 @@ without rounding; the received balance retains its precision.
 
 When a fresh Codex snapshot confirms the weekly allowance has reached zero and
 Credits are available, the weekly value is replaced by a gold coin and large
-balance. The weekly reset countdown remains. Only an integer decrease between
-fresh, chronologically ordered observations in the same weekly period rolls the
-changed digits; lock screen updates are static. The display describes the
+balance. The weekly reset countdown remains. While the quota page is awake, an
+integer Credits decrease between fresh, chronologically ordered observations
+rolls only the changed digits. After waking to that page, the first new, fresh
+snapshot compares the visible quota percentages or Credits balance with their
+last confirmed pre-lock values in the same window and reset cycle. Only changed
+digits roll, once; the cached wake redraw, lock screen, clocks and countdowns
+remain static. The display describes the
 observed account balance, not a live bill for a session. Older v2 responses
 without the optional `has_credits` field cannot confirm finite-credit availability.
 

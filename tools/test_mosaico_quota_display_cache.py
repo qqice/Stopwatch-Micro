@@ -145,7 +145,7 @@ static_assert(cases(),"last validated cache survives age/copy failures without e
         refresh = ui.split('void CodexMicroView::refreshQuota(uint32_t now) {', 1)[1].split('void CodexMicroView::historyChartEvent', 1)[0]
         self.assertIn('if (!displayKnown || i >= _quota->bucketCount)', refresh)
         self.assertNotIn('_quota->available', refresh)
-        self.assertIn('if (percentKnown) { percent(w.remainingBasisPoints', refresh)
+        self.assertRegex(refresh, r'else if \(percentKnown\) \{\s*percent\(w\.remainingBasisPoints')
         self.assertIn('w.remainingBasisPoints, percentKnown, displayColor', refresh)
         for index in (0, 1):
             self.assertIn(f'percentKnown(b.windows[{index}], epoch)', refresh)

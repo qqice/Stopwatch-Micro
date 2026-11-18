@@ -95,7 +95,7 @@ static_assert(mosaico_dot::detail::textLayout(160, 70, MaxBalanceDigits, 4).diam
         lock = view.split("    if (lockCredits) {", 1)[1].split("    char lockReset", 1)[0]
         self.assertNotIn("setTextReel", lock)
         self.assertIn('setText(_lockQuota, shown, gold);', lock)
-        self.assertIn('_creditReading = {}; // A hidden balance change is never replayed on wake.', view)
+        self.assertIn('_creditReading = {}; // A cached response cannot roll; a newly received response can.', view)
         self.assertIn('if (takeoverWindow) lv_obj_add_flag(_windowBars[i][j], LV_OBJ_FLAG_HIDDEN);', view)
         self.assertIn('sameMotion', view)
         self.assertIn('if (old == next) glyphAt(next, y0);', paint)

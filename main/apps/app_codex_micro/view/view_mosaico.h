@@ -18,6 +18,7 @@
 #include "view_update_model.h"
 #include "dot_animation_cadence.h"
 #include "credit_takeover.h"
+#include "quota_wake_reel.h"
 #include "view_transition_snapshot.h"
 
 namespace view {
@@ -116,7 +117,7 @@ private:
     static void orientationCompleted(lv_anim_t* anim);
     void updateAnimations(uint32_t tick);
     void stopAnimations();
-    void stopCreditReel();
+    void stopQuotaReel(size_t window);
     void updateHistoryHeader(bool force = false);
     void renderHistory();
     void selectTrendAt(int localX);
@@ -237,10 +238,17 @@ private:
     std::array<lv_obj_t*, 3> _resetIcons{};
     std::array<lv_obj_t*, 8> _creditIcons{}, _creditValues{};
     mosaico_credit::Reading _creditReading{};
-    mosaico_credit::Reel _creditReel{};
-    lv_obj_t* _creditReelWidget = nullptr;
-    lv_obj_t* _creditReelCard = nullptr;
-    uint32_t _creditReelStart = 0, _creditModeRevision = 0;
+    struct QuotaReel {
+        mosaico_credit::Reel reel{};
+        lv_obj_t* value = nullptr;
+        lv_obj_t* card = nullptr;
+        uint32_t start = 0, resetEpoch = 0;
+        bool credits = false;
+    };
+    std::array<QuotaReel, 2> _quotaReels{};
+    mosaico_quota_wake::Reading _lastVisibleQuota{}, _wakeReference{};
+    mosaico_quota_wake::Gate _wakeReelGate{};
+    uint32_t _wakeReelStarts = 0, _creditModeRevision = 0;
     bool _creditModeConfirmed = false;
     std::array<std::array<lv_obj_t*, 2>, 8> _resetTimes{}, _resetBars{}, _hourglassIcons{};
     lv_obj_t* _historyClock = nullptr;
