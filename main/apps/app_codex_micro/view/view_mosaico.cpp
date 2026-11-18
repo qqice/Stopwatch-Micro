@@ -98,6 +98,11 @@ void percent(uint16_t bp, char* out, size_t size) {
     else if (bp % 10 == 0) std::snprintf(out, size, "%u.%u%%", bp / 100, (bp % 100) / 10);
     else std::snprintf(out, size, "%u.%02u%%", bp / 100, bp % 100);
 }
+void otaPercent(uint16_t bp, char* out, size_t size) {
+    // Fixed fractional columns keep the dot and percent glyph stationary
+    // across OTA reels, even when an integer digit is added on the left.
+    std::snprintf(out, size, "%u.%02u%%", unsigned(bp / 100), unsigned(bp % 100));
+}
 void formatCountdown(mosaico_time::Countdown time, char* out, size_t size, bool minutePrecision = true) {
     if (!time.known) std::snprintf(out, size, "--");
     else if (time.minutes >= 1440) {
@@ -1305,9 +1310,25 @@ void CodexMicroView::renderOta() {
         _otaRenderedStatic = _ota; _otaStaticSeen = true;
     }
     if(view.numeric) {
-        char text[32];percent(view.bp,text,sizeof(text));setTextPitch(_otaPercent,8);setText(_otaPercent,text,view.color);
+        using ReelAction = mosaico_ota_reel::Action;
+        const auto reel = _otaReel.observe(lv_tick_get(), view.bp, view.done, view.total,
+            otaReelVisible(), !staticChanged);
+        if (reel != ReelAction::Keep) {
+            char progress[8]; otaPercent(view.bp, progress, sizeof(progress));
+            setTextPitch(_otaPercent,8);
+            if (reel == ReelAction::Roll) {
+                const char* shown = mosaico_dot::text(_otaPercent);
+                std::snprintf(_otaReelFrom, sizeof(_otaReelFrom), "%.7s", shown ? shown : "");
+                _otaReelColor = view.color;
+                setText(_otaPercent,progress,view.color);
+                setTextReel(_otaPercent, _otaReelFrom);
+            } else {
+                setTextReel(_otaPercent, nullptr);
+                setText(_otaPercent,progress,view.color);
+            }
+        }
         setMeter(_otaMeter,view.bp,view.total!=0||view.screen==Screen::BootCheck,view.color);
-    }
+    } else stopOtaReel();
     if(view.bytes) {
         char text[64];const bool mega=view.total>=1000000;const double divisor=mega?1000000.0:1000.0;
         if(view.ratio)std::snprintf(text,sizeof(text),"%.2f / %.2f %sB",view.done/divisor,view.total/divisor,mega?"M":"K");
@@ -1554,7 +1575,20 @@ void CodexMicroView::stopQuotaReel(size_t window) {
     if (reel.value) setTextReel(reel.value, nullptr);
     reel.value = reel.card = nullptr;
 }
+bool CodexMicroView::otaReelVisible() const {
+    return _page == Page::OTA && !_locked && !_suppressed && !_slideTo &&
+        !_rotationFault && _rotationPhase == RotationPhase::Idle && !_settingsOpen && !_settingsAnimating;
+}
+void CodexMicroView::stopOtaReel() {
+    if (_otaReel.active) {
+        char progress[8]; otaPercent(_otaReel.latest, progress, sizeof(progress));
+        setTextReel(_otaPercent, nullptr);
+        setText(_otaPercent, progress, _otaReelColor);
+    }
+    _otaReel = {};
+}
 void CodexMicroView::stopAnimations() {
+    stopOtaReel();
     _wakeReelGate.cancel();
     for (size_t j = 0; j < _quotaReels.size(); ++j) stopQuotaReel(j);
     for (auto* obj : {_otaStageIcon, _otaMeter, _otaArrow, _otaChips[0], _otaChips[1]}) setMotion(obj, 0, false);
@@ -1573,7 +1607,23 @@ void CodexMicroView::updateAnimations(uint32_t tick) {
     if (!quotaVisible || _quotaAge.secondsAt(GetHAL().millis()) > 130)
         for (size_t j = 0; j < _quotaReels.size(); ++j)
             if (_quotaReels[j].value) stopQuotaReel(j);
+    if (!otaReelVisible() && _otaReel.seen) stopOtaReel();
     if (!_motionCadence.sample(tick, eligible)) return;
+    if (_otaReel.active) {
+        const uint32_t reelTick = lv_tick_get();
+        if (_otaReel.finished(reelTick)) {
+            char progress[8]; otaPercent(_otaReel.latest, progress, sizeof(progress));
+            setTextReel(_otaPercent, nullptr);
+            setText(_otaPercent, progress, _otaReelColor);
+            _otaReel.active = false;
+        } else {
+            const char* shown = mosaico_dot::text(_otaPercent);
+            const int columns = std::max(mosaico_credit::reelLength(_otaReelFrom),
+                shown ? mosaico_credit::reelLength(shown) : 0);
+            setTextReel(_otaPercent, _otaReelFrom,
+                _otaReel.offset(reelTick, mosaico_credit::duration(columns)));
+        }
+    }
     const uint16_t phase = static_cast<uint16_t>(((tick - _motionEpoch) % 12000U) * 360U / 12000U);
     const uint16_t meterPhase = static_cast<uint16_t>(((tick - _motionEpoch) % 6000U) * 360U / 6000U);
     using S = MosaicoOta::UiStage;

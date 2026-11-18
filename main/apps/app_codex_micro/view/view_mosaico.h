@@ -19,6 +19,7 @@
 #include "dot_animation_cadence.h"
 #include "credit_takeover.h"
 #include "quota_wake_reel.h"
+#include "ota_reel_model.h"
 #include "view_transition_snapshot.h"
 
 namespace view {
@@ -144,6 +145,11 @@ private:
     lv_obj_t* _otaPhase = nullptr;
     lv_obj_t* _otaStageIcon = nullptr;
     lv_obj_t* _otaPercent = nullptr;
+    mosaico_ota_reel::Progress _otaReel{};
+    char _otaReelFrom[8]{};
+    uint32_t _otaReelColor = 0;
+    void stopOtaReel();
+    bool otaReelVisible() const;
     lv_obj_t* _otaMeter = nullptr;
     lv_obj_t* _otaBytes = nullptr;
     lv_obj_t* _otaHash = nullptr;

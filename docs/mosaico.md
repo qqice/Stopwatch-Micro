@@ -601,6 +601,14 @@ request is separate from this bounded draw-workload change.
 
 ## UI overlap regression contract
 
+On the visible OTA page, increasing progress rolls the changed digits in the
+large percentage readout (DOWNLOAD, MERGE and BOOT CHECK). The progress meter
+and transfer-byte label keep the latest measured value. Numeric updates are
+coalesced during a short roll; stage changes, retries and completion snap to the
+actual value. Indeterminate VERIFY and INSTALL keep their activity indicator
+without a fabricated percentage. Roll frames reuse the existing UI cadence and
+are clipped to the percentage readout.
+
 Check actual widget creation sizes and every dynamic position, not just a
 layout sketch. Include every OTA state, longest percentage/version/hash/error,
 label line-height/long-mode, dot geometry and animation/translated clip bounds.
