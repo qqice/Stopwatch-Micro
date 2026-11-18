@@ -1743,7 +1743,9 @@ void CodexMicroView::refreshQuota(uint32_t now) {
             const bool unique = !other.available || other.resetEpoch != w.resetEpoch ||
                 other.durationMinutes != w.durationMinutes;
             auto& reel = _quotaReels[j];
-            const bool numeric = visible && fresh && mosaico_credit::isCodex(bucket.id) &&
+            const size_t shownLength = std::strlen(shown);
+            const bool numeric = shownLength <= mosaico_credit::MaxBalanceDigits &&
+                visible && fresh && mosaico_credit::isCodex(bucket.id) &&
                 unique && w.durationMinutes && w.resetEpoch > epoch &&
                 (takeoverWindow ? balanceKind == Balance::Finite : percentKnown);
             const bool sameMotion = reel.value == value && numeric &&
@@ -1753,7 +1755,7 @@ void CodexMicroView::refreshQuota(uint32_t now) {
             setText(value, shown, takeoverWindow ? gold : displayColor);
             if (numeric) {
                 auto& observed = nextVisible.windows[j];
-                std::snprintf(observed.text, sizeof(observed.text), "%s", shown);
+                std::memcpy(observed.text, shown, shownLength + 1);
                 observed.resetEpoch = w.resetEpoch;
                 observed.durationMinutes = w.durationMinutes;
                 observed.credits = takeoverWindow;
